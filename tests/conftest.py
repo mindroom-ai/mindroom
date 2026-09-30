@@ -2892,12 +2892,11 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _restore_gc_state() -> Generator[None, None, None]:
-    """Keep the primary's startup GC freeze and thresholds from leaking into later tests."""
+def _restore_gc_thresholds() -> Generator[None, None, None]:
+    """Keep the primary's raised GC threshold from leaking into later tests."""
     thresholds = gc.get_threshold()
     yield
     gc.set_threshold(*thresholds)
-    gc.unfreeze()
 
 
 @pytest.fixture(autouse=True)

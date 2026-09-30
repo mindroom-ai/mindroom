@@ -1069,17 +1069,18 @@ These artifacts can still contain sensitive non-credential prompt, argument, and
 Leave the flag disabled unless you are actively debugging.
 
 To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERVAL_SECONDS` to a number of seconds in the process environment or the config-adjacent `.env`.
-The primary then logs one `heap_type_probe` event per interval, starting one interval after startup, with the number of objects tracked by Python's garbage collector, the number frozen at startup (`frozen_objects`, which the walk skips), the 25 most common object types and their counts, resident memory (`rss_bytes`, where `/proc` is available), and the walk duration.
+The primary then logs one `heap_type_probe` event per interval, starting one interval after startup, with the number of objects tracked by Python's garbage collector, the 25 most common object types and their counts, resident memory (`rss_bytes`, where `/proc` is available), and the walk duration.
 Compare successive events to see which object types grow along with memory.
 Only garbage-collected container objects are counted; strings, bytes, and numbers are not, and the event carries no object contents.
 Each walk pauses the event loop for about as long as a full garbage-collection pass and briefly allocates one pointer per tracked object, so prefer intervals of several minutes or more on large processes.
 Unset or `0` disables the probe, which is the default; any other value below `60` fails startup.
 
 A full garbage-collection pass walks every tracked object while holding Python's global lock, so it pauses the event loop for longer as the heap grows.
-Once the primary first reports ready, it runs one full collection, freezes the surviving startup objects so later passes skip them, and raises the young-generation threshold from Python 3.13's 2,000 to 50,000 so fewer short-lived turn objects are promoted toward full passes.
-It logs one `gc_startup_heap_frozen` event with the frozen object count and the new thresholds.
-Young and middle passes then run less often but each takes longer, so more of them appear in the `event_loop_gc_collection` events that the event-loop stall detector logs for passes of 50 ms or more.
-Frozen objects are still freed when their last reference goes away, but frozen objects that later become unreachable only through reference cycles stay allocated, so that cost is bounded by the startup heap.
+Once the primary first reports ready, it raises Python's young-generation threshold from 2,000 (the Python 3.13 default) to 50,000, so more short-lived turn objects die before they are promoted and full passes come less often.
+It logs one `gc_threshold_raised` event with the new thresholds.
+Young and middle passes then run less often but each takes longer, tens to hundreds of milliseconds instead of a few, so more of them appear in the `event_loop_gc_collection` events that the event-loop stall detector logs for passes of 50 ms or more.
+Cyclic garbage also waits longer before it is freed, which can raise peak memory slightly.
+The change does not shorten a full pass itself, which still walks the whole heap.
 Set `MINDROOM_GC_TUNING=0` in the process environment or the config-adjacent `.env` to keep the interpreter's collector settings.
 
 ## Built-In Prompt Overrides

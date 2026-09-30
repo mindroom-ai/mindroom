@@ -66,10 +66,9 @@ async def test_start_is_a_no_op_when_disabled() -> None:
 
 
 def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One probe logs total tracked and frozen objects, the most common types, RSS, and walk time."""
+    """One probe logs total tracked objects, the most common types, RSS, and walk time."""
     heap = [_ProbeMarker(), _ProbeMarker(), _ProbeMarker(), {}, {}, []]
     monkeypatch.setattr(heap_probe.gc, "get_objects", lambda: list(heap))
-    monkeypatch.setattr(heap_probe.gc, "get_freeze_count", lambda: 7)
     monkeypatch.setattr(heap_probe, "_TOP_TYPE_COUNT", 2)
 
     with capture_logs() as logs:
@@ -78,7 +77,6 @@ def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPat
     [probe] = _probe_logs(logs)
     assert probe["log_level"] == "info"
     assert probe["tracked_objects"] == 6
-    assert probe["frozen_objects"] == 7
     assert probe["top_types"] == [
         {"type": f"{__name__}._ProbeMarker", "count": 3},
         {"type": "builtins.dict", "count": 2},

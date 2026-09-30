@@ -7,7 +7,6 @@ every object tracked by the garbage collector by type and logs the most common
 types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
-``gc.get_objects()`` skips objects frozen after startup, so they are only counted.
 The walk runs inline on the event loop: ``gc.get_objects()`` and the type count
 both run in C while holding the GIL, so a worker thread would not free the loop
 any sooner. Each walk therefore pauses the loop about as long as a full garbage
@@ -78,7 +77,6 @@ def _log_heap_type_probe() -> None:
     logger.info(
         "heap_type_probe",
         tracked_objects=counts.total(),
-        frozen_objects=gc.get_freeze_count(),
         top_types=[
             {"type": f"{object_type.__module__}.{object_type.__qualname__}", "count": count}
             for object_type, count in counts.most_common(_TOP_TYPE_COUNT)
