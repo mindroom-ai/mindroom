@@ -1207,24 +1207,27 @@ class MatrixApiTools(Toolkit):
         room_id: str,
         event_id: str,
         allow_dangerous: bool,
-    ) -> str | None:
+    ) -> tuple[str | None, bool]:
         """Hold a state event redaction to the put_state policy, because redacting current state rewrites it."""
         try:
             response = await context.client.room_get_event(room_id, event_id)
         except Exception as exc:
             response = exc
         if not isinstance(response, nio.RoomGetEventResponse):
-            return self._error_payload(
-                action="redact",
-                room_id=room_id,
-                target_event_id=event_id,
-                message="Failed to fetch the redaction target.",
-                response=response,
+            return (
+                self._error_payload(
+                    action="redact",
+                    room_id=room_id,
+                    target_event_id=event_id,
+                    message="Failed to fetch the redaction target.",
+                    response=response,
+                ),
+                False,
             )
         target = response.event.source
         if "state_key" not in target:
-            return None
-        policy_error, _dangerous = await self._state_write_policy_error(
+            return None, False
+        return await self._state_write_policy_error(
             context,
             action="redact",
             room_id=room_id,
@@ -1232,7 +1235,6 @@ class MatrixApiTools(Toolkit):
             state_key=str(target["state_key"]),
             allow_dangerous=allow_dangerous,
         )
-        return policy_error
 
     async def _redact(  # noqa: PLR0911
         self,
@@ -1264,17 +1266,18 @@ class MatrixApiTools(Toolkit):
             room_id=room_id,
             event_id=normalized_event_id,
         )
+        dangerous = False
         if thread_resolution_error is not None:
             error_message = thread_resolution_error
-        elif (
-            state_policy_error := await self._redaction_state_policy_error(
+        else:
+            state_policy_error, dangerous = await self._redaction_state_policy_error(
                 context,
                 room_id=room_id,
                 event_id=normalized_event_id,
                 allow_dangerous=allow_dangerous,
             )
-        ) is not None:
-            return state_policy_error
+            if state_policy_error is not None:
+                return state_policy_error
 
         if dry_run:
             if error_message is not None:
@@ -1322,6 +1325,7 @@ class MatrixApiTools(Toolkit):
                 status="error",
                 target_event_id=normalized_event_id,
                 reason=normalized_reason,
+                dangerous=dangerous,
                 response=exc,
             )
             return self._error_payload(
@@ -1340,6 +1344,7 @@ class MatrixApiTools(Toolkit):
                 status="ok",
                 target_event_id=normalized_event_id,
                 reason=normalized_reason,
+                dangerous=dangerous,
             )
             return self._payload(
                 "ok",
@@ -1357,6 +1362,7 @@ class MatrixApiTools(Toolkit):
             status="error",
             target_event_id=normalized_event_id,
             reason=normalized_reason,
+            dangerous=dangerous,
             response=response,
         )
         return self._error_payload(

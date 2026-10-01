@@ -1839,7 +1839,7 @@ async def test_matrix_api_redact_state_event_follows_put_state_policy(
     )
 
     with (
-        patch("mindroom.custom_tools.matrix_api.logger.warning"),
+        patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -1852,6 +1852,9 @@ async def test_matrix_api_redact_state_event_follows_put_state_policy(
 
     assert payload["status"] == ("ok" if redacted else "error")
     assert ctx.client.room_redact.await_count == int(redacted)
+    if redacted:
+        audit = next(call for call in mock_warning.call_args_list if call.args[0] == "matrix_api_write_audit")
+        assert audit.kwargs["dangerous"] is (event_type == "m.room.power_levels")
 
 
 @pytest.mark.asyncio
