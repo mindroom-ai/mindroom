@@ -117,7 +117,7 @@ Resolved content carries no sidecar metadata of its own, so storing the resoluti
 
 The file is downloaded as a stream that stops at 2 MiB, so a reference to a larger file never holds more than that in memory.
 
-A file that cannot be read settles the debt with the preview, a notice that the rest of the message could not be loaded, and no sidecar reference, so no later read downloads it again.
+A file that cannot be read settles the debt as a plain text message holding the preview and a notice that the rest could not be loaded, with no sidecar or file reference, so neither later reads nor thread attachment collection download it again.
 
 Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
 
