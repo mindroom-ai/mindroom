@@ -11,7 +11,7 @@ import nio
 import pytest
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents
+from mindroom import agents, minimal_mode_preflight
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.commands import mode_commands
 from mindroom.commands.handler import handle_command
@@ -212,7 +212,7 @@ def test_mode_parser_preserves_target_and_action() -> None:
     assert command.args == {"args_text": "helper minimal"}
 
 
-_NON_ROOT_USER_REQUIRED = "CLI workers require an explicit non-root Docker user."
+_NON_ROOT_USER_REQUIRED = "Set `MINDROOM_DOCKER_WORKER_USER` to a non-root user such as `1000:1000`."
 
 
 @pytest.mark.parametrize(
@@ -227,7 +227,7 @@ _NON_ROOT_USER_REQUIRED = "CLI workers require an explicit non-root Docker user.
         ),
         (
             {"MINDROOM_DOCKER_WORKER_ENV_JSON": '{"CUSTOM_SECRET": "fake-secret-value"}'},
-            "CLI workers do not support Docker extra env.",
+            "Unset `MINDROOM_DOCKER_WORKER_ENV_JSON`, because minimal-mode workers accept no extra environment.",
         ),
     ],
 )
@@ -256,7 +256,7 @@ def test_selection_refuses_invalid_docker_profile_before_saving(
         requester_id=context.requester_id,
         membership_index=context.agent_reply_memberships,
     )
-    assert result == f"Minimal mode is unavailable: {reason}"
+    assert result.splitlines()[:2] == ["Minimal mode is not available for `helper` yet:", f"- {reason}"]
     assert "fake-secret-value" not in result
     assert (storage.state_root / "agent_modes.json").read_bytes() == saved
 
@@ -426,18 +426,108 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         raise error(message)
 
     monkeypatch.setattr(
-        mode_commands,
+        minimal_mode_preflight,
         "ensure_tool_registry_loaded" if failure == "registry_import" else "get_tool_by_name",
         unavailable,
     )
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
-        runtime_paths=context.runtime_paths,
+        runtime_paths=replace(context.runtime_paths, process_env=_CLI_DEPLOYMENT_ENV),
         target=context.target,
         requester_id=context.requester_id,
         membership_index=context.agent_reply_memberships,
     )
-    assert result == "Minimal mode requires an available, valid shell configuration."
+    assert result.splitlines()[:2] == [
+        "Minimal mode is not available for `helper` yet:",
+        "- Fix the `shell` tool configuration of `helper` so it loads.",
+    ]
     assert "fake-secret" not in result
     assert (storage.state_root / "agent_modes.json").read_bytes() == saved
+
+
+def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path) -> None:
+    """A Docker deployment without CLI settings learns every missing setting and where it belongs in one reply."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    env = {
+        key: value
+        for key, value in _CLI_DEPLOYMENT_ENV.items()
+        if key not in {"MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_GATEWAY_URL", "MINDROOM_AGENT_CLI_PRIMARY_URL"}
+    }
+    paths = replace(context.runtime_paths, process_env=env)
+    root = resolve_agent_storage(
+        "helper",
+        context.config,
+        paths,
+        build_execution_identity_from_runtime_context(context),
+    ).state_root
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=paths,
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    assert [line.split("`")[1] for line in result.splitlines() if line.startswith("- ")] == [
+        "MINDROOM_API_KEY",
+        "MINDROOM_AGENT_CLI_PRIMARY_URL",
+        "MINDROOM_AGENT_CLI_GATEWAY_URL",
+    ]
+    assert f"`{paths.env_path}`" in result
+    assert "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements" in result
+    assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
+
+
+def test_selection_lists_docker_profile_problems_despite_an_incomplete_docker_config(tmp_path: Path) -> None:
+    """A missing image does not hide the root user or extra environment that minimal workers also reject."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    env = _CLI_DEPLOYMENT_ENV | {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "",
+        "MINDROOM_DOCKER_WORKER_USER": "root",
+        "MINDROOM_DOCKER_WORKER_ENV_JSON": '{"CUSTOM": "fake-secret-value"}',
+    }
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=replace(context.runtime_paths, process_env=env),
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    assert [line for line in result.splitlines() if line.startswith("- ")] == [
+        "- MINDROOM_DOCKER_WORKER_IMAGE must be set when MINDROOM_WORKER_BACKEND=docker.",
+        "- Unset `MINDROOM_DOCKER_WORKER_ENV_JSON`, because minimal-mode workers accept no extra environment.",
+        f"- {_NON_ROOT_USER_REQUIRED}",
+    ]
+    assert "fake-secret-value" not in result
+
+
+def test_selection_lists_root_user_despite_malformed_extra_environment(tmp_path: Path) -> None:
+    """Unparseable extra environment is reported once and does not hide the root user."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    env = _CLI_DEPLOYMENT_ENV | {"MINDROOM_DOCKER_WORKER_USER": "root", "MINDROOM_DOCKER_WORKER_ENV_JSON": "{"}
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=replace(context.runtime_paths, process_env=env),
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    bullets = [line for line in result.splitlines() if line.startswith("- ")]
+    assert len(bullets) == 2, bullets
+    assert "MINDROOM_DOCKER_WORKER_ENV_JSON" in bullets[0]
+    assert bullets[1] == f"- {_NON_ROOT_USER_REQUIRED}"

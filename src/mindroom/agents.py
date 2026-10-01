@@ -1687,7 +1687,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         except Exception as exc:
             # One toolkit must never stop the agent, even when worker code broke the store it reads.
             if minimal_mode:
-                raise MinimalModeUnavailableError(minimal_mode_failure_message(str(exc), agent_name)) from exc
+                raise MinimalModeUnavailableError(
+                    minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
+                ) from exc
             logger.warning(
                 "Could not load tool for agent construction",
                 tool=tool_name,

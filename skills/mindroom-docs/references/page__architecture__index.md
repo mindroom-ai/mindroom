@@ -73,6 +73,7 @@ MindRoom's architecture consists of several key components working together.
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
 | `agent_cli/` | Response-owned CLI grants, call admission, worker leases, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
+| `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |

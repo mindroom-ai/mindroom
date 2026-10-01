@@ -100,7 +100,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
 
     def _failure_message(self, reason: str) -> str:
         assert self.id is not None
-        return minimal_mode_failure_message(reason, self.id)
+        return minimal_mode_failure_message(reason, self.id, subagent=self.delegation_depth > 0)
 
     def _raise_failure(self, exc: BaseException) -> NoReturn:
         if not isinstance(exc, Exception):

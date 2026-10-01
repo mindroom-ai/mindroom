@@ -13,24 +13,62 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.agent_cli.worker_protocol import safe_origin
+
 if TYPE_CHECKING:
     from mindroom.agent_cli.worker_protocol import CliWorkerLaunch
     from mindroom.constants import RuntimePaths
 
 
-def validate_cli_primary_auth(runtime_paths: RuntimePaths) -> None:
-    """Reject primary auth modes which expose executable authority to the worker."""
+def cli_deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
+    """Return every primary auth or endpoint setting that would expose authority to the worker.
+
+    Each problem is phrased as its fix, so callers can show the whole list at once.
+    """
+    problems = []
+    # Worker shells keep network access to the primary, so its API must not be open.
     if not runtime_paths.env_value("MINDROOM_API_KEY"):
-        msg = "CLI workers require protected primary MINDROOM_API_KEY authentication"
-        raise ValueError(msg)
+        problems.append(
+            "Set `MINDROOM_API_KEY` to a long random secret, because minimal-mode worker shells can reach "
+            "the MindRoom API; the dashboard then asks for this key.",
+        )
     if runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") and not runtime_paths.env_flag(
         "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
     ):
-        msg = "CLI workers cannot use spoofable trusted-upstream header authentication"
-        raise ValueError(msg)
+        problems.append(
+            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
+            "trusted-upstream headers.",
+        )
     if runtime_paths.env_flag("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED"):
-        msg = "CLI workers cannot reach unauthenticated OpenAI execution"
-        raise ValueError(msg)
+        problems.append(
+            "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
+            "the unauthenticated OpenAI-compatible API.",
+        )
+    origins = {}
+    for name, purpose in (
+        ("MINDROOM_AGENT_CLI_PRIMARY_URL", "the MindRoom API as reached from inside worker containers"),
+        (
+            "MINDROOM_AGENT_CLI_GATEWAY_URL",
+            "a proxy that forwards only `POST /api/agent-cli/operations` and "
+            "`GET /api/agent-cli/calls/<call-id>` to MindRoom",
+        ),
+    ):
+        try:
+            origins[name] = safe_origin(runtime_paths.env_value(name) or "")
+        except ValueError:
+            problems.append(f"Set `{name}` to the `http(s)://host:port` origin of {purpose}.")
+    if len(origins) == 2 and origins["MINDROOM_AGENT_CLI_GATEWAY_URL"] == origins["MINDROOM_AGENT_CLI_PRIMARY_URL"]:
+        problems.append(
+            "Point `MINDROOM_AGENT_CLI_GATEWAY_URL` at the gateway-only proxy, not at "
+            "`MINDROOM_AGENT_CLI_PRIMARY_URL`.",
+        )
+    return problems
+
+
+def validate_cli_deployment(runtime_paths: RuntimePaths) -> None:
+    """Reject primary auth and endpoint settings which expose executable authority to the worker."""
+    if problems := cli_deployment_problems(runtime_paths):
+        raise ValueError(" ".join(problems))
 
 
 def _headers_to_reject(*, grant: str, control_token: str) -> tuple[dict[str, str], ...]:

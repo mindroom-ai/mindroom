@@ -223,7 +223,8 @@ Other agents and conversations are unaffected; teams and OpenAI-compatible API r
 
 You must be authorized to use the named agent.
 Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
-Unsupported deployment settings are rejected before saving the choice.
+When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
+See [deployment requirements](https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements).
 If shell permissions or deployment settings later change, minimal responses fail closed.
 Run `!mode helper standard` or `!mode helper reset` in the same conversation to remove the saved choice and restore standard mode.
 

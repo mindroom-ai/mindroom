@@ -197,7 +197,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     function = tools.async_functions["run_subagent"]
     schema = cached_processed_schema(function, strict=False)
     assert schema is not None
-    assert set(schema.parameters["properties"]) == {"agent_name", "task", "model"}
+    assert set(schema.parameters["properties"]) == {"agent_name", "task", "model", "minimal"}
 
     async def complete_child(ctx: object, **kwargs: object) -> str:
         callback = cast("Callable[[str], None]", kwargs["run_id_callback"])

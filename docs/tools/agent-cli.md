@@ -23,7 +23,19 @@ Teams and the OpenAI-compatible API do not use these Matrix conversation overrid
 An active response keeps the mode it started with.
 Reset removes the saved override and restores the standard default.
 Selecting minimal mode does not grant shell access or add tools.
-If the deployment or agent cannot support minimal mode, the command reports why and keeps the previous selection.
+If the deployment or agent cannot support minimal mode, the command keeps the previous selection and lists every missing requirement with its fix, the `.env` file for deployment settings, and a link to the [deployment requirements](#deployment-requirements).
+
+## Minimal subagents
+
+A caller with the [`delegate`](agent-orchestration.md#delegate) tool can pass `minimal=True` to `run_subagent` to run that child in minimal mode.
+The child starts with the short prompt and Bash tool described here instead of its full system prompt and tool schemas, so each of its requests carries far fewer tokens.
+Use it for self-contained tasks whose child does not need its role, instructions, and tool guidance up front; the child can still read them with `mindroom-agent context`.
+`continue_subagent` keeps the child's mode.
+The tool description offers minimal mode only when the deployment meets the [deployment requirements](#deployment-requirements), and lists the allowed subagents that have the `shell` tool.
+Each request still checks the child's shell permissions and workspace, and refuses with every missing requirement before the child starts.
+A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it and its shell commands must not require approval.
+Minimal subagents run only inside Matrix conversations.
+Each minimal child response gets its own dedicated Docker worker, which retires when that response ends.
 
 ## Instructions and context
 
@@ -143,7 +155,8 @@ The first supported profile requires a dedicated Docker worker with the `mindroo
 Local and static shell runners are unsupported.
 Docker worker images from earlier releases lack the CLI routes; minimal mode reports that the image must be updated, while standard mode keeps using them.
 Configure the existing Docker worker backend and separate origins for `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_PRIMARY_URL`.
-The primary API must require `MINDROOM_API_KEY` authentication.
+The primary API must require `MINDROOM_API_KEY` authentication, because worker shells keep network access to it.
+`!mode <agent> minimal` lists every missing setting at once; set them in the runtime's `.env` and restart MindRoom.
 Unauthenticated OpenAI execution and spoofable trusted-upstream header authentication are unsupported.
 
 The CLI gateway forwards only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/<call-id>`.

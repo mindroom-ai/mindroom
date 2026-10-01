@@ -412,18 +412,19 @@ expose = [
 
 [[modules]]
 path = "mindroom.agent_cli.worker_network"
-depends_on = []
+depends_on = ["mindroom.agent_cli.worker_protocol"]
 visibility = [
     "mindroom.agent_cli.worker",
     "mindroom.api.sandbox_runner_cli",
-    "mindroom.commands.mode_commands",
+    "mindroom.minimal_mode_preflight",
 ]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.worker_network"]
 expose = [
+    "cli_deployment_problems",
     "probe_cli_network",
-    "validate_cli_primary_auth",
+    "validate_cli_deployment",
 ]
 
 [[modules]]
@@ -431,9 +432,10 @@ path = "mindroom.agent_cli.worker_protocol"
 depends_on = []
 visibility = [
     "mindroom.agent_cli.worker",
+    "mindroom.agent_cli.worker_network",
     "mindroom.api.sandbox_runner_cli",
-    "mindroom.commands.mode_commands",
     "mindroom.minimal_agent",
+    "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
 ]
 
@@ -1263,6 +1265,7 @@ visibility = [
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.matrix_rtc.call_tools",
+    "mindroom.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
@@ -1403,6 +1406,7 @@ depends_on = [
     "mindroom.agent_descriptions",
     "mindroom.ai",
     "mindroom.logging_config",
+    "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.response_turn",
@@ -6942,6 +6946,7 @@ depends_on = [
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.error_handling",
+    "mindroom.minimal_mode_preflight",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
     "mindroom.delegation.sessions",
@@ -7587,11 +7592,20 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.mode_commands"
 depends_on = [
-    "mindroom.agent_cli.worker_network",
-    "mindroom.agent_cli.worker_protocol",
     "mindroom.agent_modes",
     "mindroom.authorization",
+    "mindroom.minimal_mode_preflight",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.minimal_mode_preflight"
+depends_on = [
+    "mindroom.agent_cli.worker_network",
+    "mindroom.agent_cli.worker_protocol",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_approval",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.worker_routing",
 ]

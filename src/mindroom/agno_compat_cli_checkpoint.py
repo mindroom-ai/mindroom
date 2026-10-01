@@ -48,7 +48,8 @@ class _Batch:
 # propagating session/run persistence before any tool is dispatched.
 # Coverage: tests/test_agent_cli_checkpoint.py::test_real_fallback_batch_checkpoints_resolved_model;
 # tests/test_agent_cli_checkpoint.py::test_lifetime_capture_resolves_owner_created_during_first_pull;
-# tests/test_agent_cli_checkpoint.py::test_checkpoint_retains_only_the_current_provider_batch.
+# tests/test_agent_cli_checkpoint.py::test_checkpoint_retains_only_the_current_provider_batch;
+# tests/test_delegation_minimal_mode.py::test_minimal_parent_runs_a_minimal_child_through_its_cli.
 _INNER: ContextVar[bool] = ContextVar("cli_inner_dispatch", default=False)
 _RESOLVER: ContextVar[Callable[[], tuple[ProviderBatchCheckpoint, Function] | None] | None] = ContextVar(
     "cli_checkpoint_resolver",
@@ -58,11 +59,17 @@ _RESOLVER: ContextVar[Callable[[], tuple[ProviderBatchCheckpoint, Function] | No
 
 @contextmanager
 def checkpoint_resolver(resolve: Callable[[], tuple[ProviderBatchCheckpoint, Function] | None]) -> Iterator[None]:
-    """Resolve a lazily prepared provider binding only inside its response context."""
+    """Resolve a lazily prepared provider binding only inside its response context.
+
+    A response starts outside any enclosing dispatch, so a subagent response
+    running inside its parent's CLI call still captures its own batches.
+    """
     token = _RESOLVER.set(resolve)
+    inner = _INNER.set(False)
     try:
         yield
     finally:
+        _INNER.reset(inner)
         _RESOLVER.reset(token)
 
 

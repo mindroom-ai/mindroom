@@ -45,6 +45,7 @@ __all__ = [
     "DEFAULT_WORKER_PORT",
     "DOCKER_RESERVED_EXTRA_ENV_NAMES",
     "DockerWorkerBackendConfig",
+    "cli_profile_problems",
     "docker_backend_cleanup_signature",
     "docker_backend_config_signature",
     "docker_workers_root",
@@ -155,6 +156,27 @@ def _default_docker_user_for_os(os_name: str) -> str | None:
     return None
 
 
+def _cli_profile_problems(user: str | None, extra_env: Mapping[str, str]) -> list[str]:
+    """Return every unsupported CLI setting, each phrased as its fix."""
+    problems = []
+    if extra_env:
+        problems.append(f"Unset `{_EXTRA_ENV_JSON_ENV}`, because minimal-mode workers accept no extra environment.")
+    if not user or re.fullmatch(r"root|[+-]?0+", user.partition(":")[0]):
+        problems.append(f"Set `{_USER_ENV}` to a non-root user such as `1000:1000`.")
+    return problems
+
+
+def cli_profile_problems(runtime_paths: RuntimePaths) -> list[str]:
+    """Return unsupported CLI settings even when the rest of the Docker configuration is incomplete."""
+    env = runtime_env_values(runtime_paths)
+    user = _read_docker_user(env)
+    try:
+        extra_env = read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV)
+    except WorkerBackendError as exc:
+        return [str(exc), *_cli_profile_problems(user, {})]
+    return _cli_profile_problems(user, extra_env)
+
+
 def _read_docker_user(env: Mapping[str, str] | None = None) -> str | None:
     raw_value = os.getenv(_USER_ENV) if env is None else env.get(_USER_ENV)
     if raw_value is None:
@@ -228,12 +250,8 @@ class _DockerWorkerBackendConfig:
 
     def validate_cli_profile(self) -> None:
         """Reject unsupported CLI settings before saving a mode or starting a worker."""
-        if self.extra_env:
-            msg = "CLI workers do not support Docker extra env."
-            raise WorkerBackendError(msg)
-        if not self.user or re.fullmatch(r"root|[+-]?0+", self.user.partition(":")[0]):
-            msg = "CLI workers require an explicit non-root Docker user."
-            raise WorkerBackendError(msg)
+        if problems := _cli_profile_problems(self.user, self.extra_env):
+            raise WorkerBackendError(" ".join(problems))
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:

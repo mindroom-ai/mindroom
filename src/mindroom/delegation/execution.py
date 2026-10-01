@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from agno.session.agent import AgentSession
     from agno.team import Team
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
@@ -119,6 +120,7 @@ class _DelegationTarget:
     agent_name: str
     task: str
     previous_child: DelegationChild | None = None
+    agent_mode: AgentMode = "standard"
 
 
 def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequirement]:
@@ -643,13 +645,17 @@ async def _resolve_delegation_target(
             msg = "Subagent ID no longer matches its retained requirement"
             raise RuntimeError(msg)
         child_name = previous_child.child_agent_name
+        agent_mode = previous_child.agent_mode
     else:
-        child_name, task = args.get("agent_name"), args.get("task")
+        child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
         if child_name is None:
             child_name = caller_identity.agent_name
+        if minimal is not None and not isinstance(minimal, bool):
+            return "Cannot delegate: minimal must be a boolean or null."
+        agent_mode = "minimal" if minimal else "standard"
     if not isinstance(child_name, str) or not isinstance(task, str):
         return "Cannot delegate: task must be a string and agent_name must be a string or null."
-    return _DelegationTarget(child_name, task, previous_child)
+    return _DelegationTarget(child_name, task, previous_child, agent_mode)
 
 
 def _validate_child_scope(
@@ -769,6 +775,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         execution_identity=caller_identity,
         depth=delegation_depth,
         model=model,
+        minimal=target.agent_mode == "minimal",
     )
     output_request = None
     if not isinstance(authorization, str):
@@ -854,6 +861,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             runtime_paths=runtime_paths,
             depth=delegation_depth,
             model=model,
+            agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=tool.tool_call_id,
             parent_requirement_id=requirement.id,

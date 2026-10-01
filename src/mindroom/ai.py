@@ -1360,7 +1360,11 @@ async def run_delegated_child_response(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool,
 ) -> str:
-    """Execute the normal response envelope for a prepared child owned by either adapter."""
+    """Execute the normal response envelope for a prepared child owned by either adapter.
+
+    A minimal child cannot pause for approval: approval-gated tools stay hidden from it,
+    so no adapter ever has to resume it natively.
+    """
     identity = child_execution_identity(child)
     active_config = authorize_delegation(
         child.caller_agent_name,
@@ -1392,6 +1396,7 @@ async def run_delegated_child_response(
         else None
     )
     turn = ResponseTurnContext(
+        agent_mode=child.agent_mode,
         entity_label=child.child_agent_name,
         session_id=child.session_id,
         run_id=child.run_id,
@@ -1419,7 +1424,7 @@ async def run_delegated_child_response(
             delegation_depth=child.depth,
             refresh_scheduler=refresh_scheduler,
             attempt_model_runtime=ToolRuntimeModelBinding(),
-            supports_native_tool_approval=supports_native_tool_approval,
+            supports_native_tool_approval=supports_native_tool_approval and child.agent_mode == "standard",
             collect_streamed_response=True,
             turn_recorder=TurnRecorder(user_message=prompt),
         )

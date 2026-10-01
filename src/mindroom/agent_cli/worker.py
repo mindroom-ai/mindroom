@@ -13,8 +13,8 @@ from uuid import uuid4
 import httpx
 from pydantic import SecretStr
 
-from mindroom.agent_cli.worker_network import validate_cli_primary_auth
-from mindroom.agent_cli.worker_protocol import CliShellRequest, CliShellSettings, CliWorkerLaunch, safe_origin
+from mindroom.agent_cli.worker_network import validate_cli_deployment
+from mindroom.agent_cli.worker_protocol import CliShellRequest, CliShellSettings, CliWorkerLaunch
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
@@ -226,14 +226,7 @@ async def open_cli_worker(
     its windows and catalog lifetimes before exiting this context. Static runners
     and non-Docker backends are deliberately unsupported by this initial profile.
     """
-    validate_cli_primary_auth(context.runtime_paths)
-    for name in ("MINDROOM_AGENT_CLI_GATEWAY_URL", "MINDROOM_AGENT_CLI_PRIMARY_URL"):
-        safe_origin(context.runtime_paths.env_value(name) or "")
-    if context.runtime_paths.env_value("MINDROOM_AGENT_CLI_GATEWAY_URL") == context.runtime_paths.env_value(
-        "MINDROOM_AGENT_CLI_PRIMARY_URL",
-    ):
-        msg = "CLI gateway must be a separate gateway-only proxy origin"
-        raise ValueError(msg)
+    validate_cli_deployment(context.runtime_paths)
     spec = _cli_worker_spec(context)
     startup = asyncio.create_task(asyncio.to_thread(backend.ensure_worker, spec))
     try:

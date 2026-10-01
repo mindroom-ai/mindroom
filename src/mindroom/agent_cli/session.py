@@ -77,7 +77,13 @@ def cli_turn_owner(
         (runtime_context.room_id, turn_context.room_id, "room"),
         (runtime_context.session_id, turn_context.session_id, "session"),
         (runtime_context.resolved_thread_id, turn_context.thread_id, "thread"),
-        (runtime_context.reply_to_event_id, turn_context.reply_to_event_id, "reply target"),
+        # A delegated child's turn replies to no event, while its runtime keeps
+        # the parent's reply target for Matrix tools.
+        *(
+            ((runtime_context.reply_to_event_id, turn_context.reply_to_event_id, "reply target"),)
+            if turn_context.reply_to_event_id is not None
+            else ()
+        ),
     )
     for runtime_value, turn_value, label in expected:
         if runtime_value != turn_value:

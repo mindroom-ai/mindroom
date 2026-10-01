@@ -97,13 +97,13 @@ class CaptureAudit:
         for path in sorted(logs_dir.glob("*.log")):
             self.capture("primary", str(path), path.read_bytes())
 
-    def capture_response(self, mode, presentation, trace, *, entity_name="helper") -> None:
+    def capture_response(self, mode, presentation, trace, *, entity_name="helper", child=False) -> None:
         """Keep every presentation and trace, including earlier minimal output."""
         identity = f"{entity_name}-response-{len(self.responses) + len(self.child_responses)}-{mode}"
-        if entity_name == "helper":
-            self.responses.append(mode)
+        if child:
+            self.child_responses.append(f"{entity_name}:{mode}")
         else:
-            self.child_responses.append(entity_name)
+            self.responses.append(mode)
         self.capture("presentation", identity, presentation)
         self.capture("trace", identity, json.dumps(trace, default=str))
 
@@ -137,8 +137,8 @@ class CaptureAudit:
         }
         assert self.expected_workers, "Missing expected workflow workers"
         assert self.expected_workers <= captured_workers, "Missing expected workflow worker logs"
-        assert self.responses == ["standard", "minimal", "standard"], self.responses
-        assert self.child_responses == ["code"], "Missing delegated child presentation"
+        assert self.responses == ["standard", "minimal", "standard", "standard"], self.responses
+        assert self.child_responses == ["code:standard", "helper:minimal"], self.child_responses
         assert any(record["kind"] == "primary" and b"mindroom.ai" in record["raw"] for record in self.records), (
             "Missing actual primary response logging"
         )
@@ -302,7 +302,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         config.agents["helper"] = AgentConfig(
             display_name="Helper",
             tools=["shell", "file", "parity"],
-            delegate_to=["code"],
+            delegate_to=["code", "helper"],
             learning=False,
             memory_backend="file",
         )
@@ -396,6 +396,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 presentation,
                 [asdict(entry) for entry in trace],
                 entity_name=ctx.entity_label,
+                child=ctx.session_id.startswith("delegate:"),
             )
             return presentation
 
@@ -491,6 +492,32 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         assert any(tool["function"]["name"] == "read_file" for tool in final_request["tools"])
         assert len(storage.get_session(runtime.session_id).runs) == 3
         results["steps"].append("standard mode reads identical workspace note and prior history")
+        # The standard parent runs a minimal copy of itself, which uses the real CLI in its own worker.
+        provider.steps = [
+            [("run_subagent", {"agent_name": "helper", "task": "List your tools", "minimal": True})],
+            [("bash", {"command": "mindroom-agent tools list"})],
+            "minimal child done",
+            "parent after minimal child",
+        ]
+        result = await respond("Delegate a minimal copy of yourself")
+        assert "parent after minimal child" in str(result), result
+        parent_request, child_first, child_second, parent_final = provider.requests[-4:]
+        run_subagent = next(
+            tool["function"] for tool in parent_request["tools"] if tool["function"]["name"] == "run_subagent"
+        )
+        assert "Subagents that support minimal mode: helper." in run_subagent["description"]
+        assert "minimal" in run_subagent["parameters"]["properties"]
+        assert all(
+            [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
+            for request in (child_first, child_second)
+        )
+        listing = next(str(message["content"]) for message in child_second["messages"] if message["role"] == "tool")
+        assert "integration" in listing, listing
+        assert "approved" not in listing, listing
+        assert "minimal child done" in str(parent_final["messages"])
+        results["steps"].append(
+            "minimal subagent: Bash-only child lists tools through its own worker without gated ones",
+        )
         audit.capture("provider", "all-sdk-requests", json.dumps(provider.requests, indent=2, default=str))
         audit.capture(
             "history",

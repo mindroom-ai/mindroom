@@ -56,8 +56,10 @@ class MinimalModeUnavailableError(RuntimeError):
     """Minimal mode cannot serve a turn; the message already names its recovery command."""
 
 
-def minimal_mode_failure_message(reason: str, agent_name: str) -> str:
-    """Include the command that recovers a conversation from unavailable minimal mode."""
+def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool) -> str:
+    """Include how to recover from unavailable minimal mode: the mode command, or a standard subagent."""
+    if subagent:
+        return f"{reason.rstrip('.')}. Run this subagent again without minimal."
     return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
 
 

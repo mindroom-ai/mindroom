@@ -94,7 +94,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_private_storage.py`][private-legacy] and [`legacy_private_storage_aliases.py`][private-legacy-aliases] | [Private-storage tests][private-storage-tests] cover verified owner relocation, content preservation, historical aliases, and tamper rejection. |
 | [`oauth/legacy_credentials.py`][oauth-legacy-credentials] and [`oauth/credential_store.py`][oauth-store] | [OAuth store tests][oauth-store-tests] cover literal SQLite bindings, publication normalization, the removed JSON reader, reconnect disposition, and inert old files. |
 | [`oauth/providers.py`][oauth-providers], [`api/oauth.py`][api-oauth], and [`oauth/discovery.py`][oauth-discovery] | [MCP OAuth tests][mcp-oauth-tests] cover unbound credential rejection and legacy registration binding; [OAuth API tests][oauth-api-tests] cover rejection of pending state without a bound endpoint. |
-| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
+| [`memory/auto_flush.py`][auto-flush], [`report_publishing/store.py`][report-store], [`scheduling.py`][scheduling], [`external_triggers/replay_store.py`][replay-store], [`custom_tools/todo_poke.py`][todo-poke], [`custom_tools/todo.py`][todo-tool], [`delegation/state.py`][delegation-state], and [`cli/owner.py`][cli-owner] | [Memory][memory-flush-tests], [report][report-tests], [scheduling][workflow-scheduling-tests], [trigger replay][trigger-replay-tests], [todo poke][todo-poke-tests], [todo tool][todo-builtin-tests], [delegation mode][delegation-minimal-tests], and [pairing][cli-connect-tests] tests drive the retained defaults through their public read or mutation paths. |
 | [`legacy_streaming.py`][legacy-streaming] and [`execution_preparation.py`][execution-preparation] | [Partial-reply][partial-reply-tests] and [streaming][streaming-tests] tests cover bounded historical suffixes, exact stripping order, current structured-status precedence, and interruption classification. |
 | [`history/legacy_compaction_state.py`][legacy-compaction-state] | [Legacy compaction tests][legacy-compaction-state-tests] cover recognition, one-time migration, summary attribution, tombstone pruning, and malformed metadata; [compaction redaction tests][compaction-redaction-tests] cover legacy invalidation. |
 | [`legacy_revision_replay.py`][legacy-revision-replay] | [Revision replay][legacy-revision-replay-tests], [turn-store][turn-store-tests], and [handled-turn][handled-turn-tests] tests cover reconstruction, monotonic preservation, historical and modern selection, and cold-reopen cleanup. |
@@ -169,6 +169,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] parses a todo item without `requester_id` but never pokes it, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
+| S24 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `agent_mode` as standard, so delegations saved before minimal subagents continue unchanged. |
 
 ## Configuration and credentials
 
@@ -382,6 +383,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [saas-migrations]: https://github.com/mindroom-ai/mindroom/tree/main/saas-platform/supabase/migrations
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
+[delegation-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/delegation/state.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
@@ -451,6 +453,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [turn-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_turn_store.py
 [usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
 [workflow-scheduling-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_workflow_scheduling.py
+[delegation-minimal-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_delegation_minimal_mode.py
 
 [legacy-response-attempts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_response_attempts.py
 [response-attempt-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_attempts_migration.py

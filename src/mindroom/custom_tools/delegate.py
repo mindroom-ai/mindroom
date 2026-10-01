@@ -30,6 +30,7 @@ from mindroom.delegation.sessions import (
     subagent_liveness,
 )
 from mindroom.logging_config import get_logger
+from mindroom.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -108,6 +109,7 @@ class DelegateTools(Toolkit):
         self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
+        self._minimal_targets = minimal_subagent_candidates(config, runtime_paths, delegate_to, execution_identity)
 
         super().__init__(
             name="delegate",
@@ -134,6 +136,18 @@ class DelegateTools(Toolkit):
     def _build_run_subagent_description(self) -> str:
         """Build the model-facing function description with this caller's allowlist."""
         available_targets = ", ".join(self._delegate_to)
+        minimal_guidance = (
+            "Set minimal to true to run the child in minimal mode: a short system prompt and one Bash tool "
+            "through which the child discovers and calls its configured tools on demand. "
+            "Each child request carries far fewer tokens, at the cost of a few discovery steps. "
+            "Prefer minimal when the task is self-contained and the child's full role, instructions, and tool "
+            "descriptions are not important in its system prompt; it can still read them on demand. "
+            "Use standard mode when that context matters or the child needs tools that require approval, "
+            "which minimal children cannot use. "
+            f"Subagents that support minimal mode: {', '.join(self._minimal_targets)}.\n"
+            if self._minimal_targets
+            else ""
+        )
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
@@ -145,27 +159,41 @@ class DelegateTools(Toolkit):
             f"Available models: {', '.join(sorted(self._config.models))}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
             "The caller waits; this does not create a Matrix thread. "
-            "Use continue_subagent with the returned subagent_id for follow-ups in the same child session.\n"
+            "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
+            "follow-ups keep the child's model and mode.\n"
+            f"{minimal_guidance}"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
         )
 
-    async def run_subagent(self, task: str, agent_name: str | None = None, model: str | None = None) -> str:
+    async def run_subagent(
+        self,
+        task: str,
+        agent_name: str | None = None,
+        model: str | None = None,
+        minimal: bool = False,
+    ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
         The runtime-generated tool description lists caller-specific allowed
-        targets and model guidance.
+        targets, model guidance, and subagents that support minimal mode.
 
         Args:
             task: Self-contained task with relevant context, constraints, and expected output.
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
             model: Configured model name from models; omitted or null uses normal model selection.
+            minimal: True runs the child in token-efficient minimal mode, only for subagents listed as supporting it.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        return await self._run_child(self._agent_name if agent_name is None else agent_name, task, model=model)
+        return await self._run_child(
+            self._agent_name if agent_name is None else agent_name,
+            task,
+            model=model,
+            minimal=minimal,
+        )
 
     def _caller_identity(self) -> ToolExecutionIdentity:
         """Resolve one concrete caller identity for execution, ownership, and audit."""
@@ -226,9 +254,12 @@ class DelegateTools(Toolkit):
         task: str,
         *,
         model: str | None = None,
+        minimal: bool = False,
         continuation: DelegationChild | None = None,
     ) -> str:
         """Run one direct child using the shared preparation and settlement owner."""
+        if continuation is not None:
+            minimal = continuation.agent_mode == "minimal"
         config = authorize_delegation(
             self._agent_name,
             agent_name,
@@ -239,6 +270,7 @@ class DelegateTools(Toolkit):
             depth=self._delegation_depth,
             allowed_targets=self._delegate_to,
             model=model,
+            minimal=minimal,
         )
         if isinstance(config, str):
             return config
@@ -254,6 +286,7 @@ class DelegateTools(Toolkit):
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
             model=model,
+            agent_mode="minimal" if minimal else "standard",
             previous=continuation,
             parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
         )

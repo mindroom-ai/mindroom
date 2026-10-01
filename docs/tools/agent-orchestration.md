@@ -257,7 +257,7 @@ Automatic saving of large tool results uses the same configured policy as other 
 ### What It Does
 
 ```python
-run_subagent(task: str, agent_name: str | None = None, model: str | None = None) -> str
+run_subagent(task: str, agent_name: str | None = None, model: str | None = None, minimal: bool = False) -> str
 continue_subagent(subagent_id: str, message: str) -> str
 ```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
@@ -265,6 +265,8 @@ Fresh execution still uses the target agent's configured workspace, memory, requ
 Set `model` to an alias from `models:` to override the child's model without changing its agent identity.
 The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
+Set `minimal` to `True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
+The tool description recommends this for self-contained tasks whose child does not need that context, and lists only subagents the deployment can run in minimal mode.
 The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
@@ -279,7 +281,7 @@ Empty tasks and follow-up messages are rejected.
 
 Use `continue_subagent` after the child returns to retain its own conversation history.
 The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
-Follow-ups preserve the child session, selected model, and nesting depth, recheck current permissions, and require the original storage scope.
+Follow-ups preserve the child session, selected model and mode, and nesting depth, recheck current permissions, and require the original storage scope.
 The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
 Calls wait for a result and do not queue messages into a running child or one awaiting approval.
