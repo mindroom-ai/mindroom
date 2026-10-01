@@ -2778,6 +2778,63 @@ def test_spotify_callback_preserves_runtime_validation_error(
     assert callback_response.json()["detail"] == invalid_detail
 
 
+def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestClient) -> None:
+    """Shared-scope Spotify tokens must stay out of the worker store, where only worker code would see them."""
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.test/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            return {"access_token": "spotify-token", "refresh_token": "spotify-refresh"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": "Spotify User"}
+
+    current_paths = main._app_runtime_paths(test_client.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=current_paths.config_path,
+        storage_path=current_paths.storage_root,
+        process_env={
+            **dict(current_paths.process_env),
+            "SPOTIFY_CLIENT_ID": "client-id",
+            "SPOTIFY_CLIENT_SECRET": "client-secret",
+        },
+    )
+    _publish_committed_runtime_config(
+        test_client.app,
+        runtime_paths,
+        _config_with_worker_scope("shared").model_dump(),
+    )
+
+    with patch(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        return_value=(_FakeSpotify, _FakeSpotifyOAuth),
+    ):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+        connected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+        disconnect_response = test_client.post("/api/integrations/spotify/disconnect?agent_name=general")
+        disconnected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert callback_response.status_code in {302, 307}
+    assert connected_status.json()["connected"] is True
+    assert not list((runtime_paths.storage_root / "workers").rglob("spotify_credentials.json"))
+    assert disconnect_response.status_code == 200
+    assert disconnected_status.json()["connected"] is False
+
+
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
     """openclaw_compat should appear as a registered tool in the tools response."""
     response = test_client.get("/api/tools/")

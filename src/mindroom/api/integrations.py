@@ -13,8 +13,10 @@ from mindroom.api.auth import verify_user
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
+    delete_credentials_for_target,
     load_credentials_for_target,
     resolve_request_credentials_target,
+    save_credentials_for_target,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
@@ -103,7 +105,7 @@ def _save_spotify_credentials(
     )
     credentials_to_save = dict(credentials)
     credentials_to_save.setdefault("_source", "ui")
-    resolved_target.target_manager.save_credentials("spotify", credentials_to_save)
+    save_credentials_for_target("spotify", credentials_to_save, resolved_target)
 
 
 @router.get("/spotify/status")
@@ -229,6 +231,6 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
 async def disconnect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Spotify by removing stored credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
-    target.target_manager.delete_credentials("spotify")
+    delete_credentials_for_target("spotify", target)
 
     return {"status": "disconnected"}
