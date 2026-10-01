@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import nio
 import pytest
 
+from mindroom.attachments import register_thread_history_media_attachments
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -46,6 +47,7 @@ from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_dow
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
+    from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore, RefreshRequest
 
@@ -1733,6 +1735,37 @@ class TestSidecarResolution:
             ]
             assert not holds_unresolved_sidecar(page.messages[0].content)
             assert page.refresh_pending == ()
+
+    async def test_a_settled_unreadable_attachment_is_text_that_thread_media_never_downloads(
+        self,
+        alice: PrincipalStore,
+        tmp_path: Path,
+    ) -> None:
+        """The settled preview keeps no file fields, so thread-history media collection skips it.
+
+        Left as a file event pointing at the attachment, every turn in the
+        thread would download the sender's file again as shared media.
+        """
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source})
+        reader = await self._reader(alice, client)
+        history = projected_thread_history(
+            await reader.read_strict(room_id=ROOM, thread_id=None, limit=10),
+            complete=True,
+        )
+
+        attachment_ids = await register_thread_history_media_attachments(
+            client,  # type: ignore[arg-type]
+            tmp_path,
+            room_id=ROOM,
+            thread_id=None,
+            thread_history=history,
+        )
+
+        assert attachment_ids == []
+        assert client.downloads == ["mxc://s/gone"]
+        assert history[0].content["msgtype"] == "m.text"
 
 
 class TestPointRefetch:

@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 _LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
+# What makes a sidecar preview an ``m.file`` event: the sidecar marker plus the file it points at.
+_SIDECAR_FILE_KEYS = frozenset({_LONG_TEXT_METADATA_KEY, "url", "file", "filename", "info"})
 
 
 def _validated_mxc_url(value: object) -> str | None:
@@ -55,10 +57,20 @@ def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
     return sidecar_content_to_resolve(content) is not None
 
 
+def _as_plain_text(content: Mapping[str, Any]) -> dict[str, Any]:
+    plain = {key: value for key, value in content.items() if key not in _SIDECAR_FILE_KEYS}
+    plain["msgtype"] = "m.text"
+    return plain
+
+
 def without_sidecar_reference(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return content that no longer points at a long-text sidecar, in either layer an edit may carry it."""
-    stripped = {key: value for key, value in content.items() if key != _LONG_TEXT_METADATA_KEY}
+    """Return content as plain text with no sidecar or file reference, in either layer an edit may carry it.
+
+    Left as a file event, the preview would still look like shared media, and
+    collecting a thread's attachments would download the sidecar on every turn.
+    """
+    stripped = _as_plain_text(content)
     new_content = stripped.get("m.new_content")
     if isinstance(new_content, Mapping):
-        stripped["m.new_content"] = {key: value for key, value in new_content.items() if key != _LONG_TEXT_METADATA_KEY}
+        stripped["m.new_content"] = _as_plain_text(new_content)
     return stripped
