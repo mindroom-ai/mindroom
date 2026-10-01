@@ -4728,7 +4728,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert result.exit_code == 1
         assert "Error: bad runtime" in result.output
 
-    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", True)])
+    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", False), ("y\n", True)])
     def test_connect_asks_whether_the_approving_account_is_yours(
         self,
         tmp_path: Path,
@@ -4736,7 +4736,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         answer: str,
         saved: bool,
     ) -> None:
-        """A terminal confirms the approving account (default yes); declining saves nothing and fails."""
+        """A terminal saves the approving account only on an explicit yes; a bare Enter or no saves nothing and fails."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
@@ -4755,7 +4755,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
 
         output = normalize_console_output(result.output)
         assert "Approved by @alice:mindroom.chat." in output
-        assert "Is this your account? [Y/n]" in output
+        assert "Is this your account? [y/N]" in output
         assert (tmp_path / ".env").exists() is saved
         assert (OWNER_MATRIX_USER_ID_PLACEHOLDER in cfg.read_text()) is not saved
         if saved:

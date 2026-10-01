@@ -742,7 +742,8 @@ def _approver_confirmation() -> Callable[[], bool] | None:
 
     def confirm() -> bool:
         try:
-            return typer.confirm("Is this your account?", default=True)
+            # Only an explicit yes adopts the approver, because whoever approves first becomes the install's owner.
+            return typer.confirm("Is this your account?", default=False)
         except typer.Abort:
             # Ctrl+C or EOF is not a yes: discard the credentials with the revoke hint instead of a bare abort.
             console.print()

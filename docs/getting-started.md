@@ -37,7 +37,7 @@ On first run, MindRoom automatically initiates pairing.
 It prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [y/N]` before saving anything.
 
 After pairing completes, MindRoom starts the runtime and dashboard.
 
