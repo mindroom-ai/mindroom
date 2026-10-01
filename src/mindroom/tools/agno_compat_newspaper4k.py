@@ -88,7 +88,8 @@ def install_server_fetch_guard() -> None:
     # Remove when: Newspaper4kTools accepts caller-supplied HTML or a fetcher and can skip image
     # downloads; retain validation of each URL, redirect hop, and dialed address.
     # Coverage: tests/test_newspaper_tool.py::test_newspaper_rejects_unsafe_targets_without_connecting,
-    # ::test_newspaper_revalidates_redirects_before_following,
+    # whose redirect case is
+    # ::test_newspaper_rejects_unsafe_targets_without_connecting[https://example.com/redirect-to-loopback],
     # ::test_newspaper_extracts_public_article_without_fetching_its_images,
     # ::test_newspaper_decodes_page_with_charset_declared_only_in_meta, and
     # tests/test_tools_metadata.py::test_local_url_fetch_tools_do_not_contact_loopback_targets.
