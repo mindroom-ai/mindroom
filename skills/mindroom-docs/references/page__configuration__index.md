@@ -364,7 +364,7 @@ Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, a
 `timeout_days` sets the default approval expiry window and can be overridden per rule.
 Late approval decisions fail closed at the persisted deadline, while the periodic Matrix card sweep can take up to about one additional minute to show the expired state.
 React to the approval card with `✅` to approve the tool call.
-Reply to the approval card with a message to deny the tool call and record its first 2,000 characters as the denial reason.
+Reply to the approval card with a message to deny the tool call and record the start of that message as the denial reason, up to 2,000 plain ASCII characters or fewer when it contains other characters such as emoji.
 Only the original human requester can approve or deny their pending tool call.
 Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.

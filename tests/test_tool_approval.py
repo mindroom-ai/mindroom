@@ -46,7 +46,11 @@ from mindroom.event_journal import (
     delivery_transaction_id,
 )
 from mindroom.event_journal.approval_card_state import terminal_content
-from mindroom.matrix.large_messages import content_fits_normal_event
+from mindroom.matrix.large_messages import (
+    _MATRIX_EVENT_HARD_LIMIT,
+    _calculate_delivery_event_size,
+    content_fits_normal_event,
+)
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval import (
@@ -146,10 +150,16 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    ["no " * 20_000, "\u5426" * 20_000, "\U0001f645" * 20_000],
+    ids=["ascii", "cjk", "emoji"],
+)
 async def test_long_reply_denial_reason_keeps_the_terminal_card_edit_sendable(
     monkeypatch: pytest.MonkeyPatch,
+    reply: str,
 ) -> None:
-    """A 60 KB denial reply is shortened before it is recorded, so the edit repeating it fits one Matrix event."""
+    """A long denial reply is shortened before it is recorded, so the encrypted edit repeating it fits one event."""
     manager = MagicMock(handle_card_response=AsyncMock(return_value=ApprovalActionResult(consumed=True)))
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: manager)
 
@@ -159,7 +169,7 @@ async def test_long_reply_denial_reason_keeps_the_terminal_card_edit_sendable(
             sender_id="@approver:localhost",
             card_event_id="$approval",
             status="denied",
-            reason="no " * 20_000,
+            reason=reply,
         ),
         authorize_responder=lambda _entity_name: True,
     )
@@ -169,7 +179,8 @@ async def test_long_reply_denial_reason_keeps_the_terminal_card_edit_sendable(
     card = ApprovalManager._pending_event_content(
         approval_id="approval-1",
         tool_name="run_shell_command",
-        arguments={"command": "rm -rf build"},
+        # Emoji filling the 1,200-character preview cap is the largest argument preview a card carries once escaped.
+        arguments={"command": "\U0001f525" * 1185},
         arguments_truncated=False,
         agent_name="code",
         thread_id="$thread",
@@ -179,8 +190,16 @@ async def test_long_reply_denial_reason_keeps_the_terminal_card_edit_sendable(
         expires_at=requested_at + timedelta(days=1),
     )
     edit = build_matrix_edit_content("$approval", terminal_content(card, status="denied", reason=reason))
-    assert reason.startswith("no no")
+    assert len(reason) >= 100
+    assert reply.startswith(reason)
     assert content_fits_normal_event(edit)
+    encrypted_size = _calculate_delivery_event_size(
+        edit,
+        room_id="!room:localhost",
+        room_encrypted=True,
+        device_id="DEVICE",
+    )
+    assert encrypted_size <= _MATRIX_EVENT_HARD_LIMIT
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:

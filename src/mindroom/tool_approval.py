@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import threading
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -48,8 +49,9 @@ __all__ = [
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
-# The terminal card edit carries the reason twice, so a Matrix user's reply must stay far below the event size limit.
-_MAX_RESOLUTION_REASON_CHARS = 2000
+# The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
+# Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
+_MAX_RESOLUTION_REASON_JSON_BYTES = 2000
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
@@ -218,6 +220,16 @@ async def evaluate_tool_approval(
     return result, timeout_seconds
 
 
+def _bounded_resolution_reason(reason: str) -> str:
+    """Return the longest prefix whose ASCII-escaped JSON string body fits the reason budget."""
+    escaped_bytes = 0
+    for index, character in enumerate(reason):
+        escaped_bytes += len(json.dumps(character)) - 2
+        if escaped_bytes > _MAX_RESOLUTION_REASON_JSON_BYTES:
+            return reason[:index]
+    return reason
+
+
 async def handle_matrix_approval_action(
     action: MatrixApprovalAction,
     *,
@@ -229,7 +241,7 @@ async def handle_matrix_approval_action(
     if manager is None:
         return ApprovalActionResult(consumed=False)
     sanitized_reason = (
-        action.reason.strip()[:_MAX_RESOLUTION_REASON_CHARS]
+        _bounded_resolution_reason(action.reason.strip())
         if isinstance(action.reason, str) and action.reason.strip()
         else None
     )
