@@ -420,6 +420,7 @@ class _MultiAgentOrchestrator:
     _dispatch_recovery_requested: bool = field(default=False, init=False, repr=False)
     _response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
+    _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     _pending_replacement_recovery_room_ids: dict[str, set[str]] = field(default_factory=dict, init=False)
     plugin_watch: PluginWatchState = field(init=False)
     agent_cli_registry: TurnToolRegistry = field(default_factory=TurnToolRegistry, init=False)
@@ -1976,23 +1977,29 @@ class _MultiAgentOrchestrator:
 
     async def _handle_mcp_catalog_change(self, server_id: str) -> None:
         """Restart entities that reference one changed MCP catalog."""
-        config = self.config
-        if not self.running or config is None:
-            return
-        if not config.get_entities_referencing_tools({mcp_tool_name(server_id)}):
-            clear_worker_validation_snapshot_cache()
-            return
-        await self.config_reload.apply_with_response_admission(
-            partial(self._apply_mcp_catalog_change, server_id),
-            operation_name="MCP catalog restart",
-            request_is_current=lambda: self.running and self.config is not None,
-        )
+        try:
+            config = self.config
+            if not self.running or config is None:
+                return
+            if not config.get_entities_referencing_tools({mcp_tool_name(server_id)}):
+                clear_worker_validation_snapshot_cache()
+                return
+            await self.config_reload.apply_with_response_admission(
+                partial(self._apply_mcp_catalog_change, server_id),
+                operation_name="MCP catalog restart",
+                request_is_current=lambda: self.running and self.config is not None,
+            )
+        finally:
+            # A restart that ends without applying must not absorb later changes.
+            if self._pending_mcp_catalog_restarts.get(server_id) is asyncio.current_task():
+                del self._pending_mcp_catalog_restarts[server_id]
 
     async def _notify_mcp_catalog_change(self, server_id: str) -> None:
         """Schedule a catalog restart so an admitted MCP call can release first."""
-        if not self.running:
+        # A queued restart reads the catalog only when it applies, so it already covers this change.
+        if not self.running or server_id in self._pending_mcp_catalog_restarts:
             return
-        create_background_task(
+        self._pending_mcp_catalog_restarts[server_id] = create_background_task(
             self._handle_mcp_catalog_change(server_id),
             name=f"mcp_catalog_change:{server_id}",
             owner=self._mcp_catalog_change_task_owner,
@@ -2003,6 +2010,8 @@ class _MultiAgentOrchestrator:
     async def _apply_mcp_catalog_change(self, server_id: str) -> None:
         """Apply one MCP catalog-triggered entity replacement."""
         async with self._config_update_lock:
+            # This restart reads the catalog next, so changes reported from here on need their own restart.
+            self._pending_mcp_catalog_restarts.pop(server_id, None)
             if not self.running or self.config is None:
                 return
             clear_worker_validation_snapshot_cache()

@@ -847,7 +847,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = ["mindroom.knowledge_source_descriptions"]
+depends_on = ["mindroom.knowledge_source_descriptions", "mindroom.tool_system.tool_hooks"]
 visibility = [
     "mindroom.minimal_agent",
     "mindroom.agents",
@@ -4156,6 +4156,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
     "mindroom.cli.owner",
@@ -4165,6 +4166,7 @@ depends_on = [
     "mindroom.credentials_sync",
     # Deferred import in the missing-env check.
     "mindroom.model_loading",
+    "mindroom.path_confinement",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]
@@ -5647,7 +5649,12 @@ visibility = ["mindroom.turn_controller"]
 exclusive = true
 
 [[interfaces]]
-expose = ["holds_unresolved_sidecar", "sidecar_content_to_resolve", "sidecar_mxc_url"]
+expose = [
+    "holds_unresolved_sidecar",
+    "sidecar_content_to_resolve",
+    "sidecar_mxc_url",
+    "without_sidecar_reference",
+]
 from = ["mindroom.matrix.sidecar_content"]
 visibility = [
     "mindroom.event_journal",
@@ -6308,7 +6315,7 @@ expose = [
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_function_tool_hook", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]
@@ -6511,6 +6518,7 @@ expose = [
     "resolve_skill_listing",
     "set_plugin_skill_roots",
     "skill_can_edit",
+    "workspace_entry_names",
     "workspace_skill_file_names",
 ]
 from = ["mindroom.tool_system.skills"]
@@ -7188,7 +7196,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.agno_compat_agentql", "mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.tools.crawl4ai", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
@@ -7222,6 +7230,32 @@ visibility = ["mindroom.tools.trafilatura"]
 
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_trafilatura"]
+expose = ["install_server_fetch_guard"]
+
+[[modules]]
+path = "mindroom.tools.file_generation"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_file_generation"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_file_generation"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+visibility = ["mindroom.tools.file_generation"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_file_generation"]
+expose = ["WorkspaceFileGenerationTools"]
+
+[[modules]]
+path = "mindroom.tools.newspaper4k"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_newspaper4k"
+depends_on = ["mindroom.bounded_bytes", "mindroom.server_fetch_url"]
+visibility = ["mindroom.tools.newspaper4k"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_newspaper4k"]
 expose = ["install_server_fetch_guard"]
 
 [[modules]]
@@ -7380,7 +7414,7 @@ depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registr
 
 [[modules]]
 path = "mindroom.custom_tools.agno_compat_agentql"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.runtime_env_policy", "mindroom.server_fetch_url", "mindroom.worker_computer.browser_proxy"]
 visibility = ["mindroom.tools.agentql"]
 
 [[interfaces]]
@@ -7581,7 +7615,13 @@ visibility = ["mindroom.agent_storage", "mindroom.agno_compat_openai_responses",
 
 [[modules]]
 path = "mindroom.legacy_usage_storage"
-depends_on = ["mindroom.background_tasks", "mindroom.constants", "mindroom.legacy_session_storage", "mindroom.usage_storage"]
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.legacy_session_storage",
+    "mindroom.logging_config",
+    "mindroom.usage_storage",
+]
 visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main", "mindroom.usage_stats"]
 
 # Shared judgment leaves; no dependency on the response pipeline.

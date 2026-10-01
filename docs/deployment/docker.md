@@ -84,7 +84,7 @@ Key environment variables (set in `.env` or pass directly):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
 | `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |

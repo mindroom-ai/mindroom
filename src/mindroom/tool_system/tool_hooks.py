@@ -1016,11 +1016,12 @@ def prepend_tool_hook_bridge(
         if id(function) in seen_functions:
             continue
         seen_functions.add(id(function))
-        _prepend_function_tool_hook(function, bridge)
+        prepend_function_tool_hook(function, bridge)
     return toolkit
 
 
-def _prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
+def prepend_function_tool_hook(function: Function, bridge: Callable[..., Any]) -> None:
+    """Prepend one bridge hook to one function, preserving its existing hooks."""
     sync_bridge = _SYNC_BRIDGES.get(bridge)
     bridge_hooks = [sync_bridge if sync_bridge is not None else bridge]
 

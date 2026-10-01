@@ -31,16 +31,15 @@ client_receive_timeout = 300
 client_request_timeout = 600
 client_response_timeout = 300
 
-# Registration - OPEN FOR DEVELOPMENT
+# Registration requires the per-instance token (TUWUNEL_REGISTRATION_TOKEN), because the homeserver is public
 allow_registration = true
-yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true
 
 # Features
 allow_encryption = true
 allow_federation = false  # Override with TUWUNEL_ALLOW_FEDERATION env var
 allow_room_creation = true
 allow_unstable_room_versions = true
-allow_guest_registration = true
+allow_guest_registration = false
 
 # Media
 allow_legacy_media = true

@@ -50,15 +50,18 @@ limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
-report expired or already claimed, and are then pruned. Connections are never
-pruned.
+report expired or already claimed, and are then pruned. Each account keeps at
+most 20 paired installs, revoked ones included; pairing another at the limit
+removes one, preferring a revoked install and otherwise the one seen least
+recently.
 
 Last seen: paired installs authenticate with their client credentials. Agent
 registration, Google OAuth client fetches, and
 ``/v1/local-mindroom/heartbeat`` all refresh the connection's ``last_seen_at``,
 which the chat client shows for each install. Running installs send a heartbeat
-at startup and every few hours; the service records heartbeats at most once per
-connection every ten minutes so it does not rewrite the state file on every call.
+at startup and every few hours; the service records ``last_seen_at`` at most
+once per connection every ten minutes so it does not rewrite the state file on
+every call.
 
 Agent passwords: register-agent creates each agent account with a random
 one-time password and returns it once, only when the account was created. The
@@ -138,7 +141,8 @@ NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection
 # `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
-HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+MAX_CONNECTIONS_PER_USER = 20
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
 # It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
 HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
@@ -583,6 +587,15 @@ def _clear_state_unlocked(state: ProvisioningState) -> None:
     state.rate_limit_buckets.clear()
 
 
+def _delete_excess_connections_unlocked(state: ProvisioningState, owned: list[LocalConnection], *, keep: int) -> bool:
+    """Delete one user's connections beyond ``keep``, revoked first, then least recently seen; return whether any went."""
+    eviction_order = sorted(owned, key=lambda connection: (connection.revoked_at is None, connection.last_seen_at))
+    excess = eviction_order[: max(0, len(owned) - keep)]
+    for connection in excess:
+        del state.connections[connection.id]
+    return bool(excess)
+
+
 def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -> None:
     _clear_state_unlocked(state)
     if not state_path.exists():
@@ -646,6 +659,16 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             revoked_at=_from_utc_iso(item.get("revoked_at")),
         )
         state.connections[connection.id] = connection
+
+    connections_by_user: dict[str, list[LocalConnection]] = {}
+    for connection in state.connections.values():
+        connections_by_user.setdefault(connection.user_id, []).append(connection)
+    trimmed = [
+        _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER)
+        for owned in connections_by_user.values()
+    ]
+    if any(trimmed):
+        _persist_state_unlocked(state, state_path)
 
 
 def _normalize_pair_code(pair_code: str) -> str:
@@ -719,7 +742,7 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
     poll still reports "expired" (410 / ``status="expired"``) instead of "not
     found" after the CLI renews its code. Connected sessions stay one code
     lifetime past completion so a replayed poll still reports 410. Connections
-    themselves are never pruned.
+    are bounded per user when one is created and when state loads instead.
     """
     retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
     finished_ids = []
@@ -790,6 +813,18 @@ def _require_local_client(
     if connection.revoked_at:
         raise HTTPException(status_code=403, detail=CONNECTION_REVOKED_DETAIL)
     return connection
+
+
+def _record_last_seen_unlocked(
+    state: ProvisioningState,
+    connection: LocalConnection,
+    now: datetime,
+    state_path: Path,
+) -> None:
+    """Refresh last_seen_at, rewriting the state file at most once per LAST_SEEN_RESOLUTION."""
+    if now - connection.last_seen_at >= LAST_SEEN_RESOLUTION:
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, state_path)
 
 
 async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
@@ -1060,7 +1095,12 @@ def _create_connection_unlocked(
     fingerprint: str,
     now: datetime,
 ) -> tuple[LocalConnection, str]:
-    """Create a local connection and return it with its one-time plaintext secret."""
+    """Create a local connection and return it with its one-time plaintext secret.
+
+    Keeps the user within MAX_CONNECTIONS_PER_USER, deleting one of their connections when they are at the limit.
+    """
+    owned = [connection for connection in state.connections.values() if connection.user_id == user_id]
+    _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER - 1)
     client_secret = secrets.token_urlsafe(32)
     connection = LocalConnection(
         id=secrets.token_urlsafe(18),
@@ -1359,8 +1399,7 @@ async def register_agent(
                 status_code=403,
                 detail=NAMESPACE_MISMATCH_DETAIL,
             )
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
 
     return await _register_agent_with_matrix(config, payload)
 
@@ -1377,9 +1416,7 @@ async def heartbeat(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"heartbeat:{connection.id}", limit=10, window_seconds=60)
-        if now - connection.last_seen_at >= HEARTBEAT_LAST_SEEN_RESOLUTION:
-            connection.last_seen_at = now
-            _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
     return HeartbeatResponse(status="ok")
 
 
@@ -1396,8 +1433,7 @@ async def google_oauth_client(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"oauth:google-client:{connection.id}", limit=60, window_seconds=60)
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
 
     if not config.google_oauth_client_id or not config.google_oauth_client_secret:
         raise HTTPException(status_code=503, detail="Google OAuth client is not configured")

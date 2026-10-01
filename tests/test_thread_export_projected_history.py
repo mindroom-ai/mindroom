@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import nio
 import pytest
@@ -34,6 +34,7 @@ from mindroom.thread_export.projected_history import (
     export_conversation_reader,
     fetch_projected_thread_history,
 )
+from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, make_matrix_client_mock, serve_media_download
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -126,6 +127,7 @@ class FakeHomeserver:
     relation_calls: int = 0
     messages_calls: int = 0
     download_calls: int = 0
+    access_token: str = TEST_ACCESS_TOKEN
 
     @property
     def history_calls(self) -> int:
@@ -188,6 +190,10 @@ class FakeHomeserver:
         if payload is None:
             return nio.DownloadError("M_NOT_FOUND")
         return nio.DownloadResponse(payload.encode(), "application/json", None)
+
+    async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+        """Serve the streamed media requests sidecar resolution sends."""
+        return await serve_media_download(self.download, path)
 
 
 @pytest.fixture
@@ -529,7 +535,7 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(
         for source in reversed(homeserver.relations.get(event_id, [])):
             yield nio.Event.parse_event(source)
 
-    client = AsyncMock(spec=nio.AsyncClient)
+    client = make_matrix_client_mock()
     client.room_get_event.side_effect = homeserver.room_get_event
     client.room_get_event_relations = Mock(side_effect=relations)
     client.download.side_effect = homeserver.download
@@ -554,10 +560,10 @@ async def test_legacy_file_edit_exports_the_entire_sidecar(
     client.download.assert_not_awaited()
 
 
-async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_preview(
+async def test_an_unreadable_sidecar_exports_its_preview_marked_incomplete(
     router: PrincipalStore,
 ) -> None:
-    """A file that cannot be read leaves the debt owed, and the caller is told."""
+    """A file that cannot be read exports the preview with a notice rather than failing the thread."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
@@ -573,8 +579,9 @@ async def test_an_unreadable_sidecar_fails_the_thread_instead_of_exporting_the_p
         ],
     )
 
-    with pytest.raises(RuntimeError, match="awaiting a server refetch"):
-        await export(reader_for(router, homeserver))
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole long mes…\n\n[The rest of this message could not be loaded.]"]
 
 
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(

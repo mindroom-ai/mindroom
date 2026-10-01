@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 from main import app
 from supabase import PostgrestAPIError
 
-from tests.fake_supabase import FakeSupabase
+from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
 
 ACCOUNT_ID = "00000000-0000-0000-0000-000000000001"
 SUBSCRIPTION_ID = "11111111-1111-1111-1111-111111111111"
@@ -122,6 +122,7 @@ def platform() -> Iterator[Platform]:
         data: dict[str, Any],
         background_tasks: Any,  # noqa: ANN401, ARG001
         resume_lifecycle_hold: bool,  # noqa: ARG001
+        expected_status: str | None,  # noqa: ARG001
     ) -> dict[str, Any]:
         # Like provision_instance, a successful deploy records the tier it deployed.
         db.row("instances", instance_id=data["instance_id"]).update(
@@ -302,6 +303,44 @@ async def test_resubscribe_after_teardown_reprovisions_instance(platform: Platfo
     }
     assert platform.instance()["status"] == "running"
     assert platform.instance()["lifecycle_stopped_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_torn_down_instance_another_replica_claimed_mints_no_key(platform: Platform) -> None:
+    """A torn-down instance that another backend replica starts reprovisioning first is not deployed again."""
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "deprovisioned",
+            openrouter_key_hash=None,
+            lifecycle_stopped_at=(now - timedelta(days=40)).isoformat(),
+            teardown_after=(now - timedelta(days=10)).isoformat(),
+        )
+    )
+    read_instances = FakeQuery.execute
+
+    def claim_after_read(query: FakeQuery) -> FakeResult:
+        result = read_instances(query)
+        if query.table_name == "instances" and query.action == "select":
+            platform.instance()["status"] = "provisioning"
+        return result
+
+    service = "backend.services.provisioner_service"
+    with (
+        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch.object(FakeQuery, "execute", claim_after_read),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.create_openrouter_key") as mint,
+    ):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    mint.assert_not_called()
+    platform.set_key_disabled.assert_not_awaited()
+    assert summary.instances_resumed == 0
+    assert summary.errors == []
+    assert platform.instance()["status"] == "provisioning"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
 
 
 def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:

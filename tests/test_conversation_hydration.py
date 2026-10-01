@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import nio
 import pytest
 
+from mindroom.attachments import register_thread_history_media_attachments
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -41,9 +42,12 @@ from mindroom.matrix.conversation_reads import (
     projected_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
+    from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore, RefreshRequest
 
@@ -192,6 +196,8 @@ class FakeClient:
             raise nio.EncryptionError(msg)
         return parse(cleartext)
 
+    access_token: str = TEST_ACCESS_TOKEN
+
     async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
         """Return one stored attachment."""
         self.downloads.append(mxc)
@@ -199,6 +205,10 @@ class FakeClient:
         if payload is None:
             return nio.DownloadError("M_NOT_FOUND")
         return nio.DownloadResponse(payload.encode(), "application/json", None)
+
+    async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+        """Serve the streamed media requests sidecar resolution sends."""
+        return await serve_media_download(self.download, path)
 
     async def room_get_event(
         self,
@@ -1699,28 +1709,135 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
-    async def test_an_unreachable_attachment_keeps_the_read_incomplete(
+    async def test_an_unreadable_attachment_is_marked_incomplete_and_never_fetched_again(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A failed fetch must not settle the debt with the preview.
+        """A failed fetch settles the message as a preview that says it is incomplete.
 
-        This is the direction that matters. Installing the preview here would
-        clear the refresh token, and the truncated body would then look exactly
-        like content that had been resolved -- permanently, because nothing
-        would ever ask again. Failing loudly leaves it repairable.
+        Anyone who can post can attach a sidecar that never resolves. Keeping
+        the debt would download it again on every strict read and fail every
+        one of them, so the conversation could never be read again. The notice
+        keeps the truncated body from passing for the whole message.
         """
         source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
         await admit_all(alice, [source])
         client = FakeClient(events={"$long": source})
         reader = await self._reader(alice, client)
 
-        with pytest.raises(_StaleConversationError):
-            await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert page.messages == ()
-        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert [message.content["body"] for message in page.messages] == [
+                "The answer beg [continues]\n\n[The rest of this message could not be loaded.]",
+            ]
+            assert not holds_unresolved_sidecar(page.messages[0].content)
+            assert page.refresh_pending == ()
+
+    async def test_an_unreadable_edited_attachment_settles_with_the_notice_on_its_new_content(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An edit keeps its sidecar and visible preview in ``m.new_content``, and that is what settles.
+
+        The outer body of an edit is only a fallback for clients that do not
+        apply edits. The revision installed is the new content, so the notice
+        has to land on its body for the truncated edit not to pass for the
+        whole message, on this read and every later one.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/gone", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": preview["content"],
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        client = FakeClient(events={"$m": original}, relations={"$m": [edit]})
+        reader = await self._reader(alice, client)
+
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert [message.content for message in page.messages] == [
+                {
+                    "msgtype": "m.text",
+                    "body": "The edit beg [continues]\n\n[The rest of this message could not be loaded.]",
+                },
+            ]
+            assert page.refresh_pending == ()
+
+    async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A sender-nested ``m.new_content`` inside an edit's new content cannot keep the debt alive.
+
+        Settling keeps only the visible layer's text, so a second sidecar
+        reference hidden one layer deeper never makes later reads fetch again.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/gone", ts=2_000)
+        nested = self._sidecar_source("$e2", "nested [continues]", "mxc://s/nested", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": {**preview["content"], "m.new_content": nested["content"]},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        client = FakeClient(events={"$m": original}, relations={"$m": [edit]})
+        reader = await self._reader(alice, client)
+
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert not holds_unresolved_sidecar(page.messages[0].content)
+            assert page.refresh_pending == ()
+
+    async def test_a_settled_unreadable_attachment_is_text_that_thread_media_never_downloads(
+        self,
+        alice: PrincipalStore,
+        tmp_path: Path,
+    ) -> None:
+        """The settled preview keeps no file fields, so thread-history media collection skips it.
+
+        Left as a file event pointing at the attachment, every turn in the
+        thread would download the sender's file again as shared media.
+        """
+        source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
+        await admit_all(alice, [source])
+        client = FakeClient(events={"$long": source})
+        reader = await self._reader(alice, client)
+        history = projected_thread_history(
+            await reader.read_strict(room_id=ROOM, thread_id=None, limit=10),
+            complete=True,
+        )
+
+        attachment_ids = await register_thread_history_media_attachments(
+            client,  # type: ignore[arg-type]
+            tmp_path,
+            room_id=ROOM,
+            thread_id=None,
+            thread_history=history,
+        )
+
+        assert attachment_ids == []
+        assert client.downloads == ["mxc://s/gone"]
+        assert history[0].content["msgtype"] == "m.text"
 
 
 class TestPointRefetch:
@@ -2458,12 +2575,11 @@ class TestRefreshStarvation:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        with pytest.raises(_StaleConversationError):
-            await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
+        await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
 
         assert "mxc://s/wanted" in client.downloads, "the requested message was never attempted"
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
-        assert [message.content["body"] for message in page.messages] == ["the older answer"]
+        assert page.messages[0].content["body"] == "the older answer"
 
 
 class TestLatestSenderMessage:

@@ -942,6 +942,23 @@ def test_instance_chart_never_gives_tenant_the_supabase_service_key() -> None:
     assert "SUPABASE_ANON_KEY" in mindroom_env
 
 
+def test_instance_chart_mounts_the_platform_oidc_client_secret_only_into_synapse() -> None:
+    """The Matrix OIDC client secret is platform-wide, so tenant code in the MindRoom container must not read it."""
+    docs = _render_instance_chart()
+    mindroom = _resource(docs, "Deployment", "mindroom-demo")
+    synapse = _resource(docs, "Deployment", "synapse-demo")
+    mounted_keys = {item["key"] for item in _volumes_by_name(mindroom)["api-keys"]["secret"].get("items", [])}
+    secret_files = {
+        env["value"]
+        for env in _container(mindroom, "mindroom")["env"]
+        if str(env.get("value")).startswith("/etc/secrets/")
+    }
+
+    assert {f"/etc/secrets/{key}" for key in mounted_keys} == secret_files
+    assert "matrix_oidc_client_secret" not in mounted_keys
+    assert "items" not in _volumes_by_name(synapse)["mindroom-secrets"]["secret"]
+
+
 def test_instance_chart_points_platform_login_at_platform_domain() -> None:
     """Split platform and instance domains keep platform login and SSO on the platform hosts."""
     docs = _render_chart(Path("cluster/k8s/instance"), "baseDomain=tenants.example.test", "platformDomain=example.test")

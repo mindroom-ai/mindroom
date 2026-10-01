@@ -107,25 +107,24 @@ class _ServiceError(ValueError):
         return self.status_code in {0, 429} or self.status_code >= 500
 
 
-def _httpx_post(url: str, *, json: Mapping[str, object], timeout: float, verify: bool) -> httpx.Response:
+def _httpx_post(url: str, *, json: Mapping[str, object], timeout: float) -> httpx.Response:
     """Call httpx.post without importing httpx during CLI help rendering."""
     import httpx  # noqa: PLC0415
 
-    return httpx.post(url, json=json, timeout=timeout, verify=verify)
+    # The service names this install's owner, so TLS is verified whatever MATRIX_SSL_VERIFY says.
+    return httpx.post(url, json=json, timeout=timeout)
 
 
 def _post_json(
     post_request: Callable[..., httpx.Response],
     url: str,
     payload: Mapping[str, object],
-    *,
-    verify: bool,
 ) -> dict[str, object]:
     """POST to the provisioning service and return its JSON object, raising _ServiceError for failed requests."""
     import httpx  # noqa: PLC0415
 
     try:
-        response = post_request(url, json=payload, timeout=10, verify=verify)
+        response = post_request(url, json=payload, timeout=10)
     except httpx.HTTPError as exc:
         raise _ServiceError(0, str(exc)) from exc
     if not response.is_success:
@@ -194,14 +193,12 @@ def _start_session(
     *,
     client_name: str,
     client_fingerprint: str,
-    verify: bool,
 ) -> DevicePairSession:
     """Start a device pairing session with the provisioning service."""
     started = _post_json(
         post_request,
         f"{base_url}/start",
         {"client_name": client_name.strip(), "client_pubkey_or_fingerprint": client_fingerprint},
-        verify=verify,
     )
     return DevicePairSession(
         pair_code=_required_non_empty_string(started, "pair_code"),
@@ -218,7 +215,6 @@ def _start_session_with_retry(
     *,
     client_name: str,
     client_fingerprint: str,
-    verify: bool,
     sleep: Callable[[float], None],
     warn: Callable[[str], None] | None,
     stopped: Callable[[], bool],
@@ -235,7 +231,6 @@ def _start_session_with_retry(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=verify,
             )
         except _ServiceError as exc:
             if not exc.transient:
@@ -253,7 +248,6 @@ def _wait_for_approval(
     base_url: str,
     session: DevicePairSession,
     *,
-    verify: bool,
     sleep: Callable[[float], None],
     stopped: Callable[[], bool],
     now: Callable[[], datetime],
@@ -273,7 +267,6 @@ def _wait_for_approval(
                 post_request,
                 f"{base_url}/poll",
                 {"device_secret": session.device_secret},
-                verify=verify,
             )
         except _ServiceError as exc:
             # The service prunes expired sessions, so an unknown device secret means expired.
@@ -340,7 +333,6 @@ def run_device_pairing(
     provisioning_url: str,
     client_name: str,
     client_fingerprint: str,
-    matrix_ssl_verify: bool,
     announce: Callable[[DevicePairSession], None],
     post_request: Callable[..., httpx.Response] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -372,7 +364,6 @@ def run_device_pairing(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=matrix_ssl_verify,
                 sleep=sleep,
                 warn=warn,
                 stopped=stopped,
@@ -385,14 +376,12 @@ def run_device_pairing(
                 base_url,
                 client_name=client_name,
                 client_fingerprint=client_fingerprint,
-                verify=matrix_ssl_verify,
             )
         announce(session)
         outcome = _wait_for_approval(
             post,
             base_url,
             session,
-            verify=matrix_ssl_verify,
             sleep=sleep,
             stopped=stopped,
             now=now,
@@ -496,7 +485,6 @@ def pair_local_install(
         provisioning_url=resolved_url,
         client_name=name,
         client_fingerprint=local_client_fingerprint(config_path=runtime_paths.config_path),
-        matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
         announce=announce,
         post_request=post_request,
         sleep=sleep,

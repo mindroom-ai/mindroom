@@ -364,7 +364,7 @@ Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, a
 `timeout_days` sets the default approval expiry window and can be overridden per rule.
 Late approval decisions fail closed at the persisted deadline, while the periodic Matrix card sweep can take up to about one additional minute to show the expired state.
 React to the approval card with `✅` to approve the tool call.
-Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
+Reply to the approval card with a message to deny the tool call and record the start of that message as the denial reason, up to 2,000 plain ASCII characters or fewer when it contains other characters such as emoji.
 Only the original human requester can approve or deny their pending tool call.
 Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.
@@ -403,6 +403,7 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval, so on every channel they are hidden when a required-approval rule or `default: require_approval` applies to them; add an `auto_approve` rule for one to keep it available.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
 It does not gate every Slack operation, and the same function names in other toolkits also match.
@@ -447,7 +448,7 @@ Container `env_file`/`--env-file` injection supplies process variables and can t
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
 | `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 
@@ -1215,6 +1216,9 @@ The owner may invite other MindRoom agents into their personal room; an agent se
 Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
 Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 When an onboarding-room join or command meets a personal room that fails these checks, including an alias another account already holds, MindRoom logs `Personal-room validation failed for an onboarding trigger` and the onboarding room keeps serving everyone else; reconciliation, which runs at startup and after a configuration reload, retries that room after doubling delays up to hourly.
+A guest the agent is not permitted to remove, such as one the owner raised to the agent's power level, fails these checks the same way.
+Any other failure of an onboarding-room join or command, such as an invite the requester's server refuses, logs `Personal-room onboarding trigger failed`, and reconciliation retries it in the background after doubling delays up to hourly while the onboarding room keeps serving everyone else.
+A join or command that arrives before the personal-room agent connects stays pending until it does.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 

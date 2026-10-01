@@ -64,7 +64,7 @@ from mindroom.event_journal.projection import is_newer_revision
 from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
-from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar, without_sidecar_reference
 from mindroom.matrix.transport_progress import is_transport_progress_revision
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
@@ -133,6 +133,8 @@ _HYDRATION_EPOCH_ATTEMPTS = 3
 # is refused its root on every request: Tuwunel and Synapse answer 404
 # ``M_NOT_FOUND``, and ``M_FORBIDDEN`` is the other answer the spec allows.
 _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
+
+_UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
 
 
 class _HydrationError(RuntimeError):
@@ -1163,8 +1165,6 @@ class ConversationHydrator:
             return False
         revision = _reduce_current_revision(projected, relations.events)
         content = await self._resolved_content(revision.event_id, revision.content)
-        if content is None:
-            return False
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
@@ -1178,7 +1178,7 @@ class ConversationHydrator:
         self,
         event_id: str,
         content: Mapping[str, object],
-    ) -> Mapping[str, object] | None:
+    ) -> Mapping[str, object]:
         """Return one revision's whole text, fetching its sidecar when it has one.
 
         A message too large for a single Matrix event carries a preview in its
@@ -1192,10 +1192,11 @@ class ConversationHydrator:
         hydrated room, because the caller asking for the text is the one whose
         page size bounds how much of it is worth fetching.
 
-        Returning nothing means the attachment could not be read. The message
-        then stays unreadable and keeps its refresh token, so the next strict
-        read tries again rather than installing the preview and calling the
-        debt settled.
+        An attachment that cannot be read settles the debt with the preview and
+        a notice that the rest is missing. Keeping the debt instead would fetch
+        it again on every strict read and fail each one, so anyone able to post
+        a message with an unreadable attachment could keep the conversation
+        from ever being read. An edit or redaction still replaces it.
         """
         if not holds_unresolved_sidecar(content):
             return content
@@ -1204,13 +1205,15 @@ class ConversationHydrator:
             self._client(),
         )
         resolved_content = resolved.get("content")
-        if not isinstance(resolved_content, dict) or holds_unresolved_sidecar(resolved_content):
-            logger.info(
-                "conversation_refresh_sidecar_unresolved",
-                event_id=event_id,
-            )
-            return None
-        return resolved_content
+        if isinstance(resolved_content, dict) and not holds_unresolved_sidecar(resolved_content):
+            return resolved_content
+        logger.info(
+            "conversation_refresh_sidecar_unresolved",
+            event_id=event_id,
+        )
+        unreadable = without_sidecar_reference(content)
+        unreadable["body"] = f"{unreadable.get('body', '')}\n\n{_UNREADABLE_SIDECAR_NOTICE}"
+        return unreadable
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.

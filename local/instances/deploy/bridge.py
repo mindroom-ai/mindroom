@@ -14,7 +14,6 @@ import asyncio
 import json
 import os
 import re
-import shlex
 import shutil
 import socket
 import stat
@@ -164,12 +163,8 @@ def _protect_bridge_secret_files(bridge: BridgeConfig) -> None:
         except PermissionError as e:
             # A non-root operator cannot chmod files the bridge container already owns.
             console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only: {e}")
-            console.print(
-                f"  Run: sudo chmod 600 {shlex.quote(str(path))}",
-                markup=False,
-                highlight=False,
-                soft_wrap=True,
-            )
+            # A sudo chmod of this path would follow a link the container swaps in before it runs.
+            console.print("  Rerun this bridge.py command as root, which changes the file without following links.")
 
 
 def load_instances() -> dict[str, Any]:
@@ -301,7 +296,7 @@ def _create_bridge_docker_compose(
 def _generate_bridge_config(bridge: BridgeConfig, credentials: dict[str, Any], admin_user_id: str | None) -> Path:
     """Generate bridge configuration from template.
 
-    The deploy templates allow open registration, so only the operator-designated admin gets more than relay access.
+    Instances from older deploy templates allow open registration, so only the chosen admin gets more than relay access.
     """
     config_file = Path(bridge.data_dir) / "data" / "config.yaml"
     config_file.parent.mkdir(parents=True, exist_ok=True)

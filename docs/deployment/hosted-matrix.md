@@ -66,7 +66,7 @@ Alternatively, enter the displayed code in MindRoom Chat → Settings → Local 
 Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
 
 After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
-In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+In a terminal, it asks `Is this your account? [y/N]`; answering `n`, pressing Enter without an answer, or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
 Under a service or the macOS app, it prints the approving account without asking.
 While it waits for approval, `/api/health` on the API port already reports healthy and `/api/ready` reports `Waiting for local pairing approval`, so container health checks do not restart it with a new code.
 
@@ -114,6 +114,7 @@ The Google app client configuration lets the local process exchange OAuth codes 
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
 That page shows when each paired install was last seen.
+Each account keeps at most 20 paired installs, revoked ones included; pairing another at the limit removes one, preferring a revoked install and otherwise the one seen least recently.
 A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
 Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
 The service records these reports with ten-minute resolution.

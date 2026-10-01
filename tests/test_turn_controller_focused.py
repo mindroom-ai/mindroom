@@ -4075,6 +4075,7 @@ async def test_normal_desktop_agent_owns_desktop_command(tmp_path: Path) -> None
     )
     harness = _build_harness(config, tmp_path, agent_name="computer")
     room = _room_with_members(config, "computer")
+    room.members_synced = True
     event = _text_event("!desktop status", event_id="$desktop-command:localhost")
 
     await harness.deliver(room, event)

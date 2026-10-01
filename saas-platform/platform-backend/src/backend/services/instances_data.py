@@ -57,14 +57,19 @@ def create_instance(sb: Client, fields: dict[str, Any]) -> dict[str, Any] | None
     return result.data[0] if result.data else None
 
 
-def update_instance(sb: Client, instance_id: int | str, fields: dict[str, Any]) -> list[dict[str, Any]]:
+def update_instance(
+    sb: Client, instance_id: int | str, fields: dict[str, Any], *, expected_status: str | None = None
+) -> list[dict[str, Any]]:
     """Update an instance row by instance_id and return the updated rows.
 
+    With ``expected_status``, only a row still in that status is updated, so one of several concurrent callers wins.
     Stamps ``updated_at`` automatically unless the caller provides its own value.
     """
     payload = {"updated_at": datetime.now(UTC).isoformat(), **fields}
-    result = sb.table("instances").update(payload).eq("instance_id", str(instance_id)).execute()
-    return result.data or []
+    query = sb.table("instances").update(payload).eq("instance_id", str(instance_id))
+    if expected_status is not None:
+        query = query.eq("status", expected_status)
+    return query.execute().data or []
 
 
 def update_instance_status(instance_id: int | str, status: str) -> bool:

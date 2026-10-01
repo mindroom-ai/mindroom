@@ -4251,12 +4251,140 @@ async def test_mcp_manager_handles_tools_list_changed_notifications(
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_spaces_refreshes_for_repeated_tools_list_changed_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A server repeating tools-changed notifications gets at most one catalog refresh per interval."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(mcp_manager_module, "_STALE_REFRESH_MIN_INTERVAL_SECONDS", 0.5)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    refreshed_at: list[float] = []
+
+    async def fake_refresh(state: MCPServerState, *, notify: bool) -> bool:
+        assert notify is True
+        state.stale = False
+        refreshed_at.append(time.monotonic())
+        return True
+
+    monkeypatch.setattr(manager, "_refresh_server_catalog", fake_refresh)
+    message_handler = _FakeClientSession.sessions[0].message_handler
+    assert message_handler is not None
+    for _ in range(20):
+        await message_handler(
+            mcp_types.ServerNotification(
+                ToolListChangedNotification(method="notifications/tools/list_changed"),
+            ),
+        )
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    assert len(refreshed_at) == 1
+    deferred_refresh = manager._states["demo"].refresh_task
+    assert deferred_refresh is not None
+    assert not deferred_refresh.done()
+    await asyncio.wait_for(deferred_refresh, timeout=5)
+    assert len(refreshed_at) == 2
+    assert refreshed_at[1] - refreshed_at[0] >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_notifies_deferred_change_already_published_by_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request that publishes a changed catalog while its refresh is deferred must not hide the change."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(mcp_manager_module, "_STALE_REFRESH_MIN_INTERVAL_SECONDS", 0.5)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    catalog_changes: list[str] = []
+
+    async def on_catalog_change(server_id: str) -> None:
+        catalog_changes.append(server_id)
+
+    manager = MCPServerManager(_runtime_paths(tmp_path), on_catalog_change=on_catalog_change)
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+
+    async def send_tools_changed() -> asyncio.Task[None]:
+        message_handler = _FakeClientSession.sessions[-1].message_handler
+        assert message_handler is not None
+        await message_handler(
+            mcp_types.ServerNotification(
+                ToolListChangedNotification(method="notifications/tools/list_changed"),
+            ),
+        )
+        assert state.refresh_task is not None
+        return state.refresh_task
+
+    await asyncio.wait_for(await send_tools_changed(), timeout=5)
+    assert catalog_changes == []
+
+    _FakeClientSession.tool_list = [_tool("echo"), _tool("ping")]
+    deferred_refresh = await send_tools_changed()
+    catalog = await manager.get_request_catalog("demo", credentials_manager=None, worker_target=None)
+    assert [tool.remote_name for tool in catalog.tools] == ["echo", "ping"]
+    assert not deferred_refresh.done()
+    assert catalog_changes == []
+
+    await asyncio.wait_for(deferred_refresh, timeout=5)
+    assert catalog_changes == ["demo"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_notifies_change_published_silently_after_a_failed_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request that recovers a catalog lost to a failed refresh must not hide a tool change from dependents."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(mcp_manager_module, "_STALE_REFRESH_MIN_INTERVAL_SECONDS", 0.5)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    catalog_changes: list[str] = []
+
+    async def on_catalog_change(server_id: str) -> None:
+        catalog_changes.append(server_id)
+
+    manager = MCPServerManager(_runtime_paths(tmp_path), on_catalog_change=on_catalog_change)
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    message_handler = _FakeClientSession.sessions[-1].message_handler
+    assert message_handler is not None
+
+    async def send_tools_changed() -> asyncio.Task[None]:
+        await message_handler(
+            mcp_types.ServerNotification(
+                ToolListChangedNotification(method="notifications/tools/list_changed"),
+            ),
+        )
+        assert state.refresh_task is not None
+        return state.refresh_task
+
+    await asyncio.wait_for(await send_tools_changed(), timeout=5)
+    _FakeClientSession.tool_list = [_tool("echo"), _tool("ping")]
+    deferred_refresh = await send_tools_changed()
+    state.catalog = None
+    catalog = await manager.get_request_catalog("demo", credentials_manager=None, worker_target=None)
+    assert [tool.remote_name for tool in catalog.tools] == ["echo", "ping"]
+    assert catalog_changes == []
+
+    await asyncio.wait_for(deferred_refresh, timeout=5)
+    assert catalog_changes == ["demo"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_reschedules_refresh_when_catalog_goes_stale_mid_refresh(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A second tools-changed notification during refresh should schedule a follow-up refresh."""
     _patch_manager(monkeypatch)
+    monkeypatch.setattr(mcp_manager_module, "_STALE_REFRESH_MIN_INTERVAL_SECONDS", 0.0)
     _FakeClientSession.tool_list = [_tool("echo")]
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})

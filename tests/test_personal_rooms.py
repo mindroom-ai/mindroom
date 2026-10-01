@@ -118,6 +118,7 @@ class MatrixServer:
         self.messages: dict[str, dict[str, Any]] = {}
         self.fail_invite = False
         self.fail_kick = False
+        self.unkickable: set[str] = set()
         self.kicks: list[tuple[str, str]] = []
         self.fail_send = False
         self.fail_receipt = False
@@ -211,6 +212,8 @@ class MatrixServer:
         del reason
         if self.fail_kick:
             return nio.RoomKickError("retry", "M_UNKNOWN")
+        if user_id in self.unkickable:
+            return nio.RoomKickError("target power level is not below yours", "M_FORBIDDEN")
         self.kicks.append((room_id, user_id))
         self.set_member(room_id, user_id, "leave")
         return nio.RoomKickResponse()
@@ -745,6 +748,61 @@ async def test_squatted_alias_settles_the_lobby_join_with_a_warning(
     assert [entry["user_id"] for entry in warnings] == ["@alice:localhost"]
     assert alias in warnings[0]["error"]
     assert server.create_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_guest_the_agent_cannot_remove_settles_the_lobby_join_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An owner who gives a guest the agent's power level cannot make the router's lobby callback raise forever."""
+    server = MatrixServer()
+    router, _ = bots(tmp_path, server, monkeypatch)
+    room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
+    await _dispatch_member(router, room, _room_member_event())
+    room_id = server.aliases["#personal_" + personal_room_digest("@alice:localhost")[:20] + ":localhost"]
+    server.set_member(room_id, "@eve:localhost", "join")
+    server.unkickable.add("@eve:localhost")
+
+    with capture_logs() as logs:
+        await _dispatch_member(router, room, _room_member_event(event_id="$rejoin"))
+
+    warnings = [
+        entry for entry in logs if entry["event"] == "Personal-room validation failed for an onboarding trigger"
+    ]
+    assert [entry["user_id"] for entry in warnings] == ["@alice:localhost"]
+    assert server.membership(room_id, "@eve:localhost") == "join"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_owner_invite_settles_the_lobby_join_and_reconciliation_retries_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requester whose server refuses the invite cannot make the router's lobby callback raise forever."""
+    server = MatrixServer()
+    router, _ = bots(tmp_path, server, monkeypatch)
+    lifecycle = router._personal_room_lifecycle
+    await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    server.fail_invite = True
+    room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
+
+    with capture_logs() as logs:
+        await _dispatch_member(router, room, _room_member_event())
+
+    failures = [entry for entry in logs if entry["event"] == "Personal-room onboarding trigger failed"]
+    assert [(entry["user_id"], entry["error"]) for entry in failures] == [
+        ("@alice:localhost", "Personal-room invite failed"),
+    ]
+    room_id = server.aliases["#personal_" + personal_room_digest("@alice:localhost")[:20] + ":localhost"]
+    assert server.membership(room_id, "@alice:localhost") is None
+
+    server.fail_invite = False
+    await lifecycle._reconcile()
+
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert lifecycle._reconciled
 
 
 @pytest.mark.asyncio

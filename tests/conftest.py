@@ -29,7 +29,8 @@ from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import nio
@@ -416,6 +417,7 @@ __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
+    "FakeMediaResponse",
     "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
@@ -456,6 +458,8 @@ __all__ = [
     "request_envelope",
     "requires_linux",
     "runtime_paths_for",
+    "serve_media_download",
+    "serve_media_from_download",
     "sync_bot_runtime_state",
     "test_runtime_paths",
     "unwrap_extracted_collaborator",
@@ -1157,6 +1161,54 @@ class _AutoRoomCache(MutableMapping[str, nio.MatrixRoom]):
         return len(self._rooms)
 
 
+@dataclass
+class FakeMediaResponse:
+    """The part of an aiohttp response that a streamed Matrix media download reads."""
+
+    body: bytes
+    status: int = 200
+    headers: dict[str, str] = field(default_factory=dict)
+    streamed_bytes: int = 0
+    released: bool = False
+
+    @property
+    def content(self) -> "FakeMediaResponse":
+        """Stand in for the response's payload stream."""
+        return self
+
+    async def iter_chunked(self, size: int) -> AsyncIterator[bytes]:
+        """Yield the body in chunks, counting what the reader actually took."""
+        for start in range(0, len(self.body), size):
+            chunk = self.body[start : start + size]
+            self.streamed_bytes += len(chunk)
+            yield chunk
+
+    def release(self) -> None:
+        """Record that the reader gave the connection back."""
+        self.released = True
+
+
+async def serve_media_download(download: Callable[..., Awaitable[object]], path: str) -> FakeMediaResponse:
+    """Answer one streamed media download request from a test's ``download(mxc=...)`` fake."""
+    server_name, media_id = urlsplit(path).path.split("/")[-2:]
+    response = await download(mxc=f"mxc://{unquote(server_name)}/{unquote(media_id)}")
+    if isinstance(response, nio.DownloadResponse):
+        return FakeMediaResponse(response.body)
+    return FakeMediaResponse(b'{"errcode": "M_NOT_FOUND"}', status=404)
+
+
+def serve_media_from_download(client: AsyncMock) -> None:
+    """Answer streamed media requests on ``client.send`` from ``client.download`` as it is when each is sent."""
+
+    async def send(_method: str, path: str, *_args: object, **_kwargs: object) -> object:
+        if "/media/download/" not in path:
+            return DEFAULT
+        return await serve_media_download(client.download, path)
+
+    client.access_token = TEST_ACCESS_TOKEN
+    client.send = AsyncMock(side_effect=send)
+
+
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
@@ -1182,6 +1234,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     client.room_get_event_relations = MagicMock(return_value=_empty_async_iterator())
     client.room_messages = AsyncMock(return_value=room_messages_response)
     client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
+    serve_media_from_download(client)
 
     return client
 

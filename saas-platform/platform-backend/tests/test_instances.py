@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
+
 
 class TestInstancesEndpoints:
     """Test instances endpoints via HTTP API."""
@@ -340,6 +342,35 @@ class TestInstancesEndpoints:
         mock_provision_instance.assert_called_once()
         call_args = mock_provision_instance.call_args[1]
         assert call_args["data"]["instance_id"] == "789"  # Reusing same ID
+
+    def test_reprovision_claimed_by_another_replica_mints_no_key(self, client: TestClient, mock_verify_user: Mock):
+        """A deprovisioned instance that a request on another backend replica claims first is not deployed again."""
+        db = FakeSupabase(
+            {
+                "subscriptions": [{"id": "sub_123", "account_id": "acc_test_123", "tier": "pro", "status": "active"}],
+                "instances": [{"instance_id": "789", "subscription_id": "sub_123", "status": "deprovisioned"}],
+            }
+        )
+        read_instances = FakeQuery.execute
+
+        def claim_after_read(query: FakeQuery) -> FakeResult:
+            result = read_instances(query)
+            if query.table_name == "instances" and query.action == "select":
+                db.row("instances", instance_id="789")["status"] = "provisioning"
+            return result
+
+        service = "backend.services.provisioner_service"
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=db),
+            patch.object(FakeQuery, "execute", claim_after_read),
+            patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+            patch(f"{service}.create_openrouter_key") as mint,
+        ):
+            response = client.post("/my/instances/provision")
+
+        mint.assert_not_called()
+        assert response.status_code == 409
+        assert db.row("instances", instance_id="789")["status"] == "provisioning"
 
     def test_provision_user_instance_no_subscription(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock

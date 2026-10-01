@@ -841,9 +841,7 @@ async def test_crawl4ai_browser_egress_route(
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
-_LOCAL_URL_FETCH_TOOLS = ("crawl4ai", "trafilatura", "website")
-# Research toolkits that still download model-chosen URLs locally without the guard; each is tracked separately.
-_UNGUARDED_LOCAL_URL_FETCH_TOOLS = ("agentql", "newspaper")
+_LOCAL_URL_FETCH_TOOLS = ("agentql", "crawl4ai", "newspaper", "trafilatura", "website")
 # Research toolkits that forward URLs to a hosted service instead of downloading them locally.
 _HOSTED_URL_FETCH_TOOLS = (
     "brightdata",
@@ -907,7 +905,7 @@ def _recording_loopback_server() -> Iterator[tuple[str, list[object]]]:
 
 
 def test_research_url_tools_declare_their_fetch_path() -> None:
-    """Every research toolkit taking URLs must be classified as a guarded, unguarded, or hosted fetcher."""
+    """Every research toolkit taking URLs must be classified as a guarded or hosted fetcher."""
     url_tools = sorted(
         tool_name
         for tool_name, metadata in BUILTIN_TOOL_METADATA.items()
@@ -916,24 +914,20 @@ def test_research_url_tools_declare_their_fetch_path() -> None:
         and _url_functions(tool_name)
     )
 
-    assert url_tools == sorted((*_LOCAL_URL_FETCH_TOOLS, *_UNGUARDED_LOCAL_URL_FETCH_TOOLS, *_HOSTED_URL_FETCH_TOOLS))
+    assert url_tools == sorted((*_LOCAL_URL_FETCH_TOOLS, *_HOSTED_URL_FETCH_TOOLS))
 
 
-@pytest.mark.parametrize(
-    "tool_name",
-    [
-        *_LOCAL_URL_FETCH_TOOLS,
-        # Newspaper4k needs no browser, so it shows that this check catches an unguarded local download.
-        pytest.param(
-            "newspaper",
-            marks=pytest.mark.xfail(strict=True, reason="Newspaper4k downloads are unguarded and tracked separately."),
-        ),
-    ],
-)
-def test_local_url_fetch_tools_do_not_contact_loopback_targets(tool_name: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_name", _LOCAL_URL_FETCH_TOOLS)
+def test_local_url_fetch_tools_do_not_contact_loopback_targets(
+    tool_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
     if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
         pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
+    # AgentQL refuses to build without a key; the unsafe URL is refused before any request could use it.
+    monkeypatch.setenv("AGENTQL_API_KEY", "unused")
     toolkit = get_tool_by_name(
         tool_name,
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
@@ -1936,7 +1930,6 @@ def test_code_execution_tools_declare_unconfined_file_access() -> None:
 
 
 _UNCONFINED_LOCAL_FILE_TOOLS = (
-    "agentql",
     "airflow",
     "browserbase",
     "composio",
@@ -1944,7 +1937,6 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
     "duckdb",
     "groq",
     "moviepy_video_tools",
-    "newspaper",
     "openai",
     "pandas",
     "postgres",

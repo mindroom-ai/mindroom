@@ -242,6 +242,7 @@ async def provision_user_instance(
                     "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
                 background_tasks=background_tasks,
+                expected_status="deprovisioned",
             )
 
         # Otherwise return existing instance metadata

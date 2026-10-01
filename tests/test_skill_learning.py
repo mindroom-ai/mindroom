@@ -53,7 +53,7 @@ from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill
 from mindroom.skill_learning.transcript import count_model_replies, render_transcript
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.skill_usage import update_skill_usages
+from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import seed_session
@@ -1277,6 +1277,22 @@ def test_restored_or_reused_skill_names_start_over(tmp_path: Path) -> None:
     assert restored.learned
     assert reused is not None
     assert not reused.learned
+
+
+def test_archival_keeps_every_record_when_its_scan_stops_early(tmp_path: Path) -> None:
+    """A skills/ scan that stopped at its limit missed directories, so it forgets no record of a skill it did not see."""
+    root = tmp_path / "skills"
+    names = {f"planted-{index:04d}" for index in range(2048)}
+    for name in names:
+        (root / name).mkdir(parents=True)
+    with open_skills_root(root) as root_fd:
+        update_skill_usages(
+            root_fd,
+            dict.fromkeys(names, lambda usage: usage.model_copy(update={"created_by": "learner"})),
+        )
+    assert library.archive_unused_skills(root, archive_after_days=30, now=datetime.now(UTC)) == []
+    with open_skills_root(root) as root_fd:
+        assert load_skill_usage(root_fd).keys() == names
 
 
 @pytest.mark.asyncio

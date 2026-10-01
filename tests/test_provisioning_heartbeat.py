@@ -91,14 +91,13 @@ async def test_heartbeat_reports_at_startup_and_then_every_interval(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("ssl_verify", "expected_verify"), [(None, True), ("false", False)])
-async def test_heartbeat_follows_matrix_ssl_verify(
+@pytest.mark.parametrize("ssl_verify", [None, "false"])
+async def test_heartbeat_verifies_tls_whatever_matrix_ssl_verify_says(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ssl_verify: str | None,
-    expected_verify: bool,
 ) -> None:
-    """Heartbeats verify TLS like other provisioning calls, honouring MATRIX_SSL_VERIFY."""
+    """Heartbeats carry the client secret, so the homeserver-only MATRIX_SSL_VERIFY never turns off their TLS checks."""
     _, client_kwargs = _install_transport(monkeypatch, lambda _request: httpx.Response(200, json={"status": "ok"}))
     _, sleep = _sleep_until(stop_after=1)
     env = _PAIRED_ENV if ssl_verify is None else {**_PAIRED_ENV, "MATRIX_SSL_VERIFY": ssl_verify}
@@ -106,7 +105,8 @@ async def test_heartbeat_follows_matrix_ssl_verify(
     with pytest.raises(_StopLoopError):
         await run_provisioning_heartbeat(_runtime_paths(tmp_path, env), sleep=sleep)
 
-    assert [kwargs["verify"] for kwargs in client_kwargs] == [expected_verify]
+    # httpx verifies certificates unless told otherwise.
+    assert [kwargs.get("verify", True) for kwargs in client_kwargs] == [True]
 
 
 @pytest.mark.asyncio

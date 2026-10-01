@@ -19,10 +19,17 @@ import heapq
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.thread_membership import map_backed_thread_membership_access, resolve_event_thread_membership
+from mindroom.matrix.thread_membership import (
+    ThreadResolutionState,
+    map_backed_thread_membership_access,
+    resolve_event_thread_membership,
+    resolve_map_backed_related_event_thread_membership,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
+
+    from mindroom.matrix.thread_membership import MapBackedRelationWalks
 
 _TThreadItem = TypeVar("_TThreadItem")
 
@@ -268,9 +275,14 @@ async def resolve_thread_ids_for_event_infos(
     event_infos: Mapping[str, EventInfo],
     ordered_event_ids: Sequence[str],
     resolved_thread_ids: dict[str, str] | None = None,
+    indeterminate_event_ids: set[str] | None = None,
 ) -> dict[str, str]:
-    """Resolve canonical thread membership for one local event-info graph."""
+    """Resolve canonical thread membership for one local event-info graph.
+
+    ``indeterminate_event_ids`` receives the unthreaded events whose membership stays indeterminate.
+    """
     resolved = {} if resolved_thread_ids is None else resolved_thread_ids
+    indeterminate = set() if indeterminate_event_ids is None else indeterminate_event_ids
     access = map_backed_thread_membership_access(
         event_infos=event_infos,
         resolved_thread_ids=resolved,
@@ -279,17 +291,30 @@ async def resolve_thread_ids_for_event_infos(
     progress_made = True
     while progress_made:
         progress_made = False
+        indeterminate.clear()
+        # Walks are reused within one pass. An event resolved after a walk was recorded can only hide a thread
+        # from it, and the next pass finds that thread.
+        walks: MapBackedRelationWalks = {}
         for event_id in ordered_event_ids:
             if event_id in resolved:
                 continue
             event_info = event_infos.get(event_id)
             if event_info is None:
                 continue
-            resolution = await resolve_event_thread_membership(
-                room_id,
-                event_info,
-                access=access,
-            )
+            related_event_id = event_info.next_related_event_id("")
+            if event_info.thread_id is None and related_event_id is not None:
+                resolution = await resolve_map_backed_related_event_thread_membership(
+                    room_id,
+                    related_event_id,
+                    event_infos=event_infos,
+                    resolved_thread_ids=resolved,
+                    access=access,
+                    walks=walks,
+                )
+            else:
+                resolution = await resolve_event_thread_membership(room_id, event_info, access=access)
+            if resolution.state is ThreadResolutionState.INDETERMINATE:
+                indeterminate.add(event_id)
             if not resolution.is_threaded:
                 continue
             assert resolution.thread_id is not None

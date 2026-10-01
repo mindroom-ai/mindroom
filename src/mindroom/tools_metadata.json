@@ -3404,7 +3404,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Directory inside the agent workspace where generated files are saved",
           "label": "Output Directory",
           "name": "output_directory",
           "options": null,
@@ -9892,7 +9892,7 @@
       "display_name": "AgentQL",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "custom_scrape_website",
         "scrape_website"
@@ -12003,7 +12003,7 @@
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "get_article_data",
         "read_article"

@@ -155,6 +155,14 @@ def _write_local_cinny_config(
     return target
 
 
+def _needs_ssl_verify_override(homeserver_url: str) -> bool:
+    """Return whether the local homeserver needs MATRIX_SSL_VERIFY=false for its self-signed certificate.
+
+    Plain HTTP needs no certificate override, and a persisted one would stop verifying a hosted homeserver set later.
+    """
+    return urlparse(homeserver_url).scheme == "https"
+
+
 def _persist_local_matrix_env(
     homeserver_url: str,
     server_name: str,
@@ -162,14 +170,10 @@ def _persist_local_matrix_env(
     config_path: Path,
 ) -> Path:
     """Write local Matrix settings to .env next to the active config file."""
-    return upsert_env_values(
-        env_path_for_config(config_path),
-        {
-            "MATRIX_HOMESERVER": homeserver_url,
-            "MATRIX_SSL_VERIFY": "false",
-            "MATRIX_SERVER_NAME": server_name,
-        },
-    )
+    values = {"MATRIX_HOMESERVER": homeserver_url, "MATRIX_SERVER_NAME": server_name}
+    if _needs_ssl_verify_override(homeserver_url):
+        values["MATRIX_SSL_VERIFY"] = "false"
+    return upsert_env_values(env_path_for_config(config_path), values)
 
 
 def _require_supported_platform() -> None:
@@ -282,8 +286,9 @@ def _print_local_stack_summary(
         console.print("\nRun MindRoom backend:")
         console.print("  uv run mindroom run")
     else:
+        ssl_override = " MATRIX_SSL_VERIFY=false" if _needs_ssl_verify_override(homeserver_url) else ""
         console.print("\nRun MindRoom backend against this stack:")
-        console.print(f"  MATRIX_HOMESERVER={homeserver_url} MATRIX_SSL_VERIFY=false uv run mindroom run")
+        console.print(f"  MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
     console.print("\nStop commands:")
     console.print(f"  docker rm -f {cinny_container_name}")
     if not skip_synapse:

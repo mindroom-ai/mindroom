@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import decrypt_media_bytes
+from mindroom.matrix.media import decrypt_media_bytes, download_mxc_bytes
 from mindroom.matrix.sidecar_content import sidecar_content_to_resolve, sidecar_mxc_url
 from mindroom.matrix.visible_body import has_trusted_stream_body_metadata, visible_body_from_content
 
@@ -126,7 +126,7 @@ def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool
     return True
 
 
-async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
+async def _download_mxc_text(  # noqa: PLR0911
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -143,26 +143,8 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
 
     """
     try:
-        # Parse MXC URL
-        if not mxc_url.startswith("mxc://"):
-            logger.error("invalid_mxc_url", mxc_url=mxc_url)
-            return None
-
-        # Validate the MXC URL structure before issuing the download.
-        parts = mxc_url[6:].split("/", 1)
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            logger.error("invalid_mxc_url_format", mxc_url=mxc_url)
-            return None
-
-        response = await client.download(mxc=mxc_url)
-
-        if not isinstance(response, nio.DownloadResponse):
-            logger.error("mxc_download_failed", mxc_url=mxc_url, error=str(response))
-            return None
-        if not isinstance(response.body, bytes):
-            logger.error("mxc_download_returned_non_bytes_payload", mxc_url=mxc_url)
-            return None
-        if _mxc_bytes_exceed_limit(mxc_url, response.body, stage="download"):
+        body = await download_mxc_bytes(client, mxc_url, max_bytes=_MXC_TEXT_MAX_BYTES)
+        if body is None:
             return None
 
         # Handle encryption if needed
@@ -170,7 +152,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
             # Decrypt the content
             try:
                 text_bytes = decrypt_media_bytes(
-                    response.body,
+                    body,
                     key=file_info["key"]["k"],
                     sha256=file_info["hashes"]["sha256"],
                     iv=file_info["iv"],
@@ -184,7 +166,7 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
             if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
                 return None
         else:
-            text_bytes = response.body
+            text_bytes = body
 
         # Decode to text
         try:

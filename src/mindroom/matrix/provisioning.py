@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, NoReturn
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.http_error_detail import error_detail_from_response
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
@@ -16,6 +15,9 @@ from mindroom.matrix.provisioning_env import (
     local_pairing_required,
     local_provisioning_client_credentials_from_env,
 )
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
 def required_local_provisioning_client_credentials_for_registration(
@@ -99,7 +101,6 @@ async def register_user_via_provisioning_service(
     homeserver: str,
     username: str,
     display_name: str,
-    runtime_paths: RuntimePaths,
 ) -> _ProvisioningRegisterResult:
     """Register an agent account via provisioning service server-side flow."""
     url = f"{provisioning_url}/v1/local-mindroom/register-agent"
@@ -110,10 +111,8 @@ async def register_user_via_provisioning_service(
         "display_name": display_name,
     }
     try:
-        async with httpx.AsyncClient(
-            timeout=10,
-            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
-        ) as client:
+        # The response carries the agent's one-time password, so TLS is verified whatever MATRIX_SSL_VERIFY says.
+        async with httpx.AsyncClient(timeout=10) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"

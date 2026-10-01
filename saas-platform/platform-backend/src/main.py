@@ -40,12 +40,15 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.datastructures import Headers
+from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from starlette.responses import Response as StarletteResponse
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 async def _run_cleanup_job() -> None:
@@ -87,6 +90,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.cleanup_scheduler = None
 
 
+# Request size limit middleware (1 MiB default)
+MAX_REQUEST_BYTES = 1024 * 1024
+
+
+class RequestSizeLimitMiddleware:
+    """Return 413 once a request body exceeds MAX_REQUEST_BYTES, whether declared up front or streamed."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass through requests whose bodies stay within the limit."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            length = int(Headers(scope=scope).get("content-length", "0") or "0")
+        except ValueError:
+            length = 0
+        if length > MAX_REQUEST_BYTES:
+            await JSONResponse({"detail": "Request too large"}, status_code=413)(scope, receive, send)
+            return
+        received = 0
+
+        async def bounded_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_REQUEST_BYTES:
+                    # Routes reading the body (including chunked bodies without Content-Length) answer 413.
+                    raise HTTPException(status_code=413, detail="Request too large")
+            return message
+
+        await self.app(scope, bounded_receive, send)
+
+
 # FastAPI app
 production_docs_disabled = ENVIRONMENT == "production"
 app = FastAPI(
@@ -102,35 +142,20 @@ instrument_app(app)
 # IMPORTANT: Middleware order is reversed in FastAPI!
 # The last middleware added runs first.
 # We want the execution order to be:
-# Request -> CORS -> TrustedHost -> SlowAPI -> Security -> AuditLogging -> Routes
+# Request -> CORS -> TrustedHost -> SlowAPI -> Security -> AuditLogging -> RequestSize -> Routes
 # So we add them in reverse order:
 
-# 1. Audit logging middleware (runs after security checks)
+# 1. Request size limit, with no BaseHTTPMiddleware below it, so an overflow raised from a body read answers 413
+app.add_middleware(RequestSizeLimitMiddleware)
+
+# 2. Audit logging middleware (runs after security checks)
 app.add_middleware(AuditLoggingMiddleware)
 
 # NOTE: The following middleware will be added later:
-# 2. Custom @app.middleware("http") decorators for security headers and request size
-# 3. SlowAPIMiddleware for rate limiting
-# 4. TrustedHostMiddleware for host validation
-# 5. CORSMiddleware (must be last to run first)
-
-
-# Request size limit middleware (1 MiB default)
-MAX_REQUEST_BYTES = 1024 * 1024
-
-
-@app.middleware("http")
-async def enforce_request_size(
-    request: Request, call_next: Callable[[Request], Awaitable[StarletteResponse]]
-) -> StarletteResponse:
-    """Return 413 if Content-Length exceeds MAX_REQUEST_BYTES."""
-    try:
-        length = int(request.headers.get("content-length", "0") or "0")
-    except ValueError:
-        length = 0
-    if length and length > MAX_REQUEST_BYTES:
-        return JSONResponse({"detail": "Request too large"}, status_code=413)
-    return await call_next(request)
+# 3. Custom @app.middleware("http") decorator for security headers
+# 4. SlowAPIMiddleware for rate limiting
+# 5. TrustedHostMiddleware for host validation
+# 6. CORSMiddleware (must be last to run first)
 
 
 # Basic security headers

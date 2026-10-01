@@ -242,6 +242,8 @@ read_article("https://matrix.org/blog/")
 #### Notes
 
 - Use `newspaper` in `tools:`, not `newspaper4k`.
+- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
+- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 
@@ -618,6 +620,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
@@ -700,6 +703,7 @@ With the default `workspace`, host `upload` accepts files in that artifact direc
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
 On a routed worker, `workspace` mode reads only files inside the worker workspace.
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
+`upload` copies each file into a private snapshot that stays on disk until its tab closes, and one browser keeps at most 256 MiB of snapshots, so an upload past that is refused until a tab closes.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.

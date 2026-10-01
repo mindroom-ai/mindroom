@@ -57,6 +57,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.team_scope import ad_hoc_team_has_private_member
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens
@@ -487,7 +488,7 @@ async def _run_scope_compaction_with_lifecycle(
             summary_model=serving_summary_model,
             status=status,
             duration_ms=_elapsed_ms(compaction_start),
-            failure_reason=failure_reason,
+            failure_reason=redact_sensitive_text(failure_reason),
             history_budget_tokens=history_budget,
         )
 

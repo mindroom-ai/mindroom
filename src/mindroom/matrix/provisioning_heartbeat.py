@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.provisioning import local_client_credentials_rejected
 from mindroom.matrix.provisioning_env import (
@@ -52,13 +51,11 @@ def _heartbeat_target(runtime_paths: RuntimePaths) -> tuple[str, str, str] | Non
     return f"{provisioning_url}{_HEARTBEAT_PATH}", client_id, client_secret
 
 
-async def _send_heartbeat(url: str, client_id: str, client_secret: str, runtime_paths: RuntimePaths) -> bool:
+async def _send_heartbeat(url: str, client_id: str, client_secret: str) -> bool:
     """Send one heartbeat and return whether later heartbeats are still worth sending."""
     try:
-        async with httpx.AsyncClient(
-            timeout=_HEARTBEAT_TIMEOUT_SECONDS,
-            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
-        ) as client:
+        # The request carries the client secret, so TLS is verified whatever MATRIX_SSL_VERIFY says.
+        async with httpx.AsyncClient(timeout=_HEARTBEAT_TIMEOUT_SECONDS) as client:
             response = await client.post(url, headers=local_client_headers(client_id, client_secret))
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
         # InvalidURL is not an HTTPError; a malformed MINDROOM_PROVISIONING_URL must not end the task with an exception.
@@ -84,5 +81,5 @@ async def run_provisioning_heartbeat(
     if target is None:
         return
     url, client_id, client_secret = target
-    while await _send_heartbeat(url, client_id, client_secret, runtime_paths):
+    while await _send_heartbeat(url, client_id, client_secret):
         await sleep(_HEARTBEAT_INTERVAL_SECONDS)

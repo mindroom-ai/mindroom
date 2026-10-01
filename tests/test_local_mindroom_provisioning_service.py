@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
 from mindroom.cli import connect as cli_connect
-from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import provisioning as matrix_provisioning
 from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
@@ -448,6 +447,55 @@ def test_heartbeat_updates_last_seen_with_throttled_persistence(
     assert stored["last_seen_at"] == provisioning._as_utc_iso(later)
 
 
+def test_register_agent_and_google_client_rewrite_state_at_most_every_ten_minutes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-authenticated calls refresh last_seen_at like heartbeats instead of rewriting the state file each time."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    _install_fake_register(monkeypatch, [])
+    app = provisioning.create_app(
+        _service_config(
+            tmp_path / "state.json",
+            google_oauth_client_id="google-client-id",
+            google_oauth_client_secret="google-client-secret",  # noqa: S106
+        ),
+    )
+    persisted: list[datetime] = []
+    real_persist = provisioning._persist_state_unlocked
+
+    def _counting_persist(state: provisioning.ProvisioningState, path: Path) -> None:
+        persisted.append(state.connections[complete["client_id"]].last_seen_at)
+        real_persist(state, path)
+
+    def _call_both() -> None:
+        username = _managed_agent_username("code", complete["namespace"])
+        assert _post_register_agent(client, complete, username).status_code == 200
+        google = client.get(
+            "/v1/local-mindroom/oauth/google-client",
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+        assert google.status_code == 200
+
+    paired_at = provisioning._now_utc()
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        monkeypatch.setattr(provisioning, "_persist_state_unlocked", _counting_persist)
+        for _ in range(5):
+            _call_both()
+        assert persisted == []
+
+        later = paired_at + provisioning.timedelta(minutes=11)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+        _call_both()
+        assert _listed_last_seen(client) == later
+
+    assert persisted == [later]
+
+
 def test_heartbeat_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A misbehaving install cannot hammer the heartbeat endpoint."""
     _patch_legacy_access_token_auth(monkeypatch)
@@ -735,7 +783,9 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
         assert listed.status_code == 200
         assert listed.json()["connections"][0]["namespace"] == ""
 
-        # Registering updates last_seen_at and re-persists state to disk.
+        # Registering after the last-seen resolution updates last_seen_at and re-persists state to disk.
+        later = provisioning._now_utc() + provisioning.LAST_SEEN_RESOLUTION
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
         assert _post_register_agent(client, complete, "mindroom_foo").status_code == 200
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
@@ -947,7 +997,6 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint=cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml"),
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -990,7 +1039,6 @@ async def test_cli_register_agent_messages_match_service_models(
         homeserver="https://mindroom.chat",
         username="mindroom_code",
         display_name="CodeAgent",
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
     )
 
     (request,) = requests
@@ -1607,6 +1655,84 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
     connection_ids = {browser_complete["client_id"], device_complete["client_id"]}
     assert {connection["id"] for connection in persisted["connections"]} == connection_ids
     assert {connection["id"] for connection in listed["connections"]} == connection_ids
+
+
+def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_seen_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both pairing flows keep each user's persisted connections at the cap, and deleted ones stay gone after restart."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    state_path = tmp_path / "state.json"
+    started_at = provisioning._now_utc()
+
+    def _at(minutes: int) -> None:
+        moment = started_at + provisioning.timedelta(minutes=minutes)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: moment)
+
+    def _pair_device(client: TestClient, headers: dict[str, str]) -> dict[str, str]:
+        started = _start_device_pairing(client)
+        client.post("/v1/local-mindroom/pair/device/approve", json={"pair_code": started["pair_code"]}, headers=headers)
+        return client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        _at(0)
+        oldest = _pair_local_client(client)
+        _at(1)
+        revoked = _pair_local_client(client)
+        client.delete(
+            f"/v1/local-mindroom/connections/{revoked['client_id']}",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        _at(2)
+        bob = _pair_device(client, BOB_OPENID_HEADERS)
+        _at(3)
+        kept = _pair_local_client(client)
+        # The revoked connection went first even though `oldest` was seen less recently.
+        assert _post_heartbeat(client, oldest["client_id"], oldest["client_secret"]).status_code == 200
+        assert _post_heartbeat(client, revoked["client_id"], revoked["client_secret"]).status_code == 401
+        _at(4)
+        newest = _pair_device(client, ALICE_OPENID_HEADERS)
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    expected_ids = {kept["client_id"], newest["client_id"], bob["client_id"]}
+    assert {connection["id"] for connection in persisted["connections"]} == expected_ids
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        listed = restarted.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
+        assert {connection["id"] for connection in listed["connections"]} == {kept["client_id"], newest["client_id"]}
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+
+def test_loading_state_over_the_per_user_cap_trims_and_persists_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State saved with more connections per user than the cap is trimmed at startup and written back."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    started_at = provisioning._now_utc()
+    paired = []
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        for minutes in range(3):
+            moment = started_at + provisioning.timedelta(minutes=minutes)
+            monkeypatch.setattr(provisioning, "_now_utc", lambda moment=moment: moment)
+            paired.append(_pair_local_client(client))
+    oldest, kept, newest = paired
+
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+    assert {connection["id"] for connection in persisted["connections"]} == {kept["client_id"], newest["client_id"]}
 
 
 def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

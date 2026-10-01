@@ -497,7 +497,7 @@ On first run, MindRoom automatically initiates pairing.
 It prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [y/N]` before saving anything.
 
 After pairing completes, MindRoom starts the runtime and dashboard.
 
@@ -1266,6 +1266,7 @@ Compaction, edits, and regeneration keep usage already incurred; a regenerated r
 Explicit whole-session erasure removes its usage too.
 Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+A session database the startup import cannot read, or that is locked, is skipped with a warning instead of stopping startup, and its import retries when its agent or team next opens it.
 Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
 Breakdowns can still differ from session totals when history lost before migration or unrecorded member usage lacks detailed attribution.
 Deleted sessions are unavailable.
@@ -1716,7 +1717,7 @@ Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, a
 `timeout_days` sets the default approval expiry window and can be overridden per rule.
 Late approval decisions fail closed at the persisted deadline, while the periodic Matrix card sweep can take up to about one additional minute to show the expired state.
 React to the approval card with `✅` to approve the tool call.
-Reply to the approval card with a message to deny the tool call and record that text as the denial reason.
+Reply to the approval card with a message to deny the tool call and record the start of that message as the denial reason, up to 2,000 plain ASCII characters or fewer when it contains other characters such as emoji.
 Only the original human requester can approve or deny their pending tool call.
 Eligible interactive cards also offer auto-approval for 5, 10, or 30 minutes.
 A timed approval accepts the original call, matching pending calls, and subsequent calls for the same room, thread, human requester, invoking agent, and exact tool operation; arguments may differ.
@@ -1755,6 +1756,7 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
+Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval, so on every channel they are hidden when a required-approval rule or `default: require_approval` applies to them; add an `auto_approve` rule for one to keep it available.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
 It does not gate every Slack operation, and the same function names in other toolkits also match.
@@ -1799,7 +1801,7 @@ Container `env_file`/`--env-file` injection supplies process variables and can t
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
 | `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 
@@ -2567,6 +2569,9 @@ The owner may invite other MindRoom agents into their personal room; an agent se
 Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
 Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 When an onboarding-room join or command meets a personal room that fails these checks, including an alias another account already holds, MindRoom logs `Personal-room validation failed for an onboarding trigger` and the onboarding room keeps serving everyone else; reconciliation, which runs at startup and after a configuration reload, retries that room after doubling delays up to hourly.
+A guest the agent is not permitted to remove, such as one the owner raised to the agent's power level, fails these checks the same way.
+Any other failure of an onboarding-room join or command, such as an invite the requester's server refuses, logs `Personal-room onboarding trigger failed`, and reconciliation retries it in the background after doubling delays up to hourly while the onboarding room keeps serving everyone else.
+A join or command that arrives before the personal-room agent connects stays pending until it does.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
@@ -5455,10 +5460,12 @@ analyze(
 
 `file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
-If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
-Relative directories resolve from the executing process’s current working directory, not the agent workspace.
+If `output_directory` is set, the generated file is also saved in the agent workspace and the result message includes that file path.
+`output_directory` is relative to the agent workspace and cannot leave it.
 If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
-If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
+If `save_files` is `true` without `output_directory`, the toolkit saves generated files in the agent workspace root.
+Saving needs an agent workspace; without one, the files exist only in the tool result payload.
+Saved files replace any existing workspace file of the same name, and a link at that name is replaced rather than followed.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
 DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
 `file_generation` defaults to primary execution.
@@ -5467,7 +5474,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_directory` | `text` | `no` | `null` | Optional directory where generated files are written to disk. |
+| `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
 | `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
@@ -5475,7 +5482,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
 | `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
 | `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()` for source-file exports. |
-| `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files in the agent workspace; when `output_directory` is unset, use the workspace root. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
@@ -5562,7 +5569,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
 Other durations return an error message without waiting.
 `sleep` defaults to primary execution.
 
@@ -5588,7 +5595,7 @@ sleep(5)
 
 ### Notes
 
-- `sleep` is useful for deliberate polling loops or staged workflows, but it still ties up the runtime that executes it while the delay is in progress.
+- `sleep` is useful for deliberate polling loops or staged workflows; the wait holds no thread, but the response stays open until the delay ends or the response is stopped.
 - If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
 
 ## Related Docs
@@ -7094,6 +7101,8 @@ read_article("https://matrix.org/blog/")
 #### Notes
 
 - Use `newspaper` in `tools:`, not `newspaper4k`.
+- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
+- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 
@@ -7470,6 +7479,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
@@ -7552,6 +7562,7 @@ With the default `workspace`, host `upload` accepts files in that artifact direc
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
 On a routed worker, `workspace` mode reads only files inside the worker workspace.
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
+`upload` copies each file into a private snapshot that stays on disk until its tab closes, and one browser keeps at most 256 MiB of snapshots, so an upload past that is refused until a tab closes.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
@@ -9500,6 +9511,7 @@ Dangerous state event types like `m.room.power_levels` and `m.room.encryption` a
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
 Hard-blocked state event types like `m.room.create` remain blocked.
+Redacting a state event rewrites that room state, so `redact` applies the same dangerous, hard-blocked, and reserved state rules to a state event target as `put_state`.
 The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
@@ -10372,6 +10384,8 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
+It also rejects `!desktop` when it cannot confirm the room's complete membership, including invites the server counts but the bot has not seen.
+When the router serves the command but could not look up the room's membership, it asks you to try again in a moment instead.
 The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
 For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
@@ -11404,8 +11418,9 @@ Future persisted timestamps beyond the relevant cooldown or backstop window are 
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke that dispatches as the assigned agent's own internal turn.
 Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
+Items written before requesters were recorded are not poked either, and each is logged once with `todo_poke_requester_unrecorded`, until an update by someone allowed to address the assigned agent records them as that requester's work.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -11855,8 +11870,8 @@ Additional Atlassian sites can be added as separate, independently connected too
 | `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
 | `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
 | `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
-| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging. |
-| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, and current version number. |
+| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging, naming who created, owns, and last edited each result and when it was created. |
+| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, current version number, and who created, owns, and last edited it. |
 | `confluence_list_attachments` | Confluence | no | List a page's attachments with media type, size, and version, with `cursor` paging. |
 | `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation as a context attachment. |
 | `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |
@@ -12808,6 +12823,7 @@ Admin team totals use Agno's member-inclusive session aggregate without reading 
 Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
 A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+A session database the startup import cannot read, or that is locked, is skipped with a warning instead of stopping startup, and its import retries when its agent or team next opens it.
 The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
 Reports and tools read the current usage table without migrating or scanning conversation payloads.
 History lost before migration cannot be recovered by this report.
@@ -14878,8 +14894,10 @@ Check whether a potentially mutating action completed before explicitly retrying
 Retries during authorization or catalog preparation before dispatch do not replay a tool invocation.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
+These refreshes run at most once a minute per server, and notifications that arrive sooner are combined into the next refresh.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
 The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
+Changes reported while a replacement for that server is still waiting to apply are covered by it, so each server has at most one queued replacement.
 Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
 Referenced-entity replacement shares one serialized global response-admission owner with config reload.
 It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
@@ -15341,6 +15359,7 @@ Before each review, learned skills with no use, creation, or `skill_manage` edit
 Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
 Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
 A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
+The archival pass examines only the first 1,024 entries of `skills/`, hidden ones included, and forgets no records when `skills/` holds 1,024 entries or more.
 A use is recorded in `skills/.usage.json` whenever an agent loads a workspace skill or one of its files through the skill tools, also for agents without skill learning.
 Minimal-mode agents read skills through their command line, which records no use, so a learned skill used only in minimal mode is archived after `archive_after_days`.
 Usage records that cannot be read, for example after a hand edit, read as absent, and a usage write that fails is logged and never fails the skill change it records.
@@ -17466,6 +17485,7 @@ The sync fails with an error instead when that `.git` is a link or a `gitdir:` f
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - MindRoom disables implicit LFS smudge during checkout and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
+- LFS hydration always uses the endpoint Git LFS derives from `repo_url`, so an LFS URL set in the repository's `.lfsconfig` is ignored.
 - When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
 - If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
 - Change detection for Git-backed bases uses the tracked revision, not file contents: an ordinary refresh can republish the compatible existing index without reading the corpus when its revision is unchanged.
@@ -19235,6 +19255,7 @@ The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
 The stop button only works on messages currently being generated.
 Only non-agent users can trigger cancellation — agent reactions are ignored.
+A 🛑 reaction only stops a response in the room where the reaction was sent.
 
 See [Streaming — Cancellation](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for details on how cancelled responses are finalized.
 
@@ -19719,6 +19740,7 @@ MindRoom only lists, edits, cancels, restores, or runs schedule state whose Matr
 Schedule state written by any other account, including a room admin or the internal `mindroom_user`, is ignored and logged, because a schedule's recorded creator is the requester its triggers run as.
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
+When it reads one task, MindRoom takes the author from the event fetched by its ID, or from the task in current room state when history visibility hides that event, so a sender written inside state content is never trusted, even on a homeserver that ignores `format=event`.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 
@@ -20004,6 +20026,10 @@ For example, use a reservation ID, Git commit SHA, release tag, webhook delivery
 If delivery succeeds, a later signed request with the same `event_id` is treated as a duplicate and does not post another Matrix message while the replay record is retained.
 
 Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
+
+Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 characters.
+
+Each trigger may hold at most 10,000 unexpired nonces and 10,000 unexpired `event_id` records, and a request that would add one more is answered with `429` until older records expire.
 
 Retries must create a fresh signed request with the same `--event-id`.
 
@@ -20903,7 +20929,7 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 |----------|---------|-------------|
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it applies only to the homeserver, not to the provisioning service |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
@@ -20917,6 +20943,8 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default 
 A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
 Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
 Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+Requests to the provisioning service always verify its certificate, whatever `MATRIX_SSL_VERIFY` says, because that service names the install's owner and issues its client credentials.
+For a provisioning service behind a private CA, set `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment.
 
 ## Agent Users
 
@@ -21264,7 +21292,7 @@ Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; local raster publication follows the [model configuration rules](https://docs.mindroom.chat/configuration/models/).
 Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
 Application processing expires after 12 seconds; cancellation does not retract a send already retained by NIO.
-Admission caps queued/in-flight requests at eight and accepts at most eight fresh requests per device in 12 seconds; concurrent duplicate requests share the active request.
+Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
 Immediately before handing the response to NIO, MindRoom rechecks current scope, captured device identity, and config identity, including after the final awaited scope check.
 NIO then owns device validation, encryption, persistence, and delivery retries.
 A requester who loses room access during NIO preparation or retry can still receive that already-authorized catalog.
@@ -21408,6 +21436,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
 2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
    The dependent-entity check runs again under the config update lock immediately before replacement.
+   Each server has at most one queued catalog replacement, and changes reported before it takes the config update lock are covered by it.
 3. Config reloads and MCP catalog replacements serialize behind one global admission owner; MCP replacements enter through `ConfigReloadLifecycle.apply_with_response_admission()`.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
    The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
@@ -21717,7 +21746,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
-| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] parses a todo item without `requester_id` but never pokes it, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
@@ -22071,7 +22100,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | CalculatorTools computes `factorial` for any argument, although `json.dumps` refuses results above 4300 digits, so one call can hold the GIL for minutes. | Tracking gap: refuse factorial arguments whose result cannot be serialized; no matching issue or PR has been verified. | `CalculatorTools.factorial` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned`. |
 | CalculatorTools trial-divides `is_prime` up to the square root of any argument, so one large prime checks for hours. | Tracking gap: bound prime-check work; no matching issue or PR has been verified. | `CalculatorTools.is_prime` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division`. |
-| SleepTools blocks a thread in `time.sleep` for any requested duration. | Tracking gap: bound or await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
+| SleepTools blocks a thread in `time.sleep` for any requested duration, so parallel calls exhaust the primary's default executor. | Tracking gap: bound and await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | DaytonaTools treats a null `verify_ssl` like `false` and then disables certificate checks by patching `daytona_api_client.Configuration.__init__` for the whole process until it restarts. | Tracking gap: disable verification only for an explicit `False` and scope it to the toolkit's own client configuration; no matching issue or PR identified. | `tools/daytona.py` passes only an explicit `false` upstream; `tests/test_tool_config_sync.py` covers unset, null, true, and false values. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
@@ -22108,9 +22137,12 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Google authentication requires private resolver and Function entrypoint replacement. | Propose injectable credential resolution and an entrypoint middleware hook. | `oauth/agno_compat_google_auth.py`. |
 | WebsiteReader does not expose fetch, redirect, and crawl-admission hooks. | Propose a replaceable fetch path and explicit crawl-policy callbacks. | `custom_tools/agno_compat_website_reader.py`. |
 | TrafilaturaTools extraction and crawling download through fixed module-level fetchers, and Trafilatura's spider has no fetch hook. | Tracking gap: accept a caller-supplied fetcher for extraction, batch extraction, and every crawler download; no matching issue or PR identified. | `tools/agno_compat_trafilatura.py`; loopback, metadata, redirect, DNS-rebind, and crawl coverage in `tests/test_trafilatura_tool.py`. |
+| Newspaper4kTools downloads through newspaper4k's article helper, which opens `file://` paths, follows redirects anywhere, and downloads every image URL a page lists. | Tracking gap: accept caller-supplied HTML or a fetcher and allow skipping image downloads; no matching issue or PR identified. | `tools/agno_compat_newspaper4k.py`; loopback, metadata, private-address, `file://`, redirect, and page-image coverage in `tests/test_newspaper_tool.py`. |
+| FileGenerationTools saves model-named files by path into its output directory, or the process working directory, and follows links there. | Tracking gap: accept a caller-supplied writer or directory descriptor for saved files; no matching issue or PR identified. | `tools/agno_compat_file_generation.py`; working-directory and planted-link coverage in `tests/test_file_generation_tool.py`. |
 | GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
 | ReplicateTools checks its API key but calls an independent SDK default client. | Bind SDK requests to the toolkit key and expose client lifetime ownership while preserving media results. | `custom_tools/agno_compat_replicate.py`. |
 | AgentQLTools stores its resolved key without handing it to AgentQL queries. | Tracking gap: pass the resolved key through a per-request or per-page SDK credential API; no matching issue or PR identified. | `custom_tools/agno_compat_agentql.py`; concurrent stored-key requests and an unrelated SDK call in `tests/test_agentql_tools.py`. |
+| AgentQLTools launches Chromium with no proxy and navigates to the model-chosen URL, so neither the URL nor redirects and subresources follow a destination policy. | Tracking gap: accept caller-supplied browser launch options or a page factory; no matching issue or PR identified. | The `_scrape` override in `custom_tools/agno_compat_agentql.py`; unsafe-target and destination-relay coverage in `tests/test_agentql_tools.py`. |
 | AgentQLTools custom scraping returns response keys and discards extracted values. | Tracking gap: preserve the complete JSON response, including nested collections; no matching issue or PR identified. | The independent custom-result formatter in `custom_tools/agno_compat_agentql.py` and nested-value coverage in `tests/test_agentql_tools.py`. |
 | Adapter media capabilities must be inferred from a private module-name table. | Expose accurate supported-input capabilities independently of provider error learning. | The small documented table in `provider_media_fallback.py`. |
 
@@ -22146,9 +22178,11 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |
 | `custom_tools/agno_compat_website_reader.py` | Private crawl queue, visited state and copied loop with owner callbacks. | `custom_tools/website.py` retains server-fetch and redirect validation, exact-host rules, extraction, budgets, results, and sanitized logging. |
 | `tools/agno_compat_trafilatura.py` | Replaces the Agno and Trafilatura spider download bindings with fetchers that request uncompressed bodies and validate every URL, redirect hop, and dialed address within Trafilatura's timeout, redirect, and size limits. | `tools/trafilatura.py` installs the guard before returning the toolkit; upstream extraction, crawling, and result formats are unchanged. |
+| `tools/agno_compat_newspaper4k.py` | Replaces newspaper4k's article helper with one that downloads an uncompressed, size-limited body after validating every URL, redirect hop, and dialed address, then parses it without image extraction. | `tools/newspaper4k.py` installs the guard before returning the toolkit; upstream text extraction and result format are unchanged. |
+| `tools/agno_compat_file_generation.py` | Replaces the saved-file writer with an atomic, no-follow write into a workspace-relative output directory and keeps saves off without a workspace. | `tools/file_generation.py` returns the adapter; upstream generation, sanitized file names, and result artifacts are unchanged. |
 | `custom_tools/agno_compat_github_errors.py` | Capture of typed failures across serialized Agno results and prefix/logger binding. | `custom_tools/github.py` retains credential ownership and refresh, PyGithub requester policy, OAuth recovery, and sanitized output/log messages. |
 | `custom_tools/agno_compat_replicate.py` | Copied media-call boundary with a credential-bound Replicate client, inherited output parsing, and private SDK transport cleanup. | `tool_system/metadata.py` retains scoped credential resolution; `tools/replicate.py` retains lazy registration, and the adapter closes each request client after consuming outputs. |
-| `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, plus lossless Agno custom-result formatting. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
+| `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, lossless Agno custom-result formatting, and a browser launched only after URL validation, through a destination relay that validates every connection at dial time. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
 | `oauth/agno_compat_google_auth.py` | Private credential resolver, original resolver binding, and registered Function entrypoint adaptation. | `oauth/client.py` and Google tool owners retain credential state, refresh, service-account fallback, locking, scopes, and user prompts. |
 
 Small owner-adjacent boundaries use the same source records:
@@ -22163,7 +22197,7 @@ Small owner-adjacent boundaries use the same source records:
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
 | `custom_tools/calculator.py` (`factorial`) | Refuse `factorial()` above 1558 before Agno computes it. | The cap is MindRoom policy for the process shared by every agent; the result shape stays upstream. |
 | `custom_tools/calculator.py` (`is_prime`) | Refuse `is_prime()` above 10**12 before Agno's trial division. | The cap is MindRoom policy for the process shared by every agent; the other calculator functions stay upstream. |
-| `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds before Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the pause itself stays upstream. |
+| `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds and await the pause with `asyncio.sleep` instead of Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the toolkit's name and configuration stay upstream. |
 | `tools/daytona.py` | Map an unset or null `verify_ssl` to `True` before the upstream constructor sees it. | The tool configuration default stays `true`, and the one-time `legacy_tool_credentials.py` cleanup drops `false` values saved with the former default. |
 | `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
@@ -22242,17 +22276,18 @@ Reads through those descriptors are capped per surface.
 | Surface | Cap | Above the cap |
 |---|---|---|
 | Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
-| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of names, descriptions, instructions, metadata, and listings and 256 skills per workspace; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined, and an archival pass whose `skills/` scan stopped there forgets no usage records |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
 | Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered, and 100 todos per `apply_template` call, sub-templates included | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file |
 | Scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
+| `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases are refused, because a few aliases can describe a tree far larger than the file.
 Todo templates render in the primary, so they may only substitute parameters as `{{ NAME }}`; any other Jinja expression, filter, or loop could allocate memory or spin without bound.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
 `file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.
 No-follow applies to the workspace's final path component only, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout today, because no primary-only directory there contains an entry named `workspace` for such a link to reach; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
@@ -22288,13 +22323,13 @@ Every tool declares how its own file access relates to this setting.
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `agentql`, `newspaper`, `web_browser_tools`).
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `web_browser_tools`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -22323,7 +22358,7 @@ Do not report or "fix" these; they are deliberate.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
-- `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review forks the request the reviewed agent's model just processed and resends it unredacted to the same provider.
   A digest replay, used for another review model or a request that cannot be forked, redacts the conversation on a best-effort basis.
@@ -22773,7 +22808,7 @@ Alternatively, enter the displayed code in MindRoom Chat → Settings → Local 
 Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
 
 After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
-In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+In a terminal, it asks `Is this your account? [y/N]`; answering `n`, pressing Enter without an answer, or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
 Under a service or the macOS app, it prints the approving account without asking.
 While it waits for approval, `/api/health` on the API port already reports healthy and `/api/ready` reports `Waiting for local pairing approval`, so container health checks do not restart it with a new code.
 
@@ -22821,6 +22856,7 @@ The Google app client configuration lets the local process exchange OAuth codes 
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
 That page shows when each paired install was last seen.
+Each account keeps at most 20 paired installs, revoked ones included; pairing another at the limit removes one, preferring a revoked install and otherwise the one seen least recently.
 A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
 Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
 The service records these reports with ten-minute resolution.
@@ -22932,7 +22968,7 @@ Run the bridge manager from `local/instances/deploy/`:
 Provide Telegram credentials with `--api-id`, `--api-hash`, and `--bot-token`, export the matching `TELEGRAM_*` variables, or create `local/instances/deploy/.env.telegram` before running the command.
 When a credential is still missing, the command prompts for it and writes the resulting values into the generated bridge configuration only; the bridge registry never stores them.
 The generated configuration grants bridge `admin` only to the Matrix user ID passed with `--admin`, which the command prompts for when omitted.
-Every other account gets `relaybot` access, because the deploy homeserver templates allow open registration and anyone could otherwise register a matching account.
+Every other account gets `relaybot` access, because instances from older deploy homeserver templates allow open registration and anyone could otherwise register a matching account.
 To let more users log in with their own Telegram accounts, add their Matrix user IDs with the `puppeting` level (or `full`) under `bridge.permissions` in the generated configuration.
 The generated configuration and registration hold the Telegram credentials and appservice tokens, so the manager writes them owner-only, and `bridge.py start` tightens copies that older versions left readable and drops tokens they stored in the bridge registry.
 A bridge created by an older version still grants `user` to the whole homeserver domain and `admin` to `@admin:<domain>`; fix it by hand by setting `bridge.permissions` in its configuration to `relaybot` for `*` and `admin` for your own Matrix user ID and restarting it, or recreate it with `bridge.py remove` and `bridge.py add --admin`, which deletes its data.
@@ -24007,7 +24043,7 @@ Key environment variables (set in `.env` or pass directly):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
 | `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
@@ -24157,7 +24193,7 @@ This page describes the current sandboxed execution model.
 5. All other tools such as API tools or Matrix-bound tools execute in the primary MindRoom runtime as usual.
 
 The static worker runtime authenticates requests with `MINDROOM_SANDBOX_PROXY_TOKEN`.
-Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
+Docker and Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
 Compromising one dedicated worker token does not authorize requests to another dedicated worker runner.
 For worker-routed toolkits with declared credential configuration fields, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
@@ -24364,8 +24400,8 @@ Important notes for this mode:
 - The authenticated `/api/workers` and `/api/workers/cleanup` endpoints on the primary runtime expose backend-neutral worker lifecycle information.
 
 Untrusted code-execution tools may still share the runner container's process namespace and may be able to inspect the runner process environment through `/proc` on some container runtimes.
-For dedicated Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
-This leaves same-worker token exposure as a local containment risk, while per-worker credentials and NetworkPolicy limit cross-worker blast radius.
+For dedicated Docker and Kubernetes workers, the exposed environment contains only that worker's derived runner token, not the shared control-plane token.
+This leaves same-worker token exposure as a local containment risk, while per-worker credentials, and NetworkPolicy on Kubernetes, limit cross-worker blast radius.
 
 The sandbox-runner startup manifest lives in `.runtime` inside the worker's state root, which dedicated workers mount read-only on both backends, like `.shared_credentials`, so tool code cannot rewrite it before the runner restarts.
 The runner reads the manifest once at startup and keeps it in memory, so the primary rewriting it for a replacement Kubernetes pod never changes a runner that is still serving.
@@ -24531,7 +24567,7 @@ The shared static-runner Compose sidecar does not support interactive computers.
 |----------|-------------|---------|
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
-| `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
+| `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token, and the control-plane secret from which Docker and Kubernetes derive per-worker runner tokens | _(required for worker-routed execution)_ |
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off`; applies when neither agent nor defaults sets `worker_tools` | _(unset — static proxy URL routes eligible tools; dedicated backends route metadata defaults; plain static installs run locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when neither agent nor defaults sets `worker_tools` | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit tools whose default target is a worker to run locally when static routing is requested without a proxy URL; never bypasses dedicated workers | `false` |
@@ -24568,7 +24604,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.m
 |----------|-------------|---------|
 | `MINDROOM_SANDBOX_RUNNER_PORT` | Port the sandbox runner listens on | `8766` |
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to indicate runner mode | `false` |
-| `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
+| `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token. Static runners use the shared primary token; Docker and Kubernetes dedicated workers receive a per-worker derived token. | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess`, or `forkserver` | `inprocess` |
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config _(will fail if not writable)_ |
@@ -24676,6 +24712,7 @@ MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.
 Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+Only requesters on the runtime's own homeserver with a current-grammar localpart can self-grant, so a federated user cannot name another person's account.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
 The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
 
@@ -24773,7 +24810,7 @@ For shell authentication, explicitly configure [environment passthrough](#shell-
 - The worker runtime never gets the primary runtime API key files, Matrix client state, or orchestrator authority.
 - The sandbox token authenticates proxy traffic, so use a strong random value.
 
-  Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
+  Docker and Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
 - Dedicated Docker and Kubernetes worker containers mount the root filesystem read-only, with a private writable `/tmp` bounded at 1 GiB: a tmpfs that refuses writes past the limit on Docker, and a disk-backed `emptyDir` whose size limit kubelet enforces by evicting only that worker pod on Kubernetes.
   The image keeps `/app` writable by the runtime user so trusted primaries can install tool extras, but in a worker that would let tool code replace runner code or dependencies that the runner imports later or boots from after a restart.
@@ -25466,6 +25503,7 @@ For production SaaS instance provisioning, the instance chart is rendered with `
 After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
+The one exception is the platform-wide Matrix OIDC client secret, which only Synapse mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
 The sandbox proxy token is random per instance.
 Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
 Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
@@ -25606,6 +25644,8 @@ Changing a plan's `included_ai_budget_usd` redeploys every running instance of t
 Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses to shrink a PVC; a downgrade from `pro` keeps its larger volumes.
 Checkout grants a plan's trial only to a Stripe customer who never had a trial, so cancelling and checking out again starts a paid subscription.
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
+Re-provisioning a `deprovisioned` instance claims the row only while it is still `deprovisioned`, whether a customer's provision request or a lifecycle resume after teardown does it, so concurrent runs on several replicas deploy it once and mint one OpenRouter key.
+A losing provision request gets `409`, and a losing lifecycle resume, including one a provision request started for a held instance, stops without enabling a key or clearing the hold.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
 When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
@@ -27173,8 +27213,8 @@ You usually do not need `connect` at all, because `mindroom run` pairs automatic
 
 After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
 Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
-In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
-Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+In a terminal, `connect` and `run` then ask `Is this your account? [y/N]`.
+Answering `n`, pressing Enter without an answer, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
@@ -27229,7 +27269,8 @@ mindroom connect --provisioning-url https://matrix.example.com
 
 Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
-By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+By default this command also writes `MATRIX_HOMESERVER` and `MATRIX_SERVER_NAME` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+For an `https://` homeserver it also writes `MATRIX_SSL_VERIFY=false`, which turns off certificate checks for that homeserver only, so remove it before switching to hosted Matrix.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -161,7 +161,11 @@ async def test_provider_opens_and_navigates_a_new_tab_in_one_upstream_call(
 
     assert result.payload["result"] == "opened"
     assert result.payload["stable_targeting"] is False
-    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
+    call_tool.assert_awaited_once_with(
+        "browser_tabs",
+        {"action": "new", "url": "https://example.com/checkout"},
+        may_start=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -174,9 +178,8 @@ async def test_provider_removes_only_its_transient_screenshot(
     unrelated = tmp_path / "page-keep.png"
     unrelated.write_bytes(b"keep")
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
 
-    async def take_screenshot(tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+    async def take_screenshot(tool_name: str, arguments: dict[str, object], **_kwargs: object) -> CallToolResult:
         assert tool_name == "browser_take_screenshot"
         filename = arguments["filename"]
         assert isinstance(filename, str)
@@ -203,9 +206,12 @@ async def test_provider_removes_transient_screenshot_when_validation_fails(
 ) -> None:
     """An invalid MCP image cannot strand its generated plaintext file."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
 
-    async def take_empty_screenshot(_tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+    async def take_empty_screenshot(
+        _tool_name: str,
+        arguments: dict[str, object],
+        **_kwargs: object,
+    ) -> CallToolResult:
         filename = arguments["filename"]
         assert isinstance(filename, str)
         (tmp_path / filename).write_bytes(b"")
@@ -227,6 +233,47 @@ async def test_observation_cannot_start_the_extension_without_control(tmp_path: 
     with pytest.raises(PlaywrightBrowserError, match=r"browser\(action='start'"):
         await provider.execute("tabs", {})
 
+    assert provider.running is False
+
+
+@pytest.mark.asyncio
+async def test_observation_overlapping_a_local_stop_cannot_reconnect_the_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An observation that arrives while a disconnect is closing the session must not start a new one."""
+
+    class SlowClosingSession:
+        def __init__(self) -> None:
+            self.closing = asyncio.Event()
+            self.release = asyncio.Event()
+            self.closed = False
+
+        @property
+        def running(self) -> bool:
+            return not self.closed
+
+        async def close(self) -> None:
+            self.closing.set()
+            await self.release.wait()
+            self.closed = True
+
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    session = SlowClosingSession()
+    provider._session = session
+    new_session = Mock(side_effect=AssertionError("an observation started a new extension session"))
+    monkeypatch.setattr(provider, "_new_session", new_session)
+
+    stop = asyncio.create_task(provider.execute("stop", {}))
+    await session.closing.wait()
+    observation = asyncio.create_task(provider.execute("tabs", {}))
+    await asyncio.sleep(0)
+    session.release.set()
+    await stop
+
+    with pytest.raises(PlaywrightBrowserError, match=r"browser\(action='start'"):
+        await observation
+    new_session.assert_not_called()
     assert provider.running is False
 
 
@@ -317,9 +364,12 @@ async def test_oversized_screenshot_uses_a_bounded_file_read(
 ) -> None:
     """A huge MCP scratch file is rejected without calling the unbounded read_bytes helper."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
 
-    async def take_oversized_screenshot(_tool_name: str, arguments: dict[str, object]) -> CallToolResult:
+    async def take_oversized_screenshot(
+        _tool_name: str,
+        arguments: dict[str, object],
+        **_kwargs: object,
+    ) -> CallToolResult:
         filename = arguments["filename"]
         assert isinstance(filename, str)
         with (tmp_path / filename).open("wb") as image_file:
@@ -352,7 +402,11 @@ async def test_failed_control_action_reports_unknown_outcome(
     with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
         await provider.execute("open", {"targetUrl": "https://example.com/checkout"})
 
-    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
+    call_tool.assert_awaited_once_with(
+        "browser_tabs",
+        {"action": "new", "url": "https://example.com/checkout"},
+        may_start=True,
+    )
 
 
 @pytest.mark.parametrize("action", ["focus", "snapshot", "navigate", "close"])
@@ -407,7 +461,7 @@ async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
     )
 
     with pytest.raises(PlaywrightBrowserError, match="extension startup failed"):
-        await asyncio.wait_for(provider._call_tool("browser_tabs", {"action": "list"}), timeout=0.5)
+        await asyncio.wait_for(provider._call_tool("browser_tabs", {"action": "list"}, may_start=True), timeout=0.5)
 
     assert provider.running is False
 
@@ -418,7 +472,7 @@ async def test_permanent_close_rejects_calls(tmp_path: Path) -> None:
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
     await provider.close()
     with pytest.raises(PlaywrightBrowserError, match="provider is closed"):
-        await provider._call_tool("browser_tabs", {"action": "list"})
+        await provider._call_tool("browser_tabs", {"action": "list"}, may_start=True)
 
 
 @pytest.mark.asyncio
@@ -510,7 +564,6 @@ async def test_same_url_and_title_after_replacement_cannot_authorize_a_click(
 ) -> None:
     """An indistinguishable tab-list result cannot turn old element refs into authority."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
     observed_tabs = "- 0: (current) [Checkout](https://example.com/checkout)"
     call_tool = AsyncMock(return_value=_text_result(observed_tabs))
     monkeypatch.setattr(provider, "_call_tool", call_tool)

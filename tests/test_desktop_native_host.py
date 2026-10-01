@@ -27,6 +27,7 @@ from uuid import uuid4
 import aiohttp
 import nio
 import pytest
+from mcp.types import CallToolResult, TextContent
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
@@ -47,6 +48,7 @@ from mindroom.desktop.native_host import (
     supervise_native_tasks,
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
+from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
     DesktopCommand,
@@ -845,6 +847,40 @@ async def test_native_status_lists_handles_and_can_kill_one(bridge_transport: As
         if pid_file.exists() and pid_file.read_text().strip():
             with suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    await host.shutdown()
+
+
+class _LiveExtensionSession:
+    """A started extension session that answers every MCP call until it is closed."""
+
+    running = True
+
+    async def call_tool(self, _name: str, _arguments: dict[str, object]) -> CallToolResult:
+        return CallToolResult(content=[TextContent(type="text", text="- 0: (current) [Example](https://example.org)")])
+
+    async def close(self) -> None:
+        self.running = False
+
+
+@pytest.mark.asyncio
+async def test_native_status_reports_a_remotely_started_browser_session_as_connected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Status follows the provider's live session, not only the local connect and disconnect buttons."""
+    host = await _shell_host(tmp_path)
+    runtime = _attach_shell_runtime(host, tmp_path)
+    browser = PlaywrightMCPBrowserProvider(output_dir=tmp_path / "desktop-browser")
+    monkeypatch.setattr(browser, "_new_session", _LiveExtensionSession)
+    runtime._browser = browser
+    assert runtime.status()["browser_connected"] is False
+
+    # A lease holder's remote browser start reaches the provider through the bridge, not through connect_browser.
+    await browser.execute("start", {})
+    assert runtime.status()["browser_connected"] is True
+
+    await browser.execute("stop", {})
+    assert runtime.status()["browser_connected"] is False
     await host.shutdown()
 
 

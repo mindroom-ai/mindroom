@@ -5,7 +5,14 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -53,7 +60,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
 
 @register_tool_with_metadata(
     name="agentql",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.NONE,
     display_name="AgentQL",
     description="AI-powered web scraping and data extraction from websites",
     category=ToolCategory.RESEARCH,
@@ -100,6 +107,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
     ],
     dependencies=["agentql", "playwright"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/agentql",
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("custom_scrape_website", "scrape_website"),
 )
 def agentql_tools() -> type[AgentQLTools]:

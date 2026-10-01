@@ -669,13 +669,28 @@ async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id
         logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
 
 
+class InstanceClaimLostError(HTTPException):
+    """Another request claimed the instance first, so this re-provision neither deploys it nor mints its key."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=409, detail="Instance is already being provisioned")
+
+
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
-    sb: Any, *, data: dict, background_tasks: BackgroundTasks | None, resume_lifecycle_hold: bool = False
+    sb: Any,
+    *,
+    data: dict,
+    background_tasks: BackgroundTasks | None,
+    resume_lifecycle_hold: bool = False,
+    expected_status: str | None = None,
 ) -> dict[str, Any]:
     """Provision (or re-provision) a tenant instance and return the portal response payload.
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
     unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
+    A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
+    requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
+    `InstanceClaimLostError`.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -686,7 +701,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if existing_instance_id:
         customer_id = str(existing_instance_id)
         try:
-            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"})
+            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"}, expected_status=expected_status)
+            if not updated_rows and expected_status is not None:
+                raise InstanceClaimLostError  # noqa: TRY301
             if not updated_rows:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
@@ -791,7 +808,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             namespace=namespace,
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
-        # Tenant workloads are untrusted, so every value here must be scoped to this instance.
+        # Tenant workloads are untrusted, so every value here must be scoped to this instance,
+        # except the platform-wide OIDC client secret, which the instance chart mounts only into Synapse.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",

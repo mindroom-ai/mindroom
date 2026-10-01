@@ -1444,11 +1444,9 @@ class DockerWorkerBackend:
         return self._to_handle(metadata, container, now=now, paths=paths)
 
     def _control_token(self, worker_key: str) -> str:
-        if not is_cli_worker_key(worker_key):
-            return self.auth_token
         return hmac.new(
             self.auth_token.encode(),
-            f"agent-cli:{self._runtime_namespace}:{worker_key}".encode(),
+            f"docker-worker:{self._runtime_namespace}:{worker_key}".encode(),
             hashlib.sha256,
         ).hexdigest()
 

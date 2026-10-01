@@ -1,5 +1,5 @@
-# Minimal Synapse configuration for mindroom development
-# WITH ALL RATE LIMITS EFFECTIVELY DISABLED
+# Minimal Synapse configuration for mindroom instances
+# Registration is closed; registration and login keep protective rate limits
 
 server_name: "{{ matrix_server_name }}"
 public_baseurl: https://{{ matrix_server_name }}/
@@ -40,9 +40,10 @@ signing_key_path: "/data/signing.key"
 # Logging
 log_config: "/data/log.config"
 
-# Registration - open for development
-enable_registration: true
-enable_registration_without_verification: true
+# Registration - closed, because the homeserver is public
+# MindRoom creates its accounts through the shared-secret admin API (MATRIX_REGISTRATION_SHARED_SECRET)
+enable_registration: false
+registration_shared_secret: {{ registration_shared_secret | tojson }}
 
 # Allow federation to private IPs for local development
 # By default Synapse blocks private IP ranges (10.x, 172.16.x, 192.168.x)
@@ -52,32 +53,35 @@ federation_ip_range_blacklist: []
 
 # ========================================
 # COMPLETE RATE LIMITING CONFIGURATION
-# ALL LIMITS SET TO EFFECTIVELY INFINITE
+# Registration and login keep protective limits because the homeserver is public.
+# Other limits are set to effectively infinite.
 # ========================================
 
-# RC (Rate Control) Settings - all disabled
 rc_message:
   per_second: 1000000
   burst_count: 1000000
 
+# Synapse defaults; shared-secret admin registration is not limited
 rc_registration:
-  per_second: 1000000
-  burst_count: 1000000
+  per_second: 0.17
+  burst_count: 3
 
 rc_registration_token_validity:
   per_second: 1000000
   burst_count: 1000000
 
+# Synapse sees every client proxied by Traefik as one address, so the address limit stays effectively infinite.
+# Per-account limits remain, and failed attempts keep Synapse's default brute-force protection.
 rc_login:
   address:
     per_second: 1000000
     burst_count: 1000000
   account:
-    per_second: 1000000
-    burst_count: 1000000
+    per_second: 0.05
+    burst_count: 10
   failed_attempts:
-    per_second: 1000000
-    burst_count: 1000000
+    per_second: 0.17
+    burst_count: 3
 
 rc_admin_redaction:
   per_second: 1000000

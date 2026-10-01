@@ -1396,6 +1396,54 @@ async def test_mcp_catalog_change_reported_during_a_turn_restarts_outside_the_tu
 
 
 @pytest.mark.asyncio
+async def test_mcp_catalog_changes_merge_into_one_queued_restart(tmp_path: Path) -> None:
+    """Changes reported while a restart waits are covered by it, and a change during the restart gets its own."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = _config(tmp_path)
+    orchestrator.running = True
+    create_calls = 0
+
+    async def fake_create_and_start(*_args: object, **_kwargs: object) -> EntityStartResults:
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 1:
+            await orchestrator._notify_mcp_catalog_change("demo")
+        return EntityStartResults()
+
+    with (
+        patch("mindroom.orchestrator.stop_entities", new=AsyncMock()),
+        patch.object(orchestrator, "_cancel_bot_start_task", new=AsyncMock()),
+        patch.object(orchestrator, "_create_and_start_entities", side_effect=fake_create_and_start),
+    ):
+        async with orchestrator._config_update_lock:
+            for _ in range(20):
+                await orchestrator._notify_mcp_catalog_change("demo")
+                for _ in range(3):
+                    await asyncio.sleep(0)
+            assert create_calls == 0
+        assert await wait_for_background_tasks(timeout=5, owner=orchestrator._mcp_catalog_change_task_owner)
+
+    assert create_calls == 2
+    assert orchestrator._pending_mcp_catalog_restarts == {}
+
+
+@pytest.mark.asyncio
+async def test_unreferenced_mcp_catalog_change_does_not_absorb_later_changes(tmp_path: Path) -> None:
+    """A change that needs no restart must not leave the server marked as having one queued."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
+    orchestrator.config = _config_with_code_agent(tmp_path)
+    orchestrator.running = True
+
+    with patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache:
+        for _ in range(2):
+            await orchestrator._notify_mcp_catalog_change("demo")
+            assert await wait_for_background_tasks(timeout=1, owner=orchestrator._mcp_catalog_change_task_owner)
+
+    assert mock_clear_snapshot_cache.call_count == 2
+    assert orchestrator._pending_mcp_catalog_restarts == {}
+
+
+@pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_serializes_overlapping_restarts(tmp_path: Path) -> None:
     """Do not run overlapping restart cycles when multiple MCP servers hit the same entity."""
     runtime_paths = _runtime_paths(tmp_path)

@@ -490,6 +490,12 @@ _INDEXES = (
     ON visible_messages (principal_id, room_id, revision_event_id)
     """,
     """
+    -- A redaction blanks the held edit it names, so its cost must not grow
+    -- with how many edits a room member left waiting on absent targets.
+    CREATE INDEX IF NOT EXISTS unresolved_edits_edit_event
+    ON unresolved_edits (principal_id, room_id, edit_event_id)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS visible_messages_refresh
     ON visible_messages (principal_id, room_id, thread_id)
     WHERE refresh_token IS NOT NULL

@@ -193,16 +193,16 @@ async def test_one_stop_delivered_concurrently_cancels_once(journal_store: Event
     assert stopped.user_stop_settled_receipt_order == _STOP_RECEIPT_ORDER
 
 
-async def test_stop_reaction_on_a_voice_echo_is_not_claimed(journal_store: EventJournalStore, tmp_path: Path) -> None:
-    """A voice echo owns a visible event but no response, so a stop on it is left for the other consumers."""
-    store = await _store(journal_store)
-    await store.record_visible_echo("$voice", "$echo")
+def _stop_dispatcher(
+    store: TurnStore,
+    tmp_path: Path,
+    stop_manager: StopManager,
+) -> tuple[ReactionDispatcher, MagicMock, MagicMock]:
+    """Build a reaction dispatcher whose journal and reconciler record what a stop reaction claims."""
     config = Config()
     runtime_paths = test_runtime_paths(tmp_path)
     entity_ids(config, runtime_paths)
     journal = MagicMock(spec=JournalDispatcher)
-    stop_manager = MagicMock(spec=StopManager)
-    stop_manager.can_handle_stop_reaction.return_value = False
     reconciler = MagicMock(spec=UserStopReconciler)
     dispatcher = ReactionDispatcher(
         ReactionDispatcherDeps(
@@ -224,21 +224,73 @@ async def test_stop_reaction_on_a_voice_echo_is_not_claimed(journal_store: Event
             config_confirmation=MagicMock(),
         ),
     )
+    return dispatcher, journal, reconciler
+
+
+def _stop_reaction(reacts_to: str) -> nio.ReactionEvent:
     event = nio.Event.parse_event(
         {
             "type": "m.reaction",
             "event_id": "$stop",
             "sender": "@alice:localhost",
             "origin_server_ts": 1,
-            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$echo", "key": "🛑"}},
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": reacts_to, "key": "🛑"}},
         },
     )
     assert isinstance(event, nio.ReactionEvent)
+    return event
 
-    assert await dispatcher._maybe_handle_stop_reaction(event, None) is False
+
+async def test_stop_reaction_on_a_voice_echo_is_not_claimed(journal_store: EventJournalStore, tmp_path: Path) -> None:
+    """A voice echo owns a visible event but no response, so a stop on it is left for the other consumers."""
+    store = await _store(journal_store)
+    await store.record_visible_echo("$voice", "$echo")
+    stop_manager = MagicMock(spec=StopManager)
+    stop_manager.can_handle_stop_reaction.return_value = False
+    dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, stop_manager)
+
+    room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+    assert await dispatcher._maybe_handle_stop_reaction(room, _stop_reaction("$echo"), None) is False
 
     journal.claim_semantic_consumer.assert_not_awaited()
     reconciler.finalize.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owner", ["durable_turn", "live_run"])
+async def test_stop_reaction_from_another_room_is_not_claimed(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+    owner: str,
+) -> None:
+    """A reaction names its target by event ID alone, so a stop sent in another room never cancels this room's turn."""
+    store = await _store(journal_store)
+    stop_manager = StopManager()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    if owner == "durable_turn":
+        await store.record_pending_turn(
+            TurnRecord.create(
+                (_SOURCE_EVENT_ID,),
+                response_event_id=_RESPONSE_EVENT_ID,
+                conversation_target=MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ),
+        )
+    else:
+        stop_manager.set_current(_RESPONSE_EVENT_ID, MessageTarget.resolve(_ROOM_ID, None, None), response_task)
+    dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, stop_manager)
+    reconciler.finalize.return_value = True
+    try:
+        stop = _stop_reaction(_RESPONSE_EVENT_ID)
+        foreign_room = nio.MatrixRoom("!elsewhere:localhost", "@agent:localhost")
+        assert await dispatcher._maybe_handle_stop_reaction(foreign_room, stop, None) is False
+        journal.claim_semantic_consumer.assert_not_awaited()
+        reconciler.finalize.assert_not_awaited()
+
+        own_room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+        assert await dispatcher._maybe_handle_stop_reaction(own_room, stop, None) is True
+        reconciler.finalize.assert_awaited_once()
+    finally:
+        response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)
 
 
 async def _noop() -> None:

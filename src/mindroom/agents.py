@@ -155,6 +155,7 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
+    tool_hook_bridge: Callable[..., Any] | None
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
@@ -1473,12 +1474,25 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
         "Callable[[Function], bool] | None",
         agent_kwargs.pop("tool_function_filter", None),
     )
+    tool_hook_bridge = cast("Callable[..., Any] | None", agent_kwargs.pop("tool_hook_bridge", None))
     install_message_builder_patch()
     agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else Agent
     agent = agent_class(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
+    agent.tool_hook_bridge = tool_hook_bridge
     return agent
+
+
+def _generated_function_visible(
+    config: Config,
+    tool_function_filter: Callable[[Function], bool] | None,
+    function: Function,
+) -> bool:
+    """Hide generated functions an approval rule may gate, because they have no toolkit origin to pause and resume."""
+    return not tool_may_require_approval(config, function.name) and (
+        tool_function_filter is None or tool_function_filter(function)
+    )
 
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
@@ -1670,7 +1684,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                     )
         except _MatrixRoomRuntimeToolCollisionError:
             raise
-        except (ValueError, ImportError) as exc:
+        except Exception as exc:
+            # One toolkit must never stop the agent, even when worker code broke the store it reads.
             if minimal_mode:
                 raise MinimalModeUnavailableError(minimal_mode_failure_message(str(exc), agent_name)) from exc
             logger.warning(
@@ -1678,6 +1693,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 tool=tool_name,
                 agent=agent_name,
                 error=str(exc),
+                exc_info=not isinstance(exc, ValueError | ImportError),
             )
     return _AgentToolAssembly(
         tools=tools,
@@ -1688,6 +1704,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
+        tool_hook_bridge=tool_hook_bridge,
     )
 
 
@@ -2118,7 +2135,8 @@ def create_agent(
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
-        tool_function_filter=tool_function_filter,
+        tool_function_filter=partial(_generated_function_visible, config, tool_function_filter),
+        tool_hook_bridge=tool_assembly.tool_hook_bridge,
         search_knowledge=knowledge_enabled,
         add_history_to_context=persist_runtime_state,
         add_session_summary_to_context=persist_runtime_state,

@@ -658,8 +658,9 @@ class MatrixApiTools(Toolkit):
         )
 
     @classmethod
-    def _state_write_policy_error(
+    async def _state_write_policy_error(
         cls,
+        context: ToolRuntimeContext,
         *,
         action: str,
         room_id: str,
@@ -699,6 +700,21 @@ class MatrixApiTools(Toolkit):
                         f"State event type '{event_type}' is dangerous. "
                         "Re-run with allow_dangerous=true only when you intentionally want to change critical room state; "
                         "the requester must also be a joined room admin in the target room."
+                    ),
+                ),
+                True,
+            )
+        if dangerous and not await cls._requester_may_write_dangerous_state(context, room_id):
+            return (
+                cls._error_payload(
+                    action=action,
+                    room_id=room_id,
+                    event_type=event_type,
+                    state_key=state_key,
+                    dangerous=True,
+                    message=(
+                        f"State event type '{event_type}' requires the requester to be a joined room admin "
+                        "in the target room."
                     ),
                 ),
                 True,
@@ -1080,7 +1096,8 @@ class MatrixApiTools(Toolkit):
         assert normalized_event_type is not None
         assert normalized_content is not None
 
-        policy_error, dangerous = self._state_write_policy_error(
+        policy_error, dangerous = await self._state_write_policy_error(
+            context,
             action="put_state",
             room_id=room_id,
             event_type=normalized_event_type,
@@ -1089,19 +1106,6 @@ class MatrixApiTools(Toolkit):
         )
         if policy_error is not None:
             return policy_error
-
-        if dangerous and not await self._requester_may_write_dangerous_state(context, room_id):
-            return self._error_payload(
-                action="put_state",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                state_key=resolved_state_key,
-                dangerous=True,
-                message=(
-                    f"State event type '{normalized_event_type}' requires the requester to be a joined room admin "
-                    "in the target room."
-                ),
-            )
 
         if dry_run:
             return self._payload(
@@ -1196,6 +1200,42 @@ class MatrixApiTools(Toolkit):
             response=response,
         )
 
+    async def _redaction_state_policy_error(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        room_id: str,
+        event_id: str,
+        allow_dangerous: bool,
+    ) -> tuple[str | None, bool]:
+        """Hold a state event redaction to the put_state policy, because redacting current state rewrites it."""
+        try:
+            response = await context.client.room_get_event(room_id, event_id)
+        except Exception as exc:
+            response = exc
+        if not isinstance(response, nio.RoomGetEventResponse):
+            return (
+                self._error_payload(
+                    action="redact",
+                    room_id=room_id,
+                    target_event_id=event_id,
+                    message="Failed to fetch the redaction target.",
+                    response=response,
+                ),
+                False,
+            )
+        target = response.event.source
+        if "state_key" not in target:
+            return None, False
+        return await self._state_write_policy_error(
+            context,
+            action="redact",
+            room_id=room_id,
+            event_type=str(target["type"]),
+            state_key=str(target["state_key"]),
+            allow_dangerous=allow_dangerous,
+        )
+
     async def _redact(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -1204,6 +1244,7 @@ class MatrixApiTools(Toolkit):
         event_id: str | None,
         reason: str | None,
         dry_run: bool,
+        allow_dangerous: bool,
     ) -> str:
         normalized_event_id, event_id_error = self._validate_non_empty_string(
             event_id,
@@ -1225,8 +1266,18 @@ class MatrixApiTools(Toolkit):
             room_id=room_id,
             event_id=normalized_event_id,
         )
+        dangerous = False
         if thread_resolution_error is not None:
             error_message = thread_resolution_error
+        else:
+            state_policy_error, dangerous = await self._redaction_state_policy_error(
+                context,
+                room_id=room_id,
+                event_id=normalized_event_id,
+                allow_dangerous=allow_dangerous,
+            )
+            if state_policy_error is not None:
+                return state_policy_error
 
         if dry_run:
             if error_message is not None:
@@ -1274,6 +1325,7 @@ class MatrixApiTools(Toolkit):
                 status="error",
                 target_event_id=normalized_event_id,
                 reason=normalized_reason,
+                dangerous=dangerous,
                 response=exc,
             )
             return self._error_payload(
@@ -1292,6 +1344,7 @@ class MatrixApiTools(Toolkit):
                 status="ok",
                 target_event_id=normalized_event_id,
                 reason=normalized_reason,
+                dangerous=dangerous,
             )
             return self._payload(
                 "ok",
@@ -1309,6 +1362,7 @@ class MatrixApiTools(Toolkit):
             status="error",
             target_event_id=normalized_event_id,
             reason=normalized_reason,
+            dangerous=dangerous,
             response=response,
         )
         return self._error_payload(
@@ -1495,7 +1549,7 @@ class MatrixApiTools(Toolkit):
         - send_event: Send an arbitrary room event with `event_type` and `content`.
         - get_state: Read one state event by `event_type` and optional `state_key`.
         - put_state: Write one state event by `event_type`, optional `state_key`, and `content`.
-        - redact: Redact an event by `event_id`.
+        - redact: Redact an event by `event_id`; redacting a state event follows the put_state policy for its type.
         - get_event: Fetch one event by `event_id`.
         - search: Full-text search one room's events with `search_term`, optional `keys`, pagination, and context.
 
@@ -1505,7 +1559,7 @@ class MatrixApiTools(Toolkit):
         `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
         those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
-        `allow_dangerous` only affects put_state for a small set of high-risk room-state event types,
+        `allow_dangerous` only affects put_state and redact for a small set of high-risk room-state event types,
         which also require the requester to be a joined room admin in the target room.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
@@ -1598,6 +1652,7 @@ class MatrixApiTools(Toolkit):
                 event_id=event_id,
                 reason=reason,
                 dry_run=normalized_dry_run,
+                allow_dangerous=normalized_allow_dangerous,
             )
         if normalized_action == "get_event":
             return await self._get_event(

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="newspaper",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.NONE,
     display_name="Newspaper",
     description="Read and extract content from news articles using advanced web scraping",
     category=ToolCategory.RESEARCH,
@@ -56,7 +56,10 @@ if TYPE_CHECKING:
     function_names=("get_article_data", "read_article"),
 )
 def newspaper4k_tools() -> type[Newspaper4kTools]:
-    """Return Newspaper4k tools for news article extraction."""
+    """Return Newspaper4k tools whose downloads follow the server-fetch policy."""
     from agno.tools.newspaper4k import Newspaper4kTools
 
+    from mindroom.tools.agno_compat_newspaper4k import install_server_fetch_guard
+
+    install_server_fetch_guard()
     return Newspaper4kTools

@@ -222,6 +222,7 @@ Admin team totals use Agno's member-inclusive session aggregate without reading 
 Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
 A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+A session database the startup import cannot read, or that is locked, is skipped with a warning instead of stopping startup, and its import retries when its agent or team next opens it.
 The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
 Reports and tools read the current usage table without migrating or scanning conversation payloads.
 History lost before migration cannot be recovered by this report.

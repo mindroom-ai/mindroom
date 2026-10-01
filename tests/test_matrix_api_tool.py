@@ -1797,6 +1797,67 @@ async def test_matrix_api_put_state_dangerous_fails_closed_when_power_levels_unr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "requester_level", "allow_dangerous", "redacted"),
+    [
+        ("m.room.power_levels", 0, True, False),
+        ("m.room.server_acl", 100, False, False),
+        ("m.room.create", 100, True, False),
+        ("io.mindroom.scheduled_task", 100, True, False),
+        ("m.room.power_levels", 100, True, True),
+        ("com.example.state", 0, False, True),
+    ],
+)
+async def test_matrix_api_redact_state_event_follows_put_state_policy(
+    event_type: str,
+    requester_level: int,
+    allow_dangerous: bool,
+    redacted: bool,
+) -> None:
+    """Redacting a state event rewrites room state, so it needs what put_state of that type needs."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    _install_room_state(
+        ctx,
+        users={"@user:localhost": requester_level, "@mindroom_general:localhost": 50},
+        memberships={"@user:localhost": "join"},
+    )
+    ctx.client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(
+        {
+            "content": {"users": {}},
+            "event_id": "$state:localhost",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 123,
+            "room_id": ctx.room_id,
+            "type": event_type,
+            "state_key": "",
+        },
+    )
+    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
+        event_id="$redaction:localhost",
+        room_id=ctx.room_id,
+    )
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(
+            await tool.matrix_api(
+                action="redact",
+                event_id="$state:localhost",
+                allow_dangerous=allow_dangerous,
+            ),
+        )
+
+    assert payload["status"] == ("ok" if redacted else "error")
+    assert ctx.client.room_redact.await_count == int(redacted)
+    if redacted:
+        audit = next(call for call in mock_warning.call_args_list if call.args[0] == "matrix_api_write_audit")
+        assert audit.kwargs["dangerous"] is (event_type == "m.room.power_levels")
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_redact_dry_run() -> None:
     """Redact dry runs should not call Matrix."""
     tool = MatrixApiTools()

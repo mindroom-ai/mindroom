@@ -30,7 +30,7 @@ from mindroom.entity_resolution import (
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -262,6 +262,24 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+def _room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including every invite, is exactly ``member_ids``."""
+    # The joined-member refresh never lists invites, so invites come from the synced projection.
+    # MindRoom's classic sync filter never loads members lazily, so that projection holds every invite.
+    # Sliding sync loads members lazily, so only the server's joined and invited counts can reveal an unseen invite.
+    # Without both counts, nio's member_count falls back to the projection size.
+    summary = room.summary
+    has_server_counts = (
+        summary is not None and summary.joined_member_count is not None and summary.invited_member_count is not None
+    )
+    return (
+        room_membership_is_complete(room)
+        and (has_server_counts or config.matrix_sync.mode == "classic")
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )
+
+
 def agent_owns_command(
     command: Command,
     *,
@@ -275,10 +293,11 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and cached_member_ids(room) == {
-        requester_user_id,
-        room.own_user_id,
-    }
+    return chat_pairing_desktop_error(config, agent_name) is None and _room_has_only(
+        config,
+        room,
+        {requester_user_id, room.own_user_id},
+    )
 
 
 async def _desktop_agent_for_room(
@@ -299,8 +318,7 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if cached_member_ids(room) != expected_members:
+    if not _room_has_only(context.config, room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
 
@@ -356,8 +374,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.DESKTOP:
-        desktop_agent_name = await _desktop_agent_for_room(context, room, requester_user_id)
-        if desktop_agent_name is None:
+        if not room_membership_is_complete(room):
+            response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
+        elif (desktop_agent_name := await _desktop_agent_for_room(context, room, requester_user_id)) is None:
             response_text = (
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import legacy_usage_storage
 from mindroom.constants import resolve_runtime_paths
@@ -24,6 +27,10 @@ def _usage(path: Path) -> list[tuple[str | None, object]]:
             (run_id, json.loads(data) if data is not None else None)
             for run_id, data in connection.execute("SELECT run_id, usage_data FROM code_sessions_usage ORDER BY id")
         ]
+
+
+def _skipped_paths(logs: list[dict[str, object]]) -> list[object]:
+    return [entry["path"] for entry in logs if entry["event"] == "usage_migration_skipped_unreadable_store"]
 
 
 def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
@@ -158,25 +165,86 @@ def test_missing_database_and_empty_database_stay_empty(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
-async def test_usage_migration_failure_prevents_runtime_admission(
+async def test_unreadable_session_database_does_not_stop_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
-    """Neither entry point may serve exports or write runs after a failed initial import."""
+    """Worker code can corrupt one session database; both entry points still import the rest and continue."""
+
+    class _NextStartupStepError(Exception):
+        pass
+
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
-    path = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
-    path.write_bytes(b"not a database")
+    corrupt = paths.storage_root / "agents/broken/sessions/broken.db"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"not a database")
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
-    if entrypoint == "api":
-        monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(sqlite3.DatabaseError, match="not a database"):
-            async with module._lifespan(module.app):
-                pytest.fail("API admitted runtime work")
-    else:
-        with pytest.raises(sqlite3.DatabaseError, match="not a database"):
-            await module.main("ERROR", paths, api=False)
+    monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+    with capture_logs() as logs:
+        if entrypoint == "api":
+            monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
+            with pytest.raises(_NextStartupStepError):
+                async with module._lifespan(module.app):
+                    pytest.fail("API admitted runtime work")
+        else:
+            with pytest.raises(_NextStartupStepError):
+                await module.main("ERROR", paths, api=False)
+
+    assert len(_usage(healthy)) == 3
+    assert corrupt.read_bytes() == b"not a database"
+    assert _skipped_paths(logs) == [str(corrupt)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize(
+    ("blocked", "skipped"),
+    [
+        ("agents/broken", "agents/broken/sessions/broken.db"),
+        ("agents/broken/sessions", "agents/broken/sessions/broken.db"),
+        ("private_instances/scope", "private_instances/scope"),
+    ],
+)
+async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path, blocked: str, skipped: str) -> None:
+    """Worker code can make a store directory unsearchable; startup skips the stores beneath it and imports the rest."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    for store in ("agents/broken", "private_instances/scope/broken"):
+        (paths.storage_root / store / "sessions").mkdir(parents=True)
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    blocked_dir = paths.storage_root / blocked
+    blocked_dir.chmod(0)
+    try:
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+    finally:
+        blocked_dir.chmod(0o755)
+
+    assert len(_usage(healthy)) == 3
+    assert _skipped_paths(logs) == [str(paths.storage_root / skipped)]
+
+
+@pytest.mark.asyncio
+async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_path: Path) -> None:
+    """Startup waits about a second on a store worker code keeps locked, and its owner still imports it later."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    locked = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    holder = sqlite3.connect(locked, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    assert elapsed < 10
+    assert _skipped_paths(logs) == [str(locked)]
+    legacy_usage_storage.migrate_usage_database(locked, "code_sessions")
+    assert len(_usage(locked)) == 3
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:

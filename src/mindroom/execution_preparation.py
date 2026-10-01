@@ -26,7 +26,7 @@ from mindroom.constants import (
     TOOL_TRACE_CONTENT_KEY,
     RuntimePaths,
 )
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
 from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
 from mindroom.history.replay import apply_replay_plan
@@ -188,6 +188,23 @@ def _classify_partial_reply(
 def _clean_partial_reply_body(body: str) -> str:
     """Strip live status notes before the canonical interrupted replay marker is added."""
     return clean_partial_reply_text(body)
+
+
+def _without_untrusted_original_senders(
+    thread_history: Sequence[ResolvedVisibleMessage] | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Sequence[ResolvedVisibleMessage] | None:
+    """Drop relay attribution that a sender outside MindRoom wrote, so the prompt names each message's real author."""
+    if not thread_history or not any(ORIGINAL_SENDER_KEY in message.content for message in thread_history):
+        return thread_history
+    internal_sender_ids = current_internal_sender_ids(config, runtime_paths)
+    return [
+        message
+        if message.sender in internal_sender_ids or ORIGINAL_SENDER_KEY not in message.content
+        else replace(message, content={k: v for k, v in message.content.items() if k != ORIGINAL_SENDER_KEY})
+        for message in thread_history
+    ]
 
 
 def _message_speaker_label(message: ResolvedVisibleMessage) -> str:
@@ -999,7 +1016,7 @@ async def prepare_agent_execution_context(
         scope_context=scope_context,
         prompt=prompt,
         transient_context_messages=transient_context_messages,
-        thread_history=thread_history,
+        thread_history=_without_untrusted_original_senders(thread_history, config, runtime_paths),
         response_sender_id=response_sender,
         current_sender_id=current_sender_id,
         member_display_names=ctx.member_display_names,
@@ -1083,7 +1100,7 @@ async def _prepare_bound_team_execution_context(
         scope_context=scope_context,
         prompt=prompt,
         transient_context_messages=transient_context_messages,
-        thread_history=thread_history,
+        thread_history=_without_untrusted_original_senders(thread_history, config, runtime_paths),
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
         member_display_names=member_display_names,

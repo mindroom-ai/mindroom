@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,7 +15,7 @@ from nio.crypto.device import TrustState
 from PIL import Image
 
 from mindroom.config.models import ModelConfig
-from mindroom.model_catalog_receiver import register_model_catalog_receiver
+from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, register_model_catalog_receiver
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import runtime_paths_for
@@ -37,6 +37,24 @@ def request(**changes: object) -> nio.AuthenticatedToDeviceEvent:
         sender=USER,
         type="io.mindroom.models.request",
         authenticated_sender=nio.AuthenticatedDevice(USER, "REQUESTER", "curve", "fingerprint"),
+    )
+
+
+def device_request(user_id: str, device_id: str, request_id: str) -> nio.AuthenticatedToDeviceEvent:
+    """Build one request from a device whose keys are its device ID."""
+    event = request(request_id=request_id)
+    event.sender = user_id
+    event.authenticated_sender = nio.AuthenticatedDevice(user_id, device_id, device_id, device_id)
+    return event
+
+
+def known_devices(devices: dict[str, list[str]]) -> SimpleNamespace:
+    """Register each user's devices with keys equal to their device IDs."""
+    return SimpleNamespace(
+        device_store={
+            user_id: {name: OlmDevice(user_id, name, {"ed25519": name, "curve25519": name}) for name in names}
+            for user_id, names in devices.items()
+        },
     )
 
 
@@ -220,6 +238,84 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
 
 
 @pytest.mark.asyncio
+async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp_path: Path) -> None:
+    """Logging one account into more devices does not let it hold every shared slot."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    other = "@other:localhost"
+    devices = [f"DEVICE{i}" for i in range(64)]
+    client.olm = known_devices({USER: devices, other: ["OTHER"]})
+    queued = []
+
+    def wrapper(_callback: object) -> object:
+        async def enqueue(event: object) -> None:
+            queued.append(event)
+
+        return enqueue
+
+    register_model_catalog_receiver(
+        client=client,
+        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=index,
+        callback_wrapper=wrapper,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+
+    for name in devices:
+        await callback(device_request(USER, name, name))
+    await callback(device_request(other, "OTHER", "other"))
+
+    assert [event.sender for event in queued].count(USER) < 8
+    assert [event.sender for event in queued][-1] == other
+
+
+@pytest.mark.asyncio
+async def test_completed_requests_from_many_devices_share_one_rate_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finishing each request on a fresh device cannot bypass the per-user window or take more rate-table entries."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    other = "@other:localhost"
+    devices = [f"DEVICE{i}" for i in range(20)]
+    client.olm = known_devices({USER: devices, other: ["OTHER"]})
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", AsyncMock())
+    receivers: list[_Receiver] = []
+    admitted: list[str] = []
+
+    def wrapper(callback: object) -> object:
+        assert isinstance(callback, MethodType)
+        assert isinstance(callback.__self__, _Receiver)
+        receivers.append(callback.__self__)
+
+        async def run(event: nio.AuthenticatedToDeviceEvent) -> None:
+            admitted.append(event.sender)
+            await callback(event)
+
+        return run
+
+    register_model_catalog_receiver(
+        client=client,
+        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=index,
+        callback_wrapper=wrapper,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+
+    for name in devices:
+        await callback(device_request(USER, name, name))
+
+    assert admitted == [USER] * _MAX_USER_REQUESTS
+    assert not receivers[0].active
+    assert list(receivers[0].rates) == [USER]
+    await callback(device_request(other, "OTHER", "other"))
+    assert admitted[-1] == other
+
+
+@pytest.mark.asyncio
 async def test_non_router_does_not_register(tmp_path: Path) -> None:
     """Only the runtime router advertises discovery."""
     client, config, paths, index, _, _ = picker_setup(tmp_path)
@@ -285,7 +381,7 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 
 @pytest.mark.asyncio
 async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Finishing each request cannot bypass the per-device request window."""
+    """Finishing each request cannot bypass the per-user request window."""
     callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
     for i in range(20):
         await callback(request(request_id=str(i)))

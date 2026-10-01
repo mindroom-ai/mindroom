@@ -24,8 +24,10 @@ from mindroom.api.auth import verify_user
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
+    delete_credentials_for_target,
     load_credentials_for_target,
     resolve_request_credentials_target,
+    save_credentials_for_target,
 )
 from mindroom.api.integrations import get_dashboard_url
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
@@ -85,7 +87,7 @@ def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> No
     if isinstance(instance_url, str):
         config_to_save["instance_url"] = _normalize_instance_url(instance_url)
     config_to_save.setdefault("_source", "ui")
-    target.target_manager.save_credentials("homeassistant", config_to_save)
+    save_credentials_for_target("homeassistant", config_to_save, target)
 
 
 def _private_url_allowed(config: dict[str, Any]) -> bool:
@@ -407,7 +409,7 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
     """Disconnect Home Assistant by removing stored tokens."""
     try:
         target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-        target.target_manager.delete_credentials("homeassistant")
+        delete_credentials_for_target("homeassistant", target)
     except HTTPException:
         raise
     except Exception as e:

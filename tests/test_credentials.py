@@ -196,6 +196,32 @@ class TestCredentialsManager:
         assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(shared_credentials_path.stat().st_mode) == 0o600
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+    @pytest.mark.parametrize(
+        "locked_entry",
+        [".", "credentials", "credentials/github_credentials.json"],
+        ids=["worker-root", "credentials-dir", "payload"],
+    )
+    def test_primary_manager_starts_when_worker_code_locks_its_own_store(
+        self,
+        tmp_path: Path,
+        locked_entry: str,
+    ) -> None:
+        """Worker code may change the modes of its own store, which must not stop the primary from starting."""
+        storage_root = tmp_path / "mindroom_data"
+        CredentialsManager(storage_root / "credentials").save_credentials("openai", {"api_key": "primary"})
+        worker_root = storage_root / "workers" / "worker-a"
+        (worker_root / "credentials").mkdir(parents=True)
+        (worker_root / "credentials" / "github_credentials.json").write_text("{}", encoding="utf-8")
+        locked_path = worker_root / locked_entry
+        locked_path.chmod(0)
+        try:
+            manager = CredentialsManager(storage_root / "credentials")
+        finally:
+            locked_path.chmod(0o700)
+
+        assert manager.load_credentials("openai") == {"api_key": "primary"}
+
     def test_encrypted_save_and_load_credentials_round_trip(
         self,
         tmp_path: Path,

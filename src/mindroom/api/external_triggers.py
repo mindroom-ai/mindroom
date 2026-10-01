@@ -25,6 +25,7 @@ from mindroom.external_triggers.models import (
 )
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
+    ExternalTriggerReplayScopeFullError,
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
     ExternalTriggerThreadKeyClaim,
@@ -389,6 +390,8 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
 async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
     try:
         return await asyncio.to_thread(call, *args, **kwargs)
+    except ExternalTriggerReplayScopeFullError as exc:
+        raise HTTPException(status_code=429, detail="External trigger replay limit reached") from exc
     except ExternalTriggerReplayStoreError as exc:
         raise HTTPException(status_code=503, detail="External trigger replay store is not available") from exc
 

@@ -34,6 +34,7 @@ from mindroom.knowledge.registry import (
 from mindroom.knowledge.status import get_knowledge_index_status
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -829,6 +830,68 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     refresh.assert_not_awaited()
 
 
+def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path) -> None:
+    """An unauthenticated upload is refused before any multipart byte is read or spooled to disk."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MINDROOM_API_KEY": "upload-key"},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = _RecordingRefreshScheduler()
+    docs = tmp_path / "docs"
+    _publish_committed_runtime_config(main.app, _knowledge_config(docs))
+    client = TestClient(main.app, base_url="http://localhost")
+    body_read = False
+
+    def body() -> Iterator[bytes]:
+        nonlocal body_read
+        body_read = True
+        yield b"--b\r\nContent-Disposition: form-data; name=files; filename=guide.md\r\n\r\nhello\r\n--b--\r\n"
+
+    refused = client.post(
+        "/api/knowledge/bases/research/upload",
+        content=body(),
+        headers={"content-type": "multipart/form-data; boundary=b"},
+    )
+    assert refused.status_code == 401
+    assert not body_read
+
+    with patch("mindroom.api.knowledge.refresh_knowledge_binding_in_subprocess", new=AsyncMock()):
+        accepted = client.post(
+            "/api/knowledge/bases/research/upload",
+            content=body(),
+            headers={"content-type": "multipart/form-data; boundary=b", "authorization": "Bearer upload-key"},
+        )
+    assert accepted.json()["uploaded"] == ["guide.md"]
+    assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
+
+
+def test_upload_reports_unparseable_bodies_as_400_and_missing_files_as_422(tmp_path: Path) -> None:
+    """Parsing the form in the handler keeps the error responses FastAPI gave the former File parameter."""
+    client = _test_client(tmp_path)
+    _publish_committed_runtime_config(client.app, _knowledge_config(tmp_path / "docs"))
+    multipart = {"content-type": "multipart/form-data; boundary=b"}
+
+    malformed = client.post("/api/knowledge/bases/research/upload", content=b"garbage", headers=multipart)
+    no_boundary = client.post(
+        "/api/knowledge/bases/research/upload",
+        content=b"garbage",
+        headers={"content-type": "multipart/form-data"},
+    )
+    no_files = client.post(
+        "/api/knowledge/bases/research/upload",
+        content=b"--b\r\nContent-Disposition: form-data; name=files\r\n\r\nnot a file\r\n--b--\r\n",
+        headers=multipart,
+    )
+
+    assert (malformed.status_code, malformed.json()) == (400, {"detail": "There was an error parsing the body"})
+    assert (no_boundary.status_code, no_boundary.json()) == (400, {"detail": "Missing boundary in multipart."})
+    assert no_files.status_code == 422
+    assert no_files.json()["detail"][0]["loc"] == ["body", "files"]
+    assert not (tmp_path / "docs").exists()
+
+
 def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: Path) -> None:
     """Uploads must match the same semantic filters used by listing and indexing."""
     client = _test_client(tmp_path)
@@ -979,7 +1042,7 @@ async def test_empty_upload_parts_are_noop_without_source_change_mark_or_refresh
         patch("mindroom.api.knowledge.mark_knowledge_source_changed_async", side_effect=AssertionError("no mutation")),
         patch("mindroom.api.knowledge.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh,
     ):
-        response = await knowledge_api.upload_knowledge_files(
+        response = await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1122,7 +1185,7 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
 
     with pytest.raises(asyncio.CancelledError):
-        await knowledge_api.upload_knowledge_files(
+        await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1163,7 +1226,7 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     monkeypatch.setattr(knowledge_api, "_stream_upload_to_destination", _cancel_stream)
 
     with pytest.raises(asyncio.CancelledError):
-        await knowledge_api.upload_knowledge_files(
+        await knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {
@@ -1207,7 +1270,7 @@ async def test_upload_cancellation_after_source_change_mark_finalizes_backup_and
     monkeypatch.setattr(knowledge_api, "mark_knowledge_source_changed_async", _slow_source_change_mark)
 
     upload_task = asyncio.create_task(
-        knowledge_api.upload_knowledge_files(
+        knowledge_api._upload_knowledge_files(
             "research",
             Request(
                 {

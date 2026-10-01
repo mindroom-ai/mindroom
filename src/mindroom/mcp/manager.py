@@ -88,6 +88,9 @@ logger = get_logger(__name__)
 # unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
 _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
+# Tool-change notifications refresh one server at most this often, because a server may send them at any rate
+# and every changed catalog restarts the entities using it.
+_STALE_REFRESH_MIN_INTERVAL_SECONDS = 60.0
 # Bound request-local retries when concurrent credential or config publication keeps invalidating leases.
 _MAX_REQUEST_STATE_RETRIES = 8
 
@@ -100,6 +103,16 @@ def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
         _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS * 2**exponent,
         _DISCOVERY_RETRY_MAX_DELAY_SECONDS,
     )
+
+
+def _refresh_wait_seconds(state: MCPServerState, retry_delay_seconds: float) -> float:
+    """Return a retry's backoff, or reserve the next spaced slot for a stale-catalog refresh."""
+    if retry_delay_seconds > 0:
+        return retry_delay_seconds
+    now = monotonic()
+    starts_at = max(now, state.stale_refresh_not_before)
+    state.stale_refresh_not_before = starts_at + _STALE_REFRESH_MIN_INTERVAL_SECONDS
+    return starts_at - now
 
 
 def _fresh_recorded_error(error: MCPError) -> MCPError:
@@ -212,7 +225,7 @@ class _CatalogRefreshOutcome:
     """Values computed under refresh locks and consumed after those locks release."""
 
     changed: bool
-    should_notify_catalog_change: bool
+    notify_catalog_hash: str | None
     discovery_rejection: _DiscoveryRejection | None
     invalid_function_states: tuple[MCPServerState, ...] | None
 
@@ -1216,7 +1229,7 @@ class MCPServerManager:
         self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
         changed = False
-        should_notify_catalog_change = False
+        notify_catalog_hash: str | None = None
         discovery_rejection: _DiscoveryRejection | None = None
         invalid_function_states: tuple[MCPServerState, ...] | None = None
         async with state.lock:
@@ -1263,10 +1276,16 @@ class MCPServerManager:
                 else:
                     state.consecutive_failures = 0
                     changed = previous_hash != catalog.catalog_hash
-                    should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+                    if state.notified_catalog_hash is None:
+                        # Dependents first built from this catalog; a catalog lost to a failed refresh keeps its hash.
+                        state.notified_catalog_hash = catalog.catalog_hash
+                    # A refresh without notification may have published this catalog first, so also compare it with
+                    # the catalog dependents last heard about.
+                    if notify and (changed or catalog.catalog_hash != state.notified_catalog_hash):
+                        notify_catalog_hash = catalog.catalog_hash
         outcome = _CatalogRefreshOutcome(
             changed=changed,
-            should_notify_catalog_change=should_notify_catalog_change,
+            notify_catalog_hash=notify_catalog_hash,
             discovery_rejection=discovery_rejection,
             invalid_function_states=invalid_function_states,
         )
@@ -1296,7 +1315,8 @@ class MCPServerManager:
         invalid_server_ids = await self._validate_global_function_names()
         if state.server_id in invalid_server_ids:
             return False
-        if outcome.should_notify_catalog_change and self._on_catalog_change is not None:
+        if outcome.notify_catalog_hash is not None and self._on_catalog_change is not None:
+            state.notified_catalog_hash = outcome.notify_catalog_hash
             await self._on_catalog_change(state.server_id)
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
@@ -1565,13 +1585,14 @@ class MCPServerManager:
         existing_task = state.refresh_task
         if existing_task is not None and not existing_task.done() and existing_task is not asyncio.current_task():
             return
+        wait_seconds = _refresh_wait_seconds(state, delay_seconds)
 
         async def refresh() -> None:
             current_task = asyncio.current_task()
             cancelled = False
             try:
-                if delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
                 changed = await self._refresh_server_catalog(state, notify=True)
                 if changed:
                     logger.info(

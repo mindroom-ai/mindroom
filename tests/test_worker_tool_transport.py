@@ -526,6 +526,7 @@ async def test_vault_access_uses_primary_owner_token_file(
         "agent_vault_access",
         routing=routing,
         extra_env={
+            "MATRIX_HOMESERVER": "https://example.test",
             "MINDROOM_AGENT_VAULT_ACCESS_API_URL": "https://vault.example.test",
             "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE": str(token_file),
             "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://vault.example.test/ui",

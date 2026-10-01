@@ -121,7 +121,7 @@ _UNTERMINATED_HTML_FRAGMENT_PATTERN = re.compile(
     r"<(?:(?:!--)|(?:\?)|(?:![A-Za-z])|(?:/?[A-Za-z]))[^>\r\n]*(?=$|[\r\n])",
 )
 _RAW_HTML_TAG_LINE_START_PATTERN = re.compile(
-    r"^([ ]{0,3})(</?([A-Za-z][A-Za-z0-9-]*)(?:\s+[^<>]*)?\s*/?>)",
+    r"^([ ]{0,3})(</?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*)?/?>)",
 )
 _SUPPORTED_BLOCK_LINE_START_PATTERN = re.compile(
     rf"^[ ]{{0,3}}</?(?:{'|'.join(sorted(_BLOCK_FORMATTED_BODY_TAGS))})\b",

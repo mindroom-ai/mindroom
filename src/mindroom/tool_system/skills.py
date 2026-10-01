@@ -11,6 +11,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -47,6 +48,8 @@ _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+# Worker code can plant any number of entries, so a workspace skill listing examines only this many.
+_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -497,9 +500,14 @@ class SkillMarkdownError(ValueError):
     """A ``SKILL.md`` whose frontmatter skill loading cannot read."""
 
 
+def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
+    # With no closing fence the pattern backtracks quadratically before failing, so skip it when it cannot match.
+    return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
+
+
 def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
     """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them."""
-    match = _FRONTMATTER_PATTERN.match(content)
+    match = _match_skill_frontmatter(content)
     if not match:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
@@ -516,7 +524,7 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
 
 def _parse_skill_frontmatter(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
     """Split one ``SKILL.md`` into its frontmatter mapping and instructions, or warn and return None."""
-    if allow_missing and not _FRONTMATTER_PATTERN.match(content):
+    if allow_missing and not _match_skill_frontmatter(content):
         return {}, content
     try:
         return parse_skill_markdown(content)
@@ -606,15 +614,33 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
+@dataclass(frozen=True)
+class _WorkspaceEntryNames:
+    """Sorted visible real directories or regular files from one bounded scan of a workspace directory."""
+
+    names: list[str]
+    # False when the scan stopped at its limit, so the directory may hold entries it did not see.
+    complete: bool
+
+
+def workspace_entry_names(directory_fd: int, *, directories: bool) -> _WorkspaceEntryNames:
+    """Scan only the first entries of a directory worker code can fill, never following links."""
+    with os.scandir(directory_fd) as entries:
+        scanned = list(islice(entries, _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES))
+        names = sorted(
+            entry.name
+            for entry in scanned
+            if not entry.name.startswith(".")
+            and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
+        )
+    return _WorkspaceEntryNames(names=names, complete=len(scanned) < _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES)
+
+
 def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     """Return the regular files one workspace skill lists in ``dirname``, never following links."""
     try:
         with open_directory_within_root(skill_fd, dirname) as listing_fd:
-            names = sorted(
-                entry.name
-                for entry in os.scandir(listing_fd)
-                if not entry.name.startswith(".") and entry.is_file(follow_symlinks=False)
-            )
+            names = workspace_entry_names(listing_fd, directories=False).names
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -676,11 +702,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
             else:
                 skill = _load_workspace_skill(skills_fd, skills_root)
                 return [] if skill is None else [skill]
-            skill_names = sorted(
-                entry.name
-                for entry in os.scandir(skills_fd)
-                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
-            )
+            skill_names = workspace_entry_names(skills_fd, directories=True).names
             if len(skill_names) > _MAX_WORKSPACE_SKILLS:
                 logger.warning(
                     "Loading only the first workspace skills",

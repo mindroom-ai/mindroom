@@ -492,8 +492,10 @@ Check whether a potentially mutating action completed before explicitly retrying
 Retries during authorization or catalog preparation before dispatch do not replay a tool invocation.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
+These refreshes run at most once a minute per server, and notifications that arrive sooner are combined into the next refresh.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
 The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
+Changes reported while a replacement for that server is still waiting to apply are covered by it, so each server has at most one queued replacement.
 Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
 Referenced-entity replacement shares one serialized global response-admission owner with config reload.
 It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
