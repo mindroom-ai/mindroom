@@ -26,7 +26,12 @@ from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
 from mindroom.external_triggers import executor as trigger_executor
-from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
+from mindroom.external_triggers.auth import (
+    TriggerSignatureHeaders,
+    canonical_trigger_signing_payload,
+    mint_trigger_capability,
+    sign_trigger_request,
+)
 from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -522,6 +527,40 @@ def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
     assert response.status_code == 404
     assert response.json()["detail"] == "External trigger not found"
     assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+
+
+def test_oversized_nonce_or_event_id_is_refused_before_replay_claim(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validly signed requests cannot store long nonces or event ids in the shared replay store."""
+    monkeypatch.setattr(
+        "mindroom.api.external_triggers.execute_external_trigger",
+        AsyncMock(return_value="$matrix-event"),
+    )
+    body, nonce, timestamp = _body(), "n" * 257, str(int(time.time()))
+    # The bundled signer refuses long nonces, so sign the canonical payload directly as a hostile client would.
+    signature = trigger_api.private_key.sign(
+        canonical_trigger_signing_payload(
+            method="POST",
+            path="/api/triggers/campground",
+            timestamp=timestamp,
+            nonce=nonce,
+            body=body,
+        ),
+    )
+    headers = TriggerSignatureHeaders(
+        key_id="campground-main",
+        timestamp=timestamp,
+        nonce=nonce,
+        signature=base64.b64encode(signature).decode("ascii"),
+    ).to_mapping()
+
+    long_nonce = trigger_api.client.post("/api/triggers/campground", content=body, headers=headers)
+    long_event_id = _post_signed(trigger_api, body=_body(event_id="e" * 257))
+
+    assert (long_nonce.status_code, long_event_id.status_code) == (401, 422)
+    assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
 
 
 def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) -> None:

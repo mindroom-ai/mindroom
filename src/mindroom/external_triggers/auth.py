@@ -22,6 +22,8 @@ _KEY_ID_HEADER = "x-mindroom-trigger-key-id"
 _TIMESTAMP_HEADER = "x-mindroom-trigger-timestamp"
 _NONCE_HEADER = "x-mindroom-trigger-nonce"
 _SIGNATURE_HEADER = "x-mindroom-trigger-signature"
+# Nonces are retained in the shared replay store and double as default event ids, so keep them short.
+_MAX_NONCE_LENGTH = 256
 _REQUIRED_HEADERS = (
     _KEY_ID_HEADER,
     _TIMESTAMP_HEADER,
@@ -88,6 +90,9 @@ class TriggerSignatureHeaders:
         """Validate header values that are independent of configured key material."""
         if not self.nonce:
             msg = "trigger signature nonce must not be empty"
+            raise TriggerAuthError(msg)
+        if len(self.nonce) > _MAX_NONCE_LENGTH:
+            msg = f"trigger signature nonce must be at most {_MAX_NONCE_LENGTH} characters"
             raise TriggerAuthError(msg)
 
 

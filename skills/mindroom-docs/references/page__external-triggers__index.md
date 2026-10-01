@@ -235,6 +235,8 @@ If delivery succeeds, a later signed request with the same `event_id` is treated
 
 Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
 
+Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 characters.
+
 Retries must create a fresh signed request with the same `--event-id`.
 
 Each nonce-bearing HTTP request is single-use.
