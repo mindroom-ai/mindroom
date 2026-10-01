@@ -431,10 +431,17 @@ def _decrypt_validated_media_bytes(
     return decrypted_bytes
 
 
-async def download_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> bytes | None:
+async def download_mxc_bytes(
+    client: nio.AsyncClient,
+    mxc_url: str,
+    *,
+    max_bytes: int,
+    request_timeout: float | None = None,
+) -> bytes | None:
     """Download one MXC payload, abandoning it as soon as it passes ``max_bytes``.
 
     nio's ``download`` holds the whole body before a caller can measure it, so this streams it instead.
+    ``request_timeout`` overrides the client's total request timeout; ``0`` disables it.
     """
     server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
     if not mxc_url.startswith("mxc://") or not server_name or not separator or not media_id:
@@ -442,7 +449,7 @@ async def download_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes
         return None
     method, path = nio.Api.download(server_name, media_id)
     try:
-        return await Transport(client, max_bytes).request(method, path)
+        return await Transport(client, max_bytes).request(method, path, request_timeout=request_timeout)
     except HttpError as error:
         logger.warning("mxc_download_failed", mxc_url=mxc_url, status=error.status, errcode=error.errcode)
     except ResponseTooLarge:
@@ -456,7 +463,13 @@ async def download_media_bytes(
 ) -> bytes | None:
     """Download and decrypt Matrix media payload bytes."""
     try:
-        downloaded_bytes = await download_mxc_bytes(client, event.url, max_bytes=_matrix_media_max_bytes)
+        # Like nio's own download, a large file on a slow link may take longer than the client's request timeout.
+        downloaded_bytes = await download_mxc_bytes(
+            client,
+            event.url,
+            max_bytes=_matrix_media_max_bytes,
+            request_timeout=0,
+        )
     except Exception:
         logger.exception("Error downloading media")
         return None

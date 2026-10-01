@@ -271,6 +271,18 @@ class TestDownloadImage:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_download_media_bytes_has_no_total_request_timeout(self) -> None:
+        """A large file on a slow link must not fail just because it outlasts the client's request timeout."""
+        client = make_matrix_client_mock()
+        event = MagicMock(spec=nio.RoomMessageImage)
+        event.event_id = "$test_event"
+        event.url = "mxc://example.org/large"
+        client.download.return_value = _download_response(b"image_data")
+
+        assert await download_media_bytes(client, event) == b"image_data"
+        assert client.send.await_args.kwargs["timeout"] == 0
+
+    @pytest.mark.asyncio
     async def test_download_media_bytes_rejects_unencrypted_payload_over_limit(
         self,
         monkeypatch: pytest.MonkeyPatch,
