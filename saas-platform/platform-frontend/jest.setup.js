@@ -27,65 +27,62 @@ jest.mock('next/navigation', () => ({
   usePathname: jest.fn(() => '/test-path'),
 }))
 
-// Browser-only setup; server tests such as the proxy's run in the node environment.
-if (typeof window !== 'undefined') {
-  // Mock window.matchMedia
-  Object.defineProperty(window, 'matchMedia', {
-    writable: true,
-    value: jest.fn().mockImplementation(query => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: jest.fn(), // deprecated
-      removeListener: jest.fn(), // deprecated
-      addEventListener: jest.fn(),
-      removeEventListener: jest.fn(),
-      dispatchEvent: jest.fn(),
-    })),
-  })
+// Mock window.matchMedia
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: jest.fn().mockImplementation(query => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: jest.fn(), // deprecated
+    removeListener: jest.fn(), // deprecated
+    addEventListener: jest.fn(),
+    removeEventListener: jest.fn(),
+    dispatchEvent: jest.fn(),
+  })),
+})
 
-  // Mock window.location for tests
-  // Only suppress JSDOM navigation errors - they're not helpful for debugging
-  const originalConsoleError = console.error
+// Mock window.location for tests
+// Only suppress JSDOM navigation errors - they're not helpful for debugging
+const originalConsoleError = console.error
 
-  console.error = (...args) => {
-    // Always suppress JSDOM navigation errors - they don't help with debugging
-    const firstArg = args[0]
-    if (firstArg && typeof firstArg === 'object' && firstArg.type === 'not implemented') {
-      return
-    }
-    if (typeof firstArg === 'string' && firstArg.includes('Not implemented: navigation')) {
-      return
-    }
-    // Let all other console outputs through - they might be needed for debugging
-    originalConsoleError.call(console, ...args)
+console.error = (...args) => {
+  // Always suppress JSDOM navigation errors - they don't help with debugging
+  const firstArg = args[0]
+  if (firstArg && typeof firstArg === 'object' && firstArg.type === 'not implemented') {
+    return
   }
-
-  // JSDOM location is non-configurable in newer versions.
-  // The configured test URL already provides the expected localhost origin.
-  try {
-    delete window.location
-    window.location = {
-      origin: 'http://localhost:3000',
-      href: 'http://localhost:3000',
-      pathname: '/',
-      search: '',
-      hash: '',
-      protocol: 'http:',
-      hostname: 'localhost',
-      host: 'localhost:3000',
-      port: '3000',
-      reload: jest.fn(),
-      replace: jest.fn(),
-      assign: jest.fn(),
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (!/location|non-configurable|read only|Cannot delete|Cannot assign/i.test(message)) {
-      throw error
-    }
+  if (typeof firstArg === 'string' && firstArg.includes('Not implemented: navigation')) {
+    return
   }
-
-  // Inject runtime config expected by browser helpers
-  window.__MINDROOM_CONFIG__ = getServerRuntimeConfig()
+  // Let all other console outputs through - they might be needed for debugging
+  originalConsoleError.call(console, ...args)
 }
+
+// JSDOM location is non-configurable in newer versions.
+// The configured test URL already provides the expected localhost origin.
+try {
+  delete window.location
+  window.location = {
+    origin: 'http://localhost:3000',
+    href: 'http://localhost:3000',
+    pathname: '/',
+    search: '',
+    hash: '',
+    protocol: 'http:',
+    hostname: 'localhost',
+    host: 'localhost:3000',
+    port: '3000',
+    reload: jest.fn(),
+    replace: jest.fn(),
+    assign: jest.fn(),
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!/location|non-configurable|read only|Cannot delete|Cannot assign/i.test(message)) {
+    throw error
+  }
+}
+
+// Inject runtime config expected by browser helpers
+window.__MINDROOM_CONFIG__ = getServerRuntimeConfig()

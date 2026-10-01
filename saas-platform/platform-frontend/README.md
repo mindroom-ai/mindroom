@@ -47,7 +47,7 @@ public/              # Static assets
 
 - JWT-based authentication via Supabase
 - Server-side session validation
-- Session refresh in `src/proxy.ts` and the admin page guard in `src/app/admin/layout.tsx`
+- Admin page guard in `src/app/admin/layout.tsx`
 - Independent authentication and authorization dependencies in the platform backend
 - Environment variable separation for secrets
 
@@ -75,4 +75,4 @@ Optional runtime configuration:
 - `PLATFORM_DOMAIN` - Derives the API origin as `https://api.<domain>`; when unset or empty, the API origin is `http://localhost:8000`.
 
 The runtime configuration is serialized into the browser by the root layout.
-Authentication helpers require the Supabase URL and anon key; without them, the request proxy in `src/proxy.ts` only sets security headers.
+Authentication helpers require the Supabase URL and anon key.
