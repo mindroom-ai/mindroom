@@ -498,6 +498,7 @@ def oauth_runtime_bootstrapper(
             authorization_url=metadata.authorization_url,
             token_url=metadata.token_url,
             token_endpoint_auth_method=metadata.token_endpoint_auth_method,
+            token_fetch_allow_private_networks=runtime_paths.env_flag(config.allow_private_env),
         )
 
     return bootstrap

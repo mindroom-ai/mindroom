@@ -30,6 +30,7 @@ from mindroom.credential_policy import (
     is_oauth_token_service,
 )
 from mindroom.credentials import get_runtime_credentials_manager, validate_service_name
+from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
 warnings.filterwarnings(
@@ -273,6 +274,8 @@ class OAuthRuntimeEndpoints:
     authorization_url: str
     token_url: str
     token_endpoint_auth_method: _TokenEndpointAuthMethod | None = None
+    # Discovered token endpoints are dialed through the server-fetch address guard; None keeps fixed endpoints unguarded.
+    token_fetch_allow_private_networks: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,7 +498,18 @@ def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, s
     return _oauth_error_fields(payload.get("error"), payload.get("error_description"))
 
 
-def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError) -> OAuthProviderError:
+def _token_client_transport(endpoints: OAuthRuntimeEndpoints) -> dict[str, Any]:
+    """Return the guarded transport option for a discovered token endpoint."""
+    if endpoints.token_fetch_allow_private_networks is None:
+        return {}
+    return {
+        "transport": ServerFetchAsyncHTTPTransport(
+            allow_private_networks=endpoints.token_fetch_allow_private_networks,
+        ),
+    }
+
+
+def _oauth_refresh_error(exc: AuthlibBaseError | HTTPError | ServerFetchUrlError) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
     error_code: str | None = None
     error_description: str | None = None
@@ -870,6 +884,7 @@ class OAuthProvider:
             redirect_uri=client_config.redirect_uri,
             token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+            **_token_client_transport(endpoints),
         ) as client:
             try:
                 fetch_kwargs: dict[str, Any] = {
@@ -883,7 +898,7 @@ class OAuthProvider:
                     token_url,
                     **fetch_kwargs,
                 )
-            except (AuthlibBaseError, HTTPError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError) as exc:
                 msg = "OAuth token exchange failed"
                 raise OAuthProviderError(msg) from exc
         if not isinstance(token_response, Mapping):
@@ -929,6 +944,7 @@ class OAuthProvider:
             client_secret=client_config.client_secret,
             token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
+            **_token_client_transport(endpoints),
         ) as client:
             try:
                 token_response = await client.refresh_token(
@@ -936,7 +952,7 @@ class OAuthProvider:
                     refresh_token=refresh_token,
                     **self.extra_token_params,
                 )
-            except (AuthlibBaseError, HTTPError) as exc:
+            except (AuthlibBaseError, HTTPError, ServerFetchUrlError) as exc:
                 raise _oauth_refresh_error(exc) from exc
         if not isinstance(token_response, Mapping):
             msg = "OAuth token refresh failed"
