@@ -232,7 +232,7 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 
 ## Limitations
 
-- **Streaming responses omit token usage** — only non-streaming responses report `usage`, taken from the run's model metrics and summed over the leader and members for teams
+- **Token usage is partial** — only non-streaming responses report `usage`, and it covers the final model run of the turn (summed over the leader and members for teams), so tokens spent by dynamic-tool continuations or empty-run retries before it are not included
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)
