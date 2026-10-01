@@ -67,7 +67,7 @@ Custom events replay as fixed SDK subclasses; plugin class identity and methods 
 Job metadata stays in memory, while each generation's payload is a separate file that retrieval reads on demand.
 A payload file is written before the metadata that references it, so a crash in between leaves the job running for recovery to interrupt.
 Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation or Stop saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
-`tests/test_tool_job_fuzz.py` and `tests/test_delegation_job_fuzz.py` generate interleaved lifecycles, including restarts and crashes, and check these guarantees after every step.
+`tests/test_tool_job_fuzz.py`, `tests/test_delegation_job_fuzz.py`, and `tests/test_tool_job_completion_fuzz.py` generate interleaved job, subagent, and completion-wake lifecycles, including failed saves, restarts, and crashes, and check these guarantees after every step.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
 Expiry then deletes the job's files; its originating turn has finished, so the call cannot run again.
 A job stays while jobs started by a turn that delivered its outcome remain, so Stop can trace them through it to their human turn.
