@@ -246,6 +246,43 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root"}
 
     @pytest.mark.asyncio
+    async def test_resolve_thread_ids_for_event_infos_resolves_a_long_plain_reply_chain_without_rewalking(
+        self,
+    ) -> None:
+        """Thousands of chained plain replies under a relation-free message resolve within a CPU budget."""
+
+        def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
+            content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
+            if relates_to is not None:
+                content["m.relates_to"] = relates_to
+            return EventInfo.from_event({"content": content, "event_id": event_id, "type": "m.room.message"})
+
+        event_infos = {
+            "$root": message("$root"),
+            "$child": message("$child", {"rel_type": "m.thread", "event_id": "$root"}),
+            "$child_reply": message("$child_reply", {"m.in_reply_to": {"event_id": "$child"}}),
+            "$child_reply_reply": message("$child_reply_reply", {"m.in_reply_to": {"event_id": "$child_reply"}}),
+            "$plain": message("$plain"),
+            "$plain_reply_0": message("$plain_reply_0", {"m.in_reply_to": {"event_id": "$plain"}}),
+            **{
+                f"$plain_reply_{index}": message(
+                    f"$plain_reply_{index}",
+                    {"m.in_reply_to": {"event_id": f"$plain_reply_{index - 1}"}},
+                )
+                for index in range(1, 5_000)
+            },
+        }
+
+        with cpu_budget(0.5):
+            resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+                "!test:localhost",
+                event_infos=event_infos,
+                ordered_event_ids=list(event_infos),
+            )
+
+        assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root", "$child_reply_reply": "$root"}
+
+    @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:

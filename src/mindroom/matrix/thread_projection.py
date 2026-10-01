@@ -279,11 +279,17 @@ async def resolve_thread_ids_for_event_infos(
     progress_made = True
     while progress_made:
         progress_made = False
+        # Events this pass whose relation walk found no thread; walking from one again finds none either.
+        unthreaded_relation_event_ids: set[str] = set()
         for event_id in ordered_event_ids:
             if event_id in resolved:
                 continue
             event_info = event_infos.get(event_id)
             if event_info is None:
+                continue
+            related_event_id = event_info.next_related_event_id("")
+            if event_info.thread_id is None and related_event_id in unthreaded_relation_event_ids:
+                unthreaded_relation_event_ids.add(event_id)
                 continue
             resolution = await resolve_event_thread_membership(
                 room_id,
@@ -291,6 +297,8 @@ async def resolve_thread_ids_for_event_infos(
                 access=access,
             )
             if not resolution.is_threaded:
+                if related_event_id is not None:
+                    unthreaded_relation_event_ids.add(event_id)
                 continue
             assert resolution.thread_id is not None
             resolved[event_id] = resolution.thread_id
