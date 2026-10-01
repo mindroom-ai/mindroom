@@ -167,6 +167,10 @@ def request_execution_env(
     agent_vault_env = constants.worker_proxy_execution_env(worker_local_env)
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
+        if protected_env_names:
+            # The primary's HOME is a host path; a dedicated worker keeps its own HOME until the
+            # workspace HOME contract replaces it, so only the incoming request env drops it.
+            protected_env_names |= {"HOME"}
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
         env.update(agent_vault_env)
         return env
@@ -191,8 +195,7 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    # The primary's HOME is a host path; the worker keeps the HOME its own runtime set.
-    protected_names = {"HOME", "MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
+    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
     protected_names.update(
         name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
     )

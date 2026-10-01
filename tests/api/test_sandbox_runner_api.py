@@ -2309,6 +2309,28 @@ def test_dedicated_worker_execution_env_keeps_worker_home_over_primary_home(tmp_
     assert execution_env["LANG"] == "C.UTF-8"
 
 
+def test_dedicated_worker_tool_runtime_paths_keep_the_workspace_home_contract(tmp_path: Path) -> None:
+    """The workspace HOME applied after ingress filtering survives the per-request runtime-path rebuild."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:shared:coder", "HOME": "/app/worker"},
+    )
+    workspace = "/app/worker/agents/coder/workspace"
+
+    tool_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
+        runtime_paths,
+        {"HOME": workspace, "MINDROOM_AGENT_WORKSPACE": workspace},
+    )
+
+    assert tool_runtime.process_env["HOME"] == workspace
+
+
 def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
