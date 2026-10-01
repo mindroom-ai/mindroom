@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.agent import Agent
+from agno.agent._init import set_learning_machine
 from agno.db.in_memory import InMemoryDb
 from agno.knowledge.knowledge import Knowledge
 from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
@@ -4123,11 +4124,12 @@ def _config_with_workspace_skill(tmp_path: Path) -> Config:
     return config
 
 
-async def _generated_functions(agent: Agent) -> dict[str, Function]:
+async def _generated_functions(agent: Agent, user_id: str | None = None) -> dict[str, Function]:
     tools = await agent.aget_tools(
         RunOutput(run_id="run", agent_id="general", agent_name="GeneralAgent", session_id="session"),
         RunContext(run_id="run", session_id="session"),
         AgentSession(session_id="session", agent_id="general", created_at=1, updated_at=1),
+        user_id=user_id,
     )
     return {tool.name: tool for tool in tools if isinstance(tool, Function)}
 
@@ -4164,17 +4166,28 @@ async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(
         plugin_order=0,
         discovered_hooks=(decline,),
     )
-    agent = _create_agent_for_test(
-        "general",
-        _config_with_workspace_skill(tmp_path),
-        hook_registry=HookRegistry.from_plugins([plugin]),
+    config = _config_with_workspace_skill(tmp_path)
+    config.agents["general"].learning_mode = "agentic"
+    agent = _create_agent_for_test("general", config, hook_registry=HookRegistry.from_plugins([plugin]))
+    set_learning_machine(agent)
+
+    functions = await _generated_functions(agent, user_id="@alice:localhost")
+    skill_call = FunctionCall(
+        function=functions["get_skill_instructions"],
+        arguments={"skill_name": "scripted"},
+        call_id="call-1",
     )
+    memory_call = FunctionCall(
+        function=functions["update_user_memory"],
+        arguments={"task": "Remember the user prefers tea."},
+        call_id="call-2",
+    )
+    skill_result = await skill_call.aexecute()
+    memory_result = await memory_call.aexecute()
 
-    function = (await _generated_functions(agent))["get_skill_instructions"]
-    result = await FunctionCall(function=function, arguments={"skill_name": "scripted"}, call_id="call-1").aexecute()
-
-    assert "[TOOL CALL DECLINED]" in str(result.result)
-    assert "SKILL BODY" not in str(result.result)
+    assert "[TOOL CALL DECLINED]" in str(skill_result.result)
+    assert "SKILL BODY" not in str(skill_result.result)
+    assert "[TOOL CALL DECLINED]" in str(memory_result.result)
 
 
 @patch("mindroom.agent_storage._ConversationSqliteDb")
