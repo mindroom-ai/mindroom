@@ -367,8 +367,12 @@ def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
             continue
         for directory_name in (WORKER_CREDENTIALS_DIRNAME, WORKER_SHARED_CREDENTIALS_DIRNAME):
             credential_path = worker_root / directory_name
-            if not credential_path.is_symlink() and credential_path.is_dir():
-                paths.append(credential_path)
+            try:
+                if not credential_path.is_symlink() and credential_path.is_dir():
+                    paths.append(credential_path)
+            except OSError:
+                # Worker code may make its own root unsearchable, which hides only that worker's store.
+                logger.warning("Skipping an uninspectable worker credential path", path=str(credential_path))
     return tuple(paths)
 
 
@@ -422,12 +426,19 @@ class CredentialsManager:
         )
 
         credential_paths = {self.base_path, self.shared_base_path}
+        worker_credential_paths: tuple[Path, ...] = ()
         if self.current_worker_key is None and self.base_path.name == "credentials":
             _reject_linked_primary_credential_directories(credential_paths)
-            credential_paths.update(_existing_worker_credential_paths(self.storage_root))
-        for credential_path in credential_paths:
-            _ensure_private_directory(credential_path, harden_existing=True)
-            _harden_existing_credential_files(credential_path)
+            worker_credential_paths = _existing_worker_credential_paths(self.storage_root)
+        for credential_path in (*credential_paths, *worker_credential_paths):
+            try:
+                _ensure_private_directory(credential_path, harden_existing=True)
+                _harden_existing_credential_files(credential_path)
+            except OSError as exc:
+                if credential_path not in worker_credential_paths:
+                    raise
+                # Worker code owns its store and may change its modes, which must never stop the primary.
+                logger.warning("Cannot secure a worker credential store", path=str(credential_path), error=str(exc))
 
     @property
     def storage_root(self) -> Path:
