@@ -1434,8 +1434,8 @@ You usually do not need `connect` at all, because `mindroom run` pairs automatic
 
 After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
 Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
-In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
-Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+In a terminal, `connect` and `run` then ask `Is this your account? [y/N]`.
+Answering `n`, pressing Enter without an answer, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.
@@ -1490,7 +1490,8 @@ mindroom connect --provisioning-url https://matrix.example.com
 
 Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
-By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+By default this command also writes `MATRIX_HOMESERVER` and `MATRIX_SERVER_NAME` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+For an `https://` homeserver it also writes `MATRIX_SSL_VERIFY=false`, which turns off certificate checks for that homeserver and for the provisioning service, so remove it before pairing with hosted Matrix.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
