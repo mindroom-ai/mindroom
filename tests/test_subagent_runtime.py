@@ -62,6 +62,8 @@ from tests.tool_job_helpers import (
     completed_delegation_job,
     delivery_coordinator,
     finish_delegation_job,
+    job_child,
+    job_owner,
     managed_team_config,
     start_delegation_job,
     start_job,
@@ -867,3 +869,39 @@ async def test_sync_keeps_the_journal_of_an_initialize_that_ran_before_config(tm
         index.assert_awaited_once_with(paths, journal)
     finally:
         await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pause_cards_expire_once_and_retry_after_a_failed_expiry(tmp_path: Path) -> None:
+    """The coordinator keeps a cancelled pause until its cards expire, then forgets it."""
+    coordinator = ToolJobRuntimeCoordinator(
+        test_runtime_paths(tmp_path),
+        lambda: managed_team_config(tmp_path),
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+    )
+    runtime = tool_job_runtime(tmp_path)
+    coordinator._runtime = runtime
+
+    async def pause() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+
+    expired: list[set[str]] = []
+    outcomes = iter([False, True])
+
+    async def expire_job_cards(job_ids: set[str]) -> bool:
+        expired.append(set(job_ids))
+        return next(outcomes)
+
+    manager = MagicMock(expire_job_cards=expire_job_cards)
+    try:
+        job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=pause)
+        waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
+        await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
+        with patch.object(runtime_module.approval_manager, "get_approval_store", return_value=manager):
+            for _ in range(3):
+                await coordinator._expire_withdrawn_approval_cards()
+    finally:
+        await runtime.shutdown()
+    assert expired == [{job.job_id}, {job.job_id}]
