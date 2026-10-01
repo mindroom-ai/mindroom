@@ -7,7 +7,6 @@ result on stdout; memory, CPU, and output size are capped there, and the parent 
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import resource
@@ -16,7 +15,7 @@ import sys
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any
 
-from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
+from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError, nodes
 from jinja2.sandbox import SandboxedEnvironment, SecurityError
 
 if TYPE_CHECKING:
@@ -71,39 +70,60 @@ def render_workspace_template(
     return result["rendered"]
 
 
-def _render(request: Mapping[str, Any]) -> dict[str, str]:
+class _SubstitutionOnlyError(Exception):
+    """Raised when a template needs more than substitution where memory cannot be capped."""
+
+
+def _render_text(request: Mapping[str, Any], *, memory_limited: bool) -> str:
     environment = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
     max_chars = request["max_chars"]
+    parsed = environment.parse(request["template"])
+    # Plain substitution cannot allocate, so it is safe where memory cannot be capped.
+    substitution = (nodes.Output, nodes.TemplateData, nodes.Name)
+    if not memory_limited and not all(isinstance(node, substitution) for node in parsed.find_all(nodes.Node)):
+        msg = "this platform cannot cap template memory, so templates may only substitute `{{ NAME }}`"
+        raise _SubstitutionOnlyError(msg)
     rendered: list[str] = []
     size = 0
+    for chunk in environment.from_string(parsed).generate(**request["params"]):
+        rendered.append(chunk)
+        size += len(chunk)
+        if size > max_chars:
+            break
+    return "".join(rendered)[: max_chars + 1]
+
+
+def _render(request: Mapping[str, Any], *, memory_limited: bool) -> dict[str, str]:
     try:
-        for chunk in environment.from_string(request["template"]).generate(**request["params"]):
-            rendered.append(chunk)
-            size += len(chunk)
-            if size > max_chars:
-                break
+        return {"rendered": _render_text(request, memory_limited=memory_limited)}
     except UndefinedError as exc:
-        return {"error": f"undefined variable: {exc}"[:_MAX_ERROR_CHARS]}
+        message = f"undefined variable: {exc}"
     except TemplateSyntaxError as exc:
-        return {"error": f"syntax error: {exc}"[:_MAX_ERROR_CHARS]}
+        message = f"syntax error: {exc}"
     except SecurityError as exc:
-        return {"error": f"unsafe template expression: {exc}"[:_MAX_ERROR_CHARS]}
+        message = f"unsafe template expression: {exc}"
+    except _SubstitutionOnlyError as exc:
+        message = str(exc)
     except MemoryError:
-        return {"error": "rendering exceeded its memory limit"}
+        message = "rendering exceeded its memory limit"
     except Exception as exc:
-        return {"error": f"render error: {type(exc).__name__}: {exc}"[:_MAX_ERROR_CHARS]}
-    return {"rendered": "".join(rendered)[: max_chars + 1]}
+        message = f"render error: {type(exc).__name__}: {exc}"
+    return {"error": message[:_MAX_ERROR_CHARS]}
 
 
 def _main() -> None:
     cpu_seconds = int(sys.argv[1])
     request = json.load(sys.stdin)
     # Limits apply after startup imports, so they bound only the render.
-    # macOS does not support lowering RLIMIT_AS; CPU and wall-time limits still apply there.
-    with contextlib.suppress(ValueError, OSError):
+    try:
         resource.setrlimit(resource.RLIMIT_AS, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
+    except (ValueError, OSError):
+        # macOS cannot lower RLIMIT_AS.
+        memory_limited = False
+    else:
+        memory_limited = True
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-    json.dump(_render(request), sys.stdout)
+    json.dump(_render(request, memory_limited=memory_limited), sys.stdout)
 
 
 if __name__ == "__main__":

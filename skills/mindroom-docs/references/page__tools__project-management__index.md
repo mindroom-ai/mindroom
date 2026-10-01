@@ -102,6 +102,7 @@ State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
 Templates are YAML with inline Jinja inside values, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and filters like `{{ BRANCH | default('main') }}`; YAML aliases are refused.
 Workspace templates render with Jinja's sandbox in a short-lived child process limited to 256 MiB of memory, while built-in templates render in MindRoom itself.
+On macOS, which cannot set that memory limit, workspace templates may only substitute `{{ NAME }}`.
 A workspace template file holds at most 64 KiB, and one `apply_template` call reads at most 64 KiB of template text, renders at most 65,536 characters within 5 seconds, and expands to at most 100 todos, sub-templates included.
 
 ### Native Auto-Poke

@@ -11,6 +11,7 @@ from agno.agent import Agent as AgnoAgent
 from agno.team.team import Team as AgnoTeam
 
 import mindroom.custom_tools.todo as todo_module
+import mindroom.custom_tools.todo_template_render as todo_template_render_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -650,6 +651,18 @@ def test_workspace_templates_render_jinja_conditionals_and_filters(tmp_path: Pat
     assert "- 1. [medium] Deploy Cinny" in cinny
     assert "- 2. [medium] Push MAIN (depends on 1)" in cinny
     assert "- 1. [medium] No deploy for x" in other
+
+
+def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> None:
+    """Where the address-space limit cannot be installed, expressions are refused before any of them runs."""
+    request = {"template": "{% if true %}x{% endif %}", "params": {}, "max_chars": 100}
+    substitution = {"template": "Fix {{ ISSUE }}", "params": {"ISSUE": "X-1"}, "max_chars": 100}
+
+    refused = todo_template_render_module._render(request, memory_limited=False)
+    rendered = todo_template_render_module._render(substitution, memory_limited=False)
+
+    assert "only substitute" in refused["error"]
+    assert rendered == {"rendered": "Fix X-1"}
 
 
 def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
