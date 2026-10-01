@@ -380,7 +380,7 @@ Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; local raster publication follows the [model configuration rules](https://docs.mindroom.chat/configuration/models/).
 Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
 Application processing expires after 12 seconds; cancellation does not retract a send already retained by NIO.
-Admission caps queued/in-flight requests at eight and accepts at most eight fresh requests per device in 12 seconds; concurrent duplicate requests share the active request.
+Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
 Immediately before handing the response to NIO, MindRoom rechecks current scope, captured device identity, and config identity, including after the final awaited scope check.
 NIO then owns device validation, encryption, persistence, and delivery retries.
 A requester who loses room access during NIO preparation or retry can still receive that already-authorized catalog.

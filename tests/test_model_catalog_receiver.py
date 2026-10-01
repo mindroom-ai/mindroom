@@ -233,7 +233,7 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
     )
     queued = []
 
-    def wrapper(callback: object) -> object:
+    def wrapper(_callback: object) -> object:
         async def enqueue(event: object) -> None:
             queued.append(event)
 

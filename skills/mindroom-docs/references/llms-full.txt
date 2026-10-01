@@ -2567,6 +2567,7 @@ The owner may invite other MindRoom agents into their personal room; an agent se
 Anyone else invited into a personal room MindRoom created is removed, with one notice explaining why; imported rooms keep their attested roster and fail closed instead.
 Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 When an onboarding-room join or command meets a personal room that fails these checks, including an alias another account already holds, MindRoom logs `Personal-room validation failed for an onboarding trigger` and the onboarding room keeps serving everyone else; reconciliation, which runs at startup and after a configuration reload, retries that room after doubling delays up to hourly.
+A guest the agent is not permitted to remove, such as one the owner raised to the agent's power level, fails these checks the same way.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
@@ -21261,7 +21262,7 @@ Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; local raster publication follows the [model configuration rules](https://docs.mindroom.chat/configuration/models/).
 Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
 Application processing expires after 12 seconds; cancellation does not retract a send already retained by NIO.
-Admission caps queued/in-flight requests at eight and accepts at most eight fresh requests per device in 12 seconds; concurrent duplicate requests share the active request.
+Admission caps queued/in-flight requests at eight, and at two per Matrix user across all of that user's devices, and accepts at most eight fresh requests per user in 12 seconds; concurrent duplicate requests share the active request.
 Immediately before handing the response to NIO, MindRoom rechecks current scope, captured device identity, and config identity, including after the final awaited scope check.
 NIO then owns device validation, encryption, persistence, and delivery retries.
 A requester who loses room access during NIO preparation or retry can still receive that already-authorized catalog.
