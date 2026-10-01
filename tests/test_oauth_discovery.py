@@ -633,11 +633,14 @@ async def test_token_requests_revalidate_dns_when_connecting(
     # Manual discovery preflights the authorization and token endpoints before the token request dials.
     _install_dns_rebinding(monkeypatch, safe_resolutions=2)
 
+    token_request = (
+        provider.exchange_code("authorization-code", runtime_paths, token_url=token_url)
+        if operation == "exchange"
+        else provider.refresh_token_data({"refresh_token": "refresh-token", "token_uri": token_url}, runtime_paths)
+    )
+
     with pytest.raises(OAuthProviderError, match=f"OAuth token {operation}") as error:
-        if operation == "exchange":
-            await provider.exchange_code("authorization-code", runtime_paths, token_url=token_url)
-        else:
-            await provider.refresh_token_data({"refresh_token": "refresh-token", "token_uri": token_url}, runtime_paths)
+        await token_request
 
     assert isinstance(error.value.__cause__, ServerFetchUrlError)
 
