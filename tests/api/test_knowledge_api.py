@@ -867,6 +867,31 @@ def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path)
     assert (docs / "guide.md").read_text(encoding="utf-8") == "hello"
 
 
+def test_upload_reports_unparseable_bodies_as_400_and_missing_files_as_422(tmp_path: Path) -> None:
+    """Parsing the form in the handler keeps the error responses FastAPI gave the former File parameter."""
+    client = _test_client(tmp_path)
+    _publish_committed_runtime_config(client.app, _knowledge_config(tmp_path / "docs"))
+    multipart = {"content-type": "multipart/form-data; boundary=b"}
+
+    malformed = client.post("/api/knowledge/bases/research/upload", content=b"garbage", headers=multipart)
+    no_boundary = client.post(
+        "/api/knowledge/bases/research/upload",
+        content=b"garbage",
+        headers={"content-type": "multipart/form-data"},
+    )
+    no_files = client.post(
+        "/api/knowledge/bases/research/upload",
+        content=b"--b\r\nContent-Disposition: form-data; name=files\r\n\r\nnot a file\r\n--b--\r\n",
+        headers=multipart,
+    )
+
+    assert (malformed.status_code, malformed.json()) == (400, {"detail": "There was an error parsing the body"})
+    assert (no_boundary.status_code, no_boundary.json()) == (400, {"detail": "Missing boundary in multipart."})
+    assert no_files.status_code == 422
+    assert no_files.json()["detail"][0]["loc"] == ["body", "files"]
+    assert not (tmp_path / "docs").exists()
+
+
 def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: Path) -> None:
     """Uploads must match the same semantic filters used by listing and indexing."""
     client = _test_client(tmp_path)

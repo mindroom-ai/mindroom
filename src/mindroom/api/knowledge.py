@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mindroom.api import config_lifecycle
 from mindroom.constants import resolve_config_relative_path
@@ -684,9 +686,22 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
 async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, Any]:
     """Upload the multipart ``files`` parts into a knowledge base folder."""
     # Parsed here because FastAPI reads a File parameter before the router authenticates the caller.
-    async with request.form() as form:
+    # The errors below match the ones FastAPI returned for that File parameter.
+    try:
+        form = await request.form()
+    except StarletteHTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="There was an error parsing the body") from exc
+    try:
         files = [upload for upload in form.getlist("files") if isinstance(upload, UploadFile)]
+        if not files:
+            raise RequestValidationError(
+                [{"type": "missing", "loc": ("body", "files"), "msg": "Field required", "input": None}],
+            )
         return await _upload_knowledge_files(base_id, request, files)
+    finally:
+        await form.close()
 
 
 async def _upload_knowledge_files(base_id: str, request: Request, files: list[UploadFile]) -> dict[str, Any]:
