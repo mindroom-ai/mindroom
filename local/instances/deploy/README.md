@@ -281,7 +281,8 @@ docker system prune -a
 
 #### Synapse Permission Issues
 `deploy.py` writes secret-bearing files owner-only: `envs/<name>.env`, copied credentials, and Synapse's `homeserver.yaml`, which it also gives to UID 1000, the user Synapse runs as.
-Run `deploy.py` as UID 1000 or as root so that ownership change succeeds; it changes only the owner, not the group, and otherwise still makes the files owner-only and prints the `sudo chown` command to run.
+Run `deploy.py` as UID 1000 or as root so that ownership change succeeds; it changes only the owner, not the group, and otherwise still makes the files owner-only and asks you to rerun the command as root.
+Do not fix these files with a manual `sudo chown` or `sudo chmod`, because those follow a link a container may have put in place of the file.
 If Synapse fails with permission errors:
 ```bash
 # If not, files might need proper ownership

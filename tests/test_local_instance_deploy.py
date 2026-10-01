@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -1778,8 +1777,11 @@ def test_secret_file_already_owned_by_the_container_uid_is_not_chowned(
     assert console.export_text() == ""
 
 
-def test_unrestrictable_secret_file_prints_the_exact_fix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how."""
+def test_unrestrictable_secret_file_asks_for_a_root_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how.
+
+    It never prints a sudo command naming the path, because the container could swap that path for a link first.
+    """
     homeserver = tmp_path / "synapse dir" / "homeserver.yaml"
     homeserver.parent.mkdir()
     homeserver.write_text("macaroon_secret_key: secret\n")
@@ -1795,7 +1797,9 @@ def test_unrestrictable_secret_file_prints_the_exact_fix(tmp_path: Path, monkeyp
 
     deploy._protect_synapse_config(homeserver)
 
-    assert f"sudo chown {os.getuid() + 1} {shlex.quote(str(homeserver))}" in console.export_text()
+    output = normalize_console_output(console.export_text())
+    assert "Rerun this deploy.py command as root" in output
+    assert "sudo" not in output
     assert _mode(homeserver) == 0o600
 
 
@@ -1813,6 +1817,8 @@ def test_unreadable_container_secret_keeps_permission_guidance(tmp_path: Path, m
     monkeypatch.setattr(deploy.os, "open", denied_open)
     deploy._protect_synapse_config(homeserver)
 
-    assert f"sudo chmod 600 {shlex.quote(str(homeserver))}" in console.export_text()
+    output = normalize_console_output(console.export_text())
+    assert "Rerun this deploy.py command as root" in output
+    assert "sudo" not in output
     assert homeserver.read_text() == "unchanged"
     assert _mode(homeserver) == 0o600

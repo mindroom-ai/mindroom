@@ -323,12 +323,12 @@ def test_owner_only_bridge_files_need_no_read_permission(
     assert bridge_manager.console.export_text() == ""
 
 
-def test_unrestrictable_bridge_file_prints_the_exact_fix(
+def test_unrestrictable_bridge_file_asks_for_a_root_rerun(
     bridge_manager: ModuleType,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A readable bridge file the operator cannot chmod gets the command that can; owner-only files are left alone."""
+    """A readable bridge file the operator cannot chmod asks for a root rerun, never a sudo chmod of a swappable path."""
     config_file = tmp_path / "data" / "config.yaml"
     config_file.parent.mkdir()
     config_file.write_text("bridge: {}\n")
@@ -351,5 +351,6 @@ def test_unrestrictable_bridge_file_prints_the_exact_fix(
     bridge_manager._protect_bridge_secret_files(bridge)
 
     output = bridge_manager.console.export_text()
-    assert f"sudo chmod 600 {shlex.quote(str(config_file))}" in output
+    assert "Rerun this bridge.py command as root" in output
+    assert "sudo" not in output
     assert "registration.yaml" not in output

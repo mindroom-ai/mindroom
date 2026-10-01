@@ -247,8 +247,7 @@ def _give_to_container_user(path: Path) -> None:
 
 def _restrict_to_container_user(path: Path) -> None:
     """Give a secret-bearing file to the container user and make it readable by nobody else."""
-    quoted = shlex.quote(str(path))
-    fixes: list[str] = []
+    restricted = True
     try:
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as f:
             info = os.fstat(f.fileno())
@@ -259,16 +258,17 @@ def _restrict_to_container_user(path: Path) -> None:
                 if info.st_uid != CONTAINER_UID:
                     os.fchown(f.fileno(), CONTAINER_UID, -1)
             except OSError:
-                fixes.append(f"sudo chown {CONTAINER_UID} {quoted}")
+                restricted = False
             try:
                 os.fchmod(f.fileno(), 0o600)
             except OSError:
-                fixes.append(f"sudo chmod 600 {quoted}")
+                restricted = False
     except PermissionError:
-        fixes.extend([f"sudo chown {CONTAINER_UID} {quoted}", f"sudo chmod 600 {quoted}"])
-    if fixes:
+        restricted = False
+    if not restricted:
         console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
-        console.print(f"  Run: {' && '.join(fixes)}", markup=False, highlight=False, soft_wrap=True)
+        # A sudo chown or chmod of this path would follow a link the container swaps in before it runs.
+        console.print("  Rerun this deploy.py command as root, which changes the file without following links.")
 
 
 def _protect_synapse_config(config_path: Path) -> None:
