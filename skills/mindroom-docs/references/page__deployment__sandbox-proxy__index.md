@@ -541,6 +541,7 @@ MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.
 Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+Only requesters on the runtime's own homeserver with a current-grammar localpart can self-grant, so a federated user cannot name another person's account.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
 The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
 

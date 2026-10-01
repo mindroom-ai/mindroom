@@ -11402,8 +11402,9 @@ Future persisted timestamps beyond the relevant cooldown or backstop window are 
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke that dispatches as the assigned agent's own internal turn.
 Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
+Items written before requesters were recorded are not poked either, and each is logged once with `todo_poke_requester_unrecorded`, until an update by someone allowed to address the assigned agent records them as that requester's work.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |
@@ -19716,6 +19717,7 @@ MindRoom only lists, edits, cancels, restores, or runs schedule state whose Matr
 Schedule state written by any other account, including a room admin or the internal `mindroom_user`, is ignored and logged, because a schedule's recorded creator is the requester its triggers run as.
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
+On a homeserver that does not, schedule state reads fail rather than trust a sender written inside the state content.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 
@@ -21714,7 +21716,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 | S21 | Isolated | [`legacy_attachments.py`][legacy-attachments] adopts in-place attachment records into verified retained copies; [`attachments.py`][attachments] keeps copying, record publication, and retention cleanup. |
-| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] pokes a todo item without `requester_id` as the assignee's own internal turn under its unchanged dedup key, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
+| S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] parses a todo item without `requester_id` but never pokes it, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 
 ## Configuration and credentials
@@ -24669,6 +24671,7 @@ MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.
 Agents on a shared worker scope never reach the grant API, so for them only `MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL` (plus the matching vault name prefix) is required; the API URL, admin token, and email domain stay required for requester-isolated scopes.
 
 The tool maps a requester's Matrix localpart to `localpart@EMAIL_DOMAIN` for the account grant.
+Only requesters on the runtime's own homeserver with a current-grammar localpart can self-grant, so a federated user cannot name another person's account.
 That mapping only decides *UI management access*; it never changes which worker reaches which vault, so the runtime secret boundary stays the per-worker vault scope plus the in-pod proxy-role token.
 The grant is idempotent and requires the user to have already registered and verified an Agent Vault account.
 
