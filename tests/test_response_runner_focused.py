@@ -2210,7 +2210,7 @@ async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
-async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
+async def test_claimed_approval_stop_and_suppression_are_not_relabeled_as_interruptions(
     tmp_path: Path,
     failure_reason: str,
 ) -> None:
@@ -2226,13 +2226,25 @@ async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
         is_visible_response=True,
     )
 
+    latest = "Streamed after approval.\n\n**[Response cancelled by user]**"
+
     with (
         patch.object(runner._approval_responses, "settle_failure", new=settle_failure),
         patch.object(runner, "_settle_interrupted_approval_recovery", new=restart_recovery),
+        patch.object(runner, "_approval_interruption_update", new=AsyncMock(return_value=latest)),
     ):
         await runner._settle_failed_approval_outcome(continuation, outcome)
 
-    settle_failure.assert_awaited_once_with(continuation, failure_reason)
+    if failure_reason == "cancelled_by_user":
+        # A Stop keeps what the continuation last showed and ends cancelled, without claiming an interruption.
+        settle_failure.assert_awaited_once_with(
+            continuation,
+            failure_reason,
+            visible_text=latest,
+            stream_status=STREAM_STATUS_CANCELLED,
+        )
+    else:
+        settle_failure.assert_awaited_once_with(continuation, failure_reason)
     restart_recovery.assert_not_awaited()
 
 
@@ -4962,6 +4974,11 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
             "mindroom.approval_response.approval_manager.get_approval_store",
             return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ),
+        # The reply's latest committed edit is the progress the continuation streamed.
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=AsyncMock(return_value="Checking the report."),
+        ),
     ):
         lifecycle = asyncio.create_task(
             runner._run_claimed_approval_lifecycle(
@@ -4975,9 +4992,10 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
         outcome = await lifecycle
 
     assert outcome.terminal_status == "cancelled"
+    # Stop keeps what the approved continuation streamed, not the text saved when the reply paused.
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**"),
+        (STREAM_STATUS_CANCELLED, "Checking the report.\n\n**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -9868,6 +9886,10 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
             "mindroom.approval_response.approval_manager.get_approval_store",
             return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ),
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=AsyncMock(return_value="Checking the report."),
+        ),
     ):
         lifecycle = asyncio.create_task(
             runner._run_claimed_approval_lifecycle(
@@ -9884,7 +9906,10 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
 
     assert outcome.terminal_status == "cancelled"
     assert landed == [STREAM_STATUS_CANCELLED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**")
+    assert _approval_reply_edits(client)[-1] == (
+        STREAM_STATUS_CANCELLED,
+        "Checking the report.\n\n**[Response cancelled by user]**",
+    )
 
 
 @dataclass

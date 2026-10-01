@@ -40,6 +40,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -112,6 +113,7 @@ from mindroom.runtime_shutdown import (
 from mindroom.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -1846,7 +1848,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
         outcome: FinalDeliveryOutcome,
     ) -> None:
-        """Preserve partial text for interrupted continuations, but not explicit stops."""
+        """Preserve the latest visible text when a continuation is interrupted or stopped."""
         reason = outcome.failure_reason or "Tool approval continuation failed safely."
         cancel_source = _approval_interruption_cancel_source(reason)
         if outcome.terminal_status == "cancelled" and cancel_source is not None:
@@ -1854,6 +1856,14 @@ class ResponseRunner:
                 continuation,
                 reason=cancel_failure_reason(cancel_source),
                 cancel_source=cancel_source,
+            )
+        elif outcome.resolved_cancel_source == "user_stop":
+            # The approved continuation may have streamed past its saved pause, so Stop keeps what is visible now.
+            await self._approval_responses.settle_failure(
+                continuation,
+                cancel_failure_reason("user_stop"),
+                visible_text=await self._approval_interruption_update(continuation, cancel_source="user_stop"),
+                stream_status=STREAM_STATUS_CANCELLED,
             )
         else:
             await self._approval_responses.settle_failure(continuation, reason)
@@ -1958,7 +1968,7 @@ class ResponseRunner:
         self,
         continuation: ApprovalContinuation,
         *,
-        cancel_source: Literal["sync_restart", "interrupted"],
+        cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
     ) -> str | None:
         """Read the latest committed edit and build its interruption terminalization."""
         try:
@@ -1982,7 +1992,11 @@ class ResponseRunner:
                 error=str(error),
             )
             return None
-        note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
+        note = {
+            "user_stop": CANCELLED_RESPONSE_NOTE,
+            "sync_restart": RESTART_INTERRUPTED_RESPONSE_NOTE,
+            "interrupted": INTERRUPTED_RESPONSE_NOTE,
+        }[cancel_source]
         return (
             body
             if body.rstrip().endswith(note)

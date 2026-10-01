@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "CANCELLED_RESPONSE_NOTE",
     "INTERRUPTED_RESPONSE_NOTE",
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
@@ -130,7 +131,8 @@ class StreamingLifecycleSuspensionError(Exception):
 
 
 PROGRESS_PLACEHOLDER = _PROGRESS_PLACEHOLDER
-_CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+CANCELLED_RESPONSE_NOTE = "**[Response cancelled by user]**"
+_CANCELLED_RESPONSE_NOTE = CANCELLED_RESPONSE_NOTE
 INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
