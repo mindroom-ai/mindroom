@@ -1736,6 +1736,45 @@ class TestSidecarResolution:
             assert not holds_unresolved_sidecar(page.messages[0].content)
             assert page.refresh_pending == ()
 
+    async def test_an_unreadable_edited_attachment_settles_with_the_notice_on_its_new_content(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An edit keeps its sidecar and visible preview in ``m.new_content``, and that is what settles.
+
+        The outer body of an edit is only a fallback for clients that do not
+        apply edits. The revision installed is the new content, so the notice
+        has to land on its body for the truncated edit not to pass for the
+        whole message, on this read and every later one.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/gone", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": preview["content"],
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        client = FakeClient(events={"$m": original}, relations={"$m": [edit]})
+        reader = await self._reader(alice, client)
+
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert [message.content for message in page.messages] == [
+                {
+                    "msgtype": "m.text",
+                    "body": "The edit beg [continues]\n\n[The rest of this message could not be loaded.]",
+                },
+            ]
+            assert page.refresh_pending == ()
+
     async def test_a_settled_unreadable_attachment_is_text_that_thread_media_never_downloads(
         self,
         alice: PrincipalStore,
