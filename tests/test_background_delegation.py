@@ -561,9 +561,21 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             still_pending = await current_parent.aget_run_output(result.run_id, session_id="parent")
             assert still_pending.metadata == saved_parent.metadata
             assert still_pending.requirements == saved_parent.requirements
-        result = await approve(result)
+        events: list[object] = []
+        result = await approve(result, on_event=events.append)
         assert result.status == RunStatus.completed
         assert side_effects == ([] if cancel_approval else ["written"] * (2 if duplicate_approval else 1))
+        # The approved child tool its card showed is settled in the parent's live trace.
+        settled = [
+            (bool(event.tool.tool_call_error), event.tool.result)
+            for event in events
+            if isinstance(event, ToolCallCompletedEvent) and event.tool.tool_name == "write_report"
+        ]
+        assert settled == [
+            (True, "Approval no longer applies: tool job is not awaiting this approval generation.")
+            if cancel_approval
+            else (False, "Report written"),
+        ]
         assert len(children) == (2 if duplicate_approval == "next_child" else 1)
         for completed_child in children:
             saved_job = await runtime.lookup(completed_child.delegation_id, owner=identity, depth=0)
@@ -642,7 +654,11 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     job = await runtime.lookup(child.delegation_id, owner=identity, depth=0)
                     assert job.status == "awaiting_approval"
                     config.tool_approval.rules = []
-                current_parent = parent(_call("job", "wait", action="wait", job_id=child.delegation_id))
+                # Like the reply join, retrieve only once the job is ready, with the join prompt's zero budget.
+                await wait_for_status(runtime, child.delegation_id, "awaiting_approval" if approval else "completed")
+                current_parent = parent(
+                    _call("job", "wait", action="wait", job_id=child.delegation_id, wait_timeout=0),
+                )
                 result = await drive(current_parent)
                 if not approval:
                     message = next(message.content for message in result.messages if message.tool_call_id == "wait")
