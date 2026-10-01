@@ -99,6 +99,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 1. On a config change, `ConfigReloadLifecycle.request_reload()` queues a debounced reload.
 2. On an MCP catalog change, the orchestrator returns immediately when no configured entity references that server, while still clearing the worker validation snapshot cache.
    The dependent-entity check runs again under the config update lock immediately before replacement.
+   Each server has at most one queued catalog replacement, and changes reported before it takes the config update lock are covered by it.
 3. Config reloads and MCP catalog replacements serialize behind one global admission owner; MCP replacements enter through `ConfigReloadLifecycle.apply_with_response_admission()`.
 4. Sampling the in-flight count and closing the shared `ResponseAdmissionGate` happen atomically, so a new response cannot race the decision to apply.
    The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
