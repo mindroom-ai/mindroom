@@ -1710,6 +1710,31 @@ def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_see
         assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
 
 
+def test_loading_state_over_the_per_user_cap_trims_and_persists_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """State saved with more connections per user than the cap is trimmed at startup and written back."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    state_path = tmp_path / "state.json"
+    started_at = provisioning._now_utc()
+    paired = []
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        for minutes in range(3):
+            moment = started_at + provisioning.timedelta(minutes=minutes)
+            monkeypatch.setattr(provisioning, "_now_utc", lambda moment=moment: moment)
+            paired.append(_pair_local_client(client))
+    oldest, kept, newest = paired
+
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+    assert {connection["id"] for connection in persisted["connections"]} == {kept["client_id"], newest["client_id"]}
+
+
 def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Approval near expiry extends the window so CLI can still claim credentials."""
     _patch_openid_auth(monkeypatch)

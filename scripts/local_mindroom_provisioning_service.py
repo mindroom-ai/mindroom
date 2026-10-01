@@ -586,6 +586,15 @@ def _clear_state_unlocked(state: ProvisioningState) -> None:
     state.rate_limit_buckets.clear()
 
 
+def _delete_excess_connections_unlocked(state: ProvisioningState, owned: list[LocalConnection], *, keep: int) -> bool:
+    """Delete one user's connections beyond ``keep``, revoked first, then least recently seen; return whether any went."""
+    eviction_order = sorted(owned, key=lambda connection: (connection.revoked_at is None, connection.last_seen_at))
+    excess = eviction_order[: max(0, len(owned) - keep)]
+    for connection in excess:
+        del state.connections[connection.id]
+    return bool(excess)
+
+
 def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -> None:
     _clear_state_unlocked(state)
     if not state_path.exists():
@@ -649,6 +658,16 @@ def _load_state_from_disk_unlocked(state: ProvisioningState, state_path: Path) -
             revoked_at=_from_utc_iso(item.get("revoked_at")),
         )
         state.connections[connection.id] = connection
+
+    connections_by_user: dict[str, list[LocalConnection]] = {}
+    for connection in state.connections.values():
+        connections_by_user.setdefault(connection.user_id, []).append(connection)
+    trimmed = [
+        _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER)
+        for owned in connections_by_user.values()
+    ]
+    if any(trimmed):
+        _persist_state_unlocked(state, state_path)
 
 
 def _normalize_pair_code(pair_code: str) -> str:
@@ -1077,14 +1096,10 @@ def _create_connection_unlocked(
 ) -> tuple[LocalConnection, str]:
     """Create a local connection and return it with its one-time plaintext secret.
 
-    Keeps the user within MAX_CONNECTIONS_PER_USER by deleting revoked connections first, then the least recently seen.
+    Keeps the user within MAX_CONNECTIONS_PER_USER, deleting one of their connections when they are at the limit.
     """
-    owned = sorted(
-        (connection for connection in state.connections.values() if connection.user_id == user_id),
-        key=lambda connection: (connection.revoked_at is None, connection.last_seen_at),
-    )
-    for stale in owned[: max(0, len(owned) - MAX_CONNECTIONS_PER_USER + 1)]:
-        del state.connections[stale.id]
+    owned = [connection for connection in state.connections.values() if connection.user_id == user_id]
+    _delete_excess_connections_unlocked(state, owned, keep=MAX_CONNECTIONS_PER_USER - 1)
     client_secret = secrets.token_urlsafe(32)
     connection = LocalConnection(
         id=secrets.token_urlsafe(18),
