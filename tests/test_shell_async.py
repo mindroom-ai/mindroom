@@ -925,6 +925,7 @@ def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: P
     assert "$MINDROOM_AGENT_WORKSPACE" in description
     assert "worker-routed execution maps `~` to the workspace" in description
     assert "local execution maps it to the host home" in description
+    assert description.count("Working method:") == 1
 
 
 def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path: Path) -> None:
@@ -951,12 +952,13 @@ def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path
 
 
 def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tmp_path: Path) -> None:
-    """Without a workspace there is no cwd contract to describe."""
+    """Without a workspace there is no cwd contract to describe, but the working method still applies."""
     tool = _get_toolkit(tmp_path)
 
     description = tool.async_functions["run_shell_command"].description
     assert description is not None
     assert "[cwd:" not in description
+    assert description.count("Working method:") == 1
 
 
 @pytest.mark.asyncio

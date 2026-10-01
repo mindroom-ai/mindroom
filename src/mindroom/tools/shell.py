@@ -107,9 +107,10 @@ _WORKSPACE_CWD_NOTE = (
 _WORKING_METHOD_NOTE = (
     "Working method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead "
     "of printing everything, but compute results over the full input. Match filters against the extracted field "
-    "value, not the whole line, and check them on a few sample records. Never concatenate several input files "
-    "raw: a file may lack its final newline, which merges its last word or record with the next file's first, so "
-    "process each file separately or add a separator, and test with files that lack a trailing newline. When "
+    "value, not the whole line, and check them on a few sample records. When combining the lines or words of "
+    "several text files, do not concatenate them raw: a file may lack its final newline, which merges its last "
+    "word or record with the next file's first, so process each file separately or add a separator, and test "
+    "with files that lack a trailing newline (joining split chunks of one file byte for byte is different). When "
     "only one value must change, replace just that span and keep every other byte, including comments and "
     "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
     "available tests, and recheck suspicious results such as a zero count."
