@@ -693,7 +693,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if existing_instance_id:
         customer_id = str(existing_instance_id)
         try:
-            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"}, status=expected_status)
+            updated_rows = update_instance(sb, customer_id, {"status": "provisioning"}, expected_status=expected_status)
             if not updated_rows and expected_status is not None:
                 raise HTTPException(status_code=409, detail="Instance is already being provisioned")  # noqa: TRY301
             if not updated_rows:
