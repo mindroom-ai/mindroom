@@ -53,9 +53,9 @@ class JobControl:
     shutdown: bool = False
 
     def cancel(self, *, shutdown: bool = False) -> None:
-        """Prevent tool entry even when the operation catches task cancellation."""
-        self.cancelled = True
-        self.shutdown = self.shutdown or shutdown
+        """Prevent tool entry even when the operation catches task cancellation; the first cause stands."""
+        if not self.cancelled:
+            self.cancelled, self.shutdown = True, shutdown
 
     def checkpoint(self) -> None:
         """Fail on cancellation without creating waiters on another event loop."""

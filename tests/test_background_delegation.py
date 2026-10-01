@@ -41,6 +41,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
+    JobControl,
     human_message_signal_context,
     job_owns_execution,
 )
@@ -1111,6 +1112,14 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
         if shutdown
         else ("cancelled", "Delegation cancelled.")
     )
+
+
+def test_shutdown_during_a_cancellation_keeps_it_a_cancellation() -> None:
+    """The first stop cause stands, so shutdown cannot relabel an explicit cancellation that is still unwinding."""
+    control = JobControl()
+    control.cancel()
+    control.cancel(shutdown=True)
+    assert (control.cancelled, control.shutdown) == (True, False)
 
 
 @pytest.mark.asyncio
