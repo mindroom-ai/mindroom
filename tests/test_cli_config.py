@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -384,6 +385,17 @@ class TestConfigInit:
         with pytest.raises(OSError, match="symbolic links"):
             config_cli._ensure_mind_workspace(tmp_path / "workspace", config_path=tmp_path / "config.yaml", force=False)
         assert outside.read_text(encoding="utf-8") == "operator file\n"
+
+    def test_mind_workspace_config_note_keeps_tools_notes_permissions(self, tmp_path: Path) -> None:
+        """Recording the config path rewrites TOOLS.md with the permissions its owner gave it."""
+        workspace = tmp_path / "workspace"
+        workspaces_module.ensure_workspace_template(workspace, template="mind")
+        (workspace / "TOOLS.md").chmod(0o600)
+
+        config_cli._ensure_mind_workspace(workspace, config_path=tmp_path / "config.yaml", force=False)
+
+        assert "- Active config file:" in (workspace / "TOOLS.md").read_text(encoding="utf-8")
+        assert stat.S_IMODE((workspace / "TOOLS.md").stat().st_mode) == 0o600
 
     def test_init_creates_agent_rescue_docs(self, tmp_path: Path) -> None:
         """Config init seeds AGENTS.md for repair agents."""

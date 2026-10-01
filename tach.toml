@@ -4156,6 +4156,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
     "mindroom.cli.owner",
