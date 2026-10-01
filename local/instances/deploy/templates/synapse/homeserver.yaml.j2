@@ -43,7 +43,7 @@ log_config: "/data/log.config"
 # Registration - closed, because the homeserver is public
 # MindRoom creates its accounts through the shared-secret admin API (MATRIX_REGISTRATION_SHARED_SECRET)
 enable_registration: false
-registration_shared_secret: "{{ registration_shared_secret }}"
+registration_shared_secret: {{ registration_shared_secret | tojson }}
 
 # Allow federation to private IPs for local development
 # By default Synapse blocks private IP ranges (10.x, 172.16.x, 192.168.x)

@@ -341,7 +341,11 @@ def test_runtime_public_url_is_overridable() -> None:
 def test_synapse_url_previews_block_private_networks() -> None:
     """URL previews must not let Synapse fetch loopback or container-network services."""
     template = Path("local/instances/deploy/templates/synapse/homeserver.yaml.j2").read_text()
-    rendered = deploy.Template(template).render(postgres_password="test", redis_password="test")  # noqa: S106
+    rendered = deploy.Template(template).render(
+        postgres_password="test",  # noqa: S106
+        redis_password="test",  # noqa: S106
+        registration_shared_secret="test",  # noqa: S106
+    )
     homeserver = yaml.safe_load(rendered)
 
     blacklist = homeserver["url_preview_ip_range_blacklist"]
@@ -1481,6 +1485,23 @@ def test_created_synapse_instance_refuses_self_registration(tmp_path: Path, monk
     address_limit = homeserver["rc_login"]["address"]
     assert address_limit["per_second"] >= 1000000
     assert address_limit["burst_count"] >= 1000000
+
+
+def test_synapse_registration_secret_round_trips_yaml_metacharacters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-chosen shared secret reaches Synapse unchanged, even with quotes and backslashes."""
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    deploy.ENV_DIR.mkdir()
+    shared_secret = 'a"b\\c'  # noqa: S105
+    (deploy.ENV_DIR / "prod.env").write_text(f"MATRIX_REGISTRATION_SHARED_SECRET={shared_secret}\n")
+    instance = _instance("prod", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+
+    deploy._setup_synapse_config(instance)
+
+    homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
+    assert homeserver["registration_shared_secret"] == shared_secret
 
 
 @pytest.mark.parametrize("env_generation", ["current", "older"])
