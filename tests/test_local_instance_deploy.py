@@ -1621,6 +1621,15 @@ def test_launch_tightens_an_existing_world_readable_env_file(tmp_path: Path) -> 
     assert _mode(env_file) == 0o600
 
 
+def _replace_example_password_hash(users_file: Path) -> None:
+    """Give the example account its own hash so launches pass the public-hash check."""
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    parts = database["users"]["admin"]["password"].split("$")
+    parts[4] = "MDEyMzQ1Njc4OWFiY2RlZg"
+    database["users"]["admin"]["password"] = "$".join(parts)
+    users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+
+
 @pytest.mark.usefixtures("world_readable_umask")
 @pytest.mark.parametrize("command", ["create", "start", "restart", "restart_all"])
 def test_authelia_directory_is_owner_only(
@@ -1638,14 +1647,32 @@ def test_authelia_directory_is_owner_only(
         assert "jwt_secret" in (authelia_dir / "configuration.yml").read_text()
     else:
         authelia_dir.chmod(0o755)
-        database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
-        parts = database["users"]["admin"]["password"].split("$")
-        parts[4] = "MDEyMzQ1Njc4OWFiY2RlZg"
-        database["users"]["admin"]["password"] = "$".join(parts)
-        users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+        _replace_example_password_hash(users_file)
         _launch_authelia(command)
 
     assert _mode(authelia_dir) == 0o700
+
+
+@pytest.mark.usefixtures("world_readable_umask")
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_launch_tightens_the_authelia_directory_compose_mounts(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """A DATA_DIR edited away from the registry's data directory still gets its mounted Authelia directory tightened."""
+    _instance, registry_users, _commands, _console = authelia_launch
+    mounted_users = tmp_path / "moved data" / "authelia" / "users_database.yml"
+    mounted_users.parent.mkdir(parents=True, mode=0o755)
+    shutil.copyfile(registry_users, mounted_users)
+    _replace_example_password_hash(mounted_users)
+    monkeypatch.setattr(deploy, "_resolve_authelia_users_file", lambda _instance: mounted_users)
+    monkeypatch.setattr(deploy.os, "fchown", lambda *_args: None)
+
+    _launch_authelia(command)
+
+    assert _mode(mounted_users.parent) == 0o700
 
 
 @pytest.mark.usefixtures("world_readable_umask")
