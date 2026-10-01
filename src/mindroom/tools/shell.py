@@ -101,6 +101,19 @@ _WORKSPACE_CWD_NOTE = (
     "`$MINDROOM_AGENT_WORKSPACE` for workspace files instead of `~`: worker-routed execution maps `~` "
     "to the workspace, while local execution maps it to the host home."
 )
+# Working method distilled from RRSI harness-search runs on graded terminal tasks, where these habits
+# removed the most common silent failures of a shell agent (wrong field matched, merged file boundaries,
+# reserialized edits, unverified renames, truncated reads).
+_WORKING_METHOD_NOTE = (
+    "Working method: inspect inputs first, sampling large files or outputs with head, tail, grep, or wc instead "
+    "of printing everything, but compute results over the full input. Match filters against the extracted field "
+    "value, not the whole line, and check them on a few sample records. Never concatenate several input files "
+    "raw: a file may lack its final newline, which merges its last word or record with the next file's first, so "
+    "process each file separately or add a separator, and test with files that lack a trailing newline. When "
+    "only one value must change, replace just that span and keep every other byte, including comments and "
+    "spacing. Afterwards verify the result: read outputs back, search for leftover old names after a rename, run "
+    "available tests, and recheck suspicious results such as a zero count."
+)
 
 # Module-level process registry shared across all MindRoomShellTools instances.
 # This ensures handles survive toolkit re-creation for local execution; when a
@@ -402,9 +415,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
-            if run_shell_command_function is not None and self.base_dir is not None:
-                run_shell_command_function.description = (
-                    f"{run_shell_command_function.description or ''}\n\n{_WORKSPACE_CWD_NOTE}"
+            if run_shell_command_function is not None:
+                notes = (
+                    (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE)
+                    if self.base_dir is not None
+                    else (_WORKING_METHOD_NOTE,)
+                )
+                run_shell_command_function.description = "\n\n".join(
+                    (run_shell_command_function.description or "", *notes),
                 ).strip()
             self._handle_namespace = _handle_namespace(runtime_paths=runtime_paths, base_dir=self.base_dir)
             self._shell_path_prepend = shell_path_prepend
