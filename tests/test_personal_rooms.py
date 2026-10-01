@@ -775,6 +775,37 @@ async def test_a_guest_the_agent_cannot_remove_settles_the_lobby_join_with_a_war
 
 
 @pytest.mark.asyncio
+async def test_a_refused_owner_invite_settles_the_lobby_join_and_reconciliation_retries_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requester whose server refuses the invite cannot make the router's lobby callback raise forever."""
+    server = MatrixServer()
+    router, _ = bots(tmp_path, server, monkeypatch)
+    lifecycle = router._personal_room_lifecycle
+    await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    server.fail_invite = True
+    room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
+
+    with capture_logs() as logs:
+        await _dispatch_member(router, room, _room_member_event())
+
+    failures = [entry for entry in logs if entry["event"] == "Personal-room onboarding trigger failed"]
+    assert [(entry["user_id"], entry["error"]) for entry in failures] == [
+        ("@alice:localhost", "Personal-room invite failed"),
+    ]
+    room_id = server.aliases["#personal_" + personal_room_digest("@alice:localhost")[:20] + ":localhost"]
+    assert server.membership(room_id, "@alice:localhost") is None
+
+    server.fail_invite = False
+    await lifecycle._reconcile()
+
+    assert server.membership(room_id, "@alice:localhost") == "invite"
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
 async def test_two_users_have_distinct_rooms_and_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Room lifecycle storage never reads or combines requester-private agent state."""
     server = MatrixServer()

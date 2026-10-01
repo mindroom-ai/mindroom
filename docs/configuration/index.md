@@ -1220,6 +1220,8 @@ Anyone else invited into a personal room MindRoom created is removed, with one n
 Reconciliation then logs the warning `Personal-room imported roster has unattested members` naming the unexpected members, and retries that room after doubling delays up to hourly; a configuration reload retries it at once.
 When an onboarding-room join or command meets a personal room that fails these checks, including an alias another account already holds, MindRoom logs `Personal-room validation failed for an onboarding trigger` and the onboarding room keeps serving everyone else; reconciliation, which runs at startup and after a configuration reload, retries that room after doubling delays up to hourly.
 A guest the agent is not permitted to remove, such as one the owner raised to the agent's power level, fails these checks the same way.
+Any other failure of an onboarding-room join or command, such as an invite the requester's server refuses, logs `Personal-room onboarding trigger failed`, and reconciliation retries it in the background after doubling delays up to hourly while the onboarding room keeps serving everyone else.
+A join or command that arrives before the personal-room agent connects stays pending until it does.
 Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
 Disabling onboarding does not delete rooms or revoke their existing access.
 
