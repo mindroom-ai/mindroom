@@ -651,12 +651,13 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         allowed = authorized
         recovered = await runner._recover_tool_job_source(request)
         if matching_source:
-            assert 'job_id="retained"' in recovered.prompt
+            note = recovered.system_enrichment_items[-1].text
+            assert 'job_id="retained"' in note
             assert not recovered.response_envelope.origin.may_answer_interactive_prompt
             assert recovered.response_envelope.source_event_id == request.response_envelope.source_event_id
             assert recovered.sources == request.sources
-            assert recovered.prompt != request.prompt
-            assert "Execution stopped; side effects may have happened." not in recovered.prompt
+            assert recovered.prompt == request.prompt
+            assert "Execution stopped; side effects may have happened." not in note
             if not authorized:
                 assert await runtime.outcome("retained", 0) is None
         else:

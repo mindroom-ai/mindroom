@@ -98,16 +98,29 @@ def background_wait_edit(
     )
 
 
-def completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
-    """Ask once for rich native result retrieval after the runtime has finished waiting."""
+def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
     calls = []
     for job in jobs:
         member = f" through member {job.owner.agent_name}" if job.owner.transport_agent_name else ""
         calls.append(f'job(action="wait", job_id="{job.job_id}", wait_timeout=0){member}')
+    return "; ".join(calls)
+
+
+def _completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
+    """Ask once for rich native result retrieval after the runtime has finished waiting."""
     return (
         "Internal runtime update, not a new human request. Background work has reached a result or approval boundary. "
         "Retrieve these stored outcomes once using the native job tool, then continue the conversation: "
-        + "; ".join(calls)
+        + _retrieval_calls(jobs)
+    )
+
+
+def recovered_jobs_note(jobs: Sequence[BackgroundJob]) -> str:
+    """Tell the re-run of an interrupted request to read, not repeat, the tool calls it already made."""
+    return (
+        "This request was interrupted before its reply finished, and the tool calls it already made became "
+        "background jobs that were not replayed. Do not repeat them; retrieve their stored outcomes once using "
+        "the native job tool, then finish the request: " + _retrieval_calls(jobs)
     )
 
 
@@ -151,7 +164,7 @@ def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelop
     return MessageEnvelope(
         source_event_id=completion_event_id(job),
         target=MessageTarget(owner.room_id, owner.resolved_thread_id, owner.resolved_thread_id, None, owner.session_id),
-        body=completion_prompt([job]),
+        body=_completion_prompt([job]),
         attachment_ids=(),
         mentioned_agents=(),
         agent_name=owner.recipient,
@@ -231,7 +244,7 @@ async def join_conversation_jobs(
                 return
         if ready and not human.is_set():
             attempted.update((job.job_id, job.generation) for job in ready)
-            yield _ReadyJobContinuation(completion_prompt(ready))
+            yield _ReadyJobContinuation(_completion_prompt(ready))
     finally:
         if signal is not None:
             signal.unsubscribe(human.set)

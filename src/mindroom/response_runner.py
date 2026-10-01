@@ -141,7 +141,7 @@ from mindroom.tool_jobs.completion import (
     background_wait_notice,
     completion_envelope,
     completion_origin,
-    completion_prompt,
+    recovered_jobs_note,
     reported_wait_presentation,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
@@ -3715,22 +3715,21 @@ class ResponseRunner:
         if not jobs:
             return request
         # The re-run replaces the interrupted reply like any recovered request; it only must not repeat accepted work.
-        prompt = (
-            "Previously accepted work belongs to this recovered response. Do not repeat its original tool calls. "
-            + completion_prompt(jobs)
-        )
+        # It is runtime work, not a new human message, so it neither releases waits nor answers interactive prompts.
         origin = replace(
             completion_origin(jobs[0], sender_id=self.deps.matrix_full_id),
             source_kind=envelope.source_kind,
         )
+        recovery = EnrichmentItem(
+            key="recovered_tool_jobs",
+            text=recovered_jobs_note(jobs),
+            persist=False,
+            minimal_required=True,
+        )
         return replace(
             request,
-            prompt=prompt,
-            model_prompt=prompt,
-            current_prompt_is_structured=False,
-            current_timestamp_ms=None,
-            payload_preparation=None,
-            response_envelope=replace(envelope, body=prompt, origin=origin),
+            system_enrichment_items=(*request.system_enrichment_items, recovery),
+            response_envelope=replace(envelope, origin=origin),
         )
 
     async def _admit_locked_turn(

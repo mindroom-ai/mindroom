@@ -114,8 +114,16 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
         await runtime.shutdown()
     assert (recovered.existing_event_id, recovered.existing_event_is_placeholder) == ("$response", True)
     assert recovered.sources == request.sources
-    assert "Do not repeat its original tool calls." in recovered.prompt
-    assert 'job_id="retained"' in recovered.prompt
+    # The re-run answers the original request; a nonpersistent note keeps it from repeating accepted work.
+    assert (recovered.prompt, recovered.model_prompt, recovered.payload_preparation) == (
+        request.prompt,
+        request.model_prompt,
+        request.payload_preparation,
+    )
+    (note,) = recovered.system_enrichment_items
+    assert (note.persist, note.minimal_required) == (False, True)
+    assert "Do not repeat them" in note.text
+    assert 'job_id="retained"' in note.text
     bot.client.room_get_event.assert_not_called()
 
 
