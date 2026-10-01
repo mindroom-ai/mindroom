@@ -29,6 +29,17 @@ def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest
         assert shown == ("Before." if not line.startswith("`") else text)
 
 
+def test_parse_and_format_interactive_handles_many_unclosed_openers() -> None:
+    """Thousands of interactive openers that never close parse in linear time, and the closed block still renders."""
+    block = '```interactive\n{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}\n```\n'
+    for opener_count in (4_000, 9_000):
+        text = block + "```interactive\n" * opener_count
+        with cpu_budget(0.5):
+            response = interactive.parse_and_format_interactive(text, extract_mapping=True)
+        assert response.interactive_metadata is not None
+        assert response.formatted_text.startswith("Pick one\n")
+
+
 @pytest.fixture
 def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""

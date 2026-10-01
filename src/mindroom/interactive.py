@@ -149,14 +149,18 @@ class _InteractiveResponse:
 # Constants
 # Match interactive code blocks
 _INTERACTIVE_MARKERS = frozenset({"interactive", "interactive json"})
-_INTERACTIVE_PATTERN = (
+_INTERACTIVE_OPENER_PATTERN = re.compile(
     r"```[ \t]*(?:"
     r"interactive(?:[ \t]+json)?[ \t]*\r?\n"
     r"|"
     r"\r?\n[ \t]*interactive(?:[ \t]+json)?[ \t]*\r?\n"
-    r")(.*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)"
+    r")",
+    re.IGNORECASE,
 )
-_INTERACTIVE_PATTERN_FLAGS = re.DOTALL | re.IGNORECASE
+_INTERACTIVE_PATTERN = re.compile(
+    rf"{_INTERACTIVE_OPENER_PATTERN.pattern}(.*?)\r?\n[ \t]*```[ \t]*(?=\r?\n|$)",
+    re.DOTALL | re.IGNORECASE,
+)
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
 _DEFAULT_QUESTION = "Please choose an option:"
@@ -338,6 +342,23 @@ def _first_valid_interactive_payload(
     return None
 
 
+def _interactive_block_matches(text: str) -> list[re.Match[str]]:
+    """Return every interactive block in order, in time linear in the text length.
+
+    A block ends at the first closing fence after its opener, so once one opener has no closing fence,
+    no later opener has one either; stopping there keeps each unclosed opener from rescanning the text.
+    """
+    matches: list[re.Match[str]] = []
+    position = 0
+    while (opener := _INTERACTIVE_OPENER_PATTERN.search(text, position)) is not None:
+        match = _INTERACTIVE_PATTERN.match(text, opener.start())
+        if match is None:
+            break
+        matches.append(match)
+        position = match.end()
+    return matches
+
+
 def hide_unfinished_interactive(formatted_text: str) -> str:
     """Cut an interactive block that is still streaming, so its partial JSON stays out of the message.
 
@@ -385,7 +406,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         The formatted response and any prompt metadata extracted from it.
 
     """
-    matches = list(re.finditer(_INTERACTIVE_PATTERN, response_text, _INTERACTIVE_PATTERN_FLAGS))
+    matches = _interactive_block_matches(response_text)
 
     if not matches:
         if _should_warn_unparsed_interactive(response_text):
