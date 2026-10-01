@@ -634,7 +634,7 @@ async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_p
     [
         ("private", "classic", None),
         ("extra_member", "classic", "private room"),
-        ("failed_refresh", "classic", "private room"),
+        ("failed_refresh", "classic", "try again"),
         ("unseen_invite", "classic", "private room"),
         # Sliding sync loads members lazily, so a refresh without the server's counts proves nothing about invites.
         ("private", "sliding", "private room"),

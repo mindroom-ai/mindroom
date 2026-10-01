@@ -443,6 +443,7 @@ Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
 It also rejects `!desktop` when it cannot confirm the room's complete membership, including invites the server counts but the bot has not seen.
+If the bot could not look up the room's membership, the reply asks you to try again in a moment instead.
 The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
 For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
