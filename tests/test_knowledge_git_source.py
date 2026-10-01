@@ -2081,6 +2081,40 @@ async def test_hydrate_git_lfs_worktree_ignores_repository_lfs_endpoint(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git-lfs") is None, reason="git-lfs is required")
+@pytest.mark.parametrize("bare", [pytest.param(True, id="bare"), pytest.param(False, id="non-bare")])
+async def test_lfs_sync_hydrates_from_absolute_local_path_remote(tmp_path: Path, bare: bool) -> None:
+    """A remote given as an absolute local path serves its LFS objects to hydration."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+    _git(remote_work, "init", "-b", "main")
+    _git(remote_work, "config", "user.email", "tests@example.com")
+    _git(remote_work, "config", "user.name", "MindRoom Tests")
+    _git(remote_work, "config", "commit.gpgsign", "false")
+    _git(remote_work, "lfs", "install", "--local", "--skip-repo")
+    _git(remote_work, "lfs", "track", "*.md")
+    (remote_work / "doc.md").write_text("large file content", encoding="utf-8")
+    _git(remote_work, "add", ".gitattributes", "doc.md")
+    _git(remote_work, "commit", "-m", "initial")
+    remote = remote_work
+    if bare:
+        remote = tmp_path / "remote.git"
+        _git(tmp_path, "clone", "--bare", str(remote_work), str(remote))
+        shutil.copytree(remote_work / ".git" / "lfs" / "objects", remote / "lfs" / "objects")
+    docs_path = tmp_path / "docs"
+    config = _config(
+        tmp_path,
+        bases={"docs": docs_path},
+        agent_bases=["docs"],
+        git_configs={"docs": KnowledgeGitConfig(repo_url=str(remote), branch="main", lfs=True)},
+    )
+
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert (docs_path / "doc.md").read_text(encoding="utf-8") == "large file content"
+
+
+@pytest.mark.asyncio
 async def test_ensure_git_lfs_available_raises_clear_runtime_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

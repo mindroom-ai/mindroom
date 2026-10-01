@@ -272,11 +272,13 @@ _SCP_STYLE_REMOTE_URL: re.Pattern[str] = re.compile(
 def _remote_lfs_url(remote_url: str) -> str:
     """Return the LFS endpoint git-lfs derives from a remote URL when no LFS URL is configured.
 
-    SSH and ``file:`` remotes are returned unchanged: git-lfs takes the repository path from them, and an SSH
-    server supplies the transfer URL itself.
+    SSH, ``file:``, and absolute local path remotes are returned unchanged: git-lfs takes the repository path
+    from local ones, and an SSH server supplies the transfer URL itself.
     """
-    if urlparse(remote_url).scheme.lower() in {"file", "ssh", "git+ssh", "ssh+git"} or _SCP_STYLE_REMOTE_URL.match(
-        remote_url,
+    if (
+        remote_url.startswith("/")
+        or urlparse(remote_url).scheme.lower() in {"file", "ssh", "git+ssh", "ssh+git"}
+        or _SCP_STYLE_REMOTE_URL.match(remote_url)
     ):
         return remote_url
     return f"{remote_url.removesuffix('/').removesuffix('.git')}.git/info/lfs"
