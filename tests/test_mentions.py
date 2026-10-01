@@ -14,7 +14,11 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix import mentions as mentions_module
-from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from mindroom.matrix.mentions import (
+    format_message_with_mentions,
+    parse_mentions_in_text,
+    resolve_mentioned_user_ids_from_text,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.cpu_budget_helpers import cpu_budget
@@ -162,6 +166,16 @@ class TestMentionParsing:
 
         assert len(validated) <= 255
         assert max(map(len, validated)) <= 255
+
+    def test_resolving_a_2_mib_sidecar_body_stays_within_a_cpu_budget(self) -> None:
+        """A resolved long-text body full of mention-like tokens costs a bounded scan, and real mentions still resolve."""
+        config = _make_config(_default_runtime_paths())
+        runtime_paths = _runtime_paths_for(config)
+        for token in ("@" + "a" * 100 + ":!" + "b" * 150, "@a"):
+            body = "@calculator please ask @alice:example.org " + " ".join([token] * (2 * 1024 * 1024 // len(token)))
+            with cpu_budget(0.2):
+                user_ids = resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
+            assert user_ids == ["@actual_calculator:localhost", "@alice:example.org"]
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""

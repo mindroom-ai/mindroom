@@ -26,6 +26,12 @@ _ENTITY_MENTION_PATTERN = re.compile(r"(?<![\w])@(?P<localpart>\w+)(?::[^\s]+)?"
 _FULL_MATRIX_ID_CANDIDATE_PATTERN = re.compile(r"(?<![-A-Za-z0-9._=/+])@\S+")
 # Matrix user IDs are at most 255 bytes, so no longer prefix of a token can be one.
 _MAX_MATRIX_USER_ID_LENGTH = 255
+# The longest token prefix shaped like a current-grammar user ID, so each token is validated once.
+_MATRIX_USER_ID_PREFIX_PATTERN = re.compile(
+    r"@[a-z0-9._=/+-]+:(?:\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*)(?::[0-9]{1,5})?",
+)
+# A Matrix event holds at most 64 KiB, so only a resolved long-text sidecar body is longer.
+_MAX_INBOUND_MENTION_SCAN_CHARS = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -93,8 +99,8 @@ def resolve_mentioned_user_ids_from_text(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[str]:
-    """Resolve visible text mention tokens to Matrix user IDs."""
-    tokens = _scan_mention_tokens(text)
+    """Resolve visible text mention tokens to Matrix user IDs, scanning at most one Matrix event's worth of text."""
+    tokens = _scan_mention_tokens(text[:_MAX_INBOUND_MENTION_SCAN_CHARS])
     if not tokens:
         return []
 
@@ -330,12 +336,10 @@ def _literal_user_resolution(user_id: str) -> _MentionResolution:
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
     """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
-    token = token[:_MAX_MATRIX_USER_ID_LENGTH]
-    for end in range(len(token), 0, -1):
-        candidate = token[:end]
-        if _is_valid_explicit_matrix_user_id(candidate):
-            return candidate
-    return None
+    match = _MATRIX_USER_ID_PREFIX_PATTERN.match(token[:_MAX_MATRIX_USER_ID_LENGTH])
+    if match is None or not _is_valid_explicit_matrix_user_id(match.group(0)):
+        return None
+    return match.group(0)
 
 
 def _is_valid_explicit_matrix_user_id(candidate: str) -> bool:
