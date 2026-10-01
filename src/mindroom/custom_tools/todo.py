@@ -161,6 +161,18 @@ class _TemplateRoot:
         return payload.decode("utf-8")
 
 
+@dataclass(slots=True)
+class _TemplateReadBudget:
+    """Template text one `apply_template` call may still read, shared by every sub-template it expands."""
+
+    remaining_bytes: int = _MAX_TEMPLATE_SIZE
+
+    def charge(self, path: Path, text: str) -> None:
+        self.remaining_bytes -= len(text.encode("utf-8"))
+        if self.remaining_bytes < 0:
+            raise _template_value_error(path, f"templates read by one call exceed {_MAX_TEMPLATE_SIZE} bytes")
+
+
 @dataclass(frozen=True, slots=True)
 class _ExpandedTemplateIndex:
     """Expanded roots and terminal leaves for one authored template item."""
@@ -434,6 +446,7 @@ def _render_template_definition(
     params: dict[str, Any],
     *,
     template_roots: Sequence[_TemplateRoot],
+    read_budget: _TemplateReadBudget,
     depth: int = 1,
     max_todos: int = _MAX_TEMPLATE_TODOS,
 ) -> dict[str, Any]:
@@ -443,6 +456,7 @@ def _render_template_definition(
 
     path, template_root = _resolve_template_path(name, template_roots)
     raw_text = template_root.read_text(path)
+    read_budget.charge(path, raw_text)
     raw_template = _load_template_document(path, raw_text)
     _validate_template_document(raw_template, path)
     schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
@@ -462,6 +476,7 @@ def _render_template_definition(
     expanded_todos = _expand_template_todos(
         rendered_todos,
         template_roots=template_roots,
+        read_budget=read_budget,
         depth=depth,
         max_todos=max_todos,
     )
@@ -480,6 +495,7 @@ def _expand_template_todos(
     todos: list[dict[str, Any]],
     *,
     template_roots: Sequence[_TemplateRoot],
+    read_budget: _TemplateReadBudget,
     depth: int,
     max_todos: int,
 ) -> list[dict[str, Any]]:
@@ -509,6 +525,7 @@ def _expand_template_todos(
             entry["sub_template"],
             entry.get("params", {}),
             template_roots=template_roots,
+            read_budget=read_budget,
             depth=depth + 1,
             max_todos=max_todos - len(expanded),
         )
@@ -962,7 +979,12 @@ class TodoTools(Toolkit):
     ) -> str:
         """Apply a named todo template to the current thread's work plan."""
         template_roots = _visible_template_roots(agent)
-        rendered_template = _render_template_definition(name, params, template_roots=template_roots)
+        rendered_template = _render_template_definition(
+            name,
+            params,
+            template_roots=template_roots,
+            read_budget=_TemplateReadBudget(),
+        )
         if dry_run:
             return _format_template_preview(
                 rendered_template["name"],

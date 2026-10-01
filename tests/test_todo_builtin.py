@@ -590,6 +590,15 @@ def _template_text(name: str, todos: str, *, description: str = "Workspace templ
             "at most 100 todos",
             id="fan-out",
         ),
+        pytest.param(
+            {
+                "hostile": _template_text("hostile", "  - sub_template: leaf\n" * 40),
+                "leaf": _template_text("leaf", "  - title: Leaf\n") + "#" * 2048 + "\n",
+            },
+            {},
+            "templates read by one call exceed",
+            id="combined-size",
+        ),
     ],
 )
 def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
