@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import sqlite3
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -215,6 +216,28 @@ async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path
 
     assert len(_usage(healthy)) == 3
     assert _skipped_paths(logs) == [str(unreadable)]
+
+
+@pytest.mark.asyncio
+async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_path: Path) -> None:
+    """Startup waits about a second on a store worker code keeps locked, and its owner still imports it later."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    locked = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    holder = sqlite3.connect(locked, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        started = time.monotonic()
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+        elapsed = time.monotonic() - started
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    assert elapsed < 10
+    assert _skipped_paths(logs) == [str(locked)]
+    legacy_usage_storage.migrate_usage_database(locked, "code_sessions")
+    assert len(_usage(locked)) == 3
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:

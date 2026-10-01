@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Startup gives up on a locked store after this long; the store's owner waits the full timeout.
+_STARTUP_LOCK_TIMEOUT_SECONDS = 1.0
+
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
 # Legacy format: Requests contain only created_at and metrics.
@@ -39,11 +42,11 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, session_table: str) -> None:
+def migrate_usage_database(path: Path, session_table: str, *, timeout: float = 30) -> None:
     """Seed an existing database once; publication and all imported records commit together."""
     if not path.is_file():
         return
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=30)
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=rw", uri=True, timeout=timeout)
     try:
         if not _needs_migration(connection, session_table):
             return
@@ -132,10 +135,10 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
         path = session_dir / f"{directory.name}.db"
         try:
             if not session_dir.is_symlink() and not path.is_symlink():
-                migrate_usage_database(path, f"{directory.name}_sessions")
+                migrate_usage_database(path, f"{directory.name}_sessions", timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
         except (sqlite3.Error, OSError) as error:
-            # Worker code can write session databases, so one unreadable store must not stop startup.
-            # Its owner retries the import when it next opens the store.
+            # Worker code can write session databases, so one unreadable or locked store must not stop startup.
+            # Its owner retries the import with the full lock timeout when it next opens the store.
             logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
 
 
