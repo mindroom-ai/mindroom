@@ -177,6 +177,21 @@ class TestMentionParsing:
                 user_ids = resolve_mentioned_user_ids_from_text(body, config, runtime_paths)
             assert user_ids == ["@actual_calculator:localhost", "@alice:example.org"]
 
+    def test_resolving_an_overlong_body_drops_the_token_cut_by_the_scan_limit(self) -> None:
+        """A mention straddling the scan limit is dropped instead of resolving its cut-off prefix."""
+        config = _make_config(_default_runtime_paths())
+        runtime_paths = _runtime_paths_for(config)
+        limit = mentions_module._MAX_INBOUND_MENTION_SCAN_CHARS
+        for mention, kept_length, expected_user_ids in (
+            ("@calculator_notes", len("@calculator"), ["@actual_email:localhost"]),
+            ("@alice:example.org", len("@alice:example.o"), ["@actual_email:localhost"]),
+            ("@calculator ", len("@calculator"), ["@actual_email:localhost", "@actual_calculator:localhost"]),
+        ):
+            filler = "@email " + "x" * (limit - len("@email ") - kept_length - 1) + " "
+            body = filler + mention + " trailing"
+            assert body[:limit] == filler + mention[:kept_length]
+            assert resolve_mentioned_user_ids_from_text(body, config, runtime_paths) == expected_user_ids
+
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""
         config = _make_config(_default_runtime_paths())

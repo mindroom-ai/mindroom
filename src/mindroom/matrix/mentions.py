@@ -100,7 +100,7 @@ def resolve_mentioned_user_ids_from_text(
     runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Resolve visible text mention tokens to Matrix user IDs, scanning at most one Matrix event's worth of text."""
-    tokens = _scan_mention_tokens(text[:_MAX_INBOUND_MENTION_SCAN_CHARS])
+    tokens = _scan_mention_tokens(_inbound_mention_scan_text(text))
     if not tokens:
         return []
 
@@ -112,6 +112,18 @@ def resolve_mentioned_user_ids_from_text(
         allow_generated_agent_localparts=False,
     )
     return _mentioned_user_ids_from_replacements(replacements)
+
+
+def _inbound_mention_scan_text(text: str) -> str:
+    """Return at most one Matrix event's worth of text, without a token the limit would cut."""
+    if len(text) <= _MAX_INBOUND_MENTION_SCAN_CHARS:
+        return text
+    scan_text = text[:_MAX_INBOUND_MENTION_SCAN_CHARS]
+    if scan_text[-1].isspace() or text[_MAX_INBOUND_MENTION_SCAN_CHARS].isspace():
+        return scan_text
+    # Drop the cut token so a longer mention never resolves as its prefix.
+    cut_token = scan_text.rsplit(maxsplit=1)[-1]
+    return scan_text[: len(scan_text) - len(cut_token)]
 
 
 def format_entity_mention(
