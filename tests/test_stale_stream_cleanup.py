@@ -63,6 +63,7 @@ from tests.conftest import (
     delivered_matrix_side_effect,
     make_matrix_client_mock,
     runtime_paths_for,
+    serve_media_from_download,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -1667,6 +1668,7 @@ async def test_cleanup_uses_visible_content_for_fetched_edit_events(tmp_path: Pa
     config = _make_config(tmp_path)
     other_agent_user_id = entity_ids(config, runtime_paths_for(config))["other"].full_id
     client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(client)
     client.room_messages.return_value = _room_messages_response(
         _make_message_event(
             event_id="$original",
@@ -2516,6 +2518,7 @@ async def test_cleanup_preserves_tool_trace_from_v2_sidecar(tmp_path: Path) -> N
     """Cleanup should hydrate a v2 sidecar and preserve metadata that only exists there."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(client)
     client.rooms = _joined_room_cache()
 
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "web_search"}]}
@@ -2633,6 +2636,7 @@ async def test_cleanup_preserves_sidecar_tool_trace_from_edit_chain(tmp_path: Pa
     """For edit-based sidecars, tool_trace should come from the latest edit sidecar."""
     config = _make_config(tmp_path)
     client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(client)
     client.rooms = _joined_room_cache()
 
     sidecar_tool_trace = {"version": 1, "events": [{"tool": "shell"}, {"tool": "file"}]}

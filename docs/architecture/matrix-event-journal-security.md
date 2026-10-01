@@ -115,6 +115,12 @@ There is no plaintext table keyed by media URL, and no runtime-wide process-loca
 
 Resolved content carries no sidecar metadata of its own, so storing the resolution is what clears the debt, and nothing has to remember to clear it separately.
 
+The file is downloaded as a stream that stops at 2 MiB, so a reference to a larger file never holds more than that in memory.
+
+A file that cannot be read settles the debt with the preview, a notice that the rest of the message could not be loaded, and no sidecar reference, so no later read downloads it again.
+
+Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
+
 ## Edits
 
 An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.

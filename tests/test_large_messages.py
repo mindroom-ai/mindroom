@@ -42,6 +42,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_content import extract_and_resolve_message
 from mindroom.tool_system.events import _TOOL_TRACE_KEY
+from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 
 _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
@@ -1445,6 +1446,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         rooms: dict = {}  # noqa: RUF012
         uploaded_data: bytes | None = None
         user_id = "@mindroom_agent:localhost"
+        access_token = TEST_ACCESS_TOKEN
 
         async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
             data_provider = kwargs.get("data_provider")
@@ -1460,6 +1462,9 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
             response = MagicMock(spec=nio.DownloadResponse)
             response.body = self.uploaded_data
             return response
+
+        async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+            return await serve_media_download(self.download, path)
 
     client = MockClient()
     content = {

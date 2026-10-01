@@ -72,6 +72,7 @@ from tests.conftest import (
     replace_turn_controller_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
+    serve_media_from_download,
     sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -1281,6 +1282,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     """Inbound dispatch should use the canonical sidecar body everywhere downstream."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(bot.client)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
     bot.client.download = AsyncMock(

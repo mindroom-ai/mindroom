@@ -41,6 +41,8 @@ from mindroom.matrix.conversation_reads import (
     projected_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -192,6 +194,8 @@ class FakeClient:
             raise nio.EncryptionError(msg)
         return parse(cleartext)
 
+    access_token: str = TEST_ACCESS_TOKEN
+
     async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
         """Return one stored attachment."""
         self.downloads.append(mxc)
@@ -199,6 +203,10 @@ class FakeClient:
         if payload is None:
             return nio.DownloadError("M_NOT_FOUND")
         return nio.DownloadResponse(payload.encode(), "application/json", None)
+
+    async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
+        """Serve the streamed media requests sidecar resolution sends."""
+        return await serve_media_download(self.download, path)
 
     async def room_get_event(
         self,
@@ -1699,28 +1707,32 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
-    async def test_an_unreachable_attachment_keeps_the_read_incomplete(
+    async def test_an_unreadable_attachment_is_marked_incomplete_and_never_fetched_again(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """A failed fetch must not settle the debt with the preview.
+        """A failed fetch settles the message as a preview that says it is incomplete.
 
-        This is the direction that matters. Installing the preview here would
-        clear the refresh token, and the truncated body would then look exactly
-        like content that had been resolved -- permanently, because nothing
-        would ever ask again. Failing loudly leaves it repairable.
+        Anyone who can post can attach a sidecar that never resolves. Keeping
+        the debt would download it again on every strict read and fail every
+        one of them, so the conversation could never be read again. The notice
+        keeps the truncated body from passing for the whole message.
         """
         source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
         await admit_all(alice, [source])
         client = FakeClient(events={"$long": source})
         reader = await self._reader(alice, client)
 
-        with pytest.raises(_StaleConversationError):
-            await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
-        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
-        assert page.messages == ()
-        assert [request.logical_event_id for request in page.refresh_pending] == ["$long"]
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert [message.content["body"] for message in page.messages] == [
+                "The answer beg [continues]\n\n[The rest of this message could not be loaded.]",
+            ]
+            assert not holds_unresolved_sidecar(page.messages[0].content)
+            assert page.refresh_pending == ()
 
 
 class TestPointRefetch:
@@ -2458,12 +2470,11 @@ class TestRefreshStarvation:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        with pytest.raises(_StaleConversationError):
-            await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
+        await reader.read_strict(room_id=ROOM, thread_id=None, limit=100)
 
         assert "mxc://s/wanted" in client.downloads, "the requested message was never attempted"
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=100)
-        assert [message.content["body"] for message in page.messages] == ["the older answer"]
+        assert page.messages[0].content["body"] == "the older answer"
 
 
 class TestLatestSenderMessage:

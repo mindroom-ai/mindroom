@@ -28,6 +28,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_relation_lookup,
     runtime_paths_for,
+    serve_media_from_download,
     test_runtime_paths,
 )
 
@@ -662,6 +663,7 @@ async def test_threads_preview_resolves_large_file_root_through_canonical_visibl
     """Threads should hydrate large streamed m.file roots before building previews."""
     tool = MatrixRoomTools()
     ctx = _make_context()
+    serve_media_from_download(ctx.client)
     ctx.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,
@@ -1136,6 +1138,7 @@ async def test_threads_resolves_large_bundled_replacement_through_canonical_visi
     """Threads should hydrate large bundled latest edits before building previews."""
     tool = MatrixRoomTools()
     ctx = _make_context()
+    serve_media_from_download(ctx.client)
     ctx.client.download = AsyncMock(
         return_value=MagicMock(
             spec=nio.DownloadResponse,

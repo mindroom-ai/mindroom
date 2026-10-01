@@ -52,6 +52,7 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     replace_turn_controller_deps,
     runtime_paths_for,
+    serve_media_from_download,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
@@ -391,6 +392,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
+    serve_media_from_download(bot.client)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
         return_value=MagicMock(

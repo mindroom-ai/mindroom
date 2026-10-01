@@ -53,3 +53,12 @@ def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
     false. Nothing has to remember to clear a flag.
     """
     return sidecar_content_to_resolve(content) is not None
+
+
+def without_sidecar_reference(content: Mapping[str, Any]) -> dict[str, Any]:
+    """Return content that no longer points at a long-text sidecar, in either layer an edit may carry it."""
+    stripped = {key: value for key, value in content.items() if key != _LONG_TEXT_METADATA_KEY}
+    new_content = stripped.get("m.new_content")
+    if isinstance(new_content, Mapping):
+        stripped["m.new_content"] = {key: value for key, value in new_content.items() if key != _LONG_TEXT_METADATA_KEY}
+    return stripped
