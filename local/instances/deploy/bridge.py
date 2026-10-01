@@ -301,7 +301,7 @@ def _create_bridge_docker_compose(
 def _generate_bridge_config(bridge: BridgeConfig, credentials: dict[str, Any], admin_user_id: str | None) -> Path:
     """Generate bridge configuration from template.
 
-    The deploy templates allow open registration, so only the operator-designated admin gets more than relay access.
+    Instances from older deploy templates allow open registration, so only the chosen admin gets more than relay access.
     """
     config_file = Path(bridge.data_dir) / "data" / "config.yaml"
     config_file.parent.mkdir(parents=True, exist_ok=True)

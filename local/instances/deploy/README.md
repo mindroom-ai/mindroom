@@ -208,6 +208,13 @@ nano envs/test.env  # Add API keys
 - **Command**: (default, no flag needed)
 - **Features**: Just MindRoom on the bundled dashboard/API port
 
+### Matrix Registration
+Both homeservers refuse anonymous self-registration, because the instance publishes them on the host's interfaces and through Traefik.
+MindRoom registers its own accounts with `MATRIX_REGISTRATION_SHARED_SECRET` on Synapse and `MATRIX_REGISTRATION_TOKEN` on Tuwunel, which `create` writes to `envs/{instance_name}.env`.
+Synapse also keeps its default registration rate limit and limits login attempts.
+Create your own Synapse account with `docker exec -it {instance_name}-synapse register_new_matrix_user -c /data/homeserver.yaml http://localhost:8008`.
+On Tuwunel, register in a Matrix client with `MATRIX_REGISTRATION_TOKEN` as the registration token; anyone you give that token can register too.
+
 ## Testing Your Matrix Server
 
 After starting an instance with Matrix:
@@ -357,20 +364,26 @@ MINDROOM_SANDBOX_PROXY_TOKEN=...
 # Synapse only
 POSTGRES_PASSWORD=...
 REDIS_PASSWORD=...
+MATRIX_REGISTRATION_SHARED_SECRET=...
+# Tuwunel only
+MATRIX_REGISTRATION_TOKEN=...
 ```
 
-`create` generates these values, and Synapse's `homeserver.yaml` receives the same PostgreSQL and Redis passwords.
+`create` generates these values, and Synapse's `homeserver.yaml` receives the same PostgreSQL and Redis passwords and registration shared secret.
 Without `MINDROOM_SANDBOX_PROXY_TOKEN` the sandbox runner rejects every tool call, and without `MINDROOM_API_KEY` the MindRoom API accepts unauthenticated requests.
 
 ### Upgrading Instances Created by Older Versions
 
-No manual steps are required.
+No manual steps are required, except closing registration on Synapse instances as described below.
 `start` and `restart` add a random `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN` to an env file that lacks them and print the file path, after which the dashboard asks for that key.
+On Tuwunel instances they also add a random `MATRIX_REGISTRATION_TOKEN`, after which registration requires that token.
 Compose then creates `sandbox-network` and the relay, recreates the runner on the new network, and reuses the existing `mindroom-network`, so attached bridges stay connected.
 Synapse instances keep their existing PostgreSQL password and unauthenticated Redis, which the runner can no longer reach.
 To enable Redis authentication on such an instance anyway, set one new value as `REDIS_PASSWORD` in the env file and as `redis.password` in `{DATA_DIR}/synapse/homeserver.yaml`, then restart it.
-When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add random values for both `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN` yourself.
-Without the token the runner rejects every tool call, and without the API key tool code can call the MindRoom API through its published host port.
+Synapse instances also keep the open registration of their existing `homeserver.yaml`.
+To close it, set `enable_registration: false`, remove `enable_registration_without_verification`, and add `registration_shared_secret` with one new random value in `{DATA_DIR}/synapse/homeserver.yaml`, set the same value as `MATRIX_REGISTRATION_SHARED_SECRET` in the env file, then restart the instance.
+When you run Docker Compose directly with an older env file, run `./deploy.py start <name>` once or add random values for both `MINDROOM_API_KEY` and `MINDROOM_SANDBOX_PROXY_TOKEN`, and for Tuwunel `MATRIX_REGISTRATION_TOKEN`, yourself.
+Without the token the runner rejects every tool call, without the API key tool code can call the MindRoom API through its published host port, and without a registration token Tuwunel refuses to start.
 
 ## Examples
 
@@ -403,6 +416,8 @@ nano envs/prod.env
 # The provided compose files use Traefik labels, not nginx configuration.
 ./deploy.py list
 ```
+
+The homeserver refuses anonymous self-registration; create your own account as described in [Matrix Registration](#matrix-registration).
 
 ### Testing Setup
 ```bash
