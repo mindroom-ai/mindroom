@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Startup gives up on a locked store after this long; the store's owner waits the full timeout.
-_STARTUP_LOCK_TIMEOUT_SECONDS = 1.0
+# Startup skips a locked store at once; the store's owner retries it with the full timeout.
+_STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
 
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
