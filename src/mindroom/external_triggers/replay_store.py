@@ -15,6 +15,9 @@ from mindroom.file_locks import advisory_file_lock
 if TYPE_CHECKING:
     from pathlib import Path
 
+# Every claim rewrites the shared replay file, so one trigger must not grow it without bound.
+_MAX_LIVE_CLAIMS_PER_SCOPE = 10_000
+
 
 class ExternalTriggerEventClaim(StrEnum):
     """State returned when claiming an external trigger event id."""
@@ -34,6 +37,10 @@ class ExternalTriggerThreadKeyClaim(StrEnum):
 
 class ExternalTriggerReplayStoreError(RuntimeError):
     """Raised when durable replay state cannot be trusted."""
+
+
+class ExternalTriggerReplayScopeFullError(RuntimeError):
+    """Raised when one replay scope already holds the maximum number of live claims."""
 
 
 class _SerializedNonce(TypedDict):
@@ -79,6 +86,7 @@ class ExternalTriggerReplayStore:
             replay_nonces = store["nonces"].setdefault(replay_scope, {})
             if nonce in replay_nonces:
                 return False
+            _require_room_for_claim(replay_nonces)
             replay_nonces[nonce] = {"expires_at": now + ttl_seconds}
             self._write_store(store)
             return True
@@ -101,6 +109,7 @@ class ExternalTriggerReplayStore:
                 if event["state"] == "delivered":
                     return ExternalTriggerEventClaim.DELIVERED
                 return ExternalTriggerEventClaim.IN_PROGRESS
+            _require_room_for_claim(replay_events)
             replay_events[event_id] = {
                 "state": ExternalTriggerEventClaim.IN_PROGRESS.value,
                 "expires_at": now + ttl_seconds,
@@ -251,6 +260,12 @@ class ExternalTriggerReplayStore:
         except OSError as exc:
             msg = "external trigger replay store is unavailable"
             raise ExternalTriggerReplayStoreError(msg) from exc
+
+
+def _require_room_for_claim(scope_claims: Mapping[str, object]) -> None:
+    if len(scope_claims) >= _MAX_LIVE_CLAIMS_PER_SCOPE:
+        msg = "external trigger replay scope is full"
+        raise ExternalTriggerReplayScopeFullError(msg)
 
 
 def _empty_store() -> _SerializedReplayStore:

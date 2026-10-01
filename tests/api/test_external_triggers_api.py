@@ -563,6 +563,25 @@ def test_oversized_nonce_or_event_id_is_refused_before_replay_claim(
     assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
 
 
+def test_full_replay_scope_returns_429_and_still_refuses_replays(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trigger whose replay scope is full gets 429 for new claims, while a replayed nonce stays a 409."""
+    monkeypatch.setattr(
+        "mindroom.api.external_triggers.execute_external_trigger",
+        AsyncMock(return_value="$matrix-event"),
+    )
+    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 1)
+
+    delivered = _post_signed(trigger_api, nonce="nonce-1")
+    refused = _post_signed(trigger_api, nonce="nonce-2")
+    replayed = _post_signed(trigger_api, nonce="nonce-1")
+
+    assert (delivered.status_code, refused.status_code, replayed.status_code) == (202, 429, 409)
+    assert refused.json()["detail"] == "External trigger replay limit reached"
+
+
 def test_missing_signature_headers_return_401(trigger_api: TriggerApiContext) -> None:
     """Configured triggers require signature headers."""
     response = trigger_api.client.post("/api/triggers/campground", content=_body())

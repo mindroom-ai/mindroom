@@ -17,6 +17,7 @@ from mindroom.durable_write import _fsync_directory
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
 from mindroom.external_triggers.replay_store import (
     ExternalTriggerEventClaim,
+    ExternalTriggerReplayScopeFullError,
     ExternalTriggerReplayStore,
     ExternalTriggerReplayStoreError,
     ExternalTriggerThreadKeyClaim,
@@ -241,6 +242,43 @@ def test_nonce_and_event_id_remain_claimed_at_exact_expiry_boundary(tmp_path: Pa
 
     assert store.claim_nonce("campground", "nonce-1", now=1_301, ttl_seconds=300)
     assert store.claim_event_id("campground", "availability-123", now=1_301, ttl_seconds=300) is (
+        ExternalTriggerEventClaim.FRESH
+    )
+
+
+def test_full_replay_scope_refuses_new_claims_but_still_detects_replays(tmp_path: Path) -> None:
+    """One trigger cannot grow the shared replay file past 10,000 live nonces or event ids."""
+    _store_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "nonces": {"campground": {f"nonce-{index}": {"expires_at": 2_000} for index in range(10_000)}},
+                "events": {
+                    "campground": {
+                        f"event-{index}": {"state": "delivered", "expires_at": 2_000} for index in range(10_000)
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    assert not store.claim_nonce("campground", "nonce-0", now=1_000, ttl_seconds=300)
+    assert store.claim_event_id("campground", "event-0", now=1_000, ttl_seconds=300) is (
+        ExternalTriggerEventClaim.DELIVERED
+    )
+    with pytest.raises(ExternalTriggerReplayScopeFullError):
+        store.claim_nonce("campground", "nonce-new", now=1_000, ttl_seconds=300)
+    with pytest.raises(ExternalTriggerReplayScopeFullError):
+        store.claim_event_id("campground", "event-new", now=1_000, ttl_seconds=300)
+
+    assert store.claim_nonce("other-trigger", "nonce-new", now=1_000, ttl_seconds=300)
+    assert store.claim_event_id("other-trigger", "event-new", now=1_000, ttl_seconds=300) is (
+        ExternalTriggerEventClaim.FRESH
+    )
+    # Expired claims no longer count against the scope.
+    assert store.claim_nonce("campground", "nonce-new", now=2_001, ttl_seconds=300)
+    assert store.claim_event_id("campground", "event-new", now=2_001, ttl_seconds=300) is (
         ExternalTriggerEventClaim.FRESH
     )
 
