@@ -202,7 +202,7 @@ async def test_task_written_by_removed_agent_stays_listable_and_cancellable(tmp_
 
 @pytest.mark.asyncio
 async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_path: Path) -> None:
-    """Each poll reads one task state event, as a full event and as its content, never full room state."""
+    """Each poll reads one task state event and fetches that event by ID, never full room state."""
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
 
@@ -218,6 +218,7 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
 
     client.room_get_state.assert_not_awaited()
     assert [call.args[2] for call in client._send.await_args_list] == [TASK_STATE_PATH] * 3
+    assert [call.args for call in client.room_get_event.await_args_list] == [(ROOM_ID, f"$state_{TASK_ID}")] * 3
 
 
 @pytest.mark.asyncio
@@ -242,19 +243,64 @@ async def test_non_event_task_state_response_is_a_read_error(
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
 
 
-@pytest.mark.asyncio
-async def test_task_content_shaped_like_a_bot_event_is_a_read_error(tmp_path: Path) -> None:
-    """A server that ignores format=event returns the writer's content, so a sender embedded in it is never trusted."""
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    forged = {"sender": SCHEDULE_WRITER_ID, "content": _pending_content(_workflow(created_by="@victim:server"))}
+def _forged_envelope_client(
+    content: dict[str, Any],
+    fetched: nio.RoomGetEventResponse | nio.RoomGetEventError,
+) -> AsyncMock:
+    """Return a client whose server ignored format=event and returned task content shaped like a router event.
+
+    The bare state read returns that envelope's inner content, as after the writer rewrites the state between reads.
+    """
+    forged = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=SCHEDULE_WRITER_ID)
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client._send.return_value = nio.RoomGetStateEventResponse(forged, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        forged,
+        content,
         "com.mindroom.scheduled.task",
         TASK_ID,
         ROOM_ID,
     )
+    client.room_get_event.side_effect = None
+    client.room_get_event.return_value = fetched
+    return client
 
-    with pytest.raises(RuntimeError, match="did not match its state content"):
+
+@pytest.mark.asyncio
+async def test_task_content_shaped_like_a_bot_event_takes_its_sender_from_the_fetched_event(tmp_path: Path) -> None:
+    """A sender written inside state content is never trusted, even when that content matches the bare state."""
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    content = _pending_content(_workflow(created_by="@victim:server"))
+    real_event = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=HUMAN_ID)
+    client = _forged_envelope_client(content, nio.RoomGetEventResponse.from_dict(real_event))
+
+    assert await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths) is None
+    client.room_get_event.assert_awaited_once_with(ROOM_ID, f"$state_{TASK_ID}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fetched_fields",
+    [
+        pytest.param({"content": {"status": "cancelled"}}, id="other-content"),
+        pytest.param({"state_key": "other_task"}, id="other-task"),
+        pytest.param({"type": "m.room.message"}, id="other-type"),
+        pytest.param(None, id="missing"),
+    ],
+)
+async def test_task_whose_event_fetched_by_id_does_not_match_is_a_read_error(
+    tmp_path: Path,
+    fetched_fields: dict[str, Any] | None,
+) -> None:
+    """The scheduler fails closed when the event named by the state read is missing or is not that task state."""
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    content = _pending_content(_workflow(created_by="@victim:server"))
+    event = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=SCHEDULE_WRITER_ID)
+    fetched = (
+        nio.RoomGetEventError("not found", "M_NOT_FOUND")
+        if fetched_fields is None
+        else nio.RoomGetEventResponse.from_dict({**event, **fetched_fields})
+    )
+    client = _forged_envelope_client(content, fetched)
+
+    with pytest.raises(RuntimeError, match=rf"did not match its event '\$state_{TASK_ID}'"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)

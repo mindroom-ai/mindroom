@@ -771,23 +771,30 @@ async def _read_scheduled_task_state(
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
         raise _ScheduledTaskStateReadError(msg)
     event = response.content
-    if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not isinstance(event.get("content"), dict):
         transport = response.transport_response
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
         msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
         raise _ScheduledTaskStateReadError(msg)
-    # A server that ignores format=event returns the state content itself, whose author can shape it like an event.
+    # A server that ignores format=event returns the state content itself, whose author can shape it like an event,
+    # so the sender comes from the event fetched by ID, which state content cannot forge.
     try:
-        bare_response = await client.room_get_state_event(room_id, _SCHEDULED_TASK_EVENT_TYPE, task_id)
+        event_response = await client.room_get_event(room_id, event_id)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
+        msg = f"Failed to get scheduled task {task_id!r} event {event_id!r} from room {room_id!r}"
         raise _ScheduledTaskStateReadError(msg) from exc
-    if not isinstance(bare_response, nio.RoomGetStateEventResponse) or bare_response.content != event["content"]:
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} did not match its state content"
+    source = event_response.event.source if isinstance(event_response, nio.RoomGetEventResponse) else {}
+    if (
+        source.get("type") != _SCHEDULED_TASK_EVENT_TYPE
+        or source.get("state_key") != task_id
+        or source.get("content") != event["content"]
+    ):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} did not match its event {event_id!r}"
         raise _ScheduledTaskStateReadError(msg)
-    return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
+    return _runtime_authored_task_content(room_id, source, persisted_bot_user_ids(runtime_paths))
 
 
 async def get_scheduled_task(
