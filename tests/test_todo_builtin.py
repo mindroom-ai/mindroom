@@ -617,6 +617,21 @@ def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
         tool.apply_template(agent=_agent(), name="hostile", params=params, dry_run=True)
 
 
+def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path: Path) -> None:
+    """A workspace template file above 64 KiB is never read in full by the primary."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(config, "oversized", _template_text("oversized", "  - title: One\n") + "#" * 64 * 1024)
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+        with pytest.raises(ValueError, match="exceeds its size limit"):
+            tool.apply_template(agent=_agent(), name="oversized", params={}, dry_run=True)
+
+    assert "`mindroom-dev`" in listing
+    assert "`oversized`" not in listing
+
+
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
     """A workspace template that shadows a built-in name should not inherit the built-in schema."""
     config = _config(tmp_path)
