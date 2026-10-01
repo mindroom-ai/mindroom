@@ -30,7 +30,7 @@ from mindroom.entity_resolution import (
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
@@ -262,6 +262,16 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
 
 
+def _room_has_only(room: nio.MatrixRoom, member_ids: set[str]) -> bool:
+    """Return whether complete membership, including the server's member count, is exactly ``member_ids``."""
+    # A lazy or failed member refresh can omit a silent member or an older invite from the cached projection.
+    return (
+        room_membership_is_complete(room)
+        and room.member_count == len(member_ids)
+        and cached_member_ids(room) == member_ids
+    )
+
+
 def agent_owns_command(
     command: Command,
     *,
@@ -275,10 +285,10 @@ def agent_owns_command(
         return True
     if command.type is not CommandType.DESKTOP:
         return False
-    return chat_pairing_desktop_error(config, agent_name) is None and cached_member_ids(room) == {
-        requester_user_id,
-        room.own_user_id,
-    }
+    return chat_pairing_desktop_error(config, agent_name) is None and _room_has_only(
+        room,
+        {requester_user_id, room.own_user_id},
+    )
 
 
 async def _desktop_agent_for_room(
@@ -299,8 +309,7 @@ async def _desktop_agent_for_room(
     if len(eligible) != 1:
         return None
     agent_name, agent_user_id = eligible[0]
-    expected_members = {requester_user_id, room.own_user_id, agent_user_id}
-    if cached_member_ids(room) != expected_members:
+    if not _room_has_only(room, {requester_user_id, room.own_user_id, agent_user_id}):
         return None
     return agent_name
 

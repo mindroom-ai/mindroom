@@ -629,13 +629,13 @@ async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("extra_member", [None, "@bob:localhost"])
+@pytest.mark.parametrize("room_shape", ["private", "extra_member", "partial_projection", "unseen_invite"])
 async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    extra_member: str | None,
+    room_shape: str,
 ) -> None:
-    """Router-owned commands require the sole eligible agent and no unrelated room member."""
+    """Router-owned commands require the sole eligible agent and a complete membership with no other party."""
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -658,8 +658,13 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     for user_id in ("@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"):
         room.add_member(user_id, None, None)
-    if extra_member is not None:
-        room.add_member(extra_member, None, None)
+    if room_shape == "extra_member":
+        room.add_member("@bob:localhost", None, None)
+    # A lazy projection without an authoritative refresh may omit a silent member.
+    room.members_synced = room_shape != "partial_projection"
+    if room_shape == "unseen_invite":
+        # The server still counts an invite the lazy projection never saw.
+        room.update_summary(nio.RoomSummary(invited_member_count=1, joined_member_count=3))
     send_response = AsyncMock(return_value="$desktop")
     candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
     controller_identity = MagicMock()
@@ -696,7 +701,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         requester_user_id="@alice:localhost",
     )
 
-    if extra_member is None:
+    if room_shape == "private":
         assert desktop_handler.call_args.kwargs["scope"].agent_name == "code"
         assert desktop_handler.call_args.kwargs["scope"].requester_id == "@alice:localhost"
         assert desktop_handler.call_args.kwargs["scope"].controller_identity is controller_identity
