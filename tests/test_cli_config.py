@@ -4945,11 +4945,9 @@ class TestLocalStackSetup:
         assert ["docker", "compose", "up", "-d"] not in commands
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
-    def test_no_persist_env_prints_inline_command(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """--no-persist-env should not write .env and should print inline env usage."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        storage_path = tmp_path / "mindroom_data"
+    @staticmethod
+    def _stub_local_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stand in for Docker and a healthy homeserver."""
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
@@ -4962,17 +4960,56 @@ class TestLocalStackSetup:
             lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         )
 
+    @pytest.mark.parametrize(
+        ("homeserver_url", "env_prefix"),
+        [
+            ("http://localhost:8008", "MATRIX_HOMESERVER=http://localhost:8008 uv run"),
+            ("https://localhost:8448", "MATRIX_HOMESERVER=https://localhost:8448 MATRIX_SSL_VERIFY=false uv run"),
+        ],
+    )
+    def test_no_persist_env_prints_inline_command(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        homeserver_url: str,
+        env_prefix: str,
+    ) -> None:
+        """--no-persist-env writes no .env and prints the same settings it would persist."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        self._stub_local_stack(monkeypatch)
+
         result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--no-persist-env"],
+            ["local-stack-setup", "--skip-synapse", "--no-persist-env", "--homeserver-url", homeserver_url],
             cfg,
-            storage_path=storage_path,
+            storage_path=tmp_path / "mindroom_data",
         )
 
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert not (tmp_path / ".env").exists()
-        assert "MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false" in result.output
-        assert "uv run" in result.output
-        assert "mindroom run" in result.output
+        output = normalize_console_output(result.output)
+        assert f"{env_prefix} mindroom run" in output
+
+    def test_https_homeserver_persists_ssl_verify_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An https:// local homeserver still gets MATRIX_SSL_VERIFY=false for its local certificate."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
+        self._stub_local_stack(monkeypatch)
+
+        result = _invoke_with_runtime(
+            ["local-stack-setup", "--skip-synapse", "--homeserver-url", "https://localhost:8448"],
+            cfg,
+            storage_path=tmp_path / "mindroom_data",
+        )
+
+        assert result.exit_code == 0, result.output
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://localhost:8448" in env_content
+        assert "MATRIX_SSL_VERIFY=false" in env_content
 
     def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command fails on unsupported operating systems."""
