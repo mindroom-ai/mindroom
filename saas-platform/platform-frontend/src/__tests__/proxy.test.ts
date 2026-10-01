@@ -45,34 +45,27 @@ describe('proxy', () => {
     expect(response.headers.get('X-XSS-Protection')).toBeNull()
   })
 
-  it('sends signed-out visitors of admin pages to the login page', async () => {
-    const response = await proxy(new NextRequest('https://app.mindroom.chat/admin/accounts'))
-
-    expect(response.status).toBe(307)
-    expect(response.headers.get('location')).toBe(
-      'https://app.mindroom.chat/auth/login?redirect_to=%2Fadmin%2Faccounts'
-    )
-  })
-
-  it.each([
-    ['is not an admin', () => Promise.resolve(new Response(JSON.stringify({ is_admin: false })))],
-    ['cannot be checked', () => Promise.reject(new Error('API down'))],
-  ])('keeps a refreshed session when the admin status %s', async (_case, adminStatus) => {
+  it('sends a refreshed session back to the browser', async () => {
     mockedCreateServerClient.mockImplementation((_url, _key, { cookies }) => ({
       auth: {
         getUser: jest.fn(async () => {
           cookies.setAll([{ name: 'sb-test-auth-token', value: 'refreshed', options: { path: '/' } }])
           return { data: { user: { id: 'user-1' } } }
         }),
-        getSession: jest.fn().mockResolvedValue({ data: { session: { access_token: 'token' } } }),
       },
     }))
-    ;(global.fetch as jest.Mock).mockImplementation(adminStatus)
 
+    const response = await proxy(new NextRequest('https://app.mindroom.chat/dashboard'))
+
+    expect(response.headers.get('set-cookie')).toContain('sb-test-auth-token=refreshed; Path=/')
+    expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'")
+  })
+
+  it('leaves admin authorization to the admin layout', async () => {
     const response = await proxy(new NextRequest('https://app.mindroom.chat/admin/accounts'))
 
-    expect(response.headers.get('location')).toBe('https://app.mindroom.chat/dashboard')
-    expect(response.headers.get('set-cookie')).toContain('sb-test-auth-token=refreshed; Path=/')
+    expect(response.status).toBe(200)
+    expect(response.headers.get('location')).toBeNull()
   })
 
   it('still serves pages with security headers when Supabase is not configured', async () => {

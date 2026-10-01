@@ -14,7 +14,6 @@ export async function proxy(request: NextRequest) {
   const { supabaseUrl, supabaseAnonKey, apiUrl } = runtimeConfig
 
   // Without Supabase, as in local runs, there is no session to refresh.
-  // Admin pages stay closed because src/app/admin/layout.tsx requires Supabase.
   if (!isSupabaseConfigured(runtimeConfig)) {
     return withSecurityHeaders(response, supabaseUrl, apiUrl)
   }
@@ -45,56 +44,7 @@ export async function proxy(request: NextRequest) {
   )
 
   // Refresh session if needed
-  const { data: { user } } = await supabase.auth.getUser()
-
-  // A redirect is a new response, so it must carry the session cookies refreshed above.
-  const redirect = (url: URL) => {
-    const redirectResponse = NextResponse.redirect(url)
-    response.cookies.getAll().forEach((cookie) => redirectResponse.cookies.set(cookie))
-    return redirectResponse
-  }
-
-  // ADMIN ROUTE PROTECTION
-  if (request.nextUrl.pathname.startsWith('/admin')) {
-    if (!user) {
-      const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
-      return redirect(loginUrl)
-    }
-
-    // Get session for API call
-    const { data: { session } } = await supabase.auth.getSession()
-
-    if (!session) {
-      const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
-      return redirect(loginUrl)
-    }
-
-    // Check admin status via API
-    try {
-      const apiResponse = await fetch(`${apiUrl}/my/account/admin-status`, {
-        headers: {
-          'Authorization': `Bearer ${session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-      })
-
-      if (!apiResponse.ok) {
-        // Admin check failed - redirect to dashboard
-        return redirect(new URL('/dashboard', request.url))
-      }
-
-      const data = await apiResponse.json()
-
-      if (!data.is_admin) {
-        return redirect(new URL('/dashboard', request.url))
-      }
-    } catch {
-      // Admin check exception - redirect to dashboard
-      return redirect(new URL('/dashboard', request.url))
-    }
-  }
+  await supabase.auth.getUser()
 
   return withSecurityHeaders(response, supabaseUrl, apiUrl)
 }

@@ -47,7 +47,7 @@ public/              # Static assets
 
 - JWT-based authentication via Supabase
 - Server-side session validation
-- Admin page guards in `src/proxy.ts` and `src/app/admin/layout.tsx`
+- Session refresh in `src/proxy.ts` and the admin page guard in `src/app/admin/layout.tsx`
 - Independent authentication and authorization dependencies in the platform backend
 - Environment variable separation for secrets
 
