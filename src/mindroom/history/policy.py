@@ -35,7 +35,7 @@ def resolve_history_execution_plan(
         active_context_window=active_context_window,
     )
     compaction_context_window = compaction_runtime.context_window
-    replay_window_tokens = _resolve_replay_window(
+    replay_window_tokens = resolve_replay_window(
         active_context_window=active_context_window,
         configured_replay_window=compaction_config.replay_window_tokens,
     )
@@ -249,7 +249,7 @@ def context_budget_after_reserve(context_window_tokens: int, reserve_tokens: int
     return max(0, context_window_tokens - normalized_reserve_tokens - spent_tokens)
 
 
-def _resolve_replay_window(
+def resolve_replay_window(
     *,
     active_context_window: int | None,
     configured_replay_window: int | None,

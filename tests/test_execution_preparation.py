@@ -141,10 +141,24 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
 
 def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     """Fallback static budgeting should keep missing and reserve-clamped bounds."""
-    assert _fallback_static_token_budget(context_window=None, reserve_tokens=100) is None
-    assert _fallback_static_token_budget(context_window=0, reserve_tokens=100) is None
-    assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=800) == 500
-    assert _fallback_static_token_budget(context_window=1_000, reserve_tokens=100) == 900
+    assert _fallback_static_token_budget(context_window=None, replay_window_tokens=None, reserve_tokens=100) is None
+    assert _fallback_static_token_budget(context_window=0, replay_window_tokens=None, reserve_tokens=100) is None
+    assert _fallback_static_token_budget(context_window=1_000, replay_window_tokens=None, reserve_tokens=800) == 500
+    assert _fallback_static_token_budget(context_window=1_000, replay_window_tokens=None, reserve_tokens=100) == 900
+
+
+def test_fallback_static_token_budget_uses_the_persisted_replay_window() -> None:
+    """Fallback thread replay should stop at the same window as persisted replay."""
+    assert (
+        _fallback_static_token_budget(
+            context_window=1_000_000,
+            replay_window_tokens=500_000,
+            reserve_tokens=16_384,
+        )
+        == 483_616
+    )
+    assert _fallback_static_token_budget(context_window=None, replay_window_tokens=4_000, reserve_tokens=0) == 4_000
+    assert _fallback_static_token_budget(context_window=3_000, replay_window_tokens=4_000, reserve_tokens=0) == 3_000
 
 
 @pytest.mark.asyncio
@@ -177,6 +191,43 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
     assert result is prepared
     resolve_runtime_model.assert_not_called()
     assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 6_000
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread the agent has no session for should not fill the whole model window."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {
+                "tools": [],
+                "compaction": {"enabled": False, "reserve_tokens": 0, "replay_window_tokens": 4_000},
+            },
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 6_000}},
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "agent_static_token_estimator", MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+
+    await prepare_agent_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        agent=MagicMock(),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        resolved_runtime_model=ResolvedRuntimeModel(model_name="default", context_window=6_000),
+        include_openai_compat_guidance=True,
+    )
+
+    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 4_000
 
 
 @pytest.mark.asyncio
