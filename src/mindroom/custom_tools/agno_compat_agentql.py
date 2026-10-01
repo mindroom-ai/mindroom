@@ -193,8 +193,23 @@ def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
 class MindRoomAgentQLTools(AgnoAgentQLTools):
     """Preserve Agno registration with scoped requests and complete custom results."""
 
-    def __init__(self, runtime_paths: RuntimePaths, **kwargs: Any) -> None:  # noqa: ANN401
-        super().__init__(**kwargs)
+    # Mirror the authored upstream options beside the managed runtime paths the browser egress needs.
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        api_key: str | None = None,
+        enable_scrape_website: bool = True,
+        enable_custom_scrape_website: bool = False,
+        all: bool = False,  # noqa: A002 - upstream option name
+        agentql_query: str = "",
+    ) -> None:
+        super().__init__(
+            api_key=api_key,
+            enable_scrape_website=enable_scrape_website,
+            enable_custom_scrape_website=enable_custom_scrape_website,
+            all=all,
+            agentql_query=agentql_query,
+        )
         self._runtime_paths = runtime_paths
 
     def scrape_website(self, url: str) -> str:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from agno.tools.file_generation import FileGenerationTools
 from agno.utils.log import log_warning
@@ -15,15 +15,31 @@ from mindroom.path_confinement import open_directory_within_root
 class WorkspaceFileGenerationTools(FileGenerationTools):
     """File Generation toolkit whose saved files land only in the agent workspace."""
 
+    # Mirror the authored upstream options; saving is configured here, never by the upstream constructor.
     def __init__(
         self,
-        *,
         tool_output_workspace_root: Path | None = None,
+        enable_json_generation: bool = True,
+        enable_csv_generation: bool = True,
+        enable_pdf_generation: bool = True,
+        enable_docx_generation: bool = True,
+        enable_txt_generation: bool = True,
+        enable_html_generation: bool = True,
+        enable_code_generation: bool = True,
         output_directory: str | None = None,
         save_files: bool = False,
-        **kwargs: Any,  # noqa: ANN401
+        all: bool = False,  # noqa: A002 - upstream option name
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(
+            enable_json_generation=enable_json_generation,
+            enable_csv_generation=enable_csv_generation,
+            enable_pdf_generation=enable_pdf_generation,
+            enable_docx_generation=enable_docx_generation,
+            enable_txt_generation=enable_txt_generation,
+            enable_html_generation=enable_html_generation,
+            enable_code_generation=enable_code_generation,
+            all=all,
+        )
         self._workspace_root = tool_output_workspace_root
         self._relative_output_directory = Path(output_directory or "")
         if not save_files and output_directory is None:
