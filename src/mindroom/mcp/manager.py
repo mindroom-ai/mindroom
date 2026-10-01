@@ -1276,8 +1276,8 @@ class MCPServerManager:
                 else:
                     state.consecutive_failures = 0
                     changed = previous_hash != catalog.catalog_hash
-                    if previous_hash is None:
-                        # Without an earlier catalog, dependents start from this one.
+                    if state.notified_catalog_hash is None:
+                        # Dependents first built from this catalog; a catalog lost to a failed refresh keeps its hash.
                         state.notified_catalog_hash = catalog.catalog_hash
                     # A refresh without notification may have published this catalog first, so also compare it with
                     # the catalog dependents last heard about.
