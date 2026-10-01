@@ -1679,6 +1679,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 tool=tool_name,
                 agent=agent_name,
                 error=str(exc),
+                exc_info=not isinstance(exc, ValueError | ImportError),
             )
     return _AgentToolAssembly(
         tools=tools,
