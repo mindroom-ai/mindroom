@@ -1,7 +1,7 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
-import { getServerRuntimeConfig } from '@/lib/runtime-config'
+import { getServerRuntimeConfig, isSupabaseConfigured } from '@/lib/runtime-config'
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
@@ -10,7 +10,14 @@ export async function proxy(request: NextRequest) {
     },
   })
 
-  const { supabaseUrl, supabaseAnonKey, apiUrl } = getServerRuntimeConfig()
+  const runtimeConfig = getServerRuntimeConfig({ requireSupabase: false })
+  const { supabaseUrl, supabaseAnonKey, apiUrl } = runtimeConfig
+
+  // Without Supabase, as in local runs, there is no session to refresh.
+  // Admin pages stay closed because src/app/admin/layout.tsx requires Supabase.
+  if (!isSupabaseConfigured(runtimeConfig)) {
+    return withSecurityHeaders(response, supabaseUrl, apiUrl)
+  }
 
   const supabase = createServerClient(
     supabaseUrl,
@@ -82,7 +89,11 @@ export async function proxy(request: NextRequest) {
     }
   }
 
-  // Apply security headers dynamically so CSP reflects runtime configuration
+  return withSecurityHeaders(response, supabaseUrl, apiUrl)
+}
+
+// Apply security headers dynamically so CSP reflects runtime configuration
+function withSecurityHeaders(response: NextResponse, supabaseUrl: string, apiUrl: string) {
   const isDev = process.env.NODE_ENV !== 'production'
   const connectSrc = new Set(["'self'", 'https://api.stripe.com'])
 
@@ -135,7 +146,6 @@ export async function proxy(request: NextRequest) {
   response.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(self)')
   response.headers.set('X-Content-Type-Options', 'nosniff')
   response.headers.set('X-Frame-Options', 'DENY')
-  response.headers.set('X-XSS-Protection', '1; mode=block')
   if (!isDev) {
     response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
   }
@@ -160,7 +170,8 @@ export const config = {
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      * - api routes that don't need auth
+     * - static images, so loading them does not ask Supabase for the user
      */
-    '/((?!_next/static|_next/image|favicon.ico|auth/callback).*)',
+    '/((?!_next/static|_next/image|favicon.ico|auth/callback|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

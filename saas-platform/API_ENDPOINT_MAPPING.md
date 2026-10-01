@@ -13,7 +13,7 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 - **OpenAPI operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
-The frontend also makes server-side authentication checks in `proxy.ts`, `src/lib/auth/admin.ts`, and `src/app/auth/callback/route.ts`.
+The frontend also makes server-side authentication checks in `src/proxy.ts`, `src/lib/auth/admin.ts`, and `src/app/auth/callback/route.ts`.
 An operation without a platform frontend caller can still serve an external integration or an API client.
 
 ## Health, Accounts, Subscriptions, and Usage
@@ -22,7 +22,7 @@ An operation without a platform frontend caller can still serve an external inte
 | --- | --- | --- | --- |
 | GET | `/health` | `health.py` | `src/app/admin/page.tsx`: system health indicator |
 | GET | `/my/account` | `accounts.py` | `src/lib/api.ts` → settings; `src/lib/auth/admin.ts` → admin account details |
-| GET | `/my/account/admin-status` | `accounts.py` | `proxy.ts`, `src/lib/auth/admin.ts`, and `src/app/auth/callback/route.ts`: server admin checks |
+| GET | `/my/account/admin-status` | `accounts.py` | `src/proxy.ts`, `src/lib/auth/admin.ts`, and `src/app/auth/callback/route.ts`: server admin checks |
 | POST | `/my/account/setup` | `accounts.py` | `src/lib/api.ts` → `src/app/dashboard/page.tsx`: account setup |
 | GET | `/my/subscription` | `subscriptions.py` | `src/hooks/useSubscription.ts`: subscription details |
 | POST | `/my/subscription/cancel` | `subscriptions.py` | No current frontend caller; cancel a subscription |
