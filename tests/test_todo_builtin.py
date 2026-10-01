@@ -538,6 +538,76 @@ todos:
     assert "`broken`" not in listing
 
 
+def _template_text(name: str, todos: str, *, description: str = "Workspace template.") -> str:
+    return f'name: {name}\nversion: "1"\ndescription: "{description}"\ntodos:\n{todos}'
+
+
+@pytest.mark.parametrize(
+    ("templates", "params", "error"),
+    [
+        pytest.param(
+            {"hostile": _template_text("hostile", "  - title: One\n", description="{{ 'a' * 10**7 }}")},
+            {},
+            "only substitute parameters",
+            id="expression",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text(
+                    "hostile",
+                    "  - title: '{% for i in range(1000) %}{% for j in range(1000) %}{% endfor %}{% endfor %}One'\n",
+                ),
+            },
+            {},
+            "only substitute parameters",
+            id="loops",
+        ),
+        pytest.param(
+            {"hostile": _template_text("hostile", "  - title: One\n", description="{{ X }}" * 100)},
+            {"X": "a" * 1000},
+            "rendered template exceeds",
+            id="rendered-size",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text(
+                    "hostile",
+                    "  - sub_template: leaf\n    params: {A: &a [x, x], B: [*a, *a]}\n",
+                ),
+                "leaf": _template_text("leaf", "  - title: Leaf\n"),
+            },
+            {},
+            "aliases",
+            id="aliases",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text("hostile", "  - sub_template: middle\n" * 20),
+                "middle": _template_text("middle", "  - sub_template: leaf\n" * 20),
+                "leaf": _template_text("leaf", "  - title: Leaf\n" * 20),
+            },
+            {},
+            "at most 100 todos",
+            id="fan-out",
+        ),
+    ],
+)
+def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
+    tmp_path: Path,
+    templates: dict[str, str],
+    params: dict[str, str],
+    error: str,
+) -> None:
+    """Worker-written templates render in the primary, so expressions, loops, aliases, and fan-out are refused."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for name, text in templates.items():
+        _write_workspace_template(config, name, text)
+
+    with tool_runtime_context(_tool_context(config)), pytest.raises(ValueError, match=error):
+        tool.apply_template(agent=_agent(), name="hostile", params=params, dry_run=True)
+
+
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
     """A workspace template that shadows a built-in name should not inherit the built-in schema."""
     config = _config(tmp_path)

@@ -100,6 +100,8 @@ Items written before requesters were recorded have no attribution until their ne
 Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
+Templates substitute parameters only as `{{ NAME }}`, and other Jinja syntax and YAML aliases are refused.
+A workspace template file holds at most 64 KiB, a rendered template at most 65,536 characters, and one `apply_template` call expands to at most 100 todos, sub-templates included.
 
 ### Native Auto-Poke
 

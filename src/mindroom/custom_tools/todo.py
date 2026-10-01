@@ -14,8 +14,8 @@ import yaml
 from agno.agent import Agent
 from agno.team.team import Team  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.tools import Toolkit
-from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError
-from jinja2.sandbox import SandboxedEnvironment, SecurityError
+from jinja2 import StrictUndefined, TemplateSyntaxError, UndefinedError, nodes
+from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mindroom import yaml_io
@@ -51,6 +51,9 @@ _PRIORITY_EMOJI: dict[str, str] = {
     "low": "green",
 }
 _TEMPLATE_RECURSION_LIMIT = 3
+# Workspace templates are worker-written, so one apply_template call must stay small however they nest.
+_MAX_TEMPLATE_SIZE = 64 * 1024
+_MAX_TEMPLATE_TODOS = 100
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
 _JINJA_ENV = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
 
@@ -154,7 +157,8 @@ class _TemplateRoot:
             return path.read_text(encoding="utf-8")
         # Template paths are canonical; open them below the workspace as spelled so a replaced workspace is refused.
         relative = path.relative_to(self.workspace_root.resolve())
-        return read_regular_file_within_root(self.workspace_root, relative).decode("utf-8")
+        payload = read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
+        return payload.decode("utf-8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,14 +314,24 @@ def _template_value_error(path: Path, message: str) -> ValueError:
 
 
 def _render_jinja_template(template_text: str, params: Mapping[str, Any], *, path: Path) -> str:
+    # Only plain substitution is bounded: any expression, filter, or loop can allocate or spin in the primary.
+    rendered: list[str] = []
+    rendered_chars = 0
     try:
-        return _JINJA_ENV.from_string(template_text).render(**params)
-    except SecurityError as exc:
-        raise _template_value_error(path, f"unsafe template expression: {exc}") from exc
+        parsed = _JINJA_ENV.parse(template_text)
+        substitution = (nodes.Output, nodes.TemplateData, nodes.Name)
+        if not all(isinstance(node, substitution) for node in parsed.find_all(nodes.Node)):
+            raise _template_value_error(path, "templates may only substitute parameters as `{{ NAME }}`")
+        for chunk in _JINJA_ENV.from_string(parsed).generate(**params):
+            rendered_chars += len(chunk)
+            if rendered_chars > _MAX_TEMPLATE_SIZE:
+                raise _template_value_error(path, f"rendered template exceeds {_MAX_TEMPLATE_SIZE} characters")
+            rendered.append(chunk)
     except UndefinedError as exc:
         raise _template_value_error(path, f"undefined variable: {exc}") from exc
     except TemplateSyntaxError as exc:
         raise _template_value_error(path, f"syntax error: {exc}") from exc
+    return "".join(rendered)
 
 
 def _format_validation_error(exc: ValidationError) -> str:
@@ -330,7 +344,7 @@ def _format_validation_error(exc: ValidationError) -> str:
 
 def _load_template_document(path: Path, text: str) -> dict[str, Any]:
     try:
-        document = yaml_io.safe_load(text)
+        document = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError as exc:
         raise _template_value_error(path, str(exc)) from exc
     if not isinstance(document, dict):
@@ -421,6 +435,7 @@ def _render_template_definition(
     *,
     template_roots: Sequence[_TemplateRoot],
     depth: int = 1,
+    max_todos: int = _MAX_TEMPLATE_TODOS,
 ) -> dict[str, Any]:
     if depth > _TEMPLATE_RECURSION_LIMIT:
         msg = f"Template recursion depth exceeded while expanding '{name}'"
@@ -444,7 +459,12 @@ def _render_template_definition(
     rendered_document = _validate_template_document(rendered_template, path)
     rendered_todos = rendered_document.model_dump(mode="python", exclude_none=True)["todos"]
     _validate_depends_on_indexes(rendered_todos, path=path)
-    expanded_todos = _expand_template_todos(rendered_todos, template_roots=template_roots, depth=depth)
+    expanded_todos = _expand_template_todos(
+        rendered_todos,
+        template_roots=template_roots,
+        depth=depth,
+        max_todos=max_todos,
+    )
     _validate_dependency_cycle(rendered_document.name, expanded_todos)
 
     return {
@@ -461,11 +481,16 @@ def _expand_template_todos(
     *,
     template_roots: Sequence[_TemplateRoot],
     depth: int,
+    max_todos: int,
 ) -> list[dict[str, Any]]:
     expanded: list[dict[str, Any]] = []
     index_map: dict[int, _ExpandedTemplateIndex] = {}
 
     for original_index, entry in enumerate(todos, start=1):
+        # Every entry adds at least one todo, so this budget also bounds sub-template renders.
+        if len(expanded) >= max_todos:
+            msg = f"Templates may expand to at most {_MAX_TEMPLATE_TODOS} todos"
+            raise ValueError(msg)
         if entry.get("title") is not None:
             expanded.append(
                 {
@@ -485,6 +510,7 @@ def _expand_template_todos(
             entry.get("params", {}),
             template_roots=template_roots,
             depth=depth + 1,
+            max_todos=max_todos - len(expanded),
         )
         offset = len(expanded)
         expanded.extend(
