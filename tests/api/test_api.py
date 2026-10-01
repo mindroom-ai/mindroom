@@ -2464,6 +2464,7 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
         )
         status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
     stored_config = toolkit._load_config()
+    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
     disconnect_response = api_key_client.post("/api/homeassistant/disconnect?agent_name=general")
 
     assert connect_response.status_code == 200
@@ -2474,7 +2475,6 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
         "allow_private_url": False,
         "_source": "ui",
     }
-    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
     assert disconnect_response.status_code == 200
     assert toolkit._load_config() is None
 
@@ -2824,13 +2824,13 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
             f"/api/integrations/spotify/callback?code=test-code&state={state}",
             follow_redirects=False,
         )
+        assert not list((runtime_paths.storage_root / "workers").rglob("spotify_credentials.json"))
         connected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
         disconnect_response = test_client.post("/api/integrations/spotify/disconnect?agent_name=general")
         disconnected_status = test_client.get("/api/integrations/spotify/status?agent_name=general")
 
     assert callback_response.status_code in {302, 307}
     assert connected_status.json()["connected"] is True
-    assert not list((runtime_paths.storage_root / "workers").rglob("spotify_credentials.json"))
     assert disconnect_response.status_code == 200
     assert disconnected_status.json()["connected"] is False
 
