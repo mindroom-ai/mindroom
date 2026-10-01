@@ -1191,13 +1191,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 ),
                             )
                         await liveness.aclose()
-                        # The call's budget covered its wait before the human decided; an approval resumes the wait
-                        # for the approved work's outcome, so a zero-budget retrieval still sees what it approved.
                         waited = await background.wait(
                             child.delegation_id,
                             owner=caller_identity,
                             depth=delegation_depth,
-                            timeout=None if child_decisions is not None else wait_timeout,
+                            timeout=wait_timeout,
                             claim=claim,
                         )
                     except JobAccessError as error:

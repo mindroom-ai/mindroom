@@ -657,10 +657,17 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     job = await runtime.lookup(child.delegation_id, owner=identity, depth=0)
                     assert job.status == "awaiting_approval"
                     config.tool_approval.rules = []
-                # Like the reply join, retrieve only once the job is ready, with the join prompt's zero budget.
+                # Like the reply join, retrieve only once the job is ready: a result with no budget left to wait, and an
+                # approval pause with no budget, so the approved call waits for the approved work like any other.
                 await wait_for_status(runtime, child.delegation_id, "awaiting_approval" if approval else "completed")
                 current_parent = parent(
-                    _call("job", "wait", action="wait", job_id=child.delegation_id, wait_timeout=0),
+                    _call(
+                        "job",
+                        "wait",
+                        action="wait",
+                        job_id=child.delegation_id,
+                        **({} if approval else {"wait_timeout": 0}),
+                    ),
                 )
                 result = await drive(current_parent)
                 if not approval:

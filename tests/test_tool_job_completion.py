@@ -43,7 +43,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 from tests.response_runner_helpers import _target
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 
 async def _persist_waiting_continuation(
@@ -81,6 +81,17 @@ async def _persist_waiting_continuation(
         event_id="$approval-card",
         delivered_projections=(),
     )
+
+
+def test_join_prompt_lets_an_approved_retrieval_wait_for_the_approved_work() -> None:
+    """A ready result needs no wait; an approval pause's retrieval has no budget, so approving it waits for its work."""
+    done = completed_delegation_job()
+    paused = replace(done, status="awaiting_approval")
+    assert (
+        f'job(action="wait", job_id="{done.job_id}", wait_timeout=0)'
+        in completion_envelope(done, sender_id="@r:t").body
+    )
+    assert f'job(action="wait", job_id="{paused.job_id}")' in completion_envelope(paused, sender_id="@r:t").body
 
 
 def test_completion_event_id_names_exactly_one_job_generation() -> None:
