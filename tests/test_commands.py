@@ -629,16 +629,30 @@ async def test_schedule_command_reuses_failed_boundary_membership_snapshot(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("room_shape", ["private", "extra_member", "partial_projection", "unseen_invite"])
+@pytest.mark.parametrize(
+    ("room_shape", "sync_mode", "expected_reply"),
+    [
+        ("private", "classic", None),
+        ("extra_member", "classic", "private room"),
+        ("failed_refresh", "classic", "private room"),
+        ("unseen_invite", "classic", "private room"),
+        # Sliding sync loads members lazily, so a refresh without the server's counts proves nothing about invites.
+        ("private", "sliding", "private room"),
+        ("counted", "sliding", None),
+    ],
+)
 async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     room_shape: str,
+    sync_mode: str,
+    expected_reply: str | None,
 ) -> None:
     """Router-owned commands require the sole eligible agent and a complete membership with no other party."""
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "matrix_sync": {"mode": sync_mode},
             "defaults": {"tools": []},
             "agents": {
                 "code": {
@@ -656,22 +670,34 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         usernames={"router": "mindroom_router", "code": "mindroom_code"},
     )
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
-    for user_id in ("@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"):
-        room.add_member(user_id, None, None)
+    joined_user_ids = ["@mindroom_router:localhost", "@mindroom_code:localhost", "@alice:localhost"]
     if room_shape == "extra_member":
-        room.add_member("@bob:localhost", None, None)
-    # A lazy projection without an authoritative refresh may omit a silent member.
-    room.members_synced = room_shape != "partial_projection"
+        joined_user_ids.append("@bob:localhost")
+    for user_id in joined_user_ids:
+        room.add_member(user_id, None, None)
     if room_shape == "unseen_invite":
-        # The server still counts an invite the lazy projection never saw.
+        # The server still counts an invite the projection never saw.
         room.update_summary(nio.RoomSummary(invited_member_count=1, joined_member_count=3))
+    if room_shape == "counted":
+        room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=3))
+    client = AsyncMock()
+    if room_shape == "failed_refresh":
+        client.joined_members.side_effect = TimeoutError("membership lookup timed out")
+    else:
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id, None, None) for user_id in joined_user_ids],
+            room_id=room.room_id,
+        )
+    assert await ensure_room_membership_synced(client, room, sender_id="@alice:localhost") is (
+        room_shape != "failed_refresh"
+    )
     send_response = AsyncMock(return_value="$desktop")
     candidate_resolver = AsyncMock(return_value=[MatrixID.parse("@mindroom_code:localhost")])
     controller_identity = MagicMock()
     desktop_handler = MagicMock(return_value="desktop status")
     monkeypatch.setattr("mindroom.commands.handler.handle_desktop_command", desktop_handler)
     context = make_test_command_handler_context(
-        client=AsyncMock(),
+        client=client,
         config=config,
         runtime_paths=runtime_paths,
         logger=MagicMock(),
@@ -701,13 +727,13 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
         requester_user_id="@alice:localhost",
     )
 
-    if room_shape == "private":
+    if expected_reply is None:
         assert desktop_handler.call_args.kwargs["scope"].agent_name == "code"
         assert desktop_handler.call_args.kwargs["scope"].requester_id == "@alice:localhost"
         assert desktop_handler.call_args.kwargs["scope"].controller_identity is controller_identity
     else:
         desktop_handler.assert_not_called()
-        assert "private room" in send_response.await_args.args[0]
+        assert expected_reply in send_response.await_args.args[0]
 
 
 def test_docs_index_chat_commands_summary_lists_all_supported_commands() -> None:
