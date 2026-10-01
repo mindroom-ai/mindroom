@@ -1,4 +1,4 @@
-"""Approval failure must settle delegated work before releasing its sources."""
+"""Approval failure settles delegated work before releasing its sources and shows only redacted reasons."""
 
 from __future__ import annotations
 
@@ -79,6 +79,38 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
         runtime_paths=paths,
         reason="cancelled_by_user",
     )
+
+
+@pytest.mark.asyncio
+async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> None:
+    """The room-visible failure reply never shows credentials carried by a raw exception reason."""
+    continuation = _continuation()
+    api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
+    password = "hunter" + "2secret"
+    reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
+    store = MagicMock(spec=PrincipalStore)
+    store.approval_continuation = AsyncMock(return_value=continuation)
+    store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
+    gateway = MagicMock(spec=DeliveryGateway)
+    gateway.edit_text = AsyncMock(return_value=True)
+    coordinator = ApprovalResponseCoordinator(
+        config=Config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        store=store,
+        delivery_gateway=gateway,
+        retry_sources=lambda _room, _sources: None,
+    )
+    with (
+        patch.object(coordinator, "successful_final_delivery", new=AsyncMock(return_value=None)),
+        patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
+        patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
+    ):
+        assert await coordinator.settle_failure(continuation, reason)
+
+    visible = gateway.edit_text.await_args.args[0].new_text
+    assert api_key not in visible
+    assert password not in visible
+    assert "Incorrect API key provided" in visible
 
 
 @pytest.mark.asyncio

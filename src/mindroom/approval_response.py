@@ -22,6 +22,7 @@ from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
+from mindroom.redaction import redact_sensitive_text
 from mindroom.response_sources import ResponseAttempt
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -471,7 +472,9 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason)
+        visible_reason = visible_text or (
+            _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else redact_sensitive_text(reason)
+        )
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
