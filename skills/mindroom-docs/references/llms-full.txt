@@ -5562,7 +5562,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
 Other durations return an error message without waiting.
 `sleep` defaults to primary execution.
 
@@ -5588,7 +5588,7 @@ sleep(5)
 
 ### Notes
 
-- `sleep` is useful for deliberate polling loops or staged workflows, but it still ties up the runtime that executes it while the delay is in progress.
+- `sleep` is useful for deliberate polling loops or staged workflows; the wait holds no thread, but the response stays open until the delay ends or the response is stopped.
 - If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
 
 ## Related Docs
@@ -22068,7 +22068,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
 | CalculatorTools computes `factorial` for any argument, although `json.dumps` refuses results above 4300 digits, so one call can hold the GIL for minutes. | Tracking gap: refuse factorial arguments whose result cannot be serialized; no matching issue or PR has been verified. | `CalculatorTools.factorial` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned`. |
 | CalculatorTools trial-divides `is_prime` up to the square root of any argument, so one large prime checks for hours. | Tracking gap: bound prime-check work; no matching issue or PR has been verified. | `CalculatorTools.is_prime` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division`. |
-| SleepTools blocks a thread in `time.sleep` for any requested duration. | Tracking gap: bound or await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
+| SleepTools blocks a thread in `time.sleep` for any requested duration, so parallel calls exhaust the primary's default executor. | Tracking gap: bound and await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | DaytonaTools treats a null `verify_ssl` like `false` and then disables certificate checks by patching `daytona_api_client.Configuration.__init__` for the whole process until it restarts. | Tracking gap: disable verification only for an explicit `False` and scope it to the toolkit's own client configuration; no matching issue or PR identified. | `tools/daytona.py` passes only an explicit `false` upstream; `tests/test_tool_config_sync.py` covers unset, null, true, and false values. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
@@ -22160,7 +22160,7 @@ Small owner-adjacent boundaries use the same source records:
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
 | `custom_tools/calculator.py` (`factorial`) | Refuse `factorial()` above 1558 before Agno computes it. | The cap is MindRoom policy for the process shared by every agent; the result shape stays upstream. |
 | `custom_tools/calculator.py` (`is_prime`) | Refuse `is_prime()` above 10**12 before Agno's trial division. | The cap is MindRoom policy for the process shared by every agent; the other calculator functions stay upstream. |
-| `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds before Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the pause itself stays upstream. |
+| `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds and await the pause with `asyncio.sleep` instead of Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the toolkit's name and configuration stay upstream. |
 | `tools/daytona.py` | Map an unset or null `verify_ssl` to `True` before the upstream constructor sees it. | The tool configuration default stays `true`, and the one-time `legacy_tool_credentials.py` cleanup drops `false` values saved with the former default. |
 | `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |

@@ -565,7 +565,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### What It Does
 
-`sleep` exposes a single `sleep()` function that blocks for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
+`sleep` exposes a single `sleep()` function that waits for the requested number of seconds, from 0 to 300, and then returns a confirmation string.
 Other durations return an error message without waiting.
 `sleep` defaults to primary execution.
 
@@ -591,7 +591,7 @@ sleep(5)
 
 ### Notes
 
-- `sleep` is useful for deliberate polling loops or staged workflows, but it still ties up the runtime that executes it while the delay is in progress.
+- `sleep` is useful for deliberate polling loops or staged workflows; the wait holds no thread, but the response stays open until the delay ends or the response is stopped.
 - If you explicitly route `sleep` through workers, the delay occurs in the worker runtime instead of the primary process.
 
 ## Related Docs
