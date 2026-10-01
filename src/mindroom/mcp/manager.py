@@ -105,6 +105,16 @@ def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
     )
 
 
+def _refresh_wait_seconds(state: MCPServerState, retry_delay_seconds: float) -> float:
+    """Return a retry's backoff, or reserve the next spaced slot for a stale-catalog refresh."""
+    if retry_delay_seconds > 0:
+        return retry_delay_seconds
+    now = monotonic()
+    starts_at = max(now, state.stale_refresh_not_before)
+    state.stale_refresh_not_before = starts_at + _STALE_REFRESH_MIN_INTERVAL_SECONDS
+    return starts_at - now
+
+
 def _fresh_recorded_error(error: MCPError) -> MCPError:
     """Return a same-type copy of one recorded failure for raising again.
 
@@ -1568,18 +1578,14 @@ class MCPServerManager:
         existing_task = state.refresh_task
         if existing_task is not None and not existing_task.done() and existing_task is not asyncio.current_task():
             return
+        wait_seconds = _refresh_wait_seconds(state, delay_seconds)
 
         async def refresh() -> None:
             current_task = asyncio.current_task()
             cancelled = False
             try:
-                if delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
-                else:
-                    wait_seconds = state.stale_refresh_not_before - monotonic()
-                    if wait_seconds > 0:
-                        await asyncio.sleep(wait_seconds)
-                    state.stale_refresh_not_before = monotonic() + _STALE_REFRESH_MIN_INTERVAL_SECONDS
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
                 changed = await self._refresh_server_catalog(state, notify=True)
                 if changed:
                     logger.info(
