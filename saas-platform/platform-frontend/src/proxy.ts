@@ -47,12 +47,19 @@ export async function proxy(request: NextRequest) {
   // Refresh session if needed
   const { data: { user } } = await supabase.auth.getUser()
 
+  // A redirect is a new response, so it must carry the session cookies refreshed above.
+  const redirect = (url: URL) => {
+    const redirectResponse = NextResponse.redirect(url)
+    response.cookies.getAll().forEach((cookie) => redirectResponse.cookies.set(cookie))
+    return redirectResponse
+  }
+
   // ADMIN ROUTE PROTECTION
   if (request.nextUrl.pathname.startsWith('/admin')) {
     if (!user) {
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
-      return NextResponse.redirect(loginUrl)
+      return redirect(loginUrl)
     }
 
     // Get session for API call
@@ -61,7 +68,7 @@ export async function proxy(request: NextRequest) {
     if (!session) {
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
-      return NextResponse.redirect(loginUrl)
+      return redirect(loginUrl)
     }
 
     // Check admin status via API
@@ -75,17 +82,17 @@ export async function proxy(request: NextRequest) {
 
       if (!apiResponse.ok) {
         // Admin check failed - redirect to dashboard
-        return NextResponse.redirect(new URL('/dashboard', request.url))
+        return redirect(new URL('/dashboard', request.url))
       }
 
       const data = await apiResponse.json()
 
       if (!data.is_admin) {
-        return NextResponse.redirect(new URL('/dashboard', request.url))
+        return redirect(new URL('/dashboard', request.url))
       }
     } catch {
       // Admin check exception - redirect to dashboard
-      return NextResponse.redirect(new URL('/dashboard', request.url))
+      return redirect(new URL('/dashboard', request.url))
     }
   }
 

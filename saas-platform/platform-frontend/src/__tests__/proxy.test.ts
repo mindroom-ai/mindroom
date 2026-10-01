@@ -54,6 +54,27 @@ describe('proxy', () => {
     )
   })
 
+  it.each([
+    ['is not an admin', () => Promise.resolve(new Response(JSON.stringify({ is_admin: false })))],
+    ['cannot be checked', () => Promise.reject(new Error('API down'))],
+  ])('keeps a refreshed session when the admin status %s', async (_case, adminStatus) => {
+    mockedCreateServerClient.mockImplementation((_url, _key, { cookies }) => ({
+      auth: {
+        getUser: jest.fn(async () => {
+          cookies.setAll([{ name: 'sb-test-auth-token', value: 'refreshed', options: { path: '/' } }])
+          return { data: { user: { id: 'user-1' } } }
+        }),
+        getSession: jest.fn().mockResolvedValue({ data: { session: { access_token: 'token' } } }),
+      },
+    }))
+    ;(global.fetch as jest.Mock).mockImplementation(adminStatus)
+
+    const response = await proxy(new NextRequest('https://app.mindroom.chat/admin/accounts'))
+
+    expect(response.headers.get('location')).toBe('https://app.mindroom.chat/dashboard')
+    expect(response.headers.get('set-cookie')).toContain('sb-test-auth-token=refreshed; Path=/')
+  })
+
   it('still serves pages with security headers when Supabase is not configured', async () => {
     useEnv({ PLATFORM_DOMAIN: 'mindroom.chat' })
 
