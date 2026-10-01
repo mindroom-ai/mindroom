@@ -1,9 +1,10 @@
 const DEFAULT_REDIRECT = '/dashboard'
 
+// Tenant instances serve their own content on other subdomains, so only the platform's own hosts are trusted.
 function isAllowedPlatformHost(hostname: string, platformDomain: string): boolean {
   const domain = platformDomain.trim().toLowerCase()
   const host = hostname.toLowerCase()
-  return Boolean(domain && (host === domain || host.endsWith(`.${domain}`)))
+  return Boolean(domain && (host === `app.${domain}` || host === `api.${domain}`))
 }
 
 function leavesPlatformOrigin(target: string): boolean {
@@ -16,7 +17,7 @@ function leavesPlatformOrigin(target: string): boolean {
   return target.replaceAll('\\', '/').startsWith('//')
 }
 
-/** Restrict post-auth redirects to local paths or HTTPS URLs on the platform domain. */
+/** Restrict post-auth redirects to local paths or HTTPS URLs on the platform's app and API hosts. */
 export function sanitizePostAuthRedirect(
   target: string | null | undefined,
   platformDomain = ''
