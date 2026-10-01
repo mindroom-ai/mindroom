@@ -563,6 +563,7 @@ def _template_text(name: str, todos: str, *, description: str = "Workspace templ
             {},
             "unsafe template expression",
             id="sandbox-escape",
+            marks=_NEEDS_MEMORY_CAP,
         ),
         pytest.param(
             {"hostile": _template_text("hostile", "  - title: One\n", description="{{ X }}" * 100)},
