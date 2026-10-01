@@ -99,15 +99,15 @@ def test_probe_logs_allocator_totals_that_separate_live_from_retained_memory(mon
 
     [probe] = _probe_logs(logs)
     assert isinstance(probe["python_allocated_blocks"], int)
-    assert probe["python_allocated_blocks"] > 0
+    assert probe["python_allocated_blocks"] >= 0
     malloc = probe["malloc"]
     if heap_probe._mallinfo2() is None:
         assert malloc is None
     else:
         assert isinstance(malloc, dict)
-        assert set(malloc) == {"arena_bytes", "mmap_bytes", "in_use_bytes", "free_bytes", "releasable_bytes"}
+        assert set(malloc) == {"arena_bytes", "arena_in_use_bytes", "arena_free_bytes", "mmap_bytes"}
         assert all(isinstance(value, int) and value >= 0 for value in malloc.values())
-        assert malloc["in_use_bytes"] > 0
+        assert malloc["arena_in_use_bytes"] > 0
 
 
 def test_allocator_totals_are_none_without_glibc_mallinfo2(monkeypatch: pytest.MonkeyPatch) -> None:

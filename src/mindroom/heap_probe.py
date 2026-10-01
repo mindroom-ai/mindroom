@@ -8,9 +8,10 @@ types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
 Each record also carries glibc's malloc totals and Python's allocated block
-count. Resident memory that grows while live malloc bytes stay flat is freed
-memory the allocator keeps; growing live bytes with a flat type histogram point
-at untracked objects or native libraries.
+count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``.
+Resident memory that grows while live bytes stay flat suggests freed memory the
+allocator keeps; growing live bytes with a flat type histogram suggest
+untracked objects or native libraries.
 The walk runs inline on the event loop: ``gc.get_objects()`` and the type count
 both run in C while holding the GIL, so a worker thread would not free the loop
 any sooner. Each walk therefore pauses the loop about as long as a full garbage
@@ -108,17 +109,16 @@ def _mallinfo2() -> Callable[[], _MallInfo2] | None:
 
 
 def _malloc_stats() -> dict[str, int] | None:
-    """Return malloc's live, free, and releasable bytes across all arenas, when glibc provides them."""
+    """Return malloc's arena and direct-mmap byte totals across all arenas, when glibc provides them."""
     mallinfo2 = _mallinfo2()
     if mallinfo2 is None:
         return None
     info = mallinfo2()
     return {
         "arena_bytes": info.arena,
+        "arena_in_use_bytes": info.uordblks,
+        "arena_free_bytes": info.fordblks,
         "mmap_bytes": info.hblkhd,
-        "in_use_bytes": info.uordblks,
-        "free_bytes": info.fordblks,
-        "releasable_bytes": info.keepcost,
     }
 
 
