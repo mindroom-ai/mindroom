@@ -498,7 +498,7 @@ class SkillMarkdownError(ValueError):
 
 
 def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
-    # Without any closing fence, the pattern rescans the rest of the text once per newline after the opening one.
+    # With no closing fence the pattern backtracks quadratically before failing, so skip it when it cannot match.
     return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
 
 
