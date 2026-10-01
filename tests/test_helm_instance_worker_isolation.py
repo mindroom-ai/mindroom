@@ -949,7 +949,9 @@ def test_instance_chart_mounts_the_platform_oidc_client_secret_only_into_synapse
     synapse = _resource(docs, "Deployment", "synapse-demo")
     mounted_keys = {item["key"] for item in _volumes_by_name(mindroom)["api-keys"]["secret"].get("items", [])}
     secret_files = {
-        env["value"] for env in _container(mindroom, "mindroom")["env"] if str(env.get("value")).startswith("/etc/secrets/")
+        env["value"]
+        for env in _container(mindroom, "mindroom")["env"]
+        if str(env.get("value")).startswith("/etc/secrets/")
     }
 
     assert {f"/etc/secrets/{key}" for key in mounted_keys} == secret_files
