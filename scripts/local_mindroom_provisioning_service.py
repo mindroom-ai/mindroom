@@ -57,8 +57,9 @@ Last seen: paired installs authenticate with their client credentials. Agent
 registration, Google OAuth client fetches, and
 ``/v1/local-mindroom/heartbeat`` all refresh the connection's ``last_seen_at``,
 which the chat client shows for each install. Running installs send a heartbeat
-at startup and every few hours; the service records heartbeats at most once per
-connection every ten minutes so it does not rewrite the state file on every call.
+at startup and every few hours; the service records ``last_seen_at`` at most
+once per connection every ten minutes so it does not rewrite the state file on
+every call.
 
 Agent passwords: register-agent creates each agent account with a random
 one-time password and returns it once, only when the account was created. The
@@ -138,7 +139,7 @@ NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection
 # `mindroom connect` and `run` (src/mindroom/cli/connect.py) recognize a lost approval by this exact 410 detail.
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
-HEARTBEAT_LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+LAST_SEEN_RESOLUTION = timedelta(minutes=10)
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
 # It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
 HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
@@ -792,6 +793,18 @@ def _require_local_client(
     return connection
 
 
+def _record_last_seen_unlocked(
+    state: ProvisioningState,
+    connection: LocalConnection,
+    now: datetime,
+    state_path: Path,
+) -> None:
+    """Refresh last_seen_at, rewriting the state file at most once per LAST_SEEN_RESOLUTION."""
+    if now - connection.last_seen_at >= LAST_SEEN_RESOLUTION:
+        connection.last_seen_at = now
+        _persist_state_unlocked(state, state_path)
+
+
 async def _matrix_openid_userinfo(config: ServiceConfig, openid_token: str) -> str:
     url = f"{config.matrix_homeserver}/_matrix/federation/v1/openid/userinfo"
     try:
@@ -1359,8 +1372,7 @@ async def register_agent(
                 status_code=403,
                 detail=NAMESPACE_MISMATCH_DETAIL,
             )
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
 
     return await _register_agent_with_matrix(config, payload)
 
@@ -1377,9 +1389,7 @@ async def heartbeat(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"heartbeat:{connection.id}", limit=10, window_seconds=60)
-        if now - connection.last_seen_at >= HEARTBEAT_LAST_SEEN_RESOLUTION:
-            connection.last_seen_at = now
-            _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
     return HeartbeatResponse(status="ok")
 
 
@@ -1396,8 +1406,7 @@ async def google_oauth_client(
     async with state.lock:
         connection = _require_local_client(state, x_local_mindroom_client_id, x_local_mindroom_client_secret)
         _enforce_rate_limit_unlocked(state, key=f"oauth:google-client:{connection.id}", limit=60, window_seconds=60)
-        connection.last_seen_at = now
-        _persist_state_unlocked(state, config.state_path)
+        _record_last_seen_unlocked(state, connection, now, config.state_path)
 
     if not config.google_oauth_client_id or not config.google_oauth_client_secret:
         raise HTTPException(status_code=503, detail="Google OAuth client is not configured")

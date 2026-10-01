@@ -448,6 +448,55 @@ def test_heartbeat_updates_last_seen_with_throttled_persistence(
     assert stored["last_seen_at"] == provisioning._as_utc_iso(later)
 
 
+def test_register_agent_and_google_client_rewrite_state_at_most_every_ten_minutes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client-authenticated calls refresh last_seen_at like heartbeats instead of rewriting the state file each time."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    _install_fake_register(monkeypatch, [])
+    app = provisioning.create_app(
+        _service_config(
+            tmp_path / "state.json",
+            google_oauth_client_id="google-client-id",
+            google_oauth_client_secret="google-client-secret",  # noqa: S106
+        ),
+    )
+    persisted: list[datetime] = []
+    real_persist = provisioning._persist_state_unlocked
+
+    def _counting_persist(state: provisioning.ProvisioningState, path: Path) -> None:
+        persisted.append(state.connections[complete["client_id"]].last_seen_at)
+        real_persist(state, path)
+
+    def _call_both() -> None:
+        username = _managed_agent_username("code", complete["namespace"])
+        assert _post_register_agent(client, complete, username).status_code == 200
+        google = client.get(
+            "/v1/local-mindroom/oauth/google-client",
+            headers={
+                "X-Local-MindRoom-Client-Id": complete["client_id"],
+                "X-Local-MindRoom-Client-Secret": complete["client_secret"],
+            },
+        )
+        assert google.status_code == 200
+
+    paired_at = provisioning._now_utc()
+    with TestClient(app) as client:
+        complete = _pair_local_client(client)
+        monkeypatch.setattr(provisioning, "_persist_state_unlocked", _counting_persist)
+        for _ in range(5):
+            _call_both()
+        assert persisted == []
+
+        later = paired_at + provisioning.timedelta(minutes=11)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
+        _call_both()
+        assert _listed_last_seen(client) == later
+
+    assert persisted == [later]
+
+
 def test_heartbeat_is_rate_limited_per_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A misbehaving install cannot hammer the heartbeat endpoint."""
     _patch_legacy_access_token_auth(monkeypatch)
@@ -735,7 +784,9 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
         assert listed.status_code == 200
         assert listed.json()["connections"][0]["namespace"] == ""
 
-        # Registering updates last_seen_at and re-persists state to disk.
+        # Registering after the last-seen resolution updates last_seen_at and re-persists state to disk.
+        later = provisioning._now_utc() + provisioning.LAST_SEEN_RESOLUTION
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: later)
         assert _post_register_agent(client, complete, "mindroom_foo").status_code == 200
 
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
