@@ -51,7 +51,12 @@ from mindroom.delegation.lifecycle import (
     settle_child_response,
     start_child_turn,
 )
-from mindroom.delegation.recovery import interrupt_child, read_child_run, resolve_subagent
+from mindroom.delegation.recovery import (
+    RESTART_INTERRUPTION_REASON,
+    interrupt_child,
+    read_child_run,
+    resolve_subagent,
+)
 from mindroom.delegation.sessions import (
     SubagentSessionError,
     subagent_liveness,
@@ -65,7 +70,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
-from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_jobs.control import job_owns_execution, job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
@@ -702,7 +707,17 @@ async def _background_child_outcome(
                     },
                 )
         except asyncio.CancelledError:
-            await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
+            if job_stopped_by_shutdown():
+                # Shutdown interrupts the child like a restart; only a cancellation request cancels it.
+                await interrupt_child(
+                    child,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    reason=RESTART_INTERRUPTION_REASON,
+                    status="failed",
+                )
+            else:
+                await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
             raise
         except Exception as error:
             primary_error = error

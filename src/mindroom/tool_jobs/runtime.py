@@ -1084,7 +1084,7 @@ class ToolJobRuntime:
         async with self._lock:
             for entry in self._entries.values():
                 if entry.job.status not in READY_STATUSES:
-                    entry.control.cancel()
+                    entry.control.cancel(shutdown=True)
                 self._release_control(entry)
                 if entry.drain is not None:
                     # The cancellation request already cancelled execution; its drain settles it.

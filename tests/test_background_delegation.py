@@ -1090,6 +1090,30 @@ class _BlockingChild:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path, shutdown: bool) -> None:
+    """Only a cancellation request cancels a running child; shutdown records the restart interruption."""
+    runtime = tool_job_runtime(tmp_path)
+    child = _BlockingChild()
+
+    async def stop() -> None:
+        running = await child.running()
+        if shutdown:
+            await runtime.quiesce()
+        else:
+            await runtime.cancel(running.delegation_id, owner=_BACKGROUND_PARENT, depth=0)
+
+    await _drive_background_child(tmp_path, runtime, child, while_waiting=stop)
+    (path,) = saved_job_paths(tmp_path / "tool_jobs")
+    job = read_job_snapshot(path)
+    assert (job.status, job.result) == (
+        ("failed", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
+        if shutdown
+        else ("cancelled", "Delegation cancelled.")
+    )
+
+
+@pytest.mark.asyncio
 async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path) -> None:
     """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
     allowed = True

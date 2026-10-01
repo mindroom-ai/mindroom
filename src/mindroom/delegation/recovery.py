@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+
 
 async def resolve_subagent(
     subagent_id: str,
@@ -97,7 +99,7 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason="Subagent turn was interrupted by a restart. Send a follow-up to continue its history.",
+        reason=RESTART_INTERRUPTION_REASON,
         status="failed",
     )
 

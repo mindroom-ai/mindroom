@@ -50,10 +50,12 @@ class JobControl:
     """Prevent future tool entry after explicit cancellation."""
 
     cancelled: bool = False
+    shutdown: bool = False
 
-    def cancel(self) -> None:
+    def cancel(self, *, shutdown: bool = False) -> None:
         """Prevent tool entry even when the operation catches task cancellation."""
         self.cancelled = True
+        self.shutdown = self.shutdown or shutdown
 
     def checkpoint(self) -> None:
         """Fail on cancellation without creating waiters on another event loop."""
@@ -100,3 +102,9 @@ def job_checkpoint() -> None:
 def job_owns_execution() -> bool:
     """Return whether this task already belongs to one managed operation."""
     return _control.get() is not None
+
+
+def job_stopped_by_shutdown() -> bool:
+    """Return whether runtime shutdown, not a cancellation request, stopped the active job."""
+    control = _control.get()
+    return control is not None and control.shutdown
