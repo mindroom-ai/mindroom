@@ -348,6 +348,7 @@ For production SaaS instance provisioning, the instance chart is rendered with `
 After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
 Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
+The one exception is the platform-wide Matrix OIDC client secret, which only Synapse mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
 The sandbox proxy token is random per instance.
 Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
 Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.

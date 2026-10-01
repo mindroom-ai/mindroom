@@ -791,7 +791,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             namespace=namespace,
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
-        # Tenant workloads are untrusted, so every value here must be scoped to this instance.
+        # Tenant workloads are untrusted, so every value here must be scoped to this instance,
+        # except the platform-wide OIDC client secret, which the instance chart mounts only into Synapse.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",

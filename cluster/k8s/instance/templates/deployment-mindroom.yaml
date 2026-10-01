@@ -287,4 +287,12 @@ spec:
         secret:
           secretName: {{ $instanceSecretName }}
           defaultMode: 0400
+          # Mount only the files this container reads; the platform-wide Matrix OIDC client secret stays with Synapse.
+          # Missing keys stay absent as with a whole-Secret mount; the secretKeyRef env vars still require the Secret.
+          optional: true
+          items:
+          {{- range list "openai_key" "anthropic_key" "openrouter_key" "google_key" "deepseek_key" "matrix_registration_shared_secret" }}
+          - key: {{ . }}
+            path: {{ . }}
+          {{- end }}
 {{ include "mindroom.staticRunnerVolume" . | nindent 6 }}
