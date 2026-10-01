@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
 from mindroom.cli import connect as cli_connect
-from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import provisioning as matrix_provisioning
 from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
@@ -947,7 +946,6 @@ def test_cli_device_pairing_messages_match_service_models(tmp_path: Path) -> Non
         provisioning_url="https://provisioning.example",
         client_name="devbox",
         client_fingerprint=cli_connect.local_client_fingerprint(config_path=tmp_path / "config.yaml"),
-        matrix_ssl_verify=True,
         announce=lambda _session: None,
         post_request=post,
         sleep=lambda _seconds: None,
@@ -990,7 +988,6 @@ async def test_cli_register_agent_messages_match_service_models(
         homeserver="https://mindroom.chat",
         username="mindroom_code",
         display_name="CodeAgent",
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
     )
 
     (request,) = requests

@@ -895,7 +895,6 @@ async def _register_user_via_provisioning_if_configured(
         homeserver=homeserver,
         username=username,
         display_name=display_name,
-        runtime_paths=runtime_paths,
     )
     provisioning_user_id = _validated_returned_user_id(
         provisioning_result.user_id,

@@ -1799,7 +1799,7 @@ Container `env_file`/`--env-file` injection supplies process variables and can t
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
 | `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 
@@ -20900,7 +20900,7 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 |----------|---------|-------------|
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it applies only to the homeserver, not to the provisioning service |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
@@ -20914,6 +20914,8 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default 
 A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
 Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
 Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+Requests to the provisioning service always verify its certificate, whatever `MATRIX_SSL_VERIFY` says, because that service names the install's owner and issues its client credentials.
+For a provisioning service behind a private CA, set `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment.
 
 ## Agent Users
 
@@ -24000,7 +24002,7 @@ Key environment variables (set in `.env` or pass directly):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
 | `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
 | `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
@@ -27223,7 +27225,7 @@ mindroom connect --provisioning-url https://matrix.example.com
 Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
 By default this command also writes `MATRIX_HOMESERVER` and `MATRIX_SERVER_NAME` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
-For an `https://` homeserver it also writes `MATRIX_SSL_VERIFY=false`, which turns off certificate checks for that homeserver and for the provisioning service, so remove it before pairing with hosted Matrix.
+For an `https://` homeserver it also writes `MATRIX_SSL_VERIFY=false`, which turns off certificate checks for that homeserver only, so remove it before switching to hosted Matrix.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

@@ -4513,20 +4513,19 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert result.exit_code == 0
         assert "malformed namespace" in normalize_console_output(result.output)
 
-    def test_connect_passes_matrix_ssl_verify_to_httpx(
+    def test_connect_verifies_provisioning_tls_when_matrix_ssl_verify_is_false(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Connect should pass MATRIX_SSL_VERIFY through to httpx.post."""
+        """MATRIX_SSL_VERIFY covers only the homeserver, so pairing still verifies the service that names the owner."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
 
-        called: dict[str, object] = {}
+        calls: list[dict[str, object]] = []
 
         def _fake_post(url: str, **kwargs: object) -> httpx.Response:
-            called["url"] = url
-            called["kwargs"] = kwargs
+            calls.append(kwargs)
             if "start" in url:
                 return httpx.Response(
                     200,
@@ -4549,7 +4548,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
                 },
             )
 
-        monkeypatch.setattr("mindroom.cli.connect._httpx_post", _fake_post)
+        monkeypatch.setattr(httpx, "post", _fake_post)
         monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
 
         result = _invoke_with_runtime(
@@ -4563,10 +4562,9 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
             env={"MATRIX_SSL_VERIFY": "false"},
         )
 
-        assert result.exit_code == 0
-        kwargs = called["kwargs"]
-        assert isinstance(kwargs, dict)
-        assert kwargs["verify"] is False
+        assert result.exit_code == 0, result.output
+        # httpx verifies certificates unless told otherwise.
+        assert [kwargs.get("verify", True) for kwargs in calls] == [True, True]
 
     def test_connect_pair_code_option_removed(self, tmp_path: Path) -> None:
         """--pair-code should exit with code 2 (option removed)."""
@@ -4915,7 +4913,7 @@ class TestLocalStackSetup:
         assert env_path.exists()
         env_content = env_path.read_text()
         assert "MATRIX_HOMESERVER=http://localhost:8008" in env_content
-        # A plain-HTTP homeserver needs no TLS override, which would also apply to hosted pairing later.
+        # A plain-HTTP homeserver needs no TLS override, which would also apply to a hosted homeserver set later.
         assert "MATRIX_SSL_VERIFY" not in env_content
         assert "MATRIX_SERVER_NAME=localhost" in env_content
         assert "Local stack is ready." in result.output

@@ -447,7 +447,7 @@ Container `env_file`/`--env-file` injection supplies process variables and can t
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
-| `MATRIX_SSL_VERIFY` | Verify SSL certificates | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
 | `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
 | `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 

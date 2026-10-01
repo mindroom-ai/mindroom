@@ -761,7 +761,6 @@ class TestMatrixRegistration:
             homeserver="http://localhost:8008",
             username="test_user",
             display_name="Test User",
-            runtime_paths=runtime_paths,
         )
         return user_id
 
@@ -1083,12 +1082,47 @@ class TestMatrixRegistration:
                 runtime_paths=runtime_paths,
             )
 
-    @staticmethod
-    async def _register_via_provisioning_with_response(
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_verifies_tls_when_matrix_ssl_verify_is_false(
+        self,
         tmp_path: Path,
-        response: httpx.Response,
     ) -> None:
-        runtime_paths = constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+        """MATRIX_SSL_VERIFY covers only the homeserver, so the register-agent call that returns a password verifies TLS."""
+        runtime_paths = _runtime_paths(
+            tmp_path,
+            MATRIX_SSL_VERIFY="false",
+            MINDROOM_PROVISIONING_URL="https://provisioning.example",
+            MINDROOM_LOCAL_CLIENT_ID="client-123",
+            MINDROOM_LOCAL_CLIENT_SECRET="secret-123",  # noqa: S106
+        )
+        client_kwargs: list[dict[str, object]] = []
+        fake_client = _recording_httpx_async_client(
+            [],
+            httpx.Response(401, json={"detail": "Invalid local client credentials"}),
+        )
+
+        def _client(**kwargs: object) -> object:
+            client_kwargs.append(kwargs)
+            return fake_client(**kwargs)
+
+        with (
+            patch.object(provisioning.httpx, "AsyncClient", _client),
+            patch("mindroom.matrix.users.provisioning_env.registration_token_from_env", return_value=None),
+            pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"),
+        ):
+            await _register_user(
+                "http://localhost:8008",
+                "test_user",
+                "test_pass",
+                "Test User",
+                runtime_paths=runtime_paths,
+            )
+
+        # httpx verifies certificates unless told otherwise.
+        assert [kwargs.get("verify", True) for kwargs in client_kwargs] == [True]
+
+    @staticmethod
+    async def _register_via_provisioning_with_response(response: httpx.Response) -> None:
         with patch.object(provisioning.httpx, "AsyncClient", _recording_httpx_async_client([], response)):
             await provisioning.register_user_via_provisioning_service(
                 provisioning_url="https://provisioning.example",
@@ -1097,7 +1131,6 @@ class TestMatrixRegistration:
                 homeserver="http://localhost:8008",
                 username="mindroom_test_user_otherns",
                 display_name="Test User",
-                runtime_paths=runtime_paths,
             )
 
     @pytest.mark.asyncio
@@ -1120,23 +1153,20 @@ class TestMatrixRegistration:
     )
     async def test_register_user_via_provisioning_service_client_auth_failure_is_permanent(
         self,
-        tmp_path: Path,
         response: httpx.Response,
     ) -> None:
         """Any 401, and a revoked-connection 403, should ask the user to re-pair."""
         with pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"):
-            await self._register_via_provisioning_with_response(tmp_path, response)
+            await self._register_via_provisioning_with_response(response)
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_namespace_mismatch_surfaces_detail(
         self,
-        tmp_path: Path,
     ) -> None:
         """A namespace-enforcement 403 must surface the server detail, not blame the credentials."""
         detail = "Requested username is outside this local connection namespace"
         with pytest.raises(PermanentMatrixStartupError) as excinfo:
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(403, json={"detail": detail}),
             )
 
@@ -1149,12 +1179,10 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_malformed_error_body_surfaces_text(
         self,
-        tmp_path: Path,
     ) -> None:
         """A 403 with a non-JSON body should surface the raw text instead of the re-pair advice."""
         with pytest.raises(PermanentMatrixStartupError, match="policy says no") as excinfo:
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(403, content=b"policy says no"),
             )
 
@@ -1163,7 +1191,6 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_validation_error_redacts_request_body(
         self,
-        tmp_path: Path,
     ) -> None:
         """FastAPI 422 bodies echo the request under 'input'; the password must never reach the error."""
         body = {
@@ -1181,7 +1208,7 @@ class TestMatrixRegistration:
             ],
         }
         with pytest.raises(PermanentMatrixStartupError) as excinfo:
-            await self._register_via_provisioning_with_response(tmp_path, httpx.Response(422, json=body))
+            await self._register_via_provisioning_with_response(httpx.Response(422, json=body))
 
         message = str(excinfo.value)
         assert "test_pass" not in message
@@ -1190,44 +1217,38 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_homeserver_mismatch_is_permanent(
         self,
-        tmp_path: Path,
     ) -> None:
         """A deterministic 400 (homeserver mismatch) must stop startup retries and surface the detail."""
         detail = "Invalid homeserver for this provisioning service. Expected https://a, got https://b."
         with pytest.raises(PermanentMatrixStartupError, match="Expected https://a"):
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(400, json={"detail": detail}),
             )
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_redirect_is_permanent(
         self,
-        tmp_path: Path,
     ) -> None:
         """A redirecting provisioning URL is a config error, not something to retry forever."""
         response = httpx.Response(308, headers={"location": "https://mindroom.chat/v1/local-mindroom"})
         with pytest.raises(PermanentMatrixStartupError, match="MINDROOM_PROVISIONING_URL"):
-            await self._register_via_provisioning_with_response(tmp_path, response)
+            await self._register_via_provisioning_with_response(response)
 
     @pytest.mark.asyncio
-    async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self, tmp_path: Path) -> None:
+    async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self) -> None:
         """Invalid provisioning responses should not trigger endless retries."""
         with pytest.raises(PermanentMatrixStartupError, match="invalid JSON"):
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(200, content=b"not json"),
             )
 
     @pytest.mark.asyncio
     async def test_register_user_via_provisioning_service_created_without_password_is_permanent(
         self,
-        tmp_path: Path,
     ) -> None:
         """A created account is unusable without its one-time password, so a response missing it is a permanent error."""
         with pytest.raises(PermanentMatrixStartupError, match="missing one-time password"):
             await self._register_via_provisioning_with_response(
-                tmp_path,
                 httpx.Response(200, json={"status": "created", "user_id": "@mindroom_test_user_otherns:localhost"}),
             )
 

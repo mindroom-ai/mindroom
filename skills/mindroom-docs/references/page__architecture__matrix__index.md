@@ -19,7 +19,7 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 |----------|---------|-------------|
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for dev/self-signed certs |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it applies only to the homeserver, not to the provisioning service |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
@@ -33,6 +33,8 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` replaces the matching OpenSSL default 
 A homeserver certificate that fails verification during the startup probe stops startup with a permanent error naming the homeserver and the verification failure.
 Matrix client requests, including login, keep their usual connection-failure handling, because a captive portal or TLS interception can clear up on its own.
 Each Matrix client logs the first request of an outage that cannot reach the homeserver as a `matrix_request_transport_failed` warning with aiohttp's error type and message, and logs repeats at debug level until the homeserver answers a request.
+Requests to the provisioning service always verify its certificate, whatever `MATRIX_SSL_VERIFY` says, because that service names the install's owner and issues its client credentials.
+For a provisioning service behind a private CA, set `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment.
 
 ## Agent Users
 
