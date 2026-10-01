@@ -39,6 +39,31 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
+# A hosted API that sends no stream event for this long has stalled.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+# Providers whose built-in endpoint is a hosted API. A local server can stay
+# silent for minutes while it queues a request or loads a model, so ollama,
+# llama_cpp, and custom endpoints get an idle limit only when configured.
+_HOSTED_STREAM_PROVIDERS = frozenset(
+    {
+        "anthropic",
+        "azure",
+        _BEDROCK_CLAUDE_PROVIDER,
+        "cerebras",
+        "codex",
+        "deepseek",
+        "gemini",
+        "google",
+        "groq",
+        "kimi",
+        "kimi_code",
+        "openai",
+        "openai_codex",
+        "openrouter",
+        "vertexai_claude",
+        "zai",
+    },
+)
 
 
 def canonical_provider(provider: str) -> str:
@@ -372,6 +397,24 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
     raise ValueError(msg)
 
 
+def _stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: RuntimePaths) -> float | None:
+    """Return the silence limit for streamed provider requests, or None for no limit."""
+    if model_config.stream_idle_timeout_seconds is not None:
+        return model_config.stream_idle_timeout_seconds or None
+    provider = canonical_provider(model_config.provider)
+    extra_kwargs = model_config.extra_kwargs or {}
+    client_params = extra_kwargs.get("client_params")
+    custom_endpoint = (
+        model_config.host
+        or extra_kwargs.get("base_url")
+        or (isinstance(client_params, dict) and client_params.get("base_url"))
+        or (provider == "openai" and runtime_paths.env_value("OPENAI_BASE_URL"))
+    )
+    if provider not in _HOSTED_STREAM_PROVIDERS or custom_endpoint:
+        return None
+    return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+
+
 def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
     """Return the dashboard key saved for one model config (``model:<name>``), if any."""
     model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
@@ -484,7 +527,10 @@ def get_model_instance(
         configured_provider=provider,
     )
     install_claude_prompt_cache_hook(model)
-    install_provider_stream_retry_hook(model)
+    install_provider_stream_retry_hook(
+        model,
+        idle_timeout_seconds=_stream_idle_timeout_seconds(model_config, runtime_paths),
+    )
     install_provider_media_fallback(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),

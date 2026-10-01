@@ -677,6 +677,15 @@ class ModelConfig(BaseModel):
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+    stream_idle_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a streamed model request may go without a provider event before MindRoom treats it as "
+            "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
+            "built-in endpoint and no limit for ollama, llama_cpp, or a custom endpoint; 0 disables the limit"
+        ),
+    )
 
     @field_validator("display_name")
     @classmethod

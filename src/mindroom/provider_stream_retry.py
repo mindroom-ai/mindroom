@@ -8,6 +8,11 @@ earlier tool calls and their results remain in the existing run.
 
 Attempts that yielded content, tool calls, or reasoning cannot be replayed
 without duplicating output, so those errors propagate unchanged.
+
+An optional idle limit also ends async attempts whose provider sends no stream
+event for too long. HTTP read timeouts cannot catch this: proxies such as
+OpenRouter send SSE keepalive comments while an upstream hangs, and the SDK
+drops those comments before they become stream events.
 """
 
 from __future__ import annotations
@@ -41,6 +46,21 @@ _STREAM_RETRY_HOOK_ATTR = "_mindroom_provider_stream_retry_hook_installed"
 # mid-stream SSE error events after the response has already started with 200.
 _MAX_TRANSIENT_RETRIES = 4
 _RETRY_BASE_DELAY_SECONDS = 1.0
+# A silent attempt already waited out the idle limit, so one immediate fresh
+# request is enough; a second silent attempt ends the turn instead.
+_MAX_STALL_RETRIES = 1
+
+
+class _ProviderStreamStalledError(ModelProviderError):
+    """A streamed provider request sent no event within its idle limit."""
+
+    def __init__(self, model: Model, idle_timeout_seconds: float) -> None:
+        super().__init__(
+            f"Model stream stalled: no provider event for {idle_timeout_seconds:g}s",
+            status_code=504,
+            model_name=model.name,
+            model_id=model.id,
+        )
 
 
 def _should_reraise(error: ModelProviderError, *, yielded_meaningful_output: bool, attempt: int) -> bool:
@@ -94,28 +114,57 @@ def _invoke_stream_with_retry(
             stream.close()
 
 
+async def _next_response(
+    model: Model,
+    stream: AsyncGenerator[ModelResponse, None],
+    idle_timeout_seconds: float | None,
+) -> ModelResponse:
+    """Return the next provider event, raising once the provider stays silent too long."""
+    if idle_timeout_seconds is None:
+        return await anext(stream)
+    deadline = asyncio.timeout(idle_timeout_seconds)
+    try:
+        async with deadline:
+            return await anext(stream)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        raise _ProviderStreamStalledError(model, idle_timeout_seconds) from None
+
+
 async def _ainvoke_stream_with_retry(
     model: Model,
     original_ainvoke_stream: Callable[..., AsyncGenerator[ModelResponse, None]],
+    idle_timeout_seconds: float | None,
     *args: object,
     **kwargs: object,
 ) -> AsyncIterator[ModelResponse]:
-    """Replay one asynchronous stream request after transient pre-output errors."""
-    for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+    """Replay one asynchronous stream request after transient or silent pre-output failures."""
+    transient_retries = 0
+    stall_retries = 0
+    while True:
         yielded_meaningful_output = False
         stream = original_ainvoke_stream(*args, **kwargs)
         try:
-            async for response in stream:
+            while True:
+                try:
+                    response = await _next_response(model, stream, idle_timeout_seconds)
+                except StopAsyncIteration:
+                    return
                 yielded_meaningful_output = yielded_meaningful_output or has_meaningful_stream_output(response)
                 yield response
-        except ModelProviderError as error:
-            if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=attempt):
+        except _ProviderStreamStalledError as error:
+            if yielded_meaningful_output or stall_retries >= _MAX_STALL_RETRIES:
                 raise
-            delay = _retry_delay_seconds(attempt)
-            _log_retry(model, error, attempt=attempt, delay=delay)
+            stall_retries += 1
+            logger.warning("Retrying silent provider stream", model_id=model.id, error=error.message)
+        except ModelProviderError as error:
+            if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=transient_retries):
+                raise
+            delay = _retry_delay_seconds(transient_retries)
+            _log_retry(model, error, attempt=transient_retries, delay=delay)
+            transient_retries += 1
             await asyncio.sleep(delay)
-        else:
-            return
         finally:
             # Async generators abandoned mid-stream are only finalized by the
             # GC hook; close the underlying request deterministically when the
@@ -123,16 +172,18 @@ async def _ainvoke_stream_with_retry(
             await stream.aclose()
 
 
-def install_provider_stream_retry_hook(model: Model) -> None:
+def install_provider_stream_retry_hook(model: Model, *, idle_timeout_seconds: float | None = None) -> None:
     """Wrap a model's stream invocations with transient-error retries.
 
     Idempotent per model instance. Only attempts that have not yet yielded
     meaningful output are retried; anything else re-raises immediately so
-    partially streamed responses are never duplicated.
+    partially streamed responses are never duplicated. ``idle_timeout_seconds``
+    bounds the silence between provider events in async streams, which every
+    MindRoom turn uses; a blocking sync iteration cannot be interrupted.
     """
     install_stream_invocation_hooks(
         model,
         marker=_STREAM_RETRY_HOOK_ATTR,
         wrap_sync=lambda original: partial(_invoke_stream_with_retry, model, original),
-        wrap_async=lambda original: partial(_ainvoke_stream_with_retry, model, original),
+        wrap_async=lambda original: partial(_ainvoke_stream_with_retry, model, original, idle_timeout_seconds),
     )
