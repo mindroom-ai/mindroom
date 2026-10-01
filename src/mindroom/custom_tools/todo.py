@@ -98,7 +98,8 @@ class TemplateTodo(BaseModel):
     sub_template: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     priority: Literal["low", "medium", "high", "critical"] = "medium"
-    depends_on: list[int] = Field(default_factory=list)
+    # A set, so a repeated index cannot multiply the edges a sub-template's terminals add.
+    depends_on: set[int] = Field(default_factory=set)
     assigned_agent: str | None = None
 
     @model_validator(mode="after")

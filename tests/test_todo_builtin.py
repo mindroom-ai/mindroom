@@ -782,6 +782,25 @@ todos:
     assert by_title["After child"]["depends_on"] == [child_join_id]
 
 
+def test_repeated_template_dependencies_are_stored_once(tmp_path: Path) -> None:
+    """Each repeat of a sub-template index would add all its terminals again, so a dependency is stored once."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(config, "leaf", _template_text("leaf", "  - title: Leaf\n" * 3))
+    repeated = ", ".join(["1"] * 1000)
+    _write_workspace_template(
+        config,
+        "parent",
+        _template_text("parent", f"  - sub_template: leaf\n  - title: After leaf\n    depends_on: [{repeated}]\n"),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="parent", params={})
+
+    items = _read_todos(config)["items"]
+    assert items[-1]["depends_on"] == [item["id"] for item in items[:3]]
+
+
 def test_apply_template_rejects_unknown_assigned_agent(tmp_path: Path) -> None:
     """Templates should not write assignees outside the configured agent set."""
     config = _config(tmp_path)
