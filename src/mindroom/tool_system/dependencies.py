@@ -142,10 +142,11 @@ def _get_current_uv_tool_extras() -> list[str]:
 def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
-    # Pin the interpreter this environment runs on and skip `--force`: either a bare `X.Y` request
-    # resolving to another patch or arch, or `--force`, makes uv delete the live environment before
-    # building, so a failed build would leave nothing behind. A pinned non-forced install is additive.
-    # `_base_executable` is the pyvenv.cfg `home` interpreter that stdlib `venv` itself uses.
+    # Pin the exact interpreter this environment was created from (what stdlib `venv` uses) and skip
+    # `--force`: a bare `X.Y` request resolving to another patch or arch, or `--force`, makes uv delete
+    # the live environment before building, so a failed build would leave nothing behind. Without them
+    # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
+    # extras merged with the new ones so installed extras are kept.
     base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
     cmd = ["uv", "tool", "install", package_spec, "--python", base_python]
     if quiet:

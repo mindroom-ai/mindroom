@@ -415,10 +415,9 @@ def test_install_via_uv_tool_extends_running_environment_in_place(monkeypatch: p
     """Uv tool installs must reuse the running interpreter so a failed build cannot delete the environment."""
     captured: dict[str, object] = {}
 
-    def fake_run(cmd: list[str], *, check: bool, env: dict[str, str]) -> SimpleNamespace:
+    def fake_run(cmd: list[str], *, check: bool, **_kwargs: object) -> SimpleNamespace:
         captured["cmd"] = cmd
         captured["check"] = check
-        captured["env"] = env
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("mindroom.tool_system.dependencies.subprocess.run", fake_run)
@@ -437,6 +436,29 @@ def test_install_via_uv_tool_extends_running_environment_in_place(monkeypatch: p
         "-q",
     ]
     assert captured["check"] is False
+
+
+def test_install_optional_extras_keeps_receipt_extras_for_uv_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Uv syncs the tool environment exactly to the request, so installed extras must be requested again."""
+    (tmp_path / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "mindroom", extras = ["website", "Duck_Duck_Go"] }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    requested: list[list[str]] = []
+
+    def fake_install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
+        assert quiet is True
+        requested.append(extras)
+        return True
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_tool", fake_install_via_uv_tool)
+
+    assert _install_optional_extras(["browser", "duck-duck-go"], quiet=True)
+    assert requested == [["browser", "duck-duck-go", "website"]]
 
 
 def test_install_command_for_current_python_uses_uv_system_outside_virtualenv(
