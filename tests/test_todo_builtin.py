@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -539,6 +540,10 @@ todos:
     assert "`broken`" not in listing
 
 
+# Only Linux lets the render child cap its address space; elsewhere workspace templates only substitute.
+_NEEDS_MEMORY_CAP = pytest.mark.skipif(sys.platform != "linux", reason="needs RLIMIT_AS")
+
+
 def _template_text(name: str, todos: str, *, description: str = "Workspace template.") -> str:
     return f'name: {name}\nversion: "1"\ndescription: "{description}"\ntodos:\n{todos}'
 
@@ -551,6 +556,7 @@ def _template_text(name: str, todos: str, *, description: str = "Workspace templ
             {},
             "memory limit",
             id="memory",
+            marks=_NEEDS_MEMORY_CAP,
         ),
         pytest.param(
             {"hostile": _template_text("hostile", "  - title: One\n", description="{{ ''.__class__.__mro__ }}")},
@@ -629,6 +635,7 @@ def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
         tool.apply_template(agent=_agent(), name="hostile", params=params, dry_run=True)
 
 
+@_NEEDS_MEMORY_CAP
 def test_workspace_templates_render_jinja_conditionals_and_filters(tmp_path: Path) -> None:
     """Workspace templates keep full inline Jinja, rendered outside the primary."""
     config = _config(tmp_path)
@@ -665,6 +672,7 @@ def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> N
     assert rendered == {"rendered": "Fix X-1"}
 
 
+@_NEEDS_MEMORY_CAP
 def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

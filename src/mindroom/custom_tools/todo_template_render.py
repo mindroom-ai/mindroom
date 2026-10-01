@@ -21,10 +21,10 @@ from jinja2.sandbox import SandboxedEnvironment, SecurityError
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
+_MEMORY_LIMIT_BYTES = 128 * 1024 * 1024
 _MAX_ERROR_CHARS = 500
-# Bound how many render children one primary runs at once.
-_render_slots = BoundedSemaphore(4)
+# Children share the primary's CPU and memory quota, so one renders at a time.
+_render_slots = BoundedSemaphore(1)
 
 
 def render_workspace_template(
@@ -91,6 +91,14 @@ def _render_text(request: Mapping[str, Any], *, memory_limited: bool) -> str:
         if size > max_chars:
             break
     return "".join(rendered)[: max_chars + 1]
+
+
+def render_trusted_template(template_text: str, params: Mapping[str, Any], *, max_chars: int) -> str:
+    """Render a template MindRoom ships in this process, with the same output cap and error messages."""
+    result = _render({"template": template_text, "params": params, "max_chars": max_chars}, memory_limited=True)
+    if "error" in result:
+        raise ValueError(result["error"])
+    return result["rendered"]
 
 
 def _render(request: Mapping[str, Any], *, memory_limited: bool) -> dict[str, str]:

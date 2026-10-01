@@ -270,6 +270,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
+| `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |
 | `custom_tools/calculator.py` | Agno calculator with bounded `factorial()` and `is_prime()` arguments |
 | `custom_tools/sleep.py` | Agno sleep toolkit with pauses capped at 300 seconds |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
