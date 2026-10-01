@@ -4165,6 +4165,7 @@ depends_on = [
     "mindroom.credentials_sync",
     # Deferred import in the missing-env check.
     "mindroom.model_loading",
+    "mindroom.path_confinement",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
 ]

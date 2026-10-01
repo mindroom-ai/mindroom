@@ -37,6 +37,7 @@ from mindroom.model_defaults import (
     SENTENCE_TRANSFORMERS_DEFAULT,
     llama_cpp_server_command,
 )
+from mindroom.path_confinement import read_regular_file_within_root, write_file_within_root
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -176,12 +177,14 @@ _MIND_CONFIG_PATH_NOTE_END = "<!-- mindroom:config-path:end -->"
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, config_path: Path, force: bool) -> None:
-    """Create the default Mind workspace files used by starter configs."""
+    """Create the default Mind workspace files used by starter configs.
+
+    Worker code can write this workspace, so TOOLS.md is read and replaced without following links.
+    """
     from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
 
     ensure_workspace_template(workspace_path, template="mind", force=force)
-    tools_path = workspace_path / "TOOLS.md"
-    content = tools_path.read_text(encoding="utf-8")
+    content = read_regular_file_within_root(workspace_path, "TOOLS.md").decode("utf-8")
     note = (
         f"{_MIND_CONFIG_PATH_NOTE_START}\n"
         "## MindRoom Installation\n\n"
@@ -196,7 +199,7 @@ def _ensure_mind_workspace(workspace_path: Path, *, config_path: Path, force: bo
     else:
         updated = f"{content.rstrip()}\n\n{note}\n"
     if updated != content:
-        tools_path.write_text(updated, encoding="utf-8")
+        write_file_within_root(workspace_path, "TOOLS.md", updated.encode("utf-8"), file_mode=0o644)
 
 
 def _write_env_file(

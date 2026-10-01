@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 import mindroom.cli.connect as cli_connect
 import mindroom.constants as constants_module
 import mindroom.google_adc as google_adc_module
+import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
@@ -362,6 +363,27 @@ class TestConfigInit:
         assert not (workspace / "BOOT.md").exists()
         tools_notes = (workspace / "TOOLS.md").read_text(encoding="utf-8")
         assert f"- Active config file: {json.dumps(str(target.resolve()))}" in tools_notes
+
+    def test_mind_workspace_refuses_tools_notes_linked_after_scaffold(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worker code that swaps TOOLS.md for a link after the scaffold checked it cannot redirect the config note."""
+        outside = tmp_path / "outside.txt"
+        outside.write_text("operator file\n", encoding="utf-8")
+        scaffold = workspaces_module.ensure_workspace_template
+
+        def scaffold_then_swap(workspace_path: Path, *, template: str, force: bool = False) -> None:
+            scaffold(workspace_path, template=template, force=force)
+            (workspace_path / "TOOLS.md").unlink()
+            (workspace_path / "TOOLS.md").symlink_to(outside)
+
+        monkeypatch.setattr(workspaces_module, "ensure_workspace_template", scaffold_then_swap)
+
+        with pytest.raises(OSError, match="symbolic links"):
+            config_cli._ensure_mind_workspace(tmp_path / "workspace", config_path=tmp_path / "config.yaml", force=False)
+        assert outside.read_text(encoding="utf-8") == "operator file\n"
 
     def test_init_creates_agent_rescue_docs(self, tmp_path: Path) -> None:
         """Config init seeds AGENTS.md for repair agents."""
