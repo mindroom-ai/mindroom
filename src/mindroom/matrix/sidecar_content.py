@@ -57,20 +57,12 @@ def holds_unresolved_sidecar(content: Mapping[str, Any]) -> bool:
     return sidecar_content_to_resolve(content) is not None
 
 
-def _as_plain_text(content: Mapping[str, Any]) -> dict[str, Any]:
-    plain = {key: value for key, value in content.items() if key not in _SIDECAR_FILE_KEYS}
-    plain["msgtype"] = "m.text"
-    return plain
-
-
 def without_sidecar_reference(content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return content as plain text with no sidecar or file reference, in either layer an edit may carry it.
+    """Return content as plain text with no sidecar or file reference.
 
     Left as a file event, the preview would still look like shared media, and
     collecting a thread's attachments would download the sidecar on every turn.
     """
-    stripped = _as_plain_text(content)
-    new_content = stripped.get("m.new_content")
-    if isinstance(new_content, Mapping):
-        stripped["m.new_content"] = _as_plain_text(new_content)
-    return stripped
+    plain = {key: value for key, value in content.items() if key not in _SIDECAR_FILE_KEYS}
+    plain["msgtype"] = "m.text"
+    return plain
