@@ -31,6 +31,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace, tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
@@ -332,6 +333,10 @@ class ApprovalResponseCoordinator:
                 cards=tuple(cards),
             ):
                 raise RuntimeError(failure_reason)
+            # The job coordinator expires cards recorded before a job's cancellation; these may postdate it.
+            withdrawn = self._cancelled_job_ids(plan.calls)
+            if withdrawn:
+                await manager.expire_job_cards(withdrawn)
         elif (
             await self.store.activate_approval_continuation(
                 continuation.approval_id,
@@ -363,6 +368,15 @@ class ApprovalResponseCoordinator:
             continuation = refreshed
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
+
+    def _cancelled_job_ids(self, calls: tuple[ApprovalCall, ...]) -> set[str]:
+        """Name the jobs whose presented approval pause ended before its cards were recorded."""
+        runtime = get_background_runtime(self.runtime_paths)
+        if runtime is None:
+            return set()
+        # A job-owned child's call is projected as `<job_id>:<child call id>`.
+        job_ids = {call.tool_call_id.partition(":")[0] for call in calls if call.decision is None}
+        return {job_id for job_id in job_ids if runtime.has_job(job_id) and not runtime.awaits_approval(job_id)}
 
     def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
         """Recognize a paused call that can resume only through the job runtime."""

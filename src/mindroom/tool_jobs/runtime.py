@@ -384,6 +384,10 @@ class ToolJobRuntime:
         """Recognize accepted ownership; access still requires an authorized lookup."""
         return job_id in self._entries
 
+    def awaits_approval(self, job_id: str) -> bool:
+        """Whether an accepted job is paused for approval, read without acquiring the admission lock."""
+        return (entry := self._entries.get(job_id)) is not None and entry.job.status == "awaiting_approval"
+
     def source_event_id(self, job_id: str) -> str | None:
         """Read accepted provenance for internal Stop ancestry without acquiring the admission lock."""
         return entry.job.source_event_id if (entry := self._entries.get(job_id)) is not None else None

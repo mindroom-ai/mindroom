@@ -1256,6 +1256,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.response_sources",
     "mindroom.tool_approval",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.events",
 ]
@@ -7581,6 +7582,7 @@ depends_on = [
     "mindroom.tool_jobs.resources",
 ]
 visibility = [
+    "mindroom.approval_response",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",

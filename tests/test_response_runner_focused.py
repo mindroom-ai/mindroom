@@ -143,6 +143,8 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -178,6 +180,7 @@ from tests.test_response_turn import (
     _dynamic_tool_execution,
     _streaming_adapter,
 )
+from tests.tool_job_helpers import job_child, job_owner, start_delegation_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -4033,6 +4036,72 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store.prepare_detached_approval.assert_awaited_once()
     assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
     approval_store.reserve_and_publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cards_recorded_after_their_job_was_cancelled_expire_on_publication(tmp_path: Path) -> None:
+    """A job cancelled between its approval pause and card publication cannot resume, so only its card expires."""
+    bot = _bot(tmp_path)
+    bot.config.background_tool_jobs.enabled = True
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+
+    async def pause() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+
+    try:
+        cancelled = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=pause)
+        paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
+        for job in (cancelled, paused):
+            waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
+            await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0)
+        tools = tuple(
+            ToolExecution(tool_call_id=f"{job.job_id}:write", tool_name="write_file", tool_args={})
+            for job in (cancelled, paused)
+        )
+        with (
+            patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+            patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        ):
+            plan = await runner._approval_responses.plan_pause(
+                tuple((tool, tool.tool_call_id, "write_file", "child") for tool in tools),
+                requester_id="@user:localhost",
+                toolkit_owners={("child", "write_file"): "coding"},
+            )
+        continuation = ApprovalContinuation(
+            approval_id="approval-jobs",
+            run_id="run-1",
+            session_id="session-1",
+            entity_kind="agent",
+            entity_name="general",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            response_event_id="$thinking",
+            sources=ResponseSources(("$source",), ("$source",)),
+            calls=plan.calls,
+            state="waiting",
+        )
+        approval_store = MagicMock(
+            prepare_detached_approval=AsyncMock(return_value=object()),
+            reserve_and_publish=AsyncMock(return_value=True),
+            expire_job_cards=AsyncMock(return_value=True),
+        )
+        with patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=approval_store):
+            await runner._approval_responses._publish_cards(
+                continuation,
+                plan,
+                target=_target(thread_id="$thread"),
+                failure_reason="card failed",
+            )
+    finally:
+        await runtime.shutdown()
+
+    approval_store.reserve_and_publish.assert_awaited_once()
+    approval_store.expire_job_cards.assert_awaited_once_with({cancelled.job_id})
 
 
 @pytest.mark.asyncio
