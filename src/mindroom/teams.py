@@ -1761,7 +1761,7 @@ def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[T
     return tools
 
 
-def aggregate_team_usage_metrics(
+def _aggregate_team_usage_metrics(
     metrics: RunMetrics | None,
     member_responses: Sequence[TeamRunOutput | RunOutput],
 ) -> RunMetrics | None:
@@ -1774,7 +1774,7 @@ def aggregate_team_usage_metrics(
     """
     member_total: RunMetrics | None = None
     for member in member_responses:
-        member_metrics = aggregate_team_usage_metrics(
+        member_metrics = _aggregate_team_usage_metrics(
             member.metrics,
             member.member_responses if isinstance(member, TeamRunOutput) else (),
         )
@@ -1814,7 +1814,7 @@ def _build_team_run_metadata_content(
         status=response.status,
         model=response.model,
         model_provider=response.model_provider,
-        metrics=aggregate_team_usage_metrics(
+        metrics=_aggregate_team_usage_metrics(
             response.metrics,
             response.member_responses if isinstance(response, TeamRunOutput) else (),
         ),
@@ -1881,7 +1881,7 @@ def _build_streamed_team_run_metadata_content(
     accumulated model-request totals as fallback.
     """
     aggregated = (
-        aggregate_team_usage_metrics(completed_run_event.metrics, completed_run_event.member_responses)
+        _aggregate_team_usage_metrics(completed_run_event.metrics, completed_run_event.member_responses)
         if completed_run_event is not None
         else None
     )
@@ -2810,7 +2810,7 @@ async def continue_paused_team_run(
                 status=continued.status,
                 model=continued.model,
                 model_provider=continued.model_provider,
-                metrics=aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
+                metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
                 context_metrics=continued.metrics,
                 tool_count=len(_collect_team_tool_executions(continued)),
             ),
@@ -4087,7 +4087,6 @@ __all__ = [
     "TeamResolution",
     "TeamResolutionMember",
     "TeamTurnModelSelection",
-    "aggregate_team_usage_metrics",
     "build_materialized_team_instance",
     "continue_paused_team_run",
     "decide_team_formation",

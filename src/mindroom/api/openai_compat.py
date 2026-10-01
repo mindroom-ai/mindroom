@@ -93,12 +93,12 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
-    aggregate_team_usage_metrics,
     build_materialized_team_instance,
     format_team_response,
     is_cancelled_run_output,
@@ -121,7 +121,6 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
-    from agno.metrics import RunMetrics
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
@@ -249,24 +248,73 @@ class _UsageInfo(BaseModel):
     total_tokens: int = 0
 
 
-def _usage_from_metrics(metrics: RunMetrics | None) -> _UsageInfo:
-    if metrics is None:
-        return _UsageInfo()
+def _usage_info(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    provider: str | None,
+    model_id: str | None,
+) -> _UsageInfo:
+    """Build OpenAI-style usage, where prompt_tokens includes cached input on every provider."""
+    prompt_tokens = (
+        context_input_tokens_from_counts(
+            input_tokens=input_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            provider=provider,
+            configured_provider=None,
+            model_id=model_id,
+        )
+        or 0
+    )
     return _UsageInfo(
-        prompt_tokens=metrics.input_tokens,
-        completion_tokens=metrics.output_tokens,
-        total_tokens=metrics.total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=prompt_tokens + output_tokens,
     )
 
 
 def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
     """Read usage from the versioned AI run metadata that an agent run reports."""
-    usage = run_metadata.get(AI_RUN_METADATA_KEY, {}).get("usage") or {}
-    return _UsageInfo(
-        prompt_tokens=usage.get("input_tokens", 0),
-        completion_tokens=usage.get("output_tokens", 0),
-        total_tokens=usage.get("total_tokens", 0),
+    payload = run_metadata.get(AI_RUN_METADATA_KEY, {})
+    usage = payload.get("usage") or {}
+    model = payload.get("model") or {}
+    return _usage_info(
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cache_read_tokens=usage.get("cache_read_tokens"),
+        cache_write_tokens=usage.get("cache_write_tokens"),
+        provider=model.get("provider"),
+        model_id=model.get("id"),
     )
+
+
+def _usage_from_team_output(response: TeamRunOutput | RunOutput) -> _UsageInfo:
+    """Sum usage over the leader and every member run, normalizing each run for its own provider."""
+    runs: list[TeamRunOutput | RunOutput] = [response]
+    total = _UsageInfo()
+    while runs:
+        run = runs.pop()
+        if isinstance(run, TeamRunOutput):
+            runs.extend(run.member_responses)
+        if run.metrics is None:
+            continue
+        usage = _usage_info(
+            input_tokens=run.metrics.input_tokens,
+            output_tokens=run.metrics.output_tokens,
+            cache_read_tokens=run.metrics.cache_read_tokens,
+            cache_write_tokens=run.metrics.cache_write_tokens,
+            provider=run.model_provider,
+            model_id=run.model,
+        )
+        total = _UsageInfo(
+            prompt_tokens=total.prompt_tokens + usage.prompt_tokens,
+            completion_tokens=total.completion_tokens + usage.completion_tokens,
+            total_tokens=total.total_tokens + usage.total_tokens,
+        )
+    return total
 
 
 class _ChatCompletionResponse(BaseModel):
@@ -1160,13 +1208,10 @@ async def _non_stream_team_completion(
                         message=_ChatMessage(role="assistant", content=response_text),
                     ),
                 ],
-                usage=_usage_from_metrics(
-                    aggregate_team_usage_metrics(
-                        response.metrics,
-                        response.member_responses if isinstance(response, TeamRunOutput) else (),
-                    )
+                usage=(
+                    _usage_from_team_output(response)
                     if isinstance(response, (TeamRunOutput, RunOutput))
-                    else None,
+                    else _UsageInfo()
                 ),
             )
             return _OpenAIJSONResponse(content=result.model_dump())

@@ -761,6 +761,7 @@ path = "mindroom.model_usage"
 depends_on = []
 visibility = [
     "mindroom.ai_run_metadata",
+    "mindroom.api.openai_compat",
     "mindroom.llm_request_logging",
     "mindroom.skill_learning.reviewer",
 ]
@@ -1577,6 +1578,7 @@ depends_on = [
     "mindroom.history.session_context",
     "mindroom.knowledge.utils",
     "mindroom.logging_config",
+    "mindroom.model_usage",
     "mindroom.requester_identity",
     "mindroom.response_activity",
     "mindroom.routing",
@@ -5471,7 +5473,6 @@ expose = [
     "TeamOutcome",
     "TeamResolution",
     "TeamResolutionMember",
-    "aggregate_team_usage_metrics",
     "resolve_configured_team",
     "decide_team_formation",
     "select_ad_hoc_team_mode",

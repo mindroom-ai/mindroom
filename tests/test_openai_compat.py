@@ -41,7 +41,7 @@ from starlette.requests import ClientDisconnect
 
 from mindroom import constants
 from mindroom.agents import create_agent
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
@@ -1059,6 +1059,45 @@ class TestChatCompletions:
 
         assert response.status_code == 200
         assert response.json()["usage"] == {"prompt_tokens": 1200, "completion_tokens": 34, "total_tokens": 1234}
+
+    def test_non_stream_usage_counts_cached_prompt_tokens_for_anthropic(self, app_client: TestClient) -> None:
+        """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
+
+        async def respond(_ctx: object, **kwargs: object) -> str:
+            collector = kwargs.get("run_metadata_collector")
+            if isinstance(collector, dict):
+                collector.update(
+                    build_ai_run_metadata_content(
+                        config=Config(
+                            agents={},
+                            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+                            router=RouterConfig(model="default"),
+                        ),
+                        model_name="default",
+                        run_id="run-1",
+                        session_id="session-1",
+                        status="completed",
+                        model="claude-sonnet-5-5",
+                        model_provider="Anthropic",
+                        metrics=RunMetrics(
+                            input_tokens=40,
+                            output_tokens=200,
+                            total_tokens=240,
+                            cache_read_tokens=30000,
+                            cache_write_tokens=500,
+                        ),
+                    ),
+                )
+            return "Hello!"
+
+        with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["usage"] == {"prompt_tokens": 30540, "completion_tokens": 200, "total_tokens": 30740}
 
     def test_completion_lock_releases_when_request_is_cancelled(self, app_client: TestClient) -> None:
         """Cancellation after lock acquisition must not leave the OpenAI session locked."""
@@ -3309,16 +3348,26 @@ class TestTeamCompletion:
         assert metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
-        """Team usage sums the leader's and every member's model calls."""
+        """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""
         mock_team = _make_test_team()
         mock_team.arun = AsyncMock(
             return_value=TeamRunOutput(
                 content="Team consensus result",
-                metrics=RunMetrics(input_tokens=100, output_tokens=20, total_tokens=120),
+                model="claude-sonnet-5-5",
+                model_provider="Anthropic",
+                metrics=RunMetrics(
+                    input_tokens=100,
+                    output_tokens=20,
+                    total_tokens=120,
+                    cache_read_tokens=1000,
+                    cache_write_tokens=200,
+                ),
                 member_responses=[
                     RunOutput(
                         content="Member view",
-                        metrics=RunMetrics(input_tokens=50, output_tokens=10, total_tokens=60),
+                        model="gpt-6-astra",
+                        model_provider="OpenAI",
+                        metrics=RunMetrics(input_tokens=50, output_tokens=10, total_tokens=60, cache_read_tokens=30),
                     ),
                 ],
             ),
@@ -3342,7 +3391,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert response.json()["usage"] == {"prompt_tokens": 150, "completion_tokens": 30, "total_tokens": 180}
+        assert response.json()["usage"] == {"prompt_tokens": 1350, "completion_tokens": 30, "total_tokens": 1380}
 
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""
