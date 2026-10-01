@@ -1775,6 +1775,39 @@ class TestSidecarResolution:
             ]
             assert page.refresh_pending == ()
 
+    async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A sender-nested ``m.new_content`` inside an edit's new content cannot keep the debt alive.
+
+        Settling keeps only the visible layer's text, so a second sidecar
+        reference hidden one layer deeper never makes later reads fetch again.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/gone", ts=2_000)
+        nested = self._sidecar_source("$e2", "nested [continues]", "mxc://s/nested", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": {**preview["content"], "m.new_content": nested["content"]},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        client = FakeClient(events={"$m": original}, relations={"$m": [edit]})
+        reader = await self._reader(alice, client)
+
+        first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        second = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert client.downloads == ["mxc://s/gone"]
+        for page in (first, second):
+            assert not holds_unresolved_sidecar(page.messages[0].content)
+            assert page.refresh_pending == ()
+
     async def test_a_settled_unreadable_attachment_is_text_that_thread_media_never_downloads(
         self,
         alice: PrincipalStore,
