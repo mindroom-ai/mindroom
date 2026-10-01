@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -193,6 +194,27 @@ async def test_unreadable_session_database_does_not_stop_startup(
     assert len(_usage(healthy)) == 3
     assert corrupt.read_bytes() == b"not a database"
     assert _skipped_paths(logs) == [str(corrupt)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("blocked", ["agents/broken", "agents/broken/sessions"])
+async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path, blocked: str) -> None:
+    """Worker code can make a store directory unsearchable; startup skips that store and imports the rest."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
+    unreadable = paths.storage_root / "agents/broken/sessions/broken.db"
+    unreadable.parent.mkdir(parents=True)
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    blocked_dir = paths.storage_root / blocked
+    blocked_dir.chmod(0)
+    try:
+        with capture_logs() as logs:
+            await legacy_usage_storage.migrate_usage_storage(paths)
+    finally:
+        blocked_dir.chmod(0o755)
+
+    assert len(_usage(healthy)) == 3
+    assert _skipped_paths(logs) == [str(unreadable)]
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:

@@ -130,13 +130,13 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
     for directory in directories:
         session_dir = directory / "sessions"
         path = session_dir / f"{directory.name}.db"
-        if not session_dir.is_symlink() and not path.is_symlink():
-            try:
+        try:
+            if not session_dir.is_symlink() and not path.is_symlink():
                 migrate_usage_database(path, f"{directory.name}_sessions")
-            except (sqlite3.Error, OSError) as error:
-                # Worker code can write session databases, so one unreadable store must not stop startup.
-                # Its owner retries the import when it next opens the store.
-                logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
+        except (sqlite3.Error, OSError) as error:
+            # Worker code can write session databases, so one unreadable store must not stop startup.
+            # Its owner retries the import when it next opens the store.
+            logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
 
 
 def _directories(root: Path) -> Iterator[Path]:
