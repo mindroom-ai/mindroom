@@ -6,6 +6,7 @@ import pytest
 
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import ensure_visible_tool_marker_spacing
+from tests.cpu_budget_helpers import cpu_budget
 
 # --- Core bug fix: tables without blank lines ---
 
@@ -214,6 +215,15 @@ def test_unsupported_tags_escaped() -> None:
     html = markdown_to_html("<tool>content</tool>")
     assert "&lt;tool&gt;" in html
     assert "<tool>" not in html
+
+
+def test_tag_followed_by_long_whitespace_renders_within_a_cpu_budget() -> None:
+    """A line opening a tag and trailing off into whitespace classifies in linear time."""
+    for line in ("<a" + " " * 1_000, "<a" + " " * 60_000, "<a" + " " * 60_000 + "x"):
+        with cpu_budget(0.5):
+            html = markdown_to_html(f"Title\n\n{line}\n<custom   x>\n")
+        assert "&lt;a" in html
+        assert "&lt;custom   x&gt;" in html
 
 
 def test_supported_tags_pass_through() -> None:
