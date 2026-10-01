@@ -50,9 +50,11 @@ DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 # Random per-instance secrets kept in the instance env file.
-# start and restart add missing runtime secrets to env files written by older versions.
+# start and restart add missing runtime secrets and Tuwunel secrets to env files written by older versions.
 RUNTIME_SECRET_NAMES = ("MINDROOM_API_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
-SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD")
+# The homeserver registers accounts only with the MATRIX_REGISTRATION_* secret, which MindRoom reads from the env file.
+SYNAPSE_SECRET_NAMES = ("POSTGRES_PASSWORD", "REDIS_PASSWORD", "MATRIX_REGISTRATION_SHARED_SECRET")
+TUWUNEL_SECRET_NAMES = ("MATRIX_REGISTRATION_TOKEN",)
 # Instance containers run as this user.
 CONTAINER_UID = 1000
 
@@ -306,6 +308,7 @@ def _prepare_matrix_config(
                 postgres_password=env_values["POSTGRES_PASSWORD"],
                 redis_host=f"{instance.name}-redis",
                 redis_password=env_values["REDIS_PASSWORD"],
+                registration_shared_secret=env_values["MATRIX_REGISTRATION_SHARED_SECRET"],
                 macaroon_secret_key=secrets.token_hex(32),
             )
         else:
@@ -626,11 +629,11 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
                 f.write("MATRIX_ALLOW_FEDERATION=true\n")
             elif matrix_type == MatrixType.SYNAPSE:
-                f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
     synapse_secret_names = SYNAPSE_SECRET_NAMES if matrix_type == MatrixType.SYNAPSE else ()
-    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES + synapse_secret_names)
+    tuwunel_secret_names = TUWUNEL_SECRET_NAMES if matrix_type == MatrixType.TUWUNEL else ()
+    _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES + synapse_secret_names + tuwunel_secret_names)
 
 
 def _ensure_external_network(name: str) -> bool:
@@ -887,7 +890,8 @@ def _bring_up_instance(
         _require_authelia_account_setup(instance)
 
     env_file = _require_instance_env_file(name)
-    generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES)
+    tuwunel_secret_names = TUWUNEL_SECRET_NAMES if instance.matrix_type == MatrixType.TUWUNEL else ()
+    generated_secrets = _ensure_env_secrets(env_file, RUNTIME_SECRET_NAMES + tuwunel_secret_names)
     if generated_secrets:
         console.print(f"[yellow]i[/yellow] Added {', '.join(generated_secrets)} to {env_file}")
     synapse_config = Path(instance.data_dir) / "synapse" / "homeserver.yaml"

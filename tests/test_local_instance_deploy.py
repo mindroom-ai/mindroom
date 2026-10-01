@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
@@ -1451,6 +1452,62 @@ def test_create_generates_unique_synapse_instance_secrets(tmp_path: Path, monkey
         secrets_by_instance[name] = generated
 
     assert set(secrets_by_instance["alpha"].values()).isdisjoint(secrets_by_instance["beta"].values())
+
+
+def test_created_synapse_instance_refuses_self_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A public Synapse instance registers only through its shared secret and throttles registration and login."""
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", tmp_path / "missing.env.template")
+    instance = _instance("prod", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+    instance.domain = "mindroom.example.com"
+
+    deploy._create_environment_file(instance, "prod", deploy.MatrixType.SYNAPSE)
+    deploy._setup_synapse_config(instance)
+
+    homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
+    shared_secret = deploy._read_env_values(tmp_path / "envs" / "prod.env")["MATRIX_REGISTRATION_SHARED_SECRET"]
+    assert homeserver["enable_registration"] is False
+    assert not homeserver.get("enable_registration_without_verification", False)
+    assert len(shared_secret) == 64
+    assert homeserver["registration_shared_secret"] == shared_secret
+    for limit in (
+        homeserver["rc_registration"],
+        homeserver["rc_login"]["account"],
+        homeserver["rc_login"]["failed_attempts"],
+    ):
+        assert limit["per_second"] < 1
+        assert limit["burst_count"] <= 10
+
+
+@pytest.mark.parametrize("env_generation", ["current", "older"])
+def test_tuwunel_registration_requires_the_instance_token(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    monkeypatch: pytest.MonkeyPatch,
+    env_generation: str,
+) -> None:
+    """Tuwunel accepts only token registration, and every launched instance has its own token."""
+    instance, _users_file, _commands, _console = authelia_launch
+    instance.auth_type = None
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", Path(instance.data_dir) / "missing.env.template")
+    if env_generation == "current":
+        deploy._create_environment_file(instance, "alpha", deploy.MatrixType.TUWUNEL)
+        env_file = deploy.ENV_DIR / "alpha.env"
+    else:
+        env_file = _write_older_env_file(instance)
+    created_token = deploy._read_env_values(env_file).get("MATRIX_REGISTRATION_TOKEN")
+
+    _launch_authelia("start")
+
+    token = deploy._read_env_values(env_file)["MATRIX_REGISTRATION_TOKEN"]
+    assert len(token) == 64
+    assert created_token == (token if env_generation == "current" else None)
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.tuwunel.yml").read_text())
+    tuwunel_env = compose["services"]["tuwunel"]["environment"]
+    assert tuwunel_env["TUWUNEL_REGISTRATION_TOKEN"] == "${MATRIX_REGISTRATION_TOKEN:-}"  # noqa: S105
+    assert not any("OPEN_REGISTRATION" in name for name in tuwunel_env)
+    config = tomllib.loads(Path("local/instances/deploy/templates/tuwunel/tuwunel.toml").read_text())["global"]
+    assert not config.get("yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse", False)
+    assert not config.get("allow_guest_registration", False)
 
 
 def test_ensure_env_secrets_fills_only_empty_values(tmp_path: Path) -> None:
