@@ -1213,11 +1213,11 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         state_key="task_once_retry",
         room_id="!test:server",
     )
+    # Each successful task read fetches the whole event and then its bare content.
     task_reads = iter(
         [
             nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED"),
-            state_response,
-            state_response,
+            *[state_response] * 4,
         ],
     )
 

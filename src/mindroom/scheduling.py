@@ -776,6 +776,17 @@ async def _read_scheduled_task_state(
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
         msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
         raise _ScheduledTaskStateReadError(msg)
+    # A server that ignores format=event returns the state content itself, whose author can shape it like an event.
+    try:
+        bare_response = await client.room_get_state_event(room_id, _SCHEDULED_TASK_EVENT_TYPE, task_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if not isinstance(bare_response, nio.RoomGetStateEventResponse) or bare_response.content != event["content"]:
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} did not match its state content"
+        raise _ScheduledTaskStateReadError(msg)
     return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
 

@@ -202,7 +202,7 @@ async def test_task_written_by_removed_agent_stays_listable_and_cancellable(tmp_
 
 @pytest.mark.asyncio
 async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_path: Path) -> None:
-    """Each poll costs one full-event task read, as before the author check, not a room-state fetch."""
+    """Each poll reads one task state event, as a full event and as its content, never full room state."""
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
 
@@ -239,4 +239,22 @@ async def test_non_event_task_state_response_is_a_read_error(
     client._send.return_value = nio.RoomGetStateEventResponse(body, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
 
     with pytest.raises(RuntimeError, match=rf"was not returned as a full state event \({detail}\)"):
+        await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+
+
+@pytest.mark.asyncio
+async def test_task_content_shaped_like_a_bot_event_is_a_read_error(tmp_path: Path) -> None:
+    """A server that ignores format=event returns the writer's content, so a sender embedded in it is never trusted."""
+    runtime_paths = schedule_runtime_paths(tmp_path)
+    forged = {"sender": SCHEDULE_WRITER_ID, "content": _pending_content(_workflow(created_by="@victim:server"))}
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client._send.return_value = nio.RoomGetStateEventResponse(forged, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        forged,
+        "com.mindroom.scheduled.task",
+        TASK_ID,
+        ROOM_ID,
+    )
+
+    with pytest.raises(RuntimeError, match="did not match its state content"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
