@@ -513,13 +513,18 @@ class ApprovalResponseCoordinator:
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
         tool_trace = None
-        if visible_text is None and reason == _USER_STOP_FAILURE_REASON:
+        if reason == _USER_STOP_FAILURE_REASON:
             # A stopped approval keeps the answer and tool trace it was showing, like any stopped reply.
-            stopped_text = current.response_text.rstrip()
-            visible_text = f"{stopped_text}\n\n{_USER_STOP_VISIBLE_NOTE}" if stopped_text else _USER_STOP_VISIBLE_NOTE
+            if visible_text is None:
+                stopped_text = current.response_text.rstrip()
+                visible_text = (
+                    f"{stopped_text}\n\n{_USER_STOP_VISIBLE_NOTE}" if stopped_text else _USER_STOP_VISIBLE_NOTE
+                )
             stream_status = STREAM_STATUS_CANCELLED
-            if current.show_tool_calls:
-                tool_trace = deserialize_tool_trace(current.response_tool_trace)
+            saved_trace = deserialize_tool_trace(current.response_tool_trace)
+            # A continuation that streamed further tools has outgrown the saved trace, which is then left out.
+            if current.show_tool_calls and tool_markers_match_trace(visible_text, saved_trace):
+                tool_trace = saved_trace
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(

@@ -86,7 +86,13 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
     )
 
 
-async def _settled_edit(tmp_path: Path, continuation: ApprovalContinuation, reason: str) -> EditTextRequest:
+async def _settled_edit(
+    tmp_path: Path,
+    continuation: ApprovalContinuation,
+    reason: str,
+    *,
+    visible_text: str | None = None,
+) -> EditTextRequest:
     """Settle one failed continuation and return the edit its reply received."""
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
@@ -105,7 +111,7 @@ async def _settled_edit(tmp_path: Path, continuation: ApprovalContinuation, reas
         patch("mindroom.approval_response.prepare_approval_failure", new=AsyncMock(return_value=continuation)),
         patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
     ):
-        assert await coordinator.settle_failure(continuation, reason)
+        assert await coordinator.settle_failure(continuation, reason, visible_text=visible_text)
     return gateway.edit_text.await_args.args[0]
 
 
@@ -125,8 +131,20 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
-async def test_stopped_approval_keeps_its_visible_answer_and_trace(tmp_path: Path, show_tool_calls: bool) -> None:
-    """A stopped approval ends cancelled with the answer and tool trace its reply was showing."""
+@pytest.mark.parametrize(
+    "latest",
+    [
+        None,
+        "Streamed on.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**",
+        "Streamed on.\n\n🔧 `write_file` [1] ⏳\n\n🔧 `read_file` [2]\n\n**[Response cancelled by user]**",
+    ],
+)
+async def test_stopped_approval_keeps_its_visible_answer_and_trace(
+    tmp_path: Path,
+    show_tool_calls: bool,
+    latest: str | None,
+) -> None:
+    """A stopped approval ends cancelled with the answer it was showing and the trace that answer still presents."""
     trace = [ToolTraceEntry(type="tool_call_started", tool_name="write_file", tool_call_id="call-1")]
     continuation = replace(
         _continuation(),
@@ -135,11 +153,16 @@ async def test_stopped_approval_keeps_its_visible_answer_and_trace(tmp_path: Pat
         show_tool_calls=show_tool_calls,
     )
 
-    request = await _settled_edit(tmp_path, continuation, "cancelled_by_user")
+    request = await _settled_edit(tmp_path, continuation, "cancelled_by_user", visible_text=latest)
 
-    assert request.new_text == "About to write.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**"
+    assert request.new_text == latest or (
+        latest is None
+        and request.new_text == "About to write.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**"
+    )
     assert request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED}
-    assert request.tool_trace == (trace if show_tool_calls else None)
+    # A body that streamed a further tool has outgrown the saved trace.
+    outgrown = latest is not None and "read_file" in latest
+    assert request.tool_trace == (trace if show_tool_calls and not outgrown else None)
 
 
 @pytest.mark.asyncio
