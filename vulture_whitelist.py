@@ -11,6 +11,8 @@ _.unique_products  # Pydantic field validator (src/mindroom/tool_system/atlassia
 _.pinned_site  # Pydantic model validator (src/mindroom/tool_system/atlassian_connections.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
 _.fetch_response  # Trafilatura spider download binding replaced by the server-fetch guard (src/mindroom/tools/agno_compat_trafilatura.py)
+_.fetch_images  # Newspaper4k Article.parse step overridden to skip image downloads (src/mindroom/tools/agno_compat_newspaper4k.py)
+_._save_file_to_disk  # FileGenerationTools save step overridden to write inside the workspace (src/mindroom/tools/agno_compat_file_generation.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)

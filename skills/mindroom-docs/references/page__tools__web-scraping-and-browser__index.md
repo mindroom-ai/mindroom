@@ -242,6 +242,8 @@ read_article("https://matrix.org/blog/")
 #### Notes
 
 - Use `newspaper` in `tools:`, not `newspaper4k`.
+- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
+- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 
@@ -618,6 +620,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 

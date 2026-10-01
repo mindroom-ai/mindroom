@@ -5455,10 +5455,12 @@ analyze(
 
 `file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
-If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
-Relative directories resolve from the executing process’s current working directory, not the agent workspace.
+If `output_directory` is set, the generated file is also saved in the agent workspace and the result message includes that file path.
+`output_directory` is relative to the agent workspace and cannot leave it.
 If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
-If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
+If `save_files` is `true` without `output_directory`, the toolkit saves generated files in the agent workspace root.
+Saving needs an agent workspace; without one, the files exist only in the tool result payload.
+Saved files replace any existing workspace file of the same name, and a link at that name is replaced rather than followed.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
 DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
 `file_generation` defaults to primary execution.
@@ -5467,7 +5469,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_directory` | `text` | `no` | `null` | Optional directory where generated files are written to disk. |
+| `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
 | `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
@@ -5475,7 +5477,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
 | `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
 | `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()` for source-file exports. |
-| `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files in the agent workspace; when `output_directory` is unset, use the workspace root. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example
@@ -7094,6 +7096,8 @@ read_article("https://matrix.org/blog/")
 #### Notes
 
 - Use `newspaper` in `tools:`, not `newspaper4k`.
+- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
+- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 
@@ -7470,6 +7474,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
@@ -17463,6 +17468,7 @@ The sync fails with an error instead when that `.git` is a link or a `gitdir:` f
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - MindRoom disables implicit LFS smudge during checkout and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
+- LFS hydration always uses the endpoint Git LFS derives from `repo_url`, so an LFS URL set in the repository's `.lfsconfig` is ignored.
 - When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
 - If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
 - Change detection for Git-backed bases uses the tracked revision, not file contents: an ordinary refresh can republish the compatible existing index without reading the corpus when its revision is unchanged.
@@ -22105,9 +22111,12 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Google authentication requires private resolver and Function entrypoint replacement. | Propose injectable credential resolution and an entrypoint middleware hook. | `oauth/agno_compat_google_auth.py`. |
 | WebsiteReader does not expose fetch, redirect, and crawl-admission hooks. | Propose a replaceable fetch path and explicit crawl-policy callbacks. | `custom_tools/agno_compat_website_reader.py`. |
 | TrafilaturaTools extraction and crawling download through fixed module-level fetchers, and Trafilatura's spider has no fetch hook. | Tracking gap: accept a caller-supplied fetcher for extraction, batch extraction, and every crawler download; no matching issue or PR identified. | `tools/agno_compat_trafilatura.py`; loopback, metadata, redirect, DNS-rebind, and crawl coverage in `tests/test_trafilatura_tool.py`. |
+| Newspaper4kTools downloads through newspaper4k's article helper, which opens `file://` paths, follows redirects anywhere, and downloads every image URL a page lists. | Tracking gap: accept caller-supplied HTML or a fetcher and allow skipping image downloads; no matching issue or PR identified. | `tools/agno_compat_newspaper4k.py`; loopback, metadata, private-address, `file://`, redirect, and page-image coverage in `tests/test_newspaper_tool.py`. |
+| FileGenerationTools saves model-named files by path into its output directory, or the process working directory, and follows links there. | Tracking gap: accept a caller-supplied writer or directory descriptor for saved files; no matching issue or PR identified. | `tools/agno_compat_file_generation.py`; working-directory and planted-link coverage in `tests/test_file_generation_tool.py`. |
 | GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
 | ReplicateTools checks its API key but calls an independent SDK default client. | Bind SDK requests to the toolkit key and expose client lifetime ownership while preserving media results. | `custom_tools/agno_compat_replicate.py`. |
 | AgentQLTools stores its resolved key without handing it to AgentQL queries. | Tracking gap: pass the resolved key through a per-request or per-page SDK credential API; no matching issue or PR identified. | `custom_tools/agno_compat_agentql.py`; concurrent stored-key requests and an unrelated SDK call in `tests/test_agentql_tools.py`. |
+| AgentQLTools launches Chromium with no proxy and navigates to the model-chosen URL, so neither the URL nor redirects and subresources follow a destination policy. | Tracking gap: accept caller-supplied browser launch options or a page factory; no matching issue or PR identified. | The `_scrape` override in `custom_tools/agno_compat_agentql.py`; unsafe-target and destination-relay coverage in `tests/test_agentql_tools.py`. |
 | AgentQLTools custom scraping returns response keys and discards extracted values. | Tracking gap: preserve the complete JSON response, including nested collections; no matching issue or PR identified. | The independent custom-result formatter in `custom_tools/agno_compat_agentql.py` and nested-value coverage in `tests/test_agentql_tools.py`. |
 | Adapter media capabilities must be inferred from a private module-name table. | Expose accurate supported-input capabilities independently of provider error learning. | The small documented table in `provider_media_fallback.py`. |
 
@@ -22143,9 +22152,11 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |
 | `custom_tools/agno_compat_website_reader.py` | Private crawl queue, visited state and copied loop with owner callbacks. | `custom_tools/website.py` retains server-fetch and redirect validation, exact-host rules, extraction, budgets, results, and sanitized logging. |
 | `tools/agno_compat_trafilatura.py` | Replaces the Agno and Trafilatura spider download bindings with fetchers that request uncompressed bodies and validate every URL, redirect hop, and dialed address within Trafilatura's timeout, redirect, and size limits. | `tools/trafilatura.py` installs the guard before returning the toolkit; upstream extraction, crawling, and result formats are unchanged. |
+| `tools/agno_compat_newspaper4k.py` | Replaces newspaper4k's article helper with one that downloads an uncompressed, size-limited body after validating every URL, redirect hop, and dialed address, then parses it without image extraction. | `tools/newspaper4k.py` installs the guard before returning the toolkit; upstream text extraction and result format are unchanged. |
+| `tools/agno_compat_file_generation.py` | Replaces the saved-file writer with an atomic, no-follow write into a workspace-relative output directory and keeps saves off without a workspace. | `tools/file_generation.py` returns the adapter; upstream generation, sanitized file names, and result artifacts are unchanged. |
 | `custom_tools/agno_compat_github_errors.py` | Capture of typed failures across serialized Agno results and prefix/logger binding. | `custom_tools/github.py` retains credential ownership and refresh, PyGithub requester policy, OAuth recovery, and sanitized output/log messages. |
 | `custom_tools/agno_compat_replicate.py` | Copied media-call boundary with a credential-bound Replicate client, inherited output parsing, and private SDK transport cleanup. | `tool_system/metadata.py` retains scoped credential resolution; `tools/replicate.py` retains lazy registration, and the adapter closes each request client after consuming outputs. |
-| `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, plus lossless Agno custom-result formatting. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
+| `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, lossless Agno custom-result formatting, and a browser launched only after URL validation, through a destination relay that validates every connection at dial time. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
 | `oauth/agno_compat_google_auth.py` | Private credential resolver, original resolver binding, and registered Function entrypoint adaptation. | `oauth/client.py` and Google tool owners retain credential state, refresh, service-account fallback, locking, scopes, and user prompts. |
 
 Small owner-adjacent boundaries use the same source records:
@@ -22245,7 +22256,7 @@ Reads through those descriptors are capped per surface.
 | Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
 | Todo templates, scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
 `file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.
 No-follow applies to the workspace's final path component only, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout today, because no primary-only directory there contains an entry named `workspace` for such a link to reach; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
@@ -22281,13 +22292,13 @@ Every tool declares how its own file access relates to this setting.
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `agentql`, `newspaper`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `agentql`, `newspaper`, `web_browser_tools`).
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `web_browser_tools`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -22316,7 +22327,7 @@ Do not report or "fix" these; they are deliberate.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
-- `mindroom_output_path`, attachment saves, Google Drive downloads, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review forks the request the reviewed agent's model just processed and resends it unredacted to the same provider.
   A digest replay, used for another review model or a request that cannot be forked, redacts the conversation on a best-effort basis.
