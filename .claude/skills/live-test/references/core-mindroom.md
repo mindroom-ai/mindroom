@@ -305,8 +305,10 @@ If `matty threads` looks empty or flaky, use `matty messages --format json` to d
   Approve is a `✅` reaction on the router's `🔒 Approval required` card; deny is a text reply whose `m.in_reply_to` is the card (with `is_falling_back` false in a thread).
 - When a follow-up should go to another agent, put that agent in `m.mentions`; the body text alone does not route it.
 - Sync tools such as `sleep` run in threads that cannot be preempted: a cancelled job stays `cancel_requested` until the call returns, and the process lingers on SIGTERM until it does.
-- Stop backends by exact PID (`pgrep -f "venv/bin/mindroom run --api-port <port>"` can briefly match a forked child too), and wait for the old process to exit before restarting on the same port; otherwise the new backend dies with "Embedded API server exited unexpectedly" while the old one keeps serving.
-- Give background commands absolute log paths.
+- Stop backends by exact PID, and wait for the old process to exit before restarting on the same port; otherwise the new backend dies with "Embedded API server exited unexpectedly" while the old one keeps serving.
+  `pgrep -f "<pattern>"` also matches the shell running that very command, so select the Python process instead, for example `ps -eo pid,args | awk '$2 ~ /\.venv\/bin\/python3$/ && /mindroom run --api-port 9876/ {print $1}'`.
+- Give background commands absolute paths, including `nix-shell /abs/path/shell.nix`; a leading `cd` is not always applied to a backgrounded command.
+- A Stop or other reaction whose handler keeps failing stays pending and blocks every later event of that agent in the room; check `pending_event_failed` in the log when an agent stops answering.
 
 ## Live API Checks
 
