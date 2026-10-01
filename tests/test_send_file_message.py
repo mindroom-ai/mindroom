@@ -114,29 +114,33 @@ class TestUploadFileAsMxc:
         assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
 
     @pytest.mark.asyncio
-    async def test_huge_images_upload_without_their_raster_being_decoded(
+    async def test_image_dimensions_are_read_without_decoding_the_raster(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Above the media pixel limit, a PNG without early EXIF omits dimensions, and a JPEG keeps its header ones."""
+        """A PNG without early EXIF and a rotated JPEG report their header dimensions without a pixel decode."""
         client = _mock_client(encrypted=False)
         client.upload.return_value = _upload_response()
-        png = tmp_path / "huge.png"
-        Image.new("1", (8000, 6000)).save(png)
+        png = tmp_path / "chart.png"
+        Image.new("1", (1600, 900)).save(png)
         jpeg = tmp_path / "huge.jpg"
         exif = Image.Exif()
         exif[274] = 6
         Image.new("L", (8000, 6000)).save(jpeg, exif=exif)
         loads: list[object] = []
+
+        def record_load(image: object) -> None:
+            loads.append(image)
+
         for image_class in (PngImagePlugin.PngImageFile, JpegImagePlugin.JpegImageFile):
-            monkeypatch.setattr(image_class, "load", loads.append)
+            monkeypatch.setattr(image_class, "load", record_load)
 
         _mxc_uri, png_payload = await _upload_file_as_mxc(client, "!room:localhost", png, mimetype="image/png")
         _mxc_uri, jpeg_payload = await _upload_file_as_mxc(client, "!room:localhost", jpeg, mimetype="image/jpeg")
 
         assert png_payload is not None
-        assert png_payload["info"] == {"size": png.stat().st_size, "mimetype": "image/png"}
+        assert png_payload["info"] == {"size": png.stat().st_size, "mimetype": "image/png", "w": 1600, "h": 900}
         assert jpeg_payload is not None
         assert (jpeg_payload["info"]["w"], jpeg_payload["info"]["h"]) == (6000, 8000)
         assert loads == []

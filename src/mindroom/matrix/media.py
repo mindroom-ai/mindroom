@@ -40,8 +40,6 @@ _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
 _EXIF_ROTATED_ORIENTATIONS = frozenset({5, 6, 7, 8})
-# The decoded-pixel limit media delivery applies to images it prepares.
-_MAX_EXIF_READ_PIXELS = 40_000_000
 
 
 class MatrixMediaUpstreamError(RuntimeError):
@@ -243,8 +241,8 @@ def _image_dimensions(media_bytes: bytes, mimetype: str) -> dict[str, int]:
         with Image.open(io.BytesIO(media_bytes)) as image:
             width, height = image.size
             # A PNG whose eXIf chunk follows its image data decodes the whole raster to read EXIF.
-            if image.format == "PNG" and "exif" not in image.info and width * height > _MAX_EXIF_READ_PIXELS:
-                return {}
+            if image.format == "PNG" and "exif" not in image.info:
+                return {"w": width, "h": height}
             orientation = image.getexif().get(_EXIF_ORIENTATION_TAG)
     except (OSError, ValueError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError):
         return {}
