@@ -822,7 +822,7 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
     def estimate(text: str) -> int:
         return len(text.split())
 
-    budget = 25
+    budget = 20
     messages = _build_thread_history_messages(
         "Current request",
         history,
@@ -858,6 +858,64 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
     )
     assert len(untrimmed) == len(history) + 1
     assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
+
+
+def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker() -> None:
+    """A history that fits must stay whole even when one message plus the marker would not fit."""
+    history = [
+        make_visible_message(sender="@alice:localhost", body="a", event_id="$a"),
+        make_visible_message(sender="@alice:localhost", body="b", event_id="$b"),
+    ]
+
+    def estimate(text: str) -> int:
+        return len(text.split())
+
+    full_text = render_prepared_messages_text(
+        _build_thread_history_messages(
+            "Current request",
+            history,
+            response_sender_id="@mindroom_code:localhost",
+            config=_config(),
+        ),
+    )
+    messages = _build_thread_history_messages(
+        "Current request",
+        history,
+        response_sender_id="@mindroom_code:localhost",
+        config=_config(),
+        static_token_budget=estimate(full_text),
+        estimate_static_tokens_fn=estimate,
+        render_messages_text_fn=render_prepared_messages_text,
+    )
+
+    assert [message.content for message in messages[:-1]] == [
+        render_msg_tag(sender="@alice:localhost", body="a", event_id="$a"),
+        render_msg_tag(sender="@alice:localhost", body="b", event_id="$b"),
+    ]
+
+
+def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
+    """When even the newest message does not fit, the marker alone still reports the gap."""
+    config = _config()
+    history = [make_visible_message(sender="@alice:localhost", body="x " * 200, event_id="$big")]
+
+    def estimate(text: str) -> int:
+        return len(text.split())
+
+    messages = _build_thread_history_messages(
+        "Current request",
+        history,
+        response_sender_id="@mindroom_code:localhost",
+        config=config,
+        static_token_budget=30,
+        estimate_static_tokens_fn=estimate,
+        render_messages_text_fn=render_prepared_messages_text,
+    )
+
+    assert [message.content for message in messages] == [
+        config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=1),
+        "Current request",
+    ]
 
 
 def test_thread_history_and_current_message_carry_member_display_names() -> None:

@@ -361,30 +361,11 @@ def _messages_with_capped_context(
     render_messages_text_fn: Callable[[Sequence[Message]], str],
 ) -> tuple[Message, ...]:
     """Return the newest context-message suffix that fits the total static token budget."""
-    selected_context: list[Message] = []
-    current_only_messages = _messages_with_current_prompt(
-        prompt,
-        transient_context_messages=transient_context_messages,
-        current_sender_id=current_sender_id,
-        current_timestamp_ms=current_timestamp_ms,
-        current_event_id=current_event_id,
-        current_prompt_is_structured=current_prompt_is_structured,
-        config=config,
-        member_display_names=member_display_names,
-    )
-    current_only_tokens = estimate_static_tokens_fn(render_messages_text_fn(current_only_messages))
-    if current_only_tokens > static_token_budget:
-        return current_only_messages
 
-    # Tell the agent when older messages are dropped; the marker counts against the same budget.
-    for start in range(len(context_messages) - 1, -1, -1):
-        candidate_context = list(context_messages[start:])
-        if start:
-            marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
-            candidate_context.insert(0, Message(role="user", content=marker))
-        candidate_messages = _messages_with_current_prompt(
+    def with_context(context: Sequence[Message]) -> tuple[Message, ...]:
+        return _messages_with_current_prompt(
             prompt,
-            context_messages=candidate_context,
+            context_messages=context,
             transient_context_messages=transient_context_messages,
             current_sender_id=current_sender_id,
             current_timestamp_ms=current_timestamp_ms,
@@ -393,20 +374,22 @@ def _messages_with_capped_context(
             config=config,
             member_display_names=member_display_names,
         )
-        if estimate_static_tokens_fn(render_messages_text_fn(candidate_messages)) > static_token_budget:
+
+    def fits(messages: Sequence[Message]) -> bool:
+        return estimate_static_tokens_fn(render_messages_text_fn(messages)) <= static_token_budget
+
+    full_messages = with_context(context_messages)
+    if fits(full_messages):
+        return full_messages
+    selected_messages = with_context(())
+    for start in range(len(context_messages), 0, -1):
+        # Tell the agent older messages were dropped; the marker counts against the same budget.
+        marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
+        messages = with_context([Message(role="user", content=marker), *context_messages[start:]])
+        if not fits(messages):
             break
-        selected_context = candidate_context
-    return _messages_with_current_prompt(
-        prompt,
-        context_messages=selected_context,
-        transient_context_messages=transient_context_messages,
-        current_sender_id=current_sender_id,
-        current_timestamp_ms=current_timestamp_ms,
-        current_event_id=current_event_id,
-        current_prompt_is_structured=current_prompt_is_structured,
-        config=config,
-        member_display_names=member_display_names,
-    )
+        selected_messages = messages
+    return selected_messages
 
 
 def _messages_with_current_prompt(
