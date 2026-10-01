@@ -220,6 +220,50 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
 
 
 @pytest.mark.asyncio
+async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp_path: Path) -> None:
+    """Logging one account into more devices does not let it hold every shared slot."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    other = "@other:localhost"
+    devices = [f"DEVICE{i}" for i in range(64)]
+    client.olm = SimpleNamespace(
+        device_store={
+            USER: {name: OlmDevice(USER, name, {"ed25519": name, "curve25519": name}) for name in devices},
+            other: {"OTHER": OlmDevice(other, "OTHER", {"ed25519": "OTHER", "curve25519": "OTHER"})},
+        },
+    )
+    queued = []
+
+    def wrapper(callback: object) -> object:
+        async def enqueue(event: object) -> None:
+            queued.append(event)
+
+        return enqueue
+
+    register_model_catalog_receiver(
+        client=client,
+        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=index,
+        callback_wrapper=wrapper,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+
+    def device_request(user_id: str, device_id: str, request_id: str) -> nio.AuthenticatedToDeviceEvent:
+        event = request(request_id=request_id)
+        event.sender = user_id
+        event.authenticated_sender = nio.AuthenticatedDevice(user_id, device_id, device_id, device_id)
+        return event
+
+    for name in devices:
+        await callback(device_request(USER, name, name))
+    await callback(device_request(other, "OTHER", "other"))
+
+    assert [event.sender for event in queued].count(USER) < 8
+    assert [event.sender for event in queued][-1] == other
+
+
+@pytest.mark.asyncio
 async def test_non_router_does_not_register(tmp_path: Path) -> None:
     """Only the runtime router advertises discovery."""
     client, config, paths, index, _, _ = picker_setup(tmp_path)
@@ -285,7 +329,7 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 
 @pytest.mark.asyncio
 async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Finishing each request cannot bypass the per-device request window."""
+    """Finishing each request cannot bypass the per-user request window."""
     callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
     for i in range(20):
         await callback(request(request_id=str(i)))

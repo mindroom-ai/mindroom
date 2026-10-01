@@ -38,8 +38,11 @@ _REQUEST_TYPE = "io.mindroom.models.request"
 _RESPONSE_TYPE = "io.mindroom.models.response"
 _DEADLINE_SECONDS = 12.0
 _MAX_IN_FLIGHT = 8
-_MAX_DEVICE_REQUESTS = 8
-_MAX_RATE_DEVICES = 1024
+# One Matrix account may log in any number of devices, so per-user limits keep
+# it from holding the whole shared pool.
+_MAX_USER_IN_FLIGHT = 2
+_MAX_USER_REQUESTS = 8
+_MAX_RATE_USERS = 1024
 _MAX_MODELS = 256
 _MAX_RESPONSE_BYTES = 64 * 1024
 logger = get_logger(__name__)
@@ -91,7 +94,7 @@ class _Receiver:
         self.membership_index = membership_index
         self.catalog = ModelCatalog(client=client, runtime_paths=runtime_paths)
         self.active: dict[tuple[str, str, _Request], tuple[float, PinnedMatrixDevice]] = {}
-        self.rates: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self.rates: OrderedDict[str, list[float]] = OrderedDict()
 
     def _target(self, event: nio.AuthenticatedToDeviceEvent) -> PinnedMatrixDevice | None:
         if not authenticated_sender_is_current(self.client, event):
@@ -108,19 +111,22 @@ class _Receiver:
         if target is None:
             return False
         key = (event.sender, event.authenticated_sender.device_id, request)
-        if key in self.active or len(self.active) >= _MAX_IN_FLIGHT:
+        if (
+            key in self.active
+            or len(self.active) >= _MAX_IN_FLIGHT
+            or sum(sender == event.sender for sender, _, _ in self.active) >= _MAX_USER_IN_FLIGHT
+        ):
             return False
         now = time.monotonic()
         while self.rates and next(iter(self.rates.values()))[-1] <= now - _DEADLINE_SECONDS:
             self.rates.popitem(last=False)
-        device_key = (event.sender, event.authenticated_sender.device_id)
-        if device_key not in self.rates and len(self.rates) >= _MAX_RATE_DEVICES:
+        if event.sender not in self.rates and len(self.rates) >= _MAX_RATE_USERS:
             return False
-        recent = [stamp for stamp in self.rates.get(device_key, []) if stamp > now - _DEADLINE_SECONDS]
-        if len(recent) >= _MAX_DEVICE_REQUESTS:
+        recent = [stamp for stamp in self.rates.get(event.sender, []) if stamp > now - _DEADLINE_SECONDS]
+        if len(recent) >= _MAX_USER_REQUESTS:
             return False
-        self.rates[device_key] = [*recent, now]
-        self.rates.move_to_end(device_key)
+        self.rates[event.sender] = [*recent, now]
+        self.rates.move_to_end(event.sender)
         self.active[key] = (now + _DEADLINE_SECONDS, target)
         return True
 
