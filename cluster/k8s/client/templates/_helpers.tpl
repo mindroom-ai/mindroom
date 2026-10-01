@@ -259,6 +259,8 @@ server {
   location / {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
     try_files $uri $uri/ /index.html;
   }
 {{- else }}
@@ -267,6 +269,8 @@ server {
   location {{ $base }}/ {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
     try_files /index.html =404;
   }
 {{- end }}
