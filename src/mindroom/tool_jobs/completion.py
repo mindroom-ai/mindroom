@@ -118,9 +118,10 @@ def _completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
 def recovered_jobs_note(jobs: Sequence[BackgroundJob]) -> str:
     """Tell the re-run of an interrupted request to read, not repeat, the tool calls it already made."""
     return (
-        "This request was interrupted before its reply finished, and the tool calls it already made became "
-        "background jobs that were not replayed. Do not repeat them; retrieve their stored outcomes once using "
-        "the native job tool, then finish the request: " + _retrieval_calls(jobs)
+        "This request was interrupted before its reply finished. This reply replaces the interrupted one, so answer "
+        "the request in full. The tool calls the interrupted attempt made became background jobs that were not "
+        "replayed: do not repeat them, and retrieve their stored outcomes once using the native job tool: "
+        + _retrieval_calls(jobs)
     )
 
 

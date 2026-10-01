@@ -122,7 +122,7 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
     )
     (note,) = recovered.system_enrichment_items
     assert (note.persist, note.minimal_required) == (False, True)
-    assert "Do not repeat them" in note.text
+    assert "do not repeat them" in note.text
     assert 'job_id="retained"' in note.text
     bot.client.room_get_event.assert_not_called()
 
