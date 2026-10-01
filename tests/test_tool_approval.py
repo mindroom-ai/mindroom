@@ -14,7 +14,7 @@ import nio
 import pytest
 from pydantic import ValidationError
 
-from mindroom import approval_transport, redaction
+from mindroom import approval_manager, approval_transport, redaction
 from mindroom.approval_events import PendingApproval, parse_approval_datetime
 from mindroom.approval_manager import (
     ApprovalManager,
@@ -45,9 +45,12 @@ from mindroom.event_journal import (
     UnreadableApprovalCard,
     delivery_transaction_id,
 )
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.event_journal.approval_card_state import terminal_content
+from mindroom.matrix.large_messages import content_fits_normal_event
+from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval import (
+    ApprovalActionResult,
     MatrixApprovalAction,
     ToolApprovalScriptError,
     ToolApprovalTransportError,
@@ -140,6 +143,44 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
 
     before_consume.assert_awaited_once_with()
     cards.is_terminal_approval_card.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_long_reply_denial_reason_keeps_the_terminal_card_edit_sendable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 60 KB denial reply is shortened before it is recorded, so the edit repeating it fits one Matrix event."""
+    manager = MagicMock(handle_card_response=AsyncMock(return_value=ApprovalActionResult(consumed=True)))
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: manager)
+
+    await handle_matrix_approval_action(
+        MatrixApprovalAction(
+            room_id="!room:localhost",
+            sender_id="@approver:localhost",
+            card_event_id="$approval",
+            status="denied",
+            reason="no " * 20_000,
+        ),
+        authorize_responder=lambda _entity_name: True,
+    )
+
+    reason = manager.handle_card_response.await_args.kwargs["reason"]
+    requested_at = datetime(2026, 10, 1, tzinfo=UTC)
+    card = ApprovalManager._pending_event_content(
+        approval_id="approval-1",
+        tool_name="run_shell_command",
+        arguments={"command": "rm -rf build"},
+        arguments_truncated=False,
+        agent_name="code",
+        thread_id="$thread",
+        requester_id="@approver:localhost",
+        approver_user_id="@approver:localhost",
+        requested_at=requested_at,
+        expires_at=requested_at + timedelta(days=1),
+    )
+    edit = build_matrix_edit_content("$approval", terminal_content(card, status="denied", reason=reason))
+    assert reason.startswith("no no")
+    assert content_fits_normal_event(edit)
 
 
 def test_tool_approval_config_coerces_numeric_timeout_strings() -> None:

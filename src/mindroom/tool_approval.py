@@ -48,6 +48,8 @@ __all__ = [
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
+# The terminal card edit carries the reason twice, so a Matrix user's reply must stay far below the event size limit.
+_MAX_RESOLUTION_REASON_CHARS = 2000
 _SCRIPT_CACHE: dict[tuple[str, int], ModuleType] = {}
 _SCRIPT_CACHE_LOCK = threading.Lock()
 logger = get_logger(__name__)
@@ -226,7 +228,11 @@ async def handle_matrix_approval_action(
     manager = approval_manager.get_approval_store()
     if manager is None:
         return ApprovalActionResult(consumed=False)
-    sanitized_reason = action.reason.strip() if isinstance(action.reason, str) and action.reason.strip() else None
+    sanitized_reason = (
+        action.reason.strip()[:_MAX_RESOLUTION_REASON_CHARS]
+        if isinstance(action.reason, str) and action.reason.strip()
+        else None
+    )
     if action.card_event_id is None:
         return ApprovalActionResult(consumed=False)
     if (
