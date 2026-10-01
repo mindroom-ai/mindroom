@@ -34,6 +34,7 @@ from mindroom.api import workers as workers_api
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embedder_health import capture_embedder_health_recorder
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import mark_matrix_sync_loop_started, mark_matrix_sync_success, reset_matrix_sync_health
@@ -2382,8 +2383,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
 ) -> None:
     """Home Assistant OAuth should save only the final token payload, not temp callback state."""
     config = _config_with_worker_scope("shared")
-    target = MagicMock()
-    target.target_manager = MagicMock()
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
@@ -2402,10 +2402,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         config.model_dump(),
     )
 
-    with (
-        patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
-        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
-    ):
+    with patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
@@ -2432,18 +2429,54 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         },
         timeout=10.0,
     )
-    target.target_manager.save_credentials.assert_called_once_with(
-        "homeassistant",
-        {
-            "instance_url": "http://127.0.0.1:8123",
-            "client_id": "client-id",
-            "access_token": "ha-access",
-            "refresh_token": "ha-refresh",
-            "expires_in": 3600,
-            "allow_private_url": True,
-            "_source": "ui",
-        },
+    assert get_runtime_credentials_manager(runtime_paths).shared_manager().load_credentials("homeassistant") == {
+        "instance_url": "http://127.0.0.1:8123",
+        "client_id": "client-id",
+        "access_token": "ha-access",
+        "refresh_token": "ha-refresh",
+        "expires_in": 3600,
+        "allow_private_url": True,
+        "_source": "ui",
+    }
+    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
+
+
+def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(api_key_client: TestClient) -> None:
+    """Shared-scope Home Assistant tokens must stay out of the worker store, where only worker code would see them."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    toolkit = HomeAssistantTools(
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=resolve_worker_target("shared", "general", execution_identity=None),
     )
+
+    with patch(
+        "mindroom.api.homeassistant_integration._test_connection",
+        new_callable=AsyncMock,
+        return_value={"version": "2026.9"},
+    ):
+        connect_response = api_key_client.post(
+            "/api/homeassistant/connect/token?agent_name=general",
+            json={"instance_url": "http://93.184.216.34:8123", "long_lived_token": "ha-token"},
+        )
+        status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+    stored_config = toolkit._load_config()
+    disconnect_response = api_key_client.post("/api/homeassistant/disconnect?agent_name=general")
+
+    assert connect_response.status_code == 200
+    assert status_response.json()["connected"] is True
+    assert stored_config == {
+        "instance_url": "http://93.184.216.34:8123",
+        "long_lived_token": "ha-token",
+        "allow_private_url": False,
+        "_source": "ui",
+    }
+    assert not list((runtime_paths.storage_root / "workers").rglob("homeassistant_credentials.json"))
+    assert disconnect_response.status_code == 200
+    assert toolkit._load_config() is None
 
 
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
