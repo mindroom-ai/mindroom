@@ -27,6 +27,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -559,6 +560,17 @@ def _get_skill_reference(skills: Skills, skill_name: str, reference_path: str) -
     reference_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference")
     assert reference_tool.entrypoint is not None
     return json.loads(reference_tool.entrypoint(skill_name, reference_path))
+
+
+def test_workspace_skill_with_an_unclosed_frontmatter_fence_loads_within_a_cpu_budget(tmp_path: Path) -> None:
+    """A planted SKILL.md that opens frontmatter and never closes it is parsed in linear time."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    (workspace_skills / "planted").mkdir()
+    for newline_count in (32 << 10, skills_module.MAX_WORKSPACE_SKILL_FILE_BYTES - 3):
+        (workspace_skills / "planted" / "SKILL.md").write_text("---" + "\n" * newline_count, encoding="utf-8")
+        with cpu_budget(0.5):
+            skills = _load_workspace_only(tmp_path, storage)
+        assert _skill_names(skills) == ["planted"]
 
 
 def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
