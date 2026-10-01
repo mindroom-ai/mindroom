@@ -1548,7 +1548,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert isinstance(env, dict)
     assert env["MINDROOM_SANDBOX_RUNNER_MODE"] == "true"
     assert env["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "forkserver"
-    assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
+    assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == handle.auth_token
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == _TEST_UNSCOPED_WORKER_KEY
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
     assert env["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
@@ -3892,7 +3892,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
         ),
     )
 
-    updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    second_handle = updated_backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     second_container = fake_client.containers.by_name[first_handle.worker_id]
     assert second_container is not first_container
@@ -3902,7 +3902,8 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     second_run_call = fake_client.containers.run_calls[-1]
     second_env = second_run_call["environment"]
     assert isinstance(second_env, dict)
-    assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _ROTATED_AUTH_TOKEN
+    assert second_handle.auth_token != first_handle.auth_token
+    assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == second_handle.auth_token
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
 
@@ -5581,6 +5582,19 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_workers_get_their_own_runner_tokens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A runner token taken from one requester's worker must not authenticate to another requester's worker."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    keys = ("v1:default:user_agent:@alice:example.org:code", "v1:default:user_agent:@bob:example.org:code")
+    handles = [backend.ensure_worker(WorkerSpec(key, private_agent_names=frozenset()), now=10.0) for key in keys]
+
+    assert handles[0].auth_token != handles[1].auth_token
+    for call, handle in zip(fake_client.containers.run_calls, handles, strict=True):
+        env = call["environment"]
+        assert env[SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]] == handle.auth_token
+        assert _TEST_AUTH_TOKEN not in env.values()
 
 
 def test_cli_workers_have_private_control_auth_and_only_canonical_state(
