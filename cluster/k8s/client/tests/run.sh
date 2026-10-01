@@ -55,6 +55,16 @@ assert_not_contains "$work_dir/default.yaml" "__AUTHENTICATION_RECOVERY_CONFIG__
 assert_not_contains "$work_dir/default.yaml" "location = /authentication-recovery.js"
 assert_not_contains "$work_dir/default.yaml" "location = /authentication-recovery-probe"
 
+# Only the client's own origin may frame the signed-in app shell, with or without a base path.
+render "$work_dir/base-path.yaml" --set basePath=/chat
+for case in "default.yaml:/" "base-path.yaml:/chat/"; do
+  yq -r 'select(.data["default.conf"]) | .data["default.conf"]' "$work_dir/${case%%:*}" \
+    | awk -v start="  location ${case#*:} {" '$0 == start { found = 1 } found { print } found && $0 == "  }" { exit }' \
+    > "$work_dir/app-shell.conf"
+  assert_contains "$work_dir/app-shell.conf" "add_header Content-Security-Policy \"frame-ancestors 'self'\" always;"
+  assert_contains "$work_dir/app-shell.conf" 'add_header X-Frame-Options "SAMEORIGIN" always;'
+done
+
 render "$work_dir/enabled.yaml" \
   --set authenticationRecovery.enabled=true \
   --set basePath=/chat
@@ -246,4 +256,4 @@ node "$work_dir/verify-runtime.mjs" \
   "$work_dir/runtime-config.js" \
   "$base_url/runtime-config.js"
 
-echo "client chart authentication recovery tests passed"
+echo "client chart tests passed"
