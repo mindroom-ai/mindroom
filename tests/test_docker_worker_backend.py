@@ -5586,15 +5586,19 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
 
 def test_docker_workers_get_their_own_runner_tokens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A runner token taken from one requester's worker must not authenticate to another requester's worker."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: _TEST_AUTH_TOKEN},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
     keys = ("v1:default:user_agent:@alice:example.org:code", "v1:default:user_agent:@bob:example.org:code")
     handles = [backend.ensure_worker(WorkerSpec(key, private_agent_names=frozenset()), now=10.0) for key in keys]
 
     assert handles[0].auth_token != handles[1].auth_token
     for call, handle in zip(fake_client.containers.run_calls, handles, strict=True):
-        env = call["environment"]
-        assert env[SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]] == handle.auth_token
-        assert _TEST_AUTH_TOKEN not in env.values()
+        assert call["environment"][SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]] == handle.auth_token
+        assert _TEST_AUTH_TOKEN not in json.dumps(call, default=str)
 
 
 def test_cli_workers_have_private_control_auth_and_only_canonical_state(
