@@ -669,6 +669,13 @@ async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id
         logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
 
 
+class InstanceClaimLostError(HTTPException):
+    """Another request claimed the instance first, so this re-provision neither deploys it nor mints its key."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=409, detail="Instance is already being provisioned")
+
+
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     sb: Any,
     *,
@@ -682,7 +689,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
     unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
-    requests on several backend replicas cannot each deploy it and mint an OpenRouter key.
+    requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
+    `InstanceClaimLostError`.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -695,7 +703,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         try:
             updated_rows = update_instance(sb, customer_id, {"status": "provisioning"}, expected_status=expected_status)
             if not updated_rows and expected_status is not None:
-                raise HTTPException(status_code=409, detail="Instance is already being provisioned")  # noqa: TRY301
+                raise InstanceClaimLostError  # noqa: TRY301
             if not updated_rows:
                 msg = f"Instance {customer_id} not found"
                 raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301

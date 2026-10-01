@@ -485,7 +485,8 @@ Changing a plan's `included_ai_budget_usd` redeploys every running instance of t
 Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses to shrink a PVC; a downgrade from `pro` keeps its larger volumes.
 Checkout grants a plan's trial only to a Stripe customer who never had a trial, so cancelling and checking out again starts a paid subscription.
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
-A customer's provision request re-provisions a `deprovisioned` instance only while the row is still `deprovisioned`, so concurrent requests on several replicas deploy it once and mint one OpenRouter key; the losing request gets `409`.
+Re-provisioning a `deprovisioned` instance claims the row only while it is still `deprovisioned`, whether a customer's provision request or a lifecycle resume after teardown does it, so concurrent runs on several replicas deploy it once and mint one OpenRouter key.
+A losing provision request gets `409`, and a losing lifecycle resume, including one a provision request started for a held instance, stops without enabling a key or clearing the hold.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
 When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.

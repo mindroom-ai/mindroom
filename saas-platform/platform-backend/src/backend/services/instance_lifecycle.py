@@ -47,6 +47,7 @@ from backend.services.legacy_instance_lifecycle import (
 )
 from backend.services.provisioner_service import (
     CLEARED_OPENROUTER_KEY_METADATA,
+    InstanceClaimLostError,
     account_pending_deletion,
     account_row_pending_deletion,
     openrouter_key_exceeds_plan,
@@ -510,17 +511,26 @@ async def _resume(
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
+    torn_down = instance.get("status") == "deprovisioned"
     # Apply the tier's resources and key limit before re-enabling a held instance.
     plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
-    if (
-        instance.get("status") == "deprovisioned"
-        or plan_mismatch
-        or failed_before
-        or not await check_deployment_exists(str(instance_id))
-    ):
-        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=True)
+    if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
+        try:
+            # Several backend replicas may resume a torn-down instance at once; only the one that claims it while it
+            # is still deprovisioned deploys it and mints its key.
+            await _reprovision(
+                sb,
+                instance_id,
+                subscription,
+                resume_lifecycle_hold=True,
+                expected_status="deprovisioned" if torn_down else None,
+            )
+        except InstanceClaimLostError:
+            # The request that claimed it owns the deploy, so this run neither enables a key nor clears the hold.
+            logger.info("Instance %s is already being reprovisioned; skipping this resume", instance_id)
+            return
     else:
         await start_instance(instance_id)
     # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
@@ -583,12 +593,18 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
 
 
 async def _reprovision(
-    sb: Client, instance_id: Any, subscription: dict[str, Any], *, resume_lifecycle_hold: bool
+    sb: Client,
+    instance_id: Any,
+    subscription: dict[str, Any],
+    *,
+    resume_lifecycle_hold: bool,
+    expected_status: str | None = None,
 ) -> None:
     """Redeploy an instance for its subscription's tier.
 
     Only resuming a hold passes `resume_lifecycle_hold`; any other redeploy stays stopped when a hold, or an account
     deletion, lands while it runs.
+    With `expected_status`, the redeploy claims the instance only while it still has that status.
     """
     await provision_instance(
         sb,
@@ -600,6 +616,7 @@ async def _reprovision(
         },
         background_tasks=None,
         resume_lifecycle_hold=resume_lifecycle_hold,
+        expected_status=expected_status,
     )
 
 
