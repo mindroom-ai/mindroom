@@ -2285,6 +2285,30 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "MINDROOM_API_KEY" not in execution_env
 
 
+def test_dedicated_worker_execution_env_keeps_worker_home_over_primary_home(tmp_path: Path) -> None:
+    """A dedicated worker never adopts the primary's HOME, a host path that does not exist in the worker."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:shared:coder"},
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        {"HOME": "/home/primary-user", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        runtime_paths,
+    )
+
+    assert "HOME" not in execution_env
+    assert execution_env["PATH"] == "/usr/bin:/bin"
+    assert execution_env["LANG"] == "C.UTF-8"
+
+
 def test_sandbox_execution_env_excludes_arbitrary_runner_env_secrets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
