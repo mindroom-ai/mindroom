@@ -609,22 +609,33 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-def _workspace_entry_names(directory_fd: int, *, directories: bool) -> list[str]:
-    """Return sorted visible real directories or regular files among the first scanned entries, never links."""
+@dataclass(frozen=True)
+class _WorkspaceEntryNames:
+    """Sorted visible real directories or regular files from one bounded scan of a workspace directory."""
+
+    names: list[str]
+    # False when the scan stopped at its limit, so the directory may hold entries it did not see.
+    complete: bool
+
+
+def workspace_entry_names(directory_fd: int, *, directories: bool) -> _WorkspaceEntryNames:
+    """Scan only the first entries of a directory worker code can fill, never following links."""
     with os.scandir(directory_fd) as entries:
-        return sorted(
+        scanned = list(islice(entries, _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES))
+        names = sorted(
             entry.name
-            for entry in islice(entries, _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES)
+            for entry in scanned
             if not entry.name.startswith(".")
             and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
         )
+    return _WorkspaceEntryNames(names=names, complete=len(scanned) < _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES)
 
 
 def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     """Return the regular files one workspace skill lists in ``dirname``, never following links."""
     try:
         with open_directory_within_root(skill_fd, dirname) as listing_fd:
-            names = _workspace_entry_names(listing_fd, directories=False)
+            names = workspace_entry_names(listing_fd, directories=False).names
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -686,7 +697,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
             else:
                 skill = _load_workspace_skill(skills_fd, skills_root)
                 return [] if skill is None else [skill]
-            skill_names = _workspace_entry_names(skills_fd, directories=True)
+            skill_names = workspace_entry_names(skills_fd, directories=True).names
             if len(skill_names) > _MAX_WORKSPACE_SKILLS:
                 logger.warning(
                     "Loading only the first workspace skills",

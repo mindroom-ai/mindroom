@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import threading
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
+from mindroom.skill_learning import library
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import build_agent_skills
@@ -981,24 +983,21 @@ def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Pa
     assert any(entry["log_level"] == "warning" for entry in logs)
 
 
-@pytest.mark.parametrize("planted", ["skills", "scripts"])
-def test_workspace_skill_listings_stop_scanning_planted_entries(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    planted: str,
-) -> None:
-    """Every agent build examines a bounded number of workspace entries however many worker code planted."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    if planted == "skills":
-        for index in range(2048):
-            (workspace_skills / f"planted-{index:05d}").mkdir()
-    else:
-        scripts = _write_skill(workspace_skills, "many-scripts", "Scripted skill").parent / "scripts"
-        scripts.mkdir()
-        for index in range(2048):
-            (scripts / f"script-{index:05d}.sh").touch()
+_NEW_SKILL = "---\nname: many-files\ndescription: Use when testing bounded scans\n---\nBody\n"
+
+
+def _plant_entries(directory: Path) -> None:
+    """Fill a workspace directory the way worker code could, with twice the entries a scan may examine."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for index in range(2048):
+        (directory / f"planted-{index:04d}").touch()
+
+
+def _count_directory_scans(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record how many entries each descriptor-relative ``os.scandir`` or ``os.listdir`` consumes from now on."""
     scanned: list[int] = []
     real_scandir = os.scandir
+    real_listdir = os.listdir
 
     class CountingEntries:
         def __init__(self, directory_fd: int) -> None:
@@ -1023,8 +1022,70 @@ def test_workspace_skill_listings_stop_scanning_planted_entries(
     def counting_scandir(path: int | str = ".") -> object:
         return CountingEntries(path) if isinstance(path, int) else real_scandir(path)
 
+    def counting_listdir(path: int | str = ".") -> list[str]:
+        names = real_listdir(path)
+        if isinstance(path, int):
+            scanned.append(len(names))
+        return names
+
     monkeypatch.setattr(os, "scandir", counting_scandir)
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+    return scanned
+
+
+@pytest.mark.parametrize("planted", ["skills", "scripts"])
+def test_workspace_skill_listings_stop_scanning_planted_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planted: str,
+) -> None:
+    """Every agent build examines a bounded number of workspace entries however many worker code planted."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    if planted == "skills":
+        _plant_entries(workspace_skills)
+    else:
+        _plant_entries(_write_skill(workspace_skills, "many-scripts", "Scripted skill").parent / "scripts")
+    scanned = _count_directory_scans(monkeypatch)
+
     _load_workspace_only(tmp_path, storage)
+
+    assert scanned
+    assert max(scanned) <= 1024
+
+
+@pytest.mark.parametrize("change", ["creation", "edit", "archival"])
+def test_skill_learning_stops_scanning_planted_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """Skill creation, edits, and archival examine a bounded number of workspace entries however many were planted."""
+    _storage, workspace_skills = _workspace_skills(tmp_path)
+    notes = "references/notes.md"
+    if change == "edit":
+        library.create_skill(workspace_skills, "many-files", _NEW_SKILL, reserved_names=frozenset(), learner=False)
+        library.write_skill_file(workspace_skills, "many-files", notes, "Notes.", expected_digest=None, learner=False)
+        _plant_entries(workspace_skills / "many-files")
+        _plant_entries(workspace_skills / ".history" / "many-files")
+    else:
+        _plant_entries(workspace_skills)
+    scanned = _count_directory_scans(monkeypatch)
+
+    if change == "creation":
+        library.create_skill(workspace_skills, "many-files", _NEW_SKILL, reserved_names=frozenset(), learner=False)
+    elif change == "edit":
+        current = library.read_skill_file(workspace_skills, "many-files", notes)
+        assert current is not None
+        library.write_skill_file(
+            workspace_skills,
+            "many-files",
+            notes,
+            "Newer notes.",
+            expected_digest=current.digest,
+            learner=False,
+        )
+    else:
+        library.archive_unused_skills(workspace_skills, archive_after_days=30, now=datetime.now(UTC))
 
     assert scanned
     assert max(scanned) <= 1024

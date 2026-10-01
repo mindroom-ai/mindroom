@@ -6512,6 +6512,7 @@ expose = [
     "resolve_skill_listing",
     "set_plugin_skill_roots",
     "skill_can_edit",
+    "workspace_entry_names",
     "workspace_skill_file_names",
 ]
 from = ["mindroom.tool_system.skills"]

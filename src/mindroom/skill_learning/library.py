@@ -34,6 +34,7 @@ from mindroom.tool_system.skills import (
     SkillMarkdownError,
     parse_skill_markdown,
     parse_skill_metadata,
+    workspace_entry_names,
     workspace_skill_file_names,
 )
 
@@ -184,17 +185,6 @@ def _open_skills_root(skills_root: Path, *, create: bool = False) -> Iterator[in
         yield root_fd
 
 
-def _entries(directory_fd: int, *, directories: bool) -> list[str]:
-    """Return sorted visible real directories or regular files, never links."""
-    with os.scandir(directory_fd) as entries:
-        return sorted(
-            entry.name
-            for entry in entries
-            if not entry.name.startswith(".")
-            and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
-        )
-
-
 def _read_text(directory_fd: int, relative_path: str) -> str | None:
     """Return one bounded UTF-8 regular file without following links, or None when it is absent."""
     try:
@@ -284,12 +274,16 @@ def create_skill(skills_root: Path, name: str, content: str, *, reserved_names: 
     # Workspaces of shared agents without file memory exist only once something is written into them.
     skills_root.parent.mkdir(parents=True, exist_ok=True)
     with _open_skills_root(skills_root, create=True) as root_fd:
-        # Like skill loading, any entry named SKILL.md counts, including a link; pathlib cannot list a descriptor.
-        if SKILL_FILENAME in os.listdir(root_fd):  # noqa: PTH208
+        # Like skill loading, any entry named SKILL.md counts, including a link.
+        try:
+            os.stat(SKILL_FILENAME, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
             # Skill loading then reads skills/ as one skill, so a new skill directory would never load.
             msg = f"skills/{SKILL_FILENAME} makes skills/ one skill; move it into skills/<its name>/ first."
             raise SkillEditError(msg)
-        directories = _entries(root_fd, directories=True)
+        directories = workspace_entry_names(root_fd, directories=True).names
         if name in {entry.lower() for entry in directories}:
             msg = f"A workspace skill directory named {name!r} already exists."
             raise SkillEditError(msg)
@@ -329,9 +323,7 @@ def write_skill_file(
         if directory is None:
             _write_keeping_mode(skill_fd, filename, content)
         else:
-            if directory not in _entries(skill_fd, directories=True):
-                os.mkdir(directory, dir_fd=skill_fd)
-            with open_directory_within_root(skill_fd, directory) as support_fd:
+            with open_directory_within_root(skill_fd, directory, create=True) as support_fd:
                 _write_keeping_mode(support_fd, filename, content)
         _record_patch(root_fd, name)
 
@@ -423,7 +415,7 @@ def _save_history(root_fd: int, name: str, relative_path: str, content: str) -> 
             content.encode(),
             file_mode=_NEW_FILE_MODE,
         )
-        for stale in _entries(history_fd, directories=False)[:-_HISTORY_KEEP]:
+        for stale in workspace_entry_names(history_fd, directories=False).names[:-_HISTORY_KEEP]:
             os.unlink(stale, dir_fd=history_fd)
 
 
@@ -438,9 +430,11 @@ def archive_unused_skills(skills_root: Path, *, archive_after_days: int, now: da
     if not skills_root.is_dir():
         return []
     with _open_skills_root(skills_root) as root_fd:
-        directories = _entries(root_fd, directories=True)
-        archived = _archive_inactive(root_fd, directories, archive_after_days=archive_after_days, now=now)
-        forget_missing_skill_usage(root_fd, set(directories) - set(archived))
+        directories = workspace_entry_names(root_fd, directories=True)
+        archived = _archive_inactive(root_fd, directories.names, archive_after_days=archive_after_days, now=now)
+        # A scan that stopped at its limit cannot tell which records belong to directories that are gone.
+        if directories.complete:
+            forget_missing_skill_usage(root_fd, set(directories.names) - set(archived))
     return archived
 
 
