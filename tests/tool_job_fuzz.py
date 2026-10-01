@@ -1,7 +1,7 @@
 """Generated tool job lifecycles checked against invariants that must hold on every path.
 
-Execution, approval continuation, cancellation, Stop, revocation, result consumption, orderly restart, and crash
-recovery interleave at await boundaries.
+Execution, approval continuation, cancellation, Stop, revocation, result consumption, failed saves, orderly restart,
+and crash recovery interleave at await boundaries.
 Blocking work runs inline, so an idle event loop marks the end of each step and a crash lands between two awaits.
 The oracle keeps the facts a caller observed and the outcome precedence the runtime documents, not its bookkeeping.
 """
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 
+from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import (
@@ -43,8 +44,12 @@ _CLASSIFIED = "Interrupted by a shutdown or restart."
 # Loop iterations one step may take before it counts as livelocked.
 _IDLE_ROUNDS = 10_000
 _LONG_RESULT = "x" * 600
+_WRITE = runtime_module.write_json_file_durable
 # Steps that act on the whole runtime; every other step needs its job to exist, except the one that starts it.
-_RUNTIME_ACTIONS = frozenset({"deliver", "restart", "restart_stop", "crash", "crash_shutdown"})
+_RUNTIME_ACTIONS = frozenset(
+    {"deliver", "restart", "restart_stop", "crash", "crash_shutdown", "fail_write", "die_on_write"},
+)
+_PAYLOAD_SUFFIX = ".result.json"
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,8 @@ class Action:
         "restart_stop",
         "crash",
         "crash_shutdown",
+        "fail_write",
+        "die_on_write",
     ]
     job: int = 0
     script: Script = Script()
@@ -86,6 +93,8 @@ class Action:
     cleanup: Cleanup = "none"
     # A continuation presents the previous generation.
     stale: bool = False
+    # A save fault lets this many eligible saves land first.
+    skip: int = 0
 
 
 @dataclass
@@ -129,7 +138,15 @@ class JobFuzzRunner:
         self._recovering = False
         self._crashing = False
         self._baseline = asyncio.all_tasks()
-        self._cancels: list[asyncio.Task[BackgroundJob]] = []
+        # Each Cancel call with the number of injected faults before it, which may explain its failure.
+        self._cancels: list[tuple[asyncio.Task[BackgroundJob], int]] = []
+        # An armed save fault: the next save fails once, or the next metadata save kills the process.
+        self._fault: Literal["fail", "die"] | None = None
+        self._skip = 0
+        self._faults = 0
+        self._dead = False
+        self._patch = pytest.MonkeyPatch()
+        self._patch.setattr(runtime_module, "write_json_file_durable", self._write)
         self.jobs: dict[str, _Job] = {}
         self.admissions: dict[tuple[str, int], _Admission] = {}
         self.claims: dict[str, _Claim] = {}
@@ -149,13 +166,24 @@ class JobFuzzRunner:
     async def step(self, action: Action) -> None:
         """Apply one step, let every task it woke run to a standstill, then check every invariant."""
         job_id = f"job{action.job}"
+        faults = self._faults
         if action.kind in _RUNTIME_ACTIONS or action.kind == "start" or job_id in self.jobs:
-            await getattr(self, f"_{action.kind}")(action, job_id)
+            try:
+                await getattr(self, f"_{action.kind}")(action, job_id)
+            except (OSError, ExceptionGroup):
+                # An injected save fault surfaces through whichever runtime call it interrupted.
+                if self._faults == faults:
+                    raise
         await self._idle()
+        if self._dead:
+            await self._lose_process()
+        elif self._faults > faults:
+            self._resync()
         await self.check()
 
     async def finish(self) -> None:
         """Release all parked work: every job must become ready and every withdrawn card reported."""
+        self._fault = None
         self._release_all()
         await self._idle()
         await self.check()
@@ -174,6 +202,21 @@ class JobFuzzRunner:
         self._release_all()
         await self._end_tasks()
         self.runtime._lease.close()
+        self._patch.undo()
+
+    def _write(self, path: Path, payload: object, **options: object) -> None:
+        """Save through the real writer unless an armed fault fails this save or the process already died."""
+        if not self._recovering and (self._dead or self._fault is not None):
+            eligible = self._dead or self._fault == "fail" or not path.name.endswith(_PAYLOAD_SUFFIX)
+            if eligible and not self._dead and self._skip:
+                self._skip -= 1
+            elif eligible:
+                self._faults += 1
+                self._dead = self._dead or self._fault == "die"
+                self._fault = None
+                msg = "process died" if self._dead else "disk full"
+                raise OSError(msg)
+        _WRITE(path, payload, **options)  # type: ignore[arg-type]
 
     async def _cleanup(self, job: BackgroundJob) -> BackgroundOutcome | None:
         model = self.jobs[job.job_id]
@@ -317,7 +360,14 @@ class JobFuzzRunner:
 
     async def _cancel(self, _action: Action, job_id: str) -> None:
         self._cause(job_id, "cancel")
-        self._cancels.append(asyncio.create_task(self.runtime.cancel(job_id, owner=job_owner(), depth=0)))
+        task = asyncio.create_task(self.runtime.cancel(job_id, owner=job_owner(), depth=0))
+        self._cancels.append((task, self._faults))
+
+    async def _fail_write(self, action: Action, _job_id: str) -> None:
+        self._fault, self._skip = "fail", action.skip
+
+    async def _die_on_write(self, action: Action, _job_id: str) -> None:
+        self._fault, self._skip = "die", action.skip
 
     async def _stop(self, _action: Action, job_id: str) -> None:
         # During shutdown, the shutdown that already stopped running work stays its first cause.
@@ -346,18 +396,29 @@ class JobFuzzRunner:
         """Shut down in order, optionally Stopping a job while shutdown drains, then recover."""
         for owner in self.jobs:
             self._cause(owner, "shutdown")
+        faults = self._faults
         shutdown = asyncio.create_task(self.runtime.shutdown())
         await self._idle()
         if action is not None and action.kind == "restart_stop" and job_id in self.jobs and not shutdown.done():
-            await self._stop(action, job_id)
+            stopping = self._faults
+            try:
+                await self._stop(action, job_id)
+            except (OSError, ExceptionGroup):
+                # A failed save loses this Stop; shutdown goes on.
+                if self._faults == stopping:
+                    raise
             await self._idle()
         if action is not None and action.kind == "crash_shutdown":
-            await self._crash()
+            await self._lose_process()
             return
         self._release_all()
         await self._idle()
         assert shutdown.done()
-        shutdown.result()
+        if shutdown.exception() is not None:
+            # A failed save stopped shutdown from settling everything; what it did not save is lost as in a crash.
+            assert self._faults > faults, shutdown.exception()
+            await self._lose_process()
+            return
         await self._deliver()
         await self._reopen()
 
@@ -368,21 +429,62 @@ class JobFuzzRunner:
         await self._restart(action, job_id)
 
     async def _crash(self, _action: Action | None = None, _job_id: str | None = None) -> None:
+        await self._lose_process()
+
+    async def _lose_process(self) -> None:
         """Lose the process between two awaits: no task runs again, and only saved state survives."""
-        for job_id, model in self.jobs.items():
-            job = self._current(job_id)
-            if job.status not in READY_STATUSES:
-                # A shutdown already under way left nothing durable; a saved cancellation or Stop did.
-                causes = model.causes.get(job.generation, [])
-                model.causes[job.generation] = [cause for cause in causes if cause == "cancel"] + ["restart"]
+        root = self._root / "tool_jobs"
+        for job_id, model in list(self.jobs.items()):
+            if not (root / f"{job_id}.json").exists():
+                # Its admission save never landed, so no process ever owned it.
+                self._forget(job_id)
+                continue
+            saved = read_job_snapshot(root / f"{job_id}.json")
+            # Observation resumes from what was saved; memory a failed save never wrote is gone.
+            model.observed = saved
+            if saved.status not in READY_STATUSES:
+                # A shutdown under way left nothing durable; a saved cancellation or Stop did.
+                cancelled = saved.status == "cancel_requested" or saved.user_stop_receipt_order is not None
+                model.causes[saved.generation] = ["cancel", "restart"] if cancelled else ["restart"]
                 # So did an outcome execution stopped with but no settlement saved.
-                if (admission := self.admissions.get((job_id, job.generation))) is not None:
+                if (admission := self.admissions.get((job_id, saved.generation))) is not None:
                     admission.exit = None
         self._crashing = True
         await self._end_tasks()
-        self._crashing = False
+        self._crashing, self._dead, self._fault = False, False, None
         self.runtime._lease.close()
         await self._reopen()
+        self._resync()
+
+    def _forget(self, job_id: str) -> None:
+        del self.jobs[job_id]
+        self.claims.pop(job_id, None)
+        for key in [key for key in self.admissions if key[0] == job_id]:
+            del self.admissions[key]
+
+    def _resync(self) -> None:
+        """After a failed save, keep what the runtime holds: a step it did not accept changed nothing."""
+        for job_id in list(self.jobs):
+            entry = self.runtime._entries.get(job_id)
+            if entry is None:
+                self._forget(job_id)
+                continue
+            job, model = entry.job, self.jobs[job_id]
+            model.stop_order = job.user_stop_receipt_order
+            model.consumed, model.consumer = job.consumed_generation, job.consumed_by_source
+            model.continued = {generation for generation in model.continued if generation < job.generation}
+            for key in [key for key in self.admissions if key[0] == job_id and key[1] > job.generation]:
+                del self.admissions[key]
+            for generation in [generation for generation in model.causes if generation > job.generation]:
+                del model.causes[generation]
+            if job.status == "awaiting_approval" and job.user_stop_receipt_order is not None:
+                # A saved Stop still owes this pause its cancellation, which recovery settles if nothing else does.
+                model.causes[job.generation + 1] = ["cancel"]
+            if job.status == "running" and job.generation in model.causes:
+                # A cancellation that took effect would have saved its request.
+                model.causes[job.generation] = [cause for cause in model.causes[job.generation] if cause != "cancel"]
+            if (claim := entry.live_claim) is not None:
+                self.claims[job_id] = _Claim(claim, self._epoch, ready=job.status in READY_STATUSES)
 
     async def _end_tasks(self) -> None:
         current = asyncio.current_task()
@@ -437,18 +539,28 @@ class JobFuzzRunner:
             if entry.saved:
                 assert read_job_snapshot(root / f"{job_id}.json") == job, job_id
             self._observe(job)
-        # Exactly the saved current generations' payloads exist; a replaced generation's file is gone.
-        assert {path.name for path in root.glob("*.result.json")} == {
-            f"{entry.job.job_id}.g{entry.job.generation}.result.json"
-            for entry in self.runtime._entries.values()
-            if entry.saved and entry.job.has_result_payload
+        # The saved current generations' payloads exist and a replaced generation's file is gone; a failed save may
+        # leave the payload it wrote before its metadata until a retry or recovery settles it.
+        payloads = {
+            saved: {
+                f"{entry.job.job_id}.g{entry.job.generation}{_PAYLOAD_SUFFIX}"
+                for entry in self.runtime._entries.values()
+                if entry.job.has_result_payload and entry.saved is saved
+            }
+            for saved in (True, False)
         }
+        on_disk = {path.name for path in root.glob(f"*{_PAYLOAD_SUFFIX}")}
+        assert payloads[True] <= on_disk <= payloads[True] | payloads[False], on_disk
         for admission in self.admissions.values():
             assert admission.executions <= 1
-        for task in [task for task in self._cancels if task.done()]:
-            self._cancels.remove(task)
-            if not task.cancelled():
+        for task, faults in [item for item in self._cancels if item[0].done()]:
+            self._cancels.remove((task, faults))
+            if task.cancelled():
+                continue
+            if task.exception() is None:
                 assert task.result().status in TERMINAL_STATUSES
+            else:
+                assert self._faults > faults, task.exception()
         pending = {job.job_id for job in await self.runtime.pending_outcomes()}
         assert pending == {job_id for job_id in self.jobs if self._pending(job_id)}
 
@@ -529,7 +641,8 @@ def _finish(admission: _Admission, generation: int) -> BackgroundOutcome:
         raise asyncio.CancelledError
     if finish == "pause":
         admission.exit = "awaiting_approval"
-        return BackgroundOutcome("awaiting_approval", approval_state={"generation": generation})
+        payload = encode_result_payload(ToolResultPayload("paused")) if admission.script.payload else None
+        return BackgroundOutcome("awaiting_approval", approval_state={"generation": generation}, result_payload=payload)
     admission.exit = finish
     if not admission.script.payload:
         return BackgroundOutcome(finish, finish)

@@ -126,8 +126,13 @@ class JobLifecycles(RuleBasedStateMachine):
 
     @rule(kind=st.sampled_from(("deliver", "restart", "crash", "crash", "crash_shutdown")))
     def lifecycle(self, kind: str) -> None:
-        """Report withdrawn cards, restart, or crash the process."""
+        """Report withdrawn cards, or restart or crash the process."""
         self._step(kind)
+
+    @rule(kind=st.sampled_from(("fail_write", "die_on_write")), skip=st.integers(0, 2))
+    def fault(self, kind: str, skip: int) -> None:
+        """Make a coming save fail once, or kill the process, after `skip` saves land."""
+        self._step(kind, skip=skip)
 
     def teardown(self) -> None:
         """Settle every job, check an orderly restart, and release storage."""
@@ -185,6 +190,19 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
         pytest.param(
             [Action("start", script=_PARKED, cleanup="classify"), Action("restart")],
             id="cleanup-sees-orderly-shutdown",
+        ),
+        pytest.param(
+            [
+                Action("start", script=_PAUSED),
+                Action("fail_write", skip=1),
+                Action("stop"),
+                Action("continue", script=_PAUSED),
+            ],
+            id="stop-saved-but-cancellation-save-failed",
+        ),
+        pytest.param(
+            [Action("start", script=Script(payload=True, block=True)), Action("die_on_write"), Action("release")],
+            id="death-between-payload-and-metadata",
         ),
         pytest.param(
             [Action("start", script=_PARKED, cleanup="classify"), Action("cancel"), Action("restart")],
