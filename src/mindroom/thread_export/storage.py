@@ -508,7 +508,7 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
     if text is None:
         return None
     try:
-        payload = yaml_io.safe_load(text)
+        payload = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError:
         return None
     if not isinstance(payload, dict):
@@ -874,7 +874,7 @@ def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, ob
     if text is None:
         return False
     try:
-        existing = yaml_io.safe_load(text)
+        existing = yaml_io.safe_load_without_aliases(text)
     except yaml.YAMLError:
         return False
     if not isinstance(existing, dict):

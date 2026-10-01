@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -485,6 +486,29 @@ def test_room_export_query_ignores_unrecognized_yaml(tmp_path: Path) -> None:
 
     (room_dir / _thread_filename("$thread:localhost")).write_text("version: 1\n", encoding="utf-8")
     assert room_has_thread_exports(output_dir, _room()) is True
+
+
+def test_thread_export_yaml_with_aliases_is_refused(tmp_path: Path) -> None:
+    """Thread exports sit in the worker-writable workspace, so an aliased file is left out of the index and replaced."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload: dict[str, object] = {
+        "version": 1,
+        "thread": {"id": "$aliased:localhost", "source": "matrix", "summary": "$aliased:localhost"},
+        "messages": [],
+    }
+    write_thread_payload(output_dir, room, "$aliased:localhost", payload)
+    planted = output_dir / "lobby" / _thread_filename("$aliased:localhost")
+    planted.write_text(
+        'version: 1\nthread:\n  id: &id "$aliased:localhost"\n  source: matrix\n  summary: *id\nmessages: []\n',
+        encoding="utf-8",
+    )
+
+    write_room_index(output_dir, room)
+    assert json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"] == []
+
+    assert write_thread_payload(output_dir, room, "$aliased:localhost", payload) is True
+    assert "*id" not in planted.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("filename", ["marker", "index"])

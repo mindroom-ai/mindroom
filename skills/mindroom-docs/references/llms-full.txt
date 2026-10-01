@@ -22249,7 +22249,7 @@ Reads through those descriptors are capped per surface.
 | Workspace todo templates | 64 KiB per file; 65,536 characters rendered; 64 KiB of template text read and 100 todos per `apply_template` call, sub-templates included | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file |
 | Scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 
-Workspace `SKILL.md` frontmatter and todo templates that use YAML aliases are refused, because a few aliases can describe a tree far larger than the file.
+Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases are refused, because a few aliases can describe a tree far larger than the file.
 Todo templates render in the primary, so they may only substitute parameters as `{{ NAME }}`; any other Jinja expression, filter, or loop could allocate memory or spin without bound.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
