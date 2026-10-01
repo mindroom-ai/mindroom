@@ -36,11 +36,12 @@ from mindroom.attachments import (
     parse_attachment_ids_from_thread_history,
     register_bytes_attachment,
     register_local_attachment,
+    register_matrix_media_attachment,
     resolve_attachments,
     resolve_thread_attachment_ids,
 )
 from mindroom.logging_config import bound_log_context
-from tests.conftest import make_visible_message
+from tests.conftest import FakeMediaResponse, make_matrix_client_mock, make_visible_message
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -251,6 +252,48 @@ async def test_register_media_attachment_rejects_payload_over_limit(
     )
 
     assert record is None
+    assert not (tmp_path / "incoming_media").exists()
+
+
+@pytest.mark.asyncio
+async def test_register_matrix_media_attachment_stops_reading_an_oversized_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Matrix file larger than the media cap is abandoned mid-transfer, never held whole.
+
+    nio's ``download`` reads the entire body into memory before anything can
+    measure it, so any room member could post a file as large as the
+    homeserver accepts and have every agent that reads it buffer all of it.
+    """
+    limit = 256 * 1024
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", limit)
+    response = FakeMediaResponse(b"x" * (5 * limit))
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(return_value=response)
+    event = nio.Event.parse_event(
+        {
+            "event_id": "$huge",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1780736400000,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        },
+    )
+    assert isinstance(event, nio.RoomMessageFile)
+
+    record = await register_matrix_media_attachment(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        event=event,
+    )
+
+    assert record is None
+    client.download.assert_not_awaited()
+    assert response.streamed_bytes <= limit + 64 * 1024
+    assert response.released
     assert not (tmp_path / "incoming_media").exists()
 
 

@@ -25,6 +25,7 @@ from mindroom.matrix.media import (
     upload_content_uri,
     upload_media_bytes,
 )
+from tests.conftest import make_matrix_client_mock
 
 
 def _download_response(body: bytes) -> nio.DownloadResponse:
@@ -179,7 +180,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_unencrypted_image(self) -> None:
         """Test downloading an unencrypted image from Matrix."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/abc123"
@@ -191,12 +192,12 @@ class TestDownloadImage:
         assert isinstance(result, Image)
         assert result.content == b"image_data"
         assert result.mime_type == "image/png"
-        client.download.assert_called_once_with("mxc://example.org/abc123")
+        client.download.assert_called_once_with(mxc="mxc://example.org/abc123")
 
     @pytest.mark.asyncio
     async def test_download_encrypted_image(self) -> None:
         """Test downloading and decrypting an encrypted image."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted123"
@@ -231,7 +232,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_prefers_detected_mime_when_metadata_mismatches(self) -> None:
         """Payload signature should win when Matrix metadata MIME is incorrect."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/mismatch"
@@ -246,7 +247,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_returns_none_on_error(self) -> None:
         """Test that download returns None on DownloadError."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/fail"
@@ -258,28 +259,15 @@ class TestDownloadImage:
 
     @pytest.mark.asyncio
     async def test_download_returns_none_on_exception(self) -> None:
-        """Test that exceptions from client.download() return None."""
-        client = AsyncMock()
+        """Test that exceptions from the media request return None."""
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/timeout"
 
-        client.download.side_effect = TimeoutError("connection timed out")
+        client.send.side_effect = RuntimeError("connection reset")
 
         result = await image_handler.download_image(client, event)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_download_media_bytes_returns_none_on_invalid_response(self) -> None:
-        """Malformed Matrix download responses should fail closed."""
-        client = AsyncMock()
-        event = MagicMock(spec=nio.RoomMessageImage)
-        event.event_id = "$test_event"
-        event.url = "mxc://example.org/invalid"
-        client.download.return_value = object()
-
-        result = await download_media_bytes(client, event)
-
         assert result is None
 
     @pytest.mark.asyncio
@@ -289,7 +277,7 @@ class TestDownloadImage:
     ) -> None:
         """Unencrypted Matrix media bytes should be capped before handler/model use."""
         monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/too-large"
@@ -306,7 +294,7 @@ class TestDownloadImage:
     ) -> None:
         """Oversized encrypted Matrix media should be rejected before decrypting."""
         monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted-too-large"
@@ -334,7 +322,7 @@ class TestDownloadImage:
     ) -> None:
         """Decrypted Matrix media bytes should be capped before persistence or model handoff."""
         monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/decrypted-too-large"
@@ -357,7 +345,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_encrypted_image_missing_key_material_returns_none(self) -> None:
         """Test encrypted payloads missing key material fail gracefully."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted_missing_keys"
@@ -379,7 +367,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_encrypted_image_decrypt_error_returns_none(self) -> None:
         """Test decryption failures are handled without raising."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/encrypted_bad"
@@ -404,7 +392,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_download_leaves_mimetype_unset_when_missing(self) -> None:
         """Test that missing unencrypted mimetype remains unset."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomMessageImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/notype"
@@ -419,7 +407,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_encrypted_image_uses_event_mimetype(self) -> None:
         """Test that encrypted images use event.mimetype (nio-parsed)."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/enc_webp"
@@ -446,7 +434,7 @@ class TestDownloadImage:
     @pytest.mark.asyncio
     async def test_encrypted_image_leaves_mimetype_unset_when_none(self) -> None:
         """Test that encrypted images keep mimetype unset when absent."""
-        client = AsyncMock()
+        client = make_matrix_client_mock()
         event = MagicMock(spec=nio.RoomEncryptedImage)
         event.event_id = "$test_event"
         event.url = "mxc://example.org/enc_notype"

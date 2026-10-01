@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import nio
 from aiohttp import ClientResponse
 from nio import crypto
+from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
 from mindroom.logging_config import get_logger
@@ -418,25 +419,6 @@ def _media_payload_exceeds_limit_for_event(
     return True
 
 
-def _validated_download_body(
-    response: object,
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-) -> bytes | None:
-    if isinstance(response, nio.DownloadError):
-        logger.error("Media download failed", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    if not isinstance(response, nio.DownloadResponse):
-        logger.error("Media download returned invalid response", event_id=_event_id_for_log(event), error=str(response))
-        return None
-    body = response.body
-    if not isinstance(body, bytes):
-        logger.error("Media download returned non-bytes payload", event_id=_event_id_for_log(event))
-        return None
-    if _media_payload_exceeds_limit_for_event(event, body, stage="download"):
-        return None
-    return body
-
-
 def _decrypt_validated_media_bytes(
     event: nio.RoomEncryptedMedia,
     encrypted_bytes: bytes,
@@ -449,18 +431,35 @@ def _decrypt_validated_media_bytes(
     return decrypted_bytes
 
 
+async def download_mxc_bytes(client: nio.AsyncClient, mxc_url: str, *, max_bytes: int) -> bytes | None:
+    """Download one MXC payload, abandoning it as soon as it passes ``max_bytes``.
+
+    nio's ``download`` holds the whole body before a caller can measure it, so this streams it instead.
+    """
+    server_name, separator, media_id = mxc_url.removeprefix("mxc://").partition("/")
+    if not mxc_url.startswith("mxc://") or not server_name or not separator or not media_id:
+        logger.error("invalid_mxc_url", mxc_url=mxc_url)
+        return None
+    method, path = nio.Api.download(server_name, media_id)
+    try:
+        return await Transport(client, max_bytes).request(method, path)
+    except HttpError as error:
+        logger.warning("mxc_download_failed", mxc_url=mxc_url, status=error.status, errcode=error.errcode)
+    except ResponseTooLarge:
+        logger.warning("mxc_payload_exceeds_byte_limit", mxc_url=mxc_url, limit_bytes=max_bytes)
+    return None
+
+
 async def download_media_bytes(
     client: nio.AsyncClient,
     event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
 ) -> bytes | None:
     """Download and decrypt Matrix media payload bytes."""
     try:
-        response = await client.download(event.url)
+        downloaded_bytes = await download_mxc_bytes(client, event.url, max_bytes=_matrix_media_max_bytes)
     except Exception:
         logger.exception("Error downloading media")
         return None
-
-    downloaded_bytes = _validated_download_body(response, event)
     if downloaded_bytes is None:
         return None
 
