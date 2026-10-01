@@ -989,14 +989,13 @@ def test_workspace_skill_listings_stop_scanning_planted_entries(
 ) -> None:
     """Every agent build examines a bounded number of workspace entries however many worker code planted."""
     storage, workspace_skills = _workspace_skills(tmp_path)
-    count = 2 * skills_module._MAX_WORKSPACE_SKILL_SCANNED_ENTRIES
     if planted == "skills":
-        for index in range(count):
+        for index in range(2048):
             (workspace_skills / f"planted-{index:05d}").mkdir()
     else:
         scripts = _write_skill(workspace_skills, "many-scripts", "Scripted skill").parent / "scripts"
         scripts.mkdir()
-        for index in range(count):
+        for index in range(2048):
             (scripts / f"script-{index:05d}.sh").touch()
     scanned: list[int] = []
     real_scandir = os.scandir
@@ -1028,7 +1027,7 @@ def test_workspace_skill_listings_stop_scanning_planted_entries(
     _load_workspace_only(tmp_path, storage)
 
     assert scanned
-    assert max(scanned) <= skills_module._MAX_WORKSPACE_SKILL_SCANNED_ENTRIES
+    assert max(scanned) <= 1024
 
 
 def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
