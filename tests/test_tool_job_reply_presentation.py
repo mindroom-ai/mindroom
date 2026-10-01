@@ -26,10 +26,12 @@ from mindroom.tool_system.events import (
     ToolTraceEntry,
     deserialize_tool_trace,
 )
+from mindroom.turn_origin import TurnIntent
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
+from tests.test_response_payload_preparation import _preparation
 from tests.test_stale_stream_cleanup import _make_message_event
 from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
@@ -84,6 +86,14 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
         existing_event_id="$response",
         existing_event_is_placeholder=True,
     )
+    preparation = _preparation(request.response_envelope.target, prompt=request.prompt)
+    request = replace(
+        request,
+        payload_preparation=replace(
+            preparation,
+            dispatch=replace(preparation.dispatch, envelope=request.response_envelope),
+        ),
+    )
     owner = replace(
         completed_delegation_job().owner,
         agent_name="general",
@@ -110,21 +120,22 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
             operation=operation,
         )
         recovered = await runner._recover_tool_job_source(request)
+        # Recovery never reads the interrupted reply it replaces.
+        bot.client.room_get_event.assert_not_called()
+        prepared = await runner.deps.request_preparer.prepare(recovered)
     finally:
         await runtime.shutdown()
     assert (recovered.existing_event_id, recovered.existing_event_is_placeholder) == ("$response", True)
     assert recovered.sources == request.sources
     # The re-run answers the original request; a nonpersistent note keeps it from repeating accepted work.
-    assert (recovered.prompt, recovered.model_prompt, recovered.payload_preparation) == (
-        request.prompt,
-        request.model_prompt,
-        request.payload_preparation,
-    )
-    (note,) = recovered.system_enrichment_items
+    assert (prepared.prompt, recovered.model_prompt) == (request.prompt, request.model_prompt)
+    (note,) = prepared.system_enrichment_items
     assert (note.persist, note.minimal_required) == (False, True)
     assert "do not repeat them" in note.text
     assert 'job_id="retained"' in note.text
-    bot.client.room_get_event.assert_not_called()
+    # It is runtime work, not a new human message, even after deferred preparation rebuilds the envelope.
+    assert prepared.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
+    assert not prepared.response_envelope.origin.may_answer_interactive_prompt
 
 
 @pytest.mark.asyncio

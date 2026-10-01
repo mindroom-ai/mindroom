@@ -3726,10 +3726,16 @@ class ResponseRunner:
             persist=False,
             minimal_required=True,
         )
+        preparation = request.payload_preparation
+        if preparation is not None:
+            # Deferred preparation rebuilds the envelope from its dispatch, so the recovery origin must reach it too.
+            dispatch = replace(preparation.dispatch, envelope=replace(preparation.dispatch.envelope, origin=origin))
+            preparation = replace(preparation, dispatch=dispatch)
         return replace(
             request,
             system_enrichment_items=(*request.system_enrichment_items, recovery),
             response_envelope=replace(envelope, origin=origin),
+            payload_preparation=preparation,
         )
 
     async def _admit_locked_turn(
