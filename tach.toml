@@ -7225,6 +7225,19 @@ from = ["mindroom.tools.agno_compat_trafilatura"]
 expose = ["install_server_fetch_guard"]
 
 [[modules]]
+path = "mindroom.tools.file_generation"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_file_generation"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_file_generation"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+visibility = ["mindroom.tools.file_generation"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_file_generation"]
+expose = ["WorkspaceFileGenerationTools"]
+
+[[modules]]
 path = "mindroom.tools.newspaper4k"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
 

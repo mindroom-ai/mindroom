@@ -462,10 +462,12 @@ analyze(
 
 `file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
-If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
-Relative directories resolve from the executing process’s current working directory, not the agent workspace.
+If `output_directory` is set, the generated file is also saved in the agent workspace and the result message includes that file path.
+`output_directory` is relative to the agent workspace and cannot leave it.
 If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
-If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
+If `save_files` is `true` without `output_directory`, the toolkit saves generated files in the agent workspace root.
+Saving needs an agent workspace; without one, the files exist only in the tool result payload.
+Saved files replace any existing workspace file of the same name, and a link at that name is replaced rather than followed.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
 DOCX generation is automatically disabled when `python-docx` is unavailable, even if `enable_docx_generation` is left on.
 `file_generation` defaults to primary execution.
@@ -474,7 +476,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_directory` | `text` | `no` | `null` | Optional directory where generated files are written to disk. |
+| `output_directory` | `text` | `no` | `null` | Directory inside the agent workspace where generated files are saved. |
 | `enable_json_generation` | `boolean` | `no` | `true` | Enable `generate_json_file()`. |
 | `enable_csv_generation` | `boolean` | `no` | `true` | Enable `generate_csv_file()`. |
 | `enable_pdf_generation` | `boolean` | `no` | `true` | Enable `generate_pdf_file()` when `reportlab` is available. |
@@ -482,7 +484,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
 | `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
 | `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()` for source-file exports. |
-| `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
+| `save_files` | `boolean` | `no` | `false` | Save generated files in the agent workspace; when `output_directory` is unset, use the workspace root. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
 ### Example

@@ -3404,7 +3404,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Directory inside the agent workspace where generated files are saved",
           "label": "Output Directory",
           "name": "output_directory",
           "options": null,
