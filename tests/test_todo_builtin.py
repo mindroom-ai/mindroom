@@ -540,7 +540,7 @@ todos:
     assert "`broken`" not in listing
 
 
-# Only Linux lets the render child cap its address space; elsewhere workspace templates only substitute.
+# Only Linux enforces the render child's address-space cap; elsewhere workspace templates only substitute.
 _NEEDS_MEMORY_CAP = pytest.mark.skipif(sys.platform != "linux", reason="needs RLIMIT_AS")
 
 

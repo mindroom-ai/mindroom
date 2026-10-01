@@ -103,7 +103,7 @@ Built-in templates live with the package, and agents can add workspace-local tem
 Templates are YAML with inline Jinja inside values, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and filters like `{{ BRANCH | default('main') }}`; YAML aliases are refused.
 Workspace templates render with Jinja's sandbox in a short-lived child process limited to 128 MiB of memory, while built-in templates render in MindRoom itself.
 Only one workspace template renders at a time, and a call that arrives while another renders is refused as busy.
-On macOS, which cannot set that memory limit, workspace templates may only substitute `{{ NAME }}`.
+Outside Linux, which is the only platform that enforces that memory limit, workspace templates may only substitute `{{ NAME }}`.
 A workspace template file holds at most 64 KiB, and one `apply_template` call reads at most 64 KiB of template text, renders at most 65,536 characters within 5 seconds, and expands to at most 100 todos, sub-templates included.
 Each workspace template render starts a process, so one call fits roughly 80 workspace sub-template renders in those 5 seconds.
 

@@ -123,13 +123,10 @@ def _main() -> None:
     cpu_seconds = int(sys.argv[1])
     request = json.load(sys.stdin)
     # Limits apply after startup imports, so they bound only the render.
-    try:
+    # Only Linux enforces RLIMIT_AS; elsewhere the call may succeed without capping anything.
+    memory_limited = sys.platform == "linux"
+    if memory_limited:
         resource.setrlimit(resource.RLIMIT_AS, (_MEMORY_LIMIT_BYTES, _MEMORY_LIMIT_BYTES))
-    except (ValueError, OSError):
-        # macOS cannot lower RLIMIT_AS.
-        memory_limited = False
-    else:
-        memory_limited = True
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     json.dump(_render(request, memory_limited=memory_limited), sys.stdout)
 
