@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecisionMetadata
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecisionMetadata, DeliveryStage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.event_journal import PrincipalStore
     from mindroom.response_runner import ResponseRequest, _EarlyPlaceholderState
 
 
@@ -150,9 +151,35 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
         await runtime.shutdown()
 
 
+async def _acknowledge_initial(store: PrincipalStore, delivery_id: str, event_id: str) -> None:
+    """Record a visible INITIAL placeholder for one source, as a delivered first attempt leaves it."""
+    await store.enqueue_matrix_delivery(
+        delivery_id=delivery_id,
+        stage=DeliveryStage.INITIAL,
+        room_id=ROOM,
+        thread_id="$thread",
+        payload={"body": "Thinking..."},
+    )
+    await store.claim_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+    await store.acknowledge_matrix_delivery(
+        delivery_id=delivery_id,
+        stage=DeliveryStage.INITIAL,
+        event_id=event_id,
+        delivered_projections=(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_stop_on_an_idle_completion_reply_finds_its_durable_turn(tmp_path: Path) -> None:
-    """A completion's own reply is a turn like any other, so Stop on it settles durably and stops its jobs."""
+@pytest.mark.parametrize("shown_placeholder", [False, True])
+async def test_stop_on_an_idle_completion_reply_finds_its_durable_turn(  # noqa: PLR0915
+    tmp_path: Path,
+    *,
+    shown_placeholder: bool,
+) -> None:
+    """A completion's own reply is a turn like any other, so Stop on it settles durably and stops its jobs.
+
+    A re-run after a restart reuses the placeholder an interrupted attempt already showed.
+    """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     runner.deps.runtime.config.background_tool_jobs.enabled = True
@@ -181,8 +208,9 @@ async def test_stop_on_an_idle_completion_reply_finds_its_durable_turn(tmp_path:
 
     async def wake_reply(request: ResponseRequest) -> str:
         try:
-            # The visible reply is bound to its turn as soon as it exists, like any other response.
-            if request.on_visible_response is not None:
+            assert request.existing_event_id == ("$wake-reply" if shown_placeholder else None)
+            # A new visible reply is bound to its turn as soon as it exists, like any other response.
+            if request.existing_event_id is None and request.on_visible_response is not None:
                 await request.on_visible_response("$wake-reply")
             await start_job(
                 runtime,
@@ -214,6 +242,9 @@ async def test_stop_on_an_idle_completion_reply_finds_its_durable_turn(tmp_path:
         await runtime.release_wait("prior-job", ready.claim)
         event = completion_event(ready.job, sender_id=bot.matrix_id.full_id)
         await store.admit(event)
+        if shown_placeholder:
+            # An attempt interrupted by a restart already showed this completion's placeholder.
+            await _acknowledge_initial(store, event.event_id, "$wake-reply")
         with patch.object(runner, "generate_response", new=wake_reply):
             assert not await runner.handoff_tool_job_completion(await store.load_event(event.event_id))
             await asyncio.wait_for(replying.wait(), JOB_TEST_TIMEOUT)

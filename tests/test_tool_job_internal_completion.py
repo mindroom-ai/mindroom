@@ -34,6 +34,7 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.turn_record import TurnRecord
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.response_runner_helpers import _plain_request, _target
@@ -781,6 +782,66 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
         responded = bot._turn_store.turn_record_for_response_event_id("$completion-reply")
         assert responded is not None
         assert (responded.indexed_event_ids, responded.completed) == ((event.event_id,), True)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_completion_without_an_outcome_completes_its_interrupted_turn(tmp_path: Path) -> None:
+    """A re-run completion whose outcome is gone settles, and completes the turn its interrupted attempt left."""
+    bot = _bot(tmp_path)
+    bot.config.background_tool_jobs.enabled = True
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = _plain_request(_target(thread_id="$thread"))
+    owner = replace(
+        completed_delegation_job().owner,
+        agent_name="general",
+        transport_agent_name=None,
+        requester_id=request.response_envelope.requester_id,
+        session_id=request.response_envelope.target.session_id,
+        resolved_thread_id=request.thread_id,
+    )
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "done")
+
+    try:
+        await start_job(
+            runtime,
+            "gone",
+            tool_name="tool",
+            depth=0,
+            source_event_id="$event",
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
+        waited = await runtime.wait("gone", owner=owner, depth=0)
+        event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
+        await runner.deps.approval_store.admit(event)
+        # An interrupted attempt left its turn pending; another reader then consumed the outcome.
+        await bot._turn_store.record_pending_turn(
+            TurnRecord.create(
+                (event.event_id,),
+                conversation_target=request.response_envelope.target,
+                requester_id=owner.requester_id,
+                response_owner="general",
+                completed=False,
+            ),
+        )
+        await runtime.acknowledge_wait("gone", waited.claim, source_event_id="$other")
+        admitted = await runner.deps.approval_store.load_event(event.event_id)
+        assert admitted is not None
+        with patch.object(runner, "generate_response", AsyncMock()) as respond:
+            await runner._resume_tool_job_completion(admitted, "gone", 0)
+        respond.assert_not_awaited()
+        assert not await runner.deps.approval_store.is_pending(event.event_id)
+        turn = bot._turn_store.get_turn_record(event.event_id)
+        assert turn is not None
+        assert turn.completed
     finally:
         await runtime.shutdown()
 

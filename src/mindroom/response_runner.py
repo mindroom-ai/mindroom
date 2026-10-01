@@ -3119,7 +3119,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         job = await runtime.outcome(job_id, generation, source_event_id=event.event_id)
         if job is None:
-            await self.deps.approval_store.settle(event.event_id)
+            await self._settle_completion_source(event.event_id)
             return
         envelope = completion_envelope(job, sender_id=self.deps.matrix_full_id)
         original_source_id = job.source_event_id
@@ -3137,10 +3137,21 @@ class ResponseRunner:
                 # The original source still owns recovery or turn recording.
                 # Keep this wake pending until it settles; it may leave the job unconsumed.
                 return
-        # The completion's reply is a turn like a human one, so Stop and recovery find its durable owner.
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=event.event_id,
+            stage=DeliveryStage.INITIAL,
+        )
+        placeholder_event_id = initial.acknowledged_event_id if initial is not None else None
+        # The completion's reply is a turn like a human one, so Stop and recovery find its durable owner,
+        # including a placeholder an interrupted attempt already showed.
         turn = await self.deps.turn_store.record_pending_turn(
             self.deps.turn_store.attach_response_context(
-                TurnRecord.create((event.event_id,), requester_id=envelope.requester_id, completed=False),
+                TurnRecord.create(
+                    (event.event_id,),
+                    response_event_id=placeholder_event_id,
+                    requester_id=envelope.requester_id,
+                    completed=False,
+                ),
                 history_scope=None,
                 conversation_target=envelope.target,
             ),
@@ -3148,7 +3159,7 @@ class ResponseRunner:
         if turn is None or turn.completed:
             await self.deps.approval_store.settle(event.event_id)
             return
-        request = await self._completion_request(event, envelope, turn)
+        request = self._completion_request(event, envelope, turn, placeholder_event_id)
         team = self.deps.runtime.config.teams.get(self.deps.agent_name)
         member_names = team.agents if team is not None else []
         if team is None:
@@ -3176,18 +3187,22 @@ class ResponseRunner:
                 canonicalize_turn_record(turn, response_event_id=response_event_id),
             )
 
-    async def _completion_request(
+    async def _settle_completion_source(self, source_event_id: str) -> None:
+        """Settle a completion that will not reply, completing any turn an interrupted attempt left pending."""
+        pending = self.deps.turn_store.get_turn_record(source_event_id)
+        if pending is not None and not pending.completed:
+            await self.deps.turn_store.record_turn(pending)
+        await self.deps.approval_store.settle(source_event_id)
+
+    def _completion_request(
         self,
         event: JournalEvent,
         envelope: MessageEnvelope,
         turn: TurnRecord,
+        placeholder_event_id: str | None,
     ) -> ResponseRequest:
         """Build a completion's response request, settling its turn the way a human turn's reply settles."""
         turns = self.deps.turn_store
-        initial = await self.deps.approval_store.load_matrix_delivery(
-            delivery_id=event.event_id,
-            stage=DeliveryStage.INITIAL,
-        )
 
         async def record_visible_response(response_event_id: str) -> None:
             await turns.record_pending_turn(
@@ -3206,7 +3221,7 @@ class ResponseRunner:
             prompt=envelope.body,
             response_envelope=envelope,
             sources=ResponseSources((event.event_id,), (event.event_id,)),
-            existing_event_id=initial.acknowledged_event_id if initial is not None else None,
+            existing_event_id=placeholder_event_id,
             existing_event_is_placeholder=True,
             user_id=envelope.requester_id,
             on_no_response_handled=record_no_response,
