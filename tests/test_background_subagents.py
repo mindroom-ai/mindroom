@@ -43,7 +43,14 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
 from tests.conftest import test_runtime_paths
 from tests.test_queued_message_notify import _envelope
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_child, job_owner, start_delegation_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    job_child,
+    job_owner,
+    start_delegation_job,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -504,8 +511,9 @@ async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stoppe
 
 @pytest.mark.asyncio
 async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_path: Path) -> None:
-    """Work a crash left running settles as interrupted by the restart; a later cancel of a pause is a cancellation."""
+    """Work a crash left running settles as interrupted by the restart; a saved or later cancel stays a cancellation."""
     runtime = tool_job_runtime(tmp_path)
+    release = asyncio.Event()
 
     async def blocked() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -514,27 +522,45 @@ async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_
     async def pause() -> BackgroundOutcome:
         return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
 
-    running = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=blocked)
-    paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
-    waited = await runtime.wait(paused.job_id, owner=job_owner(), depth=0)
-    await runtime.acknowledge_wait(paused.job_id, waited.claim)
-    # The process dies: its storage lease goes away without an orderly shutdown.
-    runtime._lease.close()
+    async def unwinding() -> BackgroundOutcome:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+        raise AssertionError
+
     by_restart: dict[str, bool] = {}
 
     async def cleanup(job: background.BackgroundJob) -> BackgroundOutcome | None:
         by_restart[job.job_id] = job_stopped_by_shutdown()
         return None
 
-    restored = tool_job_runtime(tmp_path, cancel=cleanup)
+    cancelling = None
+    restored = None
     try:
+        running = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=blocked)
+        paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
+        cancelled = await start_delegation_job(runtime, job_child("d" * 32), owner=job_owner(), operation=unwinding)
+        waited = await runtime.wait(paused.job_id, owner=job_owner(), depth=0)
+        await runtime.acknowledge_wait(paused.job_id, waited.claim)
+        # A requested cancellation is saved before its cleanup finishes.
+        cancelling = asyncio.create_task(runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0))
+        await wait_for_status(runtime, cancelled.job_id, "cancel_requested")
+        # The process dies: its storage lease goes away without an orderly shutdown.
+        runtime._lease.close()
+        restored = tool_job_runtime(tmp_path, cancel=cleanup)
         await restored.recover()
         await restored.cancel(paused.job_id, owner=job_owner(), depth=0)
-        assert by_restart == {running.job_id: True, paused.job_id: False}
+        assert by_restart == {running.job_id: True, paused.job_id: False, cancelled.job_id: False}
     finally:
-        await restored.shutdown()
-        for task in [entry.task for entry in runtime._entries.values() if entry.task is not None]:
+        if restored is not None:
+            await restored.shutdown()
+        release.set()
+        abandoned = [entry.task for entry in runtime._entries.values() if entry.task is not None]
+        for task in abandoned:
             task.cancel()
+        await asyncio.gather(*abandoned, *([cancelling] if cancelling is not None else []), return_exceptions=True)
 
 
 @pytest.mark.asyncio
