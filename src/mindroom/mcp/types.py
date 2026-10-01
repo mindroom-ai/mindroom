@@ -126,6 +126,8 @@ class MCPServerState:
     consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
     stale_refresh_not_before: float = 0.0
+    # Catalog hash dependents last heard about, so a refresh that publishes without notifying cannot hide a change.
+    notified_catalog_hash: str | None = None
     refresh_revision: int = 0
     oauth_lease_version: MCPOAuthLeaseVersion | None = None
     oauth_session_lease_version: MCPOAuthLeaseVersion | None = None

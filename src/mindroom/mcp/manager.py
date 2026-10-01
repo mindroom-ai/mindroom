@@ -225,7 +225,7 @@ class _CatalogRefreshOutcome:
     """Values computed under refresh locks and consumed after those locks release."""
 
     changed: bool
-    should_notify_catalog_change: bool
+    notify_catalog_hash: str | None
     discovery_rejection: _DiscoveryRejection | None
     invalid_function_states: tuple[MCPServerState, ...] | None
 
@@ -1229,7 +1229,7 @@ class MCPServerManager:
         self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
         changed = False
-        should_notify_catalog_change = False
+        notify_catalog_hash: str | None = None
         discovery_rejection: _DiscoveryRejection | None = None
         invalid_function_states: tuple[MCPServerState, ...] | None = None
         async with state.lock:
@@ -1276,10 +1276,16 @@ class MCPServerManager:
                 else:
                     state.consecutive_failures = 0
                     changed = previous_hash != catalog.catalog_hash
-                    should_notify_catalog_change = notify and changed and self._on_catalog_change is not None
+                    if previous_hash is None:
+                        # Without an earlier catalog, dependents start from this one.
+                        state.notified_catalog_hash = catalog.catalog_hash
+                    # A refresh without notification may have published this catalog first, so also compare it with
+                    # the catalog dependents last heard about.
+                    if notify and (changed or catalog.catalog_hash != state.notified_catalog_hash):
+                        notify_catalog_hash = catalog.catalog_hash
         outcome = _CatalogRefreshOutcome(
             changed=changed,
-            should_notify_catalog_change=should_notify_catalog_change,
+            notify_catalog_hash=notify_catalog_hash,
             discovery_rejection=discovery_rejection,
             invalid_function_states=invalid_function_states,
         )
@@ -1309,7 +1315,8 @@ class MCPServerManager:
         invalid_server_ids = await self._validate_global_function_names()
         if state.server_id in invalid_server_ids:
             return False
-        if outcome.should_notify_catalog_change and self._on_catalog_change is not None:
+        if outcome.notify_catalog_hash is not None and self._on_catalog_change is not None:
+            state.notified_catalog_hash = outcome.notify_catalog_hash
             await self._on_catalog_change(state.server_id)
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
