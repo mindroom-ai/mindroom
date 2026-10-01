@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import legacy_usage_storage
 from mindroom.constants import resolve_runtime_paths
@@ -24,6 +25,10 @@ def _usage(path: Path) -> list[tuple[str | None, object]]:
             (run_id, json.loads(data) if data is not None else None)
             for run_id, data in connection.execute("SELECT run_id, usage_data FROM code_sessions_usage ORDER BY id")
         ]
+
+
+def _skipped_paths(logs: list[dict[str, object]]) -> list[object]:
+    return [entry["path"] for entry in logs if entry["event"] == "usage_migration_skipped_unreadable_store"]
 
 
 def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
@@ -175,19 +180,19 @@ async def test_unreadable_session_database_does_not_stop_startup(
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
     monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
-    monkeypatch.setattr(legacy_usage_storage, "logger", warning_logger := Mock())
-    if entrypoint == "api":
-        monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(_NextStartupStepError):
-            async with module._lifespan(module.app):
-                pytest.fail("API admitted runtime work")
-    else:
-        with pytest.raises(_NextStartupStepError):
-            await module.main("ERROR", paths, api=False)
+    with capture_logs() as logs:
+        if entrypoint == "api":
+            monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
+            with pytest.raises(_NextStartupStepError):
+                async with module._lifespan(module.app):
+                    pytest.fail("API admitted runtime work")
+        else:
+            with pytest.raises(_NextStartupStepError):
+                await module.main("ERROR", paths, api=False)
 
     assert len(_usage(healthy)) == 3
     assert corrupt.read_bytes() == b"not a database"
-    assert warning_logger.warning.call_args.kwargs["path"] == str(corrupt)
+    assert _skipped_paths(logs) == [str(corrupt)]
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:
