@@ -742,7 +742,7 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
     poll still reports "expired" (410 / ``status="expired"``) instead of "not
     found" after the CLI renews its code. Connected sessions stay one code
     lifetime past completion so a replayed poll still reports 410. Connections
-    are bounded per user when one is created instead.
+    are bounded per user when one is created and when state loads instead.
     """
     retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
     finished_ids = []
