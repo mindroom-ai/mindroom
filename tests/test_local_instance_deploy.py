@@ -1622,6 +1622,33 @@ def test_launch_tightens_an_existing_world_readable_env_file(tmp_path: Path) -> 
 
 
 @pytest.mark.usefixtures("world_readable_umask")
+@pytest.mark.parametrize("command", ["create", "start", "restart", "restart_all"])
+def test_authelia_directory_is_owner_only(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Authelia's generated secrets and user password hashes stay unreadable to other local accounts, including older copies."""
+    instance, users_file, _commands, _console = authelia_launch
+    authelia_dir = users_file.parent
+    monkeypatch.setattr(deploy.os, "fchown", lambda *_args: None)
+    if command == "create":
+        shutil.rmtree(authelia_dir)
+        deploy._setup_authelia_config(instance)
+        assert "jwt_secret" in (authelia_dir / "configuration.yml").read_text()
+    else:
+        authelia_dir.chmod(0o755)
+        database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+        parts = database["users"]["admin"]["password"].split("$")
+        parts[4] = "MDEyMzQ1Njc4OWFiY2RlZg"
+        database["users"]["admin"]["password"] = "$".join(parts)
+        users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+        _launch_authelia(command)
+
+    assert _mode(authelia_dir) == 0o700
+
+
+@pytest.mark.usefixtures("world_readable_umask")
 def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential copies and their directory stay private, including copies left world-readable by older versions."""
     source_dir = tmp_path / "home" / ".mindroom" / "credentials"

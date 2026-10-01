@@ -884,6 +884,8 @@ def _bring_up_instance(
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
     if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
+        # Instances created by older versions left the Authelia directory readable to every local account.
+        _create_directory_with_permissions(Path(instance.data_dir) / "authelia", 0o700)
         _require_authelia_account_setup(instance)
 
     env_file = _require_instance_env_file(name)
@@ -1094,7 +1096,8 @@ def _setup_synapse_config(instance: Instance) -> None:
 def _setup_authelia_config(instance: Instance) -> None:
     """Set up Authelia configuration directory and files."""
     authelia_dir = Path(instance.data_dir) / "authelia"
-    authelia_dir.mkdir(parents=True, exist_ok=True)
+    # Its secrets, password hashes, and reset notifications must stay unreadable to other local accounts.
+    _create_directory_with_permissions(authelia_dir, 0o700)
 
     # Use Jinja2 template
     jinja_template = SCRIPT_DIR / "templates" / "authelia" / "configuration.yml.j2"
