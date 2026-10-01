@@ -557,8 +557,9 @@ async def _complete_approved_child_tools(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> None:
-    """Publish each resumed tool's retained result in the parent's live trace."""
+) -> list[dict[str, object]]:
+    """Publish each resumed tool's retained result in the parent's live trace, returning the unfinished ones."""
+    unfinished = []
     for pending_tool in pending_tools:
         call_id = str(pending_tool["tool_call_id"])
         completed_tool = await _resolved_child_tool(
@@ -569,6 +570,9 @@ async def _complete_approved_child_tools(
         )
         if completed_tool is not None:
             on_event(_child_completion_event(response, completed_tool))
+        else:
+            unfinished.append(pending_tool)
+    return unfinished
 
 
 def _settle_pending_child_tools(
@@ -577,16 +581,17 @@ def _settle_pending_child_tools(
     on_event: Callable[[object], None],
     *,
     reason: str,
+    error: bool = True,
 ) -> None:
-    """Close the current approval generation's visible tools after an interruption."""
+    """Close the current approval generation's visible tools after an interruption or a bounded wait."""
     for pending_tool in pending_tools:
-        cancelled_tool = ToolExecution.from_dict(pending_tool)
-        cancelled_tool.requires_confirmation = False
-        cancelled_tool.requires_user_input = False
-        cancelled_tool.external_execution_required = False
-        cancelled_tool.result = reason
-        cancelled_tool.tool_call_error = True
-        on_event(_child_completion_event(response, cancelled_tool))
+        settled_tool = ToolExecution.from_dict(pending_tool)
+        settled_tool.requires_confirmation = False
+        settled_tool.requires_user_input = False
+        settled_tool.external_execution_required = False
+        settled_tool.result = reason
+        settled_tool.tool_call_error = error
+        on_event(_child_completion_event(response, settled_tool))
 
 
 def _child_completion_event(
@@ -1218,7 +1223,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     child = retained_child(background, background_job)
                     try:
                         if child_decisions is not None and on_event is not None:
-                            await _complete_approved_child_tools(
+                            unfinished = await _complete_approved_child_tools(
                                 response,
                                 prior_pending_tools,
                                 prior_tool_sources,
@@ -1226,6 +1231,15 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 config=config,
                                 runtime_paths=runtime_paths,
                             )
+                            if background_job.status == "running":
+                                # A bounded wait can end before the approved tools finish; they continue in the job.
+                                _settle_pending_child_tools(
+                                    response,
+                                    unfinished,
+                                    on_event,
+                                    reason=f"Approved; it continues in background job {child.delegation_id}.",
+                                    error=False,
+                                )
                         if background_job.status == "awaiting_approval" and waited.claim is not None:
                             saved = background_job.approval_state
                             child_outcome = _ChildOutcome(

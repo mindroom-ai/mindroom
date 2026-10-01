@@ -305,12 +305,16 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
             (True, False, "revoked"),
             (True, False, "unavailable"),
             (True, False, "denied_retrieval"),
+            (True, False, "budgeted"),
         ]
         for excluded in [False, True]
         # Both successive children must be managed and remain in their foreground wait; a revoked resume is
         # presented through a later job wait, which needs the detached child.
         if (duplicate != "next_child" or not (detach or human or excluded))
-        and (duplicate not in {"revoked", "unavailable", "denied_retrieval"} or (detach and not human and not excluded))
+        and (
+            duplicate not in {"revoked", "unavailable", "denied_retrieval", "budgeted"}
+            or (detach and not human and not excluded)
+        )
     ],
 )
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
@@ -370,7 +374,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 ModelResponse(content="Second child result"),
             ],
         )
-    elif duplicate_approval:
+    elif duplicate_approval and duplicate_approval != "budgeted":
         child_responses.insert(1, ModelResponse(tool_calls=[_call("write_report", "write-twice")]))
 
     async def write_report() -> str:
@@ -525,6 +529,20 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 on_event=on_event,
             )
 
+        if duplicate_approval == "budgeted":
+            # An explicit budget still bounds the resumed wait; the approved tool it showed continues in the job.
+            events: list[object] = []
+            resumed = await approve(result, on_event=events.append)
+            assert resumed.status == RunStatus.completed
+            settled = [
+                (bool(event.tool.tool_call_error), event.tool.result)
+                for event in events
+                if isinstance(event, ToolCallCompletedEvent) and event.tool.tool_name == "write_report"
+            ]
+            assert settled == [(False, f"Approved; it continues in background job {child.delegation_id}.")]
+            await wait_for_status(runtime, child.delegation_id, "completed")
+            assert side_effects == ["written"]
+            return resumed
         if duplicate_approval in {"revoked", "unavailable"}:
             # Resuming a presented child approval rechecks current delegation policy and job access, like any
             # other resume, and settles the approved child tool its card showed.
@@ -660,15 +678,8 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 # Like the reply join, retrieve only once the job is ready: a result with no budget left to wait, and an
                 # approval pause with no budget, so the approved call waits for the approved work like any other.
                 await wait_for_status(runtime, child.delegation_id, "awaiting_approval" if approval else "completed")
-                current_parent = parent(
-                    _call(
-                        "job",
-                        "wait",
-                        action="wait",
-                        job_id=child.delegation_id,
-                        **({} if approval else {"wait_timeout": 0}),
-                    ),
-                )
+                budget = {} if approval and duplicate_approval != "budgeted" else {"wait_timeout": 0}
+                current_parent = parent(_call("job", "wait", action="wait", job_id=child.delegation_id, **budget))
                 result = await drive(current_parent)
                 if not approval:
                     message = next(message.content for message in result.messages if message.tool_call_id == "wait")
