@@ -48,6 +48,7 @@ __all__ = [
     "SKILLS_TOOL_USAGE_PROMPT",
     "SKILL_REVIEW_PROMPT",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
+    "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE",
     "THREAD_SUMMARY_INSTRUCTIONS",
     "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
     "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE",
@@ -190,6 +191,9 @@ Deferred capability domains available through native tool search: {tool_domains}
 When a request may need one of these domains, search the deferred tool catalog before concluding that the capability is unavailable."""
 
 PREVIOUS_CONVERSATION_THREAD_HEADER = "Previous conversation in this thread:"
+THREAD_HISTORY_OMITTED_MARKER_TEMPLATE = (
+    "[{omitted_count} earlier message(s) in this thread were omitted to fit the context window.]"
+)
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
 DEFAULT_UNSEEN_MESSAGES_HEADER = "Messages since your last response:"
 INTERRUPTED_PARTIAL_REPLY_HEADER = (
@@ -639,6 +643,7 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "MEMORY_EXISTING_SNIPPETS_TEMPLATE": frozenset({"existing_context"}),
         "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": frozenset({"agents_info", "message"}),
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE": frozenset({"message", "agent_names"}),
+        "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE": frozenset({"omitted_count"}),
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": frozenset({"conversation", "tag_vocabulary"}),
         "VOICE_TRANSCRIPTION_NORMALIZER_PROMPT_TEMPLATE": frozenset(
             {"agent_list", "team_list", "transcription"},

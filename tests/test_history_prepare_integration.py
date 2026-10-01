@@ -444,7 +444,7 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=0),
-        context_window=24,
+        context_window=48,
     )
     live_agent = _agent()
     thread_history = [
@@ -482,12 +482,13 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
 
     assert prepared_run.prompt_text == "\n\n".join(
         (
+            config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=1),
             render_msg_tag(sender="bob", body="Recent context", event_id="$recent"),
             "Current prompt",
         ),
     )
     assert "Old context" not in prepared_run.prompt_text
-    assert estimate_text_tokens(prepared_run.prompt_text) <= 24
+    assert estimate_text_tokens(prepared_run.prompt_text) <= 48
 
 
 @pytest.mark.asyncio

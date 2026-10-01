@@ -376,8 +376,12 @@ def _messages_with_capped_context(
     if current_only_tokens > static_token_budget:
         return current_only_messages
 
-    for context_message in reversed(context_messages):
-        candidate_context = [context_message, *selected_context]
+    # Tell the agent when older messages are dropped; the marker counts against the same budget.
+    for start in range(len(context_messages) - 1, -1, -1):
+        candidate_context = list(context_messages[start:])
+        if start:
+            marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
+            candidate_context.insert(0, Message(role="user", content=marker))
         candidate_messages = _messages_with_current_prompt(
             prompt,
             context_messages=candidate_context,

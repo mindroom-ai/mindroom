@@ -811,6 +811,55 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
     assert messages[1].content == "Current request"
 
 
+def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
+    """The agent should learn that older thread messages did not fit, within the same budget."""
+    config = _config()
+    history = [
+        make_visible_message(sender="@alice:localhost", body=f"message {index}", event_id=f"$m{index}")
+        for index in range(1, 6)
+    ]
+
+    def estimate(text: str) -> int:
+        return len(text.split())
+
+    budget = 25
+    messages = _build_thread_history_messages(
+        "Current request",
+        history,
+        response_sender_id="@mindroom_code:localhost",
+        config=config,
+        static_token_budget=budget,
+        estimate_static_tokens_fn=estimate,
+        render_messages_text_fn=render_prepared_messages_text,
+    )
+
+    kept = [message.content for message in messages[1:-1]]
+    omitted_count = len(history) - len(kept)
+    assert 0 < omitted_count < len(history)
+    assert messages[0].content == config.render_prompt(
+        "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE",
+        omitted_count=omitted_count,
+    )
+    assert kept == [
+        render_msg_tag(sender="@alice:localhost", body=f"message {index}", event_id=f"$m{index}")
+        for index in range(omitted_count + 1, 6)
+    ]
+    assert messages[-1].content == "Current request"
+    assert estimate(render_prepared_messages_text(messages)) <= budget
+
+    untrimmed = _build_thread_history_messages(
+        "Current request",
+        history,
+        response_sender_id="@mindroom_code:localhost",
+        config=config,
+        static_token_budget=1_000,
+        estimate_static_tokens_fn=estimate,
+        render_messages_text_fn=render_prepared_messages_text,
+    )
+    assert len(untrimmed) == len(history) + 1
+    assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
+
+
 def test_thread_history_and_current_message_carry_member_display_names() -> None:
     """History and the current turn label senders with their current display name, keyed by Matrix ID."""
     messages = _build_thread_history_messages(
