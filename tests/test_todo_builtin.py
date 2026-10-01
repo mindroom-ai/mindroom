@@ -565,8 +565,24 @@ def _template_text(name: str, todos: str, *, description: str = "Workspace templ
         pytest.param(
             {"hostile": _template_text("hostile", "  - title: One\n", description="{{ X }}" * 100)},
             {"X": "a" * 1000},
-            "rendered template exceeds",
+            "templates rendered by one call exceed",
             id="rendered-size",
+        ),
+        pytest.param(
+            {
+                "hostile": _template_text(
+                    "hostile",
+                    '  - sub_template: middle\n    params: {A: "' + "1," * 600 + '", P: "\\\\n    depends_on: ["}\n',
+                ),
+                "middle": _template_text(
+                    "middle",
+                    '  - sub_template: leaf\n    params: {A: "{{A}}", P: "{{P}}"}\n' * 50,
+                ),
+                "leaf": _template_text("leaf", "  - title: a\n  - title: b\n") + "# {{P}}" + "{{A}}" * 53 + "1]\n",
+            },
+            {},
+            "templates rendered by one call exceed",
+            id="rendered-size-across-sub-templates",
         ),
         pytest.param(
             {
