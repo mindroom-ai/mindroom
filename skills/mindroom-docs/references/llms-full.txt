@@ -9500,6 +9500,7 @@ Dangerous state event types like `m.room.power_levels` and `m.room.encryption` a
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
 Hard-blocked state event types like `m.room.create` remain blocked.
+Redacting a state event rewrites that room state, so `redact` applies the same dangerous, hard-blocked, and reserved state rules to a state event target as `put_state`.
 The `com.mindroom.*` and `io.mindroom.*` namespaces are reserved for runtime metadata: `content` may not set keys in them at any depth, and `send_event` and `put_state` may not write event types in them.
 `search` is read-only, scopes results to one room via `room_id`, uses the top-level `limit` parameter, and rejects `filter.limit`.
 When `event_context={"include_profile": true}` is requested, returned context preserves `profile_info` for matching senders.
@@ -10372,6 +10373,7 @@ Add `private: {per: user_agent}` only when the agent's entire runtime and state 
 Desktop device identities are requester-agent scoped either way.
 Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
 The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
+It also rejects `!desktop` when it cannot confirm the room's complete membership, including invites the server counts but the bot has not seen.
 The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
 Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
 For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
@@ -19232,6 +19234,7 @@ The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
 The stop button only works on messages currently being generated.
 Only non-agent users can trigger cancellation — agent reactions are ignored.
+A 🛑 reaction only stops a response in the room where the reaction was sent.
 
 See [Streaming — Cancellation](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for details on how cancelled responses are finalized.
 

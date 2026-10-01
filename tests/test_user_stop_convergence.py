@@ -249,7 +249,8 @@ async def test_stop_reaction_on_a_voice_echo_is_not_claimed(journal_store: Event
     stop_manager.can_handle_stop_reaction.return_value = False
     dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, stop_manager)
 
-    assert await dispatcher._maybe_handle_stop_reaction(nio.MatrixRoom(_ROOM_ID, "@agent:localhost"), _stop_reaction("$echo"), None) is False
+    room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+    assert await dispatcher._maybe_handle_stop_reaction(room, _stop_reaction("$echo"), None) is False
 
     journal.claim_semantic_consumer.assert_not_awaited()
     reconciler.finalize.assert_not_awaited()
@@ -278,16 +279,18 @@ async def test_stop_reaction_from_another_room_is_not_claimed(
     dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, stop_manager)
     reconciler.finalize.return_value = True
     try:
+        stop = _stop_reaction(_RESPONSE_EVENT_ID)
         foreign_room = nio.MatrixRoom("!elsewhere:localhost", "@agent:localhost")
-        assert await dispatcher._maybe_handle_stop_reaction(foreign_room, _stop_reaction(_RESPONSE_EVENT_ID), None) is False
+        assert await dispatcher._maybe_handle_stop_reaction(foreign_room, stop, None) is False
         journal.claim_semantic_consumer.assert_not_awaited()
         reconciler.finalize.assert_not_awaited()
 
         own_room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
-        assert await dispatcher._maybe_handle_stop_reaction(own_room, _stop_reaction(_RESPONSE_EVENT_ID), None) is True
+        assert await dispatcher._maybe_handle_stop_reaction(own_room, stop, None) is True
         reconciler.finalize.assert_awaited_once()
     finally:
         response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)
 
 
 async def _noop() -> None:
