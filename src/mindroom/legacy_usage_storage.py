@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 from mindroom.usage_storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -142,9 +142,12 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
             logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
 
 
-def _directories(root: Path) -> Iterator[Path]:
+def _directories(root: Path) -> list[Path]:
     if root.is_symlink() or not root.is_dir():
-        return
-    for child in sorted(root.iterdir()):
-        if not child.is_symlink() and child.is_dir():
-            yield child
+        return []
+    try:
+        return [child for child in sorted(root.iterdir()) if not child.is_symlink() and child.is_dir()]
+    except OSError as error:
+        # Worker code can make a state directory unlistable; skip the stores beneath it instead of stopping startup.
+        logger.warning("usage_migration_skipped_unreadable_store", path=str(root), error=str(error))
+        return []

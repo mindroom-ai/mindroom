@@ -199,12 +199,19 @@ async def test_unreadable_session_database_does_not_stop_startup(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
-@pytest.mark.parametrize("blocked", ["agents/broken", "agents/broken/sessions"])
-async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path, blocked: str) -> None:
-    """Worker code can make a store directory unsearchable; startup skips that store and imports the rest."""
+@pytest.mark.parametrize(
+    ("blocked", "skipped"),
+    [
+        ("agents/broken", "agents/broken/sessions/broken.db"),
+        ("agents/broken/sessions", "agents/broken/sessions/broken.db"),
+        ("private_instances/scope", "private_instances/scope"),
+    ],
+)
+async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path, blocked: str, skipped: str) -> None:
+    """Worker code can make a store directory unsearchable; startup skips the stores beneath it and imports the rest."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
-    unreadable = paths.storage_root / "agents/broken/sessions/broken.db"
-    unreadable.parent.mkdir(parents=True)
+    for store in ("agents/broken", "private_instances/scope/broken"):
+        (paths.storage_root / store / "sessions").mkdir(parents=True)
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     blocked_dir = paths.storage_root / blocked
     blocked_dir.chmod(0)
@@ -215,7 +222,7 @@ async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path
         blocked_dir.chmod(0o755)
 
     assert len(_usage(healthy)) == 3
-    assert _skipped_paths(logs) == [str(unreadable)]
+    assert _skipped_paths(logs) == [str(paths.storage_root / skipped)]
 
 
 @pytest.mark.asyncio
