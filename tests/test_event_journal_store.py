@@ -9487,6 +9487,23 @@ class TestHotQueriesAreIndexCovered:
 
         assert "created_ts" in plan, plan
 
+    async def test_a_redaction_seeks_the_held_edit_it_names(self, tmp_path: Path) -> None:
+        """A redaction finds the held edit it blanks by ID instead of walking every held edit in the room.
+
+        Any room member can leave edits waiting on targets that never arrive,
+        and every later redaction in that room runs this update on the journal
+        writer every bot shares. Entered on the primary key's room prefix alone,
+        the plan still says SEARCH, so it has to name `edit_event_id`.
+        """
+        database = sqlite3.connect(tmp_path / "redaction-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = "UPDATE unresolved_edits SET content_json = '{}' WHERE principal_id=? AND room_id=? AND edit_event_id=?"
+
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))
+
+        assert "edit_event_id=?" in plan, plan
+
     async def test_every_ordered_index_column_carries_the_byte_order_pin_on_postgres(self) -> None:
         """Every ordered index column carries the byte-order pin on PostgreSQL.
 
