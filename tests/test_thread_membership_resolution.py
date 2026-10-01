@@ -9,9 +9,11 @@ import pytest
 from mindroom.event_journal import thread_root
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_membership import (
+    _MAX_THREAD_MEMBERSHIP_HOPS,
     ThreadMembershipAccess,
     ThreadResolutionState,
     _ThreadRootProof,
+    map_backed_thread_membership_access,
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     resolve_related_event_thread_membership,
@@ -246,10 +248,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root"}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("descendants_first", [False, True])
     async def test_resolve_thread_ids_for_event_infos_resolves_a_long_plain_reply_chain_without_rewalking(
         self,
+        descendants_first: bool,
     ) -> None:
-        """Thousands of chained plain replies under a relation-free message resolve within a CPU budget."""
+        """Thousands of chained plain replies under a relation-free message resolve within a CPU budget in either order."""
 
         def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
             content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
@@ -273,14 +277,53 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         }
 
+        ordered_event_ids = list(event_infos)
         with cpu_budget(0.5):
             resolved_thread_ids = await resolve_thread_ids_for_event_infos(
                 "!test:localhost",
                 event_infos=event_infos,
-                ordered_event_ids=list(event_infos),
+                ordered_event_ids=ordered_event_ids[::-1] if descendants_first else ordered_event_ids,
             )
 
         assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root", "$child_reply_reply": "$root"}
+
+    @pytest.mark.asyncio
+    async def test_resolve_thread_ids_for_event_infos_reports_what_each_walk_finds_past_the_hop_cap(self) -> None:
+        """Reused walks leave the same events indeterminate as walking each one, on both sides of the hop cap."""
+        event_infos = {
+            f"$reply_{index}": EventInfo.from_event(
+                {
+                    "content": {
+                        "body": "reply",
+                        "msgtype": "m.text",
+                        "m.relates_to": {"m.in_reply_to": {"event_id": f"$reply_{index - 1}" if index else "$missing"}},
+                    },
+                    "event_id": f"$reply_{index}",
+                    "type": "m.room.message",
+                },
+            )
+            for index in range(_MAX_THREAD_MEMBERSHIP_HOPS + 2)
+        }
+        indeterminate_event_ids: set[str] = set()
+
+        resolved_thread_ids = await resolve_thread_ids_for_event_infos(
+            "!test:localhost",
+            event_infos=event_infos,
+            ordered_event_ids=list(event_infos)[::-1],
+            indeterminate_event_ids=indeterminate_event_ids,
+        )
+
+        access = map_backed_thread_membership_access(event_infos=event_infos, resolved_thread_ids=resolved_thread_ids)
+        walked_indeterminate_event_ids = {
+            event_id
+            for event_id, event_info in event_infos.items()
+            if (await resolve_event_thread_membership("!test:localhost", event_info, access=access)).state
+            is ThreadResolutionState.INDETERMINATE
+        }
+        assert resolved_thread_ids == {}
+        assert indeterminate_event_ids == walked_indeterminate_event_ids
+        assert "$reply_0" in indeterminate_event_ids
+        assert f"$reply_{_MAX_THREAD_MEMBERSHIP_HOPS}" not in indeterminate_event_ids
 
     @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(

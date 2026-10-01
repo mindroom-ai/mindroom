@@ -43,12 +43,7 @@ from mindroom.matrix.message_content import (
     extract_and_resolve_message,
     resolve_event_source_content,
 )
-from mindroom.matrix.thread_membership import (
-    ThreadResolutionState,
-    ThreadRoomScanRootNotFoundError,
-    map_backed_thread_membership_access,
-    resolve_event_thread_membership,
-)
+from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
     ordered_event_ids_from_scanned_event_sources,
     resolve_thread_ids_for_event_infos,
@@ -477,32 +472,6 @@ class _BulkThreadScanResult:
     homeserver_scan_parse_cpu_ms: float = 0.0
 
 
-async def _unresolved_opaque_relation_event_ids(
-    room_id: str,
-    *,
-    event_infos: dict[str, EventInfo],
-    scanned_message_sources: dict[str, dict[str, Any]],
-    resolved_thread_ids: dict[str, str],
-) -> frozenset[str]:
-    """Return scanned opaque relation-bearing events whose thread impact stays unknown."""
-    access = map_backed_thread_membership_access(
-        event_infos=event_infos,
-        resolved_thread_ids=resolved_thread_ids,
-    )
-    unresolved_event_ids: set[str] = set()
-    for event_id, event_source in scanned_message_sources.items():
-        if event_id in resolved_thread_ids or not is_opaque_encrypted_event_source(event_source):
-            continue
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            event_infos[event_id],
-            access=access,
-        )
-        if resolution.state is ThreadResolutionState.INDETERMINATE:
-            unresolved_event_ids.add(event_id)
-    return frozenset(unresolved_event_ids)
-
-
 def _scanned_event_sender(event_source: dict[str, Any] | None) -> str | None:
     """Return one scanned event's sender, or None when the event was never scanned."""
     if event_source is None:
@@ -530,10 +499,12 @@ async def _group_scanned_sources_by_thread(
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
     ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
+    indeterminate_event_ids: set[str] = set()
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
         ordered_event_ids=ordered_event_ids,
+        indeterminate_event_ids=indeterminate_event_ids,
     )
     for event_id in ordered_event_ids:
         root_id = resolved_thread_ids.get(event_id)
@@ -544,11 +515,10 @@ async def _group_scanned_sources_by_thread(
             continue
         bucket[event_id] = scanned_message_sources[event_id]
 
-    unresolved_opaque_event_ids = await _unresolved_opaque_relation_event_ids(
-        room_id,
-        event_infos=event_infos,
-        scanned_message_sources=scanned_message_sources,
-        resolved_thread_ids=resolved_thread_ids,
+    unresolved_opaque_event_ids = frozenset(
+        event_id
+        for event_id in indeterminate_event_ids
+        if is_opaque_encrypted_event_source(scanned_message_sources[event_id])
     )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}

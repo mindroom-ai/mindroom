@@ -23,6 +23,7 @@ from mindroom.matrix.room_history_reads import (
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
+from tests.cpu_budget_helpers import cpu_budget
 
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
@@ -565,6 +566,37 @@ async def test_unresolved_opaque_scan_log_names_the_acting_client() -> None:
     assert len(opaque) == 1
     assert opaque[0]["user_id"] == "@agent:localhost"
     assert opaque[0]["unresolved_opaque_event_ids"] == ["$opaque:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_settles_a_long_opaque_reply_chain_within_a_cpu_budget() -> None:
+    """Thousands of chained undecryptable replies under an ordinary message are settled without rewalking."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    opaque_replies = [
+        _opaque_reply_event(
+            f"$opaque-{index}:localhost",
+            replies_to=f"$opaque-{index - 1}:localhost" if index else "$plain:localhost",
+            timestamp=10 + index,
+        )
+        for index in range(5_000)
+    ]
+    client.room_messages = AsyncMock(
+        return_value=_messages_response(
+            [
+                *reversed(opaque_replies),
+                _message_event("$plain:localhost", "plain", timestamp=3),
+                _message_event("$child:localhost", "child", timestamp=2, thread_root_id="$root:localhost"),
+                _message_event("$root:localhost", "root", timestamp=1),
+            ],
+            end=None,
+        ),
+    )
+
+    with cpu_budget(0.5):
+        scan = await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+
+    assert [source["event_id"] for source in scan.event_sources] == ["$root:localhost", "$child:localhost"]
 
 
 @pytest.mark.asyncio
