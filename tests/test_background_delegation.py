@@ -1135,22 +1135,45 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["cancel", "shutdown", "teardown"])
+@pytest.mark.parametrize("stop", ["cancel", "shutdown", "teardown", "raised"])
 async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_path: Path, stop: str) -> None:
-    """Every child a job owns, including one running inline below it, records a shutdown or teardown as a restart."""
+    """Every child a job owns, including one running inline below it, records a shutdown or teardown as a restart.
+
+    An operation that raises cancellation itself, with no request and no task cancellation, is cancelled.
+    """
     control = JobControl()
-    if stop != "teardown":
+    if stop in {"cancel", "shutdown"}:
         control.cancel(shutdown=stop == "shutdown")
     interrupt = AsyncMock()
-    with job_control_context(control), patch.object(delegation_execution, "interrupt_child", new=interrupt):
+
+    async def unwind() -> None:
         await delegation_execution._interrupt_cancelled_child(
             job_child(),
             config=Config(),
             runtime_paths=_runtime_paths(tmp_path),
         )
+
+    async def torn_down() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await unwind()
+            raise
+
+    with job_control_context(control), patch.object(delegation_execution, "interrupt_child", new=interrupt):
+        if stop == "teardown":
+            task = asyncio.create_task(torn_down())
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await unwind()
     reason = interrupt.await_args.kwargs["reason"]
     assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
-        ("Delegation cancelled.", "cancelled") if stop == "cancel" else (RESTART_INTERRUPTION_REASON, "failed")
+        (RESTART_INTERRUPTION_REASON, "failed")
+        if stop in {"shutdown", "teardown"}
+        else ("Delegation cancelled.", "cancelled")
     )
 
 

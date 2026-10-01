@@ -107,5 +107,11 @@ def job_owns_execution() -> bool:
 def job_stopped_by_shutdown() -> bool:
     """Return whether a runtime shutdown or restart, not a cancellation request, stopped the active job."""
     control = _control.get()
-    # A job cancelled without any request is event-loop teardown, which recovery reports like a restart.
-    return control is not None and (control.shutdown or not control.cancelled)
+    if control is None:
+        return False
+    if control.cancelled:
+        return control.shutdown
+    # A task cancelled without any request is event-loop teardown, which recovery reports like a restart; an
+    # operation that raises cancellation itself was cancelled.
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
