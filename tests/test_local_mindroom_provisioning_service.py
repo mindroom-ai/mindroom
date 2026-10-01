@@ -1696,6 +1696,9 @@ def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_see
         bob = _pair_device(client, BOB_OPENID_HEADERS)
         _at(3)
         kept = _pair_local_client(client)
+        # The revoked connection went first even though `oldest` was seen less recently.
+        assert _post_heartbeat(client, oldest["client_id"], oldest["client_secret"]).status_code == 200
+        assert _post_heartbeat(client, revoked["client_id"], revoked["client_secret"]).status_code == 401
         _at(4)
         newest = _pair_device(client, ALICE_OPENID_HEADERS)
 
