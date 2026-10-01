@@ -8,10 +8,12 @@ types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
 Each record also carries glibc's malloc totals and Python's allocated block
-count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``.
-Resident memory that grows while live bytes stay flat suggests freed memory the
-allocator keeps; growing live bytes with a flat type histogram suggest
-untracked objects or native libraries.
+count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``;
+Python's small-object arenas come straight from mmap, so malloc does not count
+them and ``python_allocated_blocks`` covers them instead. Resident memory that
+grows while both stay flat suggests freed memory the allocator keeps; growth in
+either with a flat type histogram suggests untracked objects or native
+libraries.
 The walk runs inline on the event loop: ``gc.get_objects()`` and the type count
 both run in C while holding the GIL, so a worker thread would not free the loop
 any sooner. Each walk therefore pauses the loop about as long as a full garbage
