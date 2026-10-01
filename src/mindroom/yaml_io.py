@@ -49,6 +49,14 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     return yaml.load(stream, Loader=SafeLoader)
 
 
+def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
+    """Parse like ``safe_load`` but refuse aliases, so a short document never describes a larger tree."""
+    if any(isinstance(event, yaml.AliasEvent) for event in yaml.parse(stream, Loader=SafeLoader)):
+        msg = "YAML aliases are not allowed"
+        raise yaml.YAMLError(msg)
+    return safe_load(stream)
+
+
 @overload
 def safe_dump(
     data: object,

@@ -956,6 +956,28 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
     assert any("description" in entry["event"] for entry in logs if entry["log_level"] == "warning")
 
 
+def test_workspace_skill_frontmatter_with_yaml_aliases_is_refused(tmp_path: Path) -> None:
+    """A few lines of aliases describe a tree far larger than the file, so such frontmatter is refused."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "plain", "Plain skill")
+    aliased_dir = workspace_skills / "aliased"
+    aliased_dir.mkdir()
+    (aliased_dir / "SKILL.md").write_text(
+        "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n"
+        f"  a: &a [{', '.join(['x'] * 100)}]\n"
+        f"  b: &b [{', '.join(['*a'] * 100)}]\n"
+        f"  c: [{', '.join(['*b'] * 100)}]\n"
+        "---\nbody\n",
+        encoding="utf-8",
+    )
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == ["plain"]
+    assert any("aliases" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
+
+
 @pytest.mark.parametrize("oversized", ["names", "scripts"])
 def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Path, oversized: str) -> None:
     """Names and script or reference listings reach every system prompt, so they are capped with a warning."""

@@ -504,7 +504,7 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+        frontmatter = yaml_io.safe_load_without_aliases(match.group(1)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
