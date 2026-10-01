@@ -204,6 +204,9 @@ def _configured_function_surface(
         context,
         _configured_tool_configs(context, agent_name, loaded_tools=loaded_tools),
     )
+    if not mcp_tool_configs:
+        # Local names only collide with this agent's MCP functions; building toolkits can auto-install deps.
+        return set(), {}
     metadata_function_names = {
         tool_config.name: _metadata_only_tool_function_names(
             tool_config.name,
