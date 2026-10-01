@@ -245,38 +245,38 @@ Each video comes in a light and a dark recording to match your color scheme.
 
 ## Films
 
-### MindRoom at work and at home
+=== "Film · 50 s"
 
-A 50-second film: approvals, a team thread, code, documents, and the browser at work, then lights, trips, and dinners at home.
+    Approvals, a team thread, code, documents, and the browser at work, then lights, trips, and dinners at home.
 
-<video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/e3ce6dae-b730-41cc-a1e9-a7292e8e5766" aria-label="MindRoom at work and at home" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/383e9556-af82-4b4c-bdd4-8ba894481eec" type="video/mp4">
-</video>
-<video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/70e6d774-5f5c-4d2c-862d-a992136dfd73" aria-label="MindRoom at work and at home" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/2c3227cf-0cea-475f-8c27-959a21504348" type="video/mp4">
-</video>
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/e3ce6dae-b730-41cc-a1e9-a7292e8e5766" aria-label="MindRoom at work and at home" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/383e9556-af82-4b4c-bdd4-8ba894481eec" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/70e6d774-5f5c-4d2c-862d-a992136dfd73" aria-label="MindRoom at work and at home" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/2c3227cf-0cea-475f-8c27-959a21504348" type="video/mp4">
+    </video>
 
-### The short version
+=== "Short · 29 s"
 
-The same story in 29 seconds, as shown in the README.
+    The same story with two moments at work and two at home, as in the README.
 
-<video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/47832724-c39c-4a5f-86e6-0eba3aefde19" aria-label="The short version" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/41418624-06e8-43f4-8c70-a5c7558de84a" type="video/mp4">
-</video>
-<video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/13bf22c5-5ca4-4677-b31e-595080773845" aria-label="The short version" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244" type="video/mp4">
-</video>
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/47832724-c39c-4a5f-86e6-0eba3aefde19" aria-label="The short version" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/41418624-06e8-43f4-8c70-a5c7558de84a" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/13bf22c5-5ca4-4677-b31e-595080773845" aria-label="The short version" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244" type="video/mp4">
+    </video>
 
-### Narrated tour
+=== "Work tour · 82 s"
 
-An 82-second narrated walk through agents at work.
+    Thirteen moments at work, one after another, in an earlier full-screen style.
 
-<video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/db242573-e9f9-4040-96c2-f8888172cbc1" aria-label="Narrated tour" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b" type="video/mp4">
-</video>
-<video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/a7a759d9-f371-4a16-ba36-43bd4cf010a5" aria-label="Narrated tour" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4" type="video/mp4">
-</video>
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/db242573-e9f9-4040-96c2-f8888172cbc1" aria-label="Narrated tour" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/a7a759d9-f371-4a16-ba36-43bd4cf010a5" aria-label="Narrated tour" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4" type="video/mp4">
+    </video>
 
 ## At work
 
