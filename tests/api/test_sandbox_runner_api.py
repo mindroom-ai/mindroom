@@ -3657,6 +3657,26 @@ def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeyp
     assert authed_data["ok"] is True
 
 
+def test_sandbox_runner_refuses_requests_without_token_before_reading_their_bodies(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unauthenticated body is never buffered, so it cannot exhaust runner memory."""
+    _set_sandbox_token(monkeypatch)
+    body_read = False
+
+    def body() -> Iterator[bytes]:
+        nonlocal body_read
+        body_read = True
+        yield b'{"tool_name": "calculator", "function_name": "add", "args": [1, 2]}'
+
+    for path in ("/api/sandbox-runner/execute", "/computer/control"):
+        response = runner_client.post(path, content=body(), headers={"content-type": "application/json"})
+        assert response.status_code == 401, path
+    assert not body_read
+    assert runner_client.get("/healthz").status_code == 200
+
+
 def test_sandbox_runner_rejects_when_token_not_configured(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
