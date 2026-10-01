@@ -331,7 +331,7 @@ def authorize_delegation(  # noqa: C901, PLR0911
             else ["Minimal subagents run only inside a Matrix conversation."]
         )
         if problems:
-            return f"Cannot run '{agent_name}' as a minimal subagent: {' '.join(problems)} Retry without minimal."
+            return f"Cannot run '{agent_name}' as a minimal subagent: {' '.join(problems)} Start a new subagent without minimal."
     return active_config
 
 
@@ -352,7 +352,7 @@ def prepare_child_turn(
 ) -> DelegationChild:
     """Prepare the same scoped fresh/follow-up turn for direct and native callers.
 
-    A follow-up keeps the model and agent mode of the child it continues.
+    A follow-up keeps the model of the child it continues; callers pass its mode.
     """
     delegation_id = uuid4().hex
     session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
@@ -391,5 +391,5 @@ def prepare_child_turn(
         previous_delegation_id=previous.delegation_id if previous is not None else None,
         parent_requirement_id=parent_requirement_id,
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
-        agent_mode=previous.agent_mode if previous is not None else agent_mode,
+        agent_mode=agent_mode,
     )

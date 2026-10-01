@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -28,7 +28,6 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -194,7 +193,7 @@ async def test_unsupported_minimal_request_is_refused_before_a_child_starts(
 
     assert result.startswith(f"Cannot run '{target}' as a minimal subagent: ")
     assert expected in result
-    assert result.endswith("Retry without minimal.")
+    assert result.endswith("Start a new subagent without minimal.")
     assert not list((paths.storage_root / "subagent_sessions").glob("*.json"))
 
 
@@ -381,47 +380,33 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     assert "Child answer" in str(models["lead"].seen_messages)
 
 
-def test_child_snapshot_without_mode_continues_in_standard_mode(tmp_path: Path) -> None:
-    """Children retained before modes existed keep running in standard mode."""
+@pytest.mark.asyncio
+async def test_child_snapshot_without_mode_continues_in_standard_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent saved before modes existed continues in standard mode with its full tool surface."""
     config = _config(helper_tools=["shell"])
     paths = _paths(tmp_path, {})
-    current = prepare_child_turn(
-        "leader",
-        "helper",
-        "Report",
-        owner=_identity(),
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        agent_mode="minimal",
-    )
-    snapshot = asdict(current)
-    del snapshot["agent_mode"]
-    retained = DelegationChild(**snapshot)
-    assert retained.agent_mode == "standard"
+    entity_ids(config, paths)
+    models: list[_ToolRecordingModel] = []
 
-    follow_up = prepare_child_turn(
-        "leader",
-        "helper",
-        "More",
-        owner=_identity(),
-        config=config,
-        runtime_paths=paths,
-        depth=0,
-        agent_mode="minimal",
-        previous=retained,
-    )
-    assert follow_up.agent_mode == "standard"
-    assert (
-        prepare_child_turn(
-            "leader",
-            "helper",
-            "More",
-            owner=_identity(),
-            config=config,
-            runtime_paths=paths,
-            depth=0,
-            previous=current,
-        ).agent_mode
-        == "minimal"
-    )
+    def load_model(_config: object, _paths: object, _name: str, *_args: object) -> _ToolRecordingModel:
+        model = _ToolRecordingModel(id="gpt-6-astra", responses=[ModelResponse(content=f"Answer {len(models)}")])
+        models.append(model)
+        return model
+
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    toolkit = DelegateTools("leader", ["helper"], paths, config, execution_identity=_identity())
+
+    with tool_runtime_context(_live_context(config, paths)):
+        assert "Answer 0" in await toolkit.run_subagent(task="Report", agent_name="helper")
+        handle = next((paths.storage_root / "subagent_sessions").glob("*.json"))
+        payload = json.loads(handle.read_text())
+        del payload["child"]["agent_mode"]
+        handle.write_text(json.dumps(payload))
+        assert DelegationChild(**payload["child"]).agent_mode == "standard"
+        assert "Answer 1" in await toolkit.continue_subagent(payload["child"]["subagent_id"], "More")
+
+    assert "bash" not in models[1].seen_tools[0]
+    assert "run_shell_command" in models[1].seen_tools[0]

@@ -37,7 +37,7 @@ class DelegationChild:
     result: str | None = None
     # LEGACY_COMPAT: Delegated children persisted without an agent mode.
     # Legacy format: Parent delegation state and subagent session records omitted agent_mode; every child ran in standard mode.
-    # Last legacy release: v2026.10.14; replacement: the next release persists the child's standard or minimal mode.
+    # Last legacy release: v2026.10.18; replacement: the next release persists the child's standard or minimal mode.
     # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
     # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
     agent_mode: AgentMode = "standard"

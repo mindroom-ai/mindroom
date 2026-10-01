@@ -262,7 +262,7 @@ Set `model` to an alias from `models:` to override the child's model without cha
 The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 Set `minimal` to `True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
-The tool description recommends this for self-contained tasks whose child does not need that context, and lists only subagents the deployment can run in minimal mode.
+The tool description recommends this for self-contained tasks whose child does not need that context and, when the deployment supports minimal mode, lists the allowed subagents that have the `shell` tool.
 The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.

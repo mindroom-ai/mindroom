@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.config.main import Config
+    from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.runtime_resolution import ResolvedAgentStorage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -49,6 +50,17 @@ def _deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
     )
 
 
+def _authored_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
+    return next(
+        (entry for entry in config.resolve_entity(agent_name).authored_tool_configs if entry.name == "shell"),
+        None,
+    )
+
+
+def _gated_shell_operations(config: Config) -> list[str]:
+    return [name for name in SHELL_OPERATION_NAMES if tool_may_require_approval(config, name)]
+
+
 def _shell_problems(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -57,10 +69,7 @@ def _shell_problems(
     storage: ResolvedAgentStorage,
 ) -> list[str]:
     """Check the agent's effective shell functions without opening integrations or a worker."""
-    shell = next(
-        (entry for entry in config.resolve_entity(agent_name).authored_tool_configs if entry.name == "shell"),
-        None,
-    )
+    shell = _authored_shell(config, agent_name)
     if shell is None:
         return [f"Add the `shell` tool to `{agent_name}`, because minimal mode reaches every tool through it."]
     worker_target = build_agent_toolkit_worker_target(
@@ -121,15 +130,10 @@ def minimal_subagent_candidates(
     if (
         (caller_identity is not None and caller_identity.channel != "matrix")
         or _deployment_problems(runtime_paths)
-        or any(tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES)
+        or _gated_shell_operations(config)
     ):
         return []
-    return [
-        name
-        for name in agent_names
-        if name in config.agents
-        and any(entry.name == "shell" for entry in config.resolve_entity(name).authored_tool_configs)
-    ]
+    return [name for name in agent_names if name in config.agents and _authored_shell(config, name) is not None]
 
 
 def minimal_subagent_problems(
@@ -139,7 +143,7 @@ def minimal_subagent_problems(
     execution_identity: ToolExecutionIdentity,
 ) -> list[str]:
     """Also require ungated shell commands, because a minimal child cannot pause for approval."""
-    gated = [name for name in SHELL_OPERATION_NAMES if tool_may_require_approval(config, name)]
+    gated = _gated_shell_operations(config)
     problems = minimal_mode_problems(config, runtime_paths, agent_name, execution_identity)
     if gated:
         problems.insert(
