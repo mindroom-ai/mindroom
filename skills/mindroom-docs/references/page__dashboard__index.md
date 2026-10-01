@@ -439,6 +439,7 @@ Compaction, edits, and regeneration keep usage already incurred; a regenerated r
 Explicit whole-session erasure removes its usage too.
 Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+A session database the startup import cannot read is skipped with a warning instead of stopping startup, and its import retries when its agent or team next opens it.
 Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
 Breakdowns can still differ from session totals when history lost before migration or unrecorded member usage lacks detailed attribution.
 Deleted sessions are unavailable.

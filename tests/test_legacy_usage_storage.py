@@ -158,25 +158,36 @@ def test_missing_database_and_empty_database_stay_empty(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
-async def test_usage_migration_failure_prevents_runtime_admission(
+async def test_unreadable_session_database_does_not_stop_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
-    """Neither entry point may serve exports or write runs after a failed initial import."""
+    """Worker code can corrupt one session database; both entry points still import the rest and continue."""
+
+    class _NextStartupStepError(Exception):
+        pass
+
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
-    path = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
-    path.write_bytes(b"not a database")
+    corrupt = paths.storage_root / "agents/broken/sessions/broken.db"
+    corrupt.parent.mkdir(parents=True)
+    corrupt.write_bytes(b"not a database")
+    healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
+    monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+    monkeypatch.setattr(legacy_usage_storage, "logger", warning_logger := Mock())
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+        with pytest.raises(_NextStartupStepError):
             async with module._lifespan(module.app):
                 pytest.fail("API admitted runtime work")
     else:
-        with pytest.raises(sqlite3.DatabaseError, match="not a database"):
+        with pytest.raises(_NextStartupStepError):
             await module.main("ERROR", paths, api=False)
+
+    assert len(_usage(healthy)) == 3
+    assert corrupt.read_bytes() == b"not a database"
+    assert warning_logger.warning.call_args.kwargs["path"] == str(corrupt)
 
 
 def test_migration_keeps_invalid_parent_as_a_gap(tmp_path: Path) -> None:

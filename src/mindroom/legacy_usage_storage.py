@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.legacy_session_storage import decode_persisted_session_json
+from mindroom.logging_config import get_logger
 from mindroom.usage_storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
 
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
@@ -128,7 +131,12 @@ def _migrate_stores(runtime_paths: RuntimePaths) -> None:
         session_dir = directory / "sessions"
         path = session_dir / f"{directory.name}.db"
         if not session_dir.is_symlink() and not path.is_symlink():
-            migrate_usage_database(path, f"{directory.name}_sessions")
+            try:
+                migrate_usage_database(path, f"{directory.name}_sessions")
+            except (sqlite3.Error, OSError) as error:
+                # Worker code can write session databases, so one unreadable store must not stop startup.
+                # Its owner retries the import when it next opens the store.
+                logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
 
 
 def _directories(root: Path) -> Iterator[Path]:
