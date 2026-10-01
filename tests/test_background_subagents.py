@@ -498,10 +498,17 @@ async def test_only_a_cancelled_approval_pause_withdraws_its_cards(tmp_path: Pat
             operation=approval,
         )
         await runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0)
-        assert runtime.take_cancelled_approvals() == {cancelled.job_id}
-        assert runtime.take_cancelled_approvals() == set()
+        assert runtime.take_withdrawn_approvals() == {cancelled.job_id}
+        assert runtime.take_withdrawn_approvals() == set()
     finally:
         await runtime.shutdown()
+    # A crash can separate the cancellation from withdrawing its card, so recovery withdraws every terminal job's.
+    restored = tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        assert restored.take_withdrawn_approvals() == {cancelled.job_id}
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio

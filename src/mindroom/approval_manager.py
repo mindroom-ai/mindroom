@@ -803,7 +803,7 @@ class ApprovalManager:
         return await self._expire_pending_cards(lambda continuation, _tool_call_id: continuation == continuation_id)
 
     async def expire_job_cards(self, job_ids: Collection[str]) -> bool:
-        """Expire cards presenting the approval pause of background jobs that were cancelled."""
+        """Expire cards presenting the approval pause of background jobs that can never resume it."""
         # A job-owned child's call is projected as `<job_id>:<child call id>`.
         return await self._expire_pending_cards(
             lambda _continuation, tool_call_id: tool_call_id is not None and tool_call_id.partition(":")[0] in job_ids,

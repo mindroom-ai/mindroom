@@ -351,13 +351,13 @@ class ToolJobRuntime:
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
         self._human_signals = WeakValueDictionary[tuple[str, str, str | None], HumanMessageSignal]()
-        # Jobs cancelled during an approval pause; a card presenting that pause can never apply again.
-        self._cancelled_approvals: set[str] = set()
+        # Jobs whose approval cards can never apply again: cancelled during a pause, or recovered already terminal.
+        self._withdrawn_approvals: set[str] = set()
 
-    def take_cancelled_approvals(self) -> set[str]:
-        """Return and forget the jobs cancelled during an approval pause since the last call."""
-        cancelled, self._cancelled_approvals = self._cancelled_approvals, set()
-        return cancelled
+    def take_withdrawn_approvals(self) -> set[str]:
+        """Return and forget the jobs whose approval cards were withdrawn since the last call."""
+        withdrawn, self._withdrawn_approvals = self._withdrawn_approvals, set()
+        return withdrawn
 
     def human_signal_for(self, transport_agent_name: str, room_id: str, thread_id: str | None) -> HumanMessageSignal:
         """Retain one conversation signal while a runner or background job uses it."""
@@ -441,7 +441,7 @@ class ToolJobRuntime:
             if previous.status == "awaiting_approval" and (
                 job.status == "cancel_requested" or job.status in TERMINAL_STATUSES
             ):
-                self._cancelled_approvals.add(job.job_id)
+                self._withdrawn_approvals.add(job.job_id)
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
                 self._release_control(entry)
@@ -500,6 +500,9 @@ class ToolJobRuntime:
                     default = BackgroundOutcome("cancelled") if stopped else BackgroundOutcome("interrupted", reason)
                     await self._publish_outcome(entry, self._settled(entry, await self._cleanup(entry), default))
                 self._add_entry(entry)
+                if entry.job.status in TERMINAL_STATUSES:
+                    # A crash can separate a cancelled pause from withdrawing the card that presented it.
+                    self._withdrawn_approvals.add(entry.job.job_id)
                 owner = entry.job.owner
                 if entry.job.status == "awaiting_approval" and owner.room_id is not None:
                     # Observe future human ingress while the recovered approval awaits reattachment.
