@@ -667,6 +667,20 @@ def _child_result_text(child: DelegationChild, receipt: str) -> str:
     return f"{result}\n\n{receipt}"
 
 
+async def _interrupt_cancelled_child(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
+    """Settle a cancelled child; shutdown of its owning job interrupts it like a restart instead."""
+    if job_stopped_by_shutdown():
+        await interrupt_child(
+            child,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=RESTART_INTERRUPTION_REASON,
+            status="failed",
+        )
+    else:
+        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
+
+
 async def _background_child_outcome(
     child: DelegationChild,
     *,
@@ -707,17 +721,7 @@ async def _background_child_outcome(
                     },
                 )
         except asyncio.CancelledError:
-            if job_stopped_by_shutdown():
-                # Shutdown interrupts the child like a restart; only a cancellation request cancels it.
-                await interrupt_child(
-                    child,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    reason=RESTART_INTERRUPTION_REASON,
-                    status="failed",
-                )
-            else:
-                await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
+            await _interrupt_cancelled_child(child, config=config, runtime_paths=runtime_paths)
             raise
         except Exception as error:
             primary_error = error
@@ -1305,12 +1309,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
                     await persist(state)
                     raise
-                await interrupt_child(
-                    child,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    reason="Delegation cancelled.",
-                )
+                await _interrupt_cancelled_child(child, config=config, runtime_paths=runtime_paths)
                 await after_delegation(
                     hook_state,
                     config=config,

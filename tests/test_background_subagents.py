@@ -37,6 +37,7 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
     job_checkpoint,
     job_control_context,
+    job_stopped_by_shutdown,
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
@@ -473,6 +474,32 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
     finally:
         cleaned.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stopped: bool) -> None:
+    """A Stop saved while shutdown refused new cancellations still stops the job as a cancellation."""
+    runtime = tool_job_runtime(tmp_path)
+    started = asyncio.Event()
+    by_shutdown: list[bool] = []
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            by_shutdown.append(job_stopped_by_shutdown())
+            raise
+        raise AssertionError
+
+    job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
+    await asyncio.wait_for(started.wait(), JOB_TEST_TIMEOUT)
+    if stopped:
+        entry = runtime._entries[job.job_id]
+        entry.job = replace(entry.job, user_stop_receipt_order=1)
+    await runtime.shutdown()
+    assert by_shutdown == [not stopped]
 
 
 @pytest.mark.asyncio

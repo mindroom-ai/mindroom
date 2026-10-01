@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
@@ -32,7 +32,7 @@ from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.background import continue_delegation, delegation_child
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
-from mindroom.delegation.recovery import read_child_run
+from mindroom.delegation.recovery import RESTART_INTERRUPTION_REASON, read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
@@ -43,6 +43,7 @@ from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     JobControl,
     human_message_signal_context,
+    job_control_context,
     job_owns_execution,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -70,6 +71,7 @@ from tests.test_delegation_execution import (
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
+    job_child,
     start_delegation_job,
     tool_job_runtime,
     wait_for_status,
@@ -1111,6 +1113,25 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
         ("failed", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
         if shutdown
         else ("cancelled", "Delegation cancelled.")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_path: Path, shutdown: bool) -> None:
+    """Every child a job owns, including one running inline below it, records a shutdown as a restart."""
+    control = JobControl()
+    control.cancel(shutdown=shutdown)
+    interrupt = AsyncMock()
+    with job_control_context(control), patch.object(delegation_execution, "interrupt_child", new=interrupt):
+        await delegation_execution._interrupt_cancelled_child(
+            job_child(),
+            config=Config(),
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+    reason = interrupt.await_args.kwargs["reason"]
+    assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
+        (RESTART_INTERRUPTION_REASON, "failed") if shutdown else ("Delegation cancelled.", "cancelled")
     )
 
 
