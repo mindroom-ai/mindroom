@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -42,6 +43,7 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    StoredApprovalCard,
     UnreadableApprovalCard,
     delivery_transaction_id,
 )
@@ -1000,6 +1002,41 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
 
     cards.expire_unacknowledged_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
     wake.assert_awaited_once_with("code", "!room:example.org", ("$source",))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_job_expires_only_the_cards_presenting_its_pause(tmp_path: Path) -> None:
+    """A job-owned child call is projected as `<job_id>:<call>`; other cards keep waiting for a decision."""
+    presented = StoredApprovalCard(
+        card={},
+        resolution=None,
+        delivery_id="presented",
+        card_event_id="$presented",
+        created_at_ns=1,
+        continuation_id="parent",
+        continuation_generation=0,
+        tool_call_id="job1:write",
+        continuation_entity_name="leader",
+    )
+    pending = [
+        presented,
+        replace(presented, delivery_id="ordinary", tool_call_id="call-2"),
+        replace(presented, delivery_id="other-job", tool_call_id="job10:write"),
+        UnreadableApprovalCard(delivery_id="unreadable", created_at_ns=4, continuation_id="parent"),
+    ]
+    cards = MagicMock()
+    cards.pending_approval_room_ids = AsyncMock(return_value=["!room:test"])
+    cards.pending_approval_cards = AsyncMock(return_value=pending)
+    manager = ApprovalManager(test_runtime_paths(tmp_path), cards=cards)
+    expired: list[str] = []
+
+    async def expire(_room_id: str, stored: StoredApprovalCard) -> bool:
+        expired.append(stored.delivery_id)
+        return True
+
+    with patch.object(manager, "_expire_stored", new=expire):
+        assert await manager.expire_job_cards({"job1"})
+    assert expired == ["presented"]
 
 
 @pytest.mark.asyncio

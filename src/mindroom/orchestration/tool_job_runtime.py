@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom import approval_manager
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
@@ -79,6 +80,8 @@ class ToolJobRuntimeCoordinator:
     # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
     # bot exists to read its journal; no completion is delivered to a recipient still listed here.
     _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
+    # Jobs cancelled during an approval pause whose cards still need expiring; a failed expiry retries next pass.
+    _cancelled_approvals: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
         """Pin execution mode, then claim job storage or index parked ownership, before dispatch can start."""
@@ -305,6 +308,7 @@ class ToolJobRuntimeCoordinator:
             self._initialized = False
             self._admitted.clear()
             self._unrestored_stops.clear()
+            self._cancelled_approvals.clear()
 
     async def _run(self) -> None:
         next_retention = 0.0
@@ -324,6 +328,7 @@ class ToolJobRuntimeCoordinator:
         """Retry pending outcomes until the durable journal owns each generation."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
+        await self._expire_cancelled_approval_cards()
         pending = await self.runtime.pending_outcomes()
         self._admitted.intersection_update((job.job_id, job.generation) for job in pending)
         for job in pending:
@@ -331,6 +336,13 @@ class ToolJobRuntimeCoordinator:
                 await self._deliver(job)
             except Exception:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
+
+    async def _expire_cancelled_approval_cards(self) -> None:
+        """Expire the cards of approval pauses cancelled as jobs, so the replies waiting on them resume."""
+        self._cancelled_approvals |= self.runtime.take_cancelled_approvals()
+        manager = approval_manager.get_approval_store()
+        if manager is None or (self._cancelled_approvals and await manager.expire_job_cards(self._cancelled_approvals)):
+            self._cancelled_approvals.clear()
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""

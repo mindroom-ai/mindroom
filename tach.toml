@@ -1149,6 +1149,7 @@ visibility = [
     "mindroom.approval_response",
     "mindroom.approval_transport",
     "mindroom.orchestration.script_runtime",
+    "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_approval",
 ]
 
@@ -7621,6 +7622,7 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.approval_manager",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
     "mindroom.delegation.lifecycle",

@@ -476,6 +476,35 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_only_a_cancelled_approval_pause_withdraws_its_cards(tmp_path: Path) -> None:
+    """A cancelled pause can never resume; an approved one may pause again behind a newer card."""
+    runtime = tool_job_runtime(tmp_path)
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+
+    try:
+        approved = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=approval)
+        cancelled = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=approval)
+        for job in (approved, cancelled):
+            waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
+            await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await continue_delegation(
+            runtime,
+            approved.job_id,
+            owner=job_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=approval,
+        )
+        await runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0)
+        assert runtime.take_cancelled_approvals() == {cancelled.job_id}
+        assert runtime.take_cancelled_approvals() == set()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_restart_preserves_native_approval_owner_snapshot(tmp_path: Path) -> None:
     """Restart reconstructs approval authority without granting the protected action."""
     runtime = tool_job_runtime(tmp_path)

@@ -351,6 +351,13 @@ class ToolJobRuntime:
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
         self._human_signals = WeakValueDictionary[tuple[str, str, str | None], HumanMessageSignal]()
+        # Jobs cancelled during an approval pause; a card presenting that pause can never apply again.
+        self._cancelled_approvals: set[str] = set()
+
+    def take_cancelled_approvals(self) -> set[str]:
+        """Return and forget the jobs cancelled during an approval pause since the last call."""
+        cancelled, self._cancelled_approvals = self._cancelled_approvals, set()
+        return cancelled
 
     def human_signal_for(self, transport_agent_name: str, room_id: str, thread_id: str | None) -> HumanMessageSignal:
         """Retain one conversation signal while a runner or background job uses it."""
@@ -431,6 +438,10 @@ class ToolJobRuntime:
         async def publish() -> None:
             await asyncio.to_thread(write)
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
+            if previous.status == "awaiting_approval" and (
+                job.status == "cancel_requested" or job.status in TERMINAL_STATUSES
+            ):
+                self._cancelled_approvals.add(job.job_id)
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
                 self._release_control(entry)
