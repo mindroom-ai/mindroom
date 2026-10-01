@@ -1373,7 +1373,7 @@ async def test_approval_cancellation_survives_a_crash_during_cleanup(tmp_path: P
         await restored.recover()
         outcomes = await restored.pending_outcomes()
         assert len(outcomes) == 1
-        assert outcomes[0].status == "interrupted"
+        assert outcomes[0].status == "cancelled"
         assert outcomes[0].generation == 1
         assert not outcomes[0].consumed
     finally:

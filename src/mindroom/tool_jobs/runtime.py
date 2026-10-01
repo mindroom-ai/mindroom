@@ -500,13 +500,12 @@ class ToolJobRuntime:
                 stopped = job.status == "awaiting_approval" and job.user_stop_receipt_order is not None
                 entry = _Entry(_cancel_requested(job) if stopped else job)
                 if entry.job.status not in READY_STATUSES:
-                    reason = "Tool execution was interrupted by a runtime restart; it was not replayed."
-                    default = BackgroundOutcome("cancelled") if stopped else BackgroundOutcome("interrupted", reason)
                     # Only work the restart cut short is interrupted by it; a cancellation or Stop saved before it is not.
                     cancelled = entry.job.status == "cancel_requested" or entry.job.user_stop_receipt_order is not None
+                    reason = "Tool execution was interrupted by a runtime restart; it was not replayed."
+                    default = BackgroundOutcome("cancelled") if cancelled else BackgroundOutcome("interrupted", reason)
                     entry.control.cancel(shutdown=not cancelled)
-                    with job_control_context(entry.control):
-                        outcome = await self._cleanup(entry)
+                    outcome = await self._cleanup(entry)
                     await self._publish_outcome(entry, self._settled(entry, outcome, default))
                 self._add_entry(entry)
                 if entry.job.status in TERMINAL_STATUSES:
@@ -884,9 +883,11 @@ class ToolJobRuntime:
 
     async def _cleanup(self, entry: _Entry) -> BackgroundOutcome | None:
         try:
-            outcome = await entry.cancel(entry.job) if entry.cancel is not None else None
-            if outcome is None:
-                outcome = await self._cancel(entry.job)
+            # Cleanup runs under the job's control, so its adapter can tell a shutdown or restart from a cancellation.
+            with job_control_context(entry.control):
+                outcome = await entry.cancel(entry.job) if entry.cancel is not None else None
+                if outcome is None:
+                    outcome = await self._cancel(entry.job)
         except JobRecoveryBlockedError:
             raise
         except Exception as error:
