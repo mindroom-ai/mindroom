@@ -320,6 +320,26 @@ async def test_upload_snapshots_stay_within_one_budget_until_their_tabs_close(
 
 
 @pytest.mark.asyncio
+async def test_parallel_uploads_cannot_each_spend_the_whole_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploads running at once share one budget instead of each seeing all of it."""
+    monkeypatch.setattr("mindroom.custom_tools.browser._MAX_STAGED_UPLOAD_BYTES", 10)
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.bin"
+    source.write_bytes(b"123456")
+    tab = tool._profiles["mindroom"].tabs["tab-1"]
+
+    results = await asyncio.gather(_upload(tool, [source]), _upload(tool, [source]), return_exceptions=True)
+
+    assert [type(result) for result in results] == [dict, ValueError]
+    consumer.assert_awaited_once()
+    assert tab.upload_staged_bytes == 6
+    await tool.aclose()
+
+
+@pytest.mark.asyncio
 async def test_upload_keeps_large_files_as_file_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

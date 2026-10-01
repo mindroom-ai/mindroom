@@ -630,6 +630,7 @@ class BrowserTools(Toolkit):
         self._worker_workspace: Path | None = None
         self._worker_process_env: dict[str, str] | None = None
         self._lock = asyncio.Lock()
+        self._upload_lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         # Keep the caller's spelling: uploads open from it without following links, so a root swapped for a link is refused.
         self._workspace_root = tool_output_workspace_root
@@ -1391,28 +1392,32 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         sources = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
-        retained_bytes = sum(
-            open_tab.upload_staged_bytes for profile in self._profiles.values() for open_tab in profile.tabs.values()
-        )
-        staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
-        try:
-            staged_paths, staged_bytes = await run_blocking_until_complete(
-                _stage_browser_upload_paths,
-                sources,
-                Path(staging.name),
-                _MAX_STAGED_UPLOAD_BYTES - retained_bytes,
+        # Count this upload before another one measures the budget, so parallel uploads cannot each spend all of it.
+        async with self._upload_lock:
+            retained_bytes = sum(
+                open_tab.upload_staged_bytes
+                for profile in self._profiles.values()
+                for open_tab in profile.tabs.values()
             )
-            await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
-        except BaseException:
-            staging.cleanup()
-            raise
-        # Chromium reads selected paths lazily, including during a later form submit.
-        # Keep snapshots until tab/profile teardown even after set_input_files returns.
-        if state.cleanup_required or tab.page.is_closed():
-            staging.cleanup()
-        else:
-            tab.upload_staging.append(staging)
-            tab.upload_staged_bytes += staged_bytes
+            staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
+            try:
+                staged_paths, staged_bytes = await run_blocking_until_complete(
+                    _stage_browser_upload_paths,
+                    sources,
+                    Path(staging.name),
+                    _MAX_STAGED_UPLOAD_BYTES - retained_bytes,
+                )
+                await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
+            except BaseException:
+                staging.cleanup()
+                raise
+            # Chromium reads selected paths lazily, including during a later form submit.
+            # Keep snapshots until tab/profile teardown even after set_input_files returns.
+            if state.cleanup_required or tab.page.is_closed():
+                staging.cleanup()
+            else:
+                tab.upload_staging.append(staging)
+                tab.upload_staged_bytes += staged_bytes
         return {
             "action": "upload",
             "paths": [source.display_path for source in sources],
