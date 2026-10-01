@@ -1139,6 +1139,44 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     assert [tool.name for tool in agent.tools] == ["shell"]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@patch("mindroom.agent_storage._ConversationSqliteDb")
+def test_create_agent_skips_only_the_toolkit_whose_worker_store_worker_code_broke(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """Worker code breaking its own credential store must not stop the primary from building the agent."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].tools = ["openai", "calculator"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_scope = "shared"
+    shared_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id=None,
+        account_id=None,
+    )
+    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
+    assert worker_key is not None
+    worker_root = worker_root_path(tmp_path, worker_key)
+    worker_root.mkdir(parents=True)
+    # The worker replaces its credential directory and then makes its root read-only.
+    (worker_root / "credentials").write_text("planted", encoding="utf-8")
+    worker_root.chmod(0o555)
+    try:
+        agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
+    finally:
+        worker_root.chmod(0o755)
+
+    assert [tool.name for tool in agent.tools] == ["calculator"]
+
+
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
