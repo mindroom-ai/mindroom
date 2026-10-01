@@ -836,9 +836,14 @@ def _require_authelia_account_setup(instance: Instance) -> None:
     """Reject enabled accounts that still use the shipped public password hash."""
     users_file = _resolve_authelia_users_file(instance)
     # Older versions left the mounted directory readable to every local account.
-    # Tightening is best effort: the read below reports a missing or unusable directory.
+    # The read below reports a missing or unusable directory.
     with contextlib.suppress(OSError):
         _set_directory_permissions(users_file.parent, 0o700)
+    with contextlib.suppress(OSError):
+        if os.lstat(users_file.parent).st_mode & 0o077:
+            console.print(f"[red]✗[/red] Cannot make the Authelia directory private: {users_file.parent}")
+            console.print("  Rerun this command as root so other local accounts cannot read its secrets.")
+            raise typer.Exit(1)
     try:
         database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:

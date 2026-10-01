@@ -1675,6 +1675,23 @@ def test_launch_tightens_the_authelia_directory_compose_mounts(
     assert _mode(mounted_users.parent) == 0o700
 
 
+def test_launch_refuses_an_authelia_directory_it_cannot_make_private(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory another account owns stays readable after the attempt, so launch stops instead of claiming it is private."""
+    _instance, registry_users, commands, _console = authelia_launch
+    _replace_example_password_hash(registry_users)
+    registry_users.parent.chmod(0o755)
+    monkeypatch.setattr(deploy, "_set_directory_permissions", lambda *_args: None)
+
+    with pytest.raises(deploy.typer.Exit):
+        _launch_authelia("start")
+
+    assert _mode(registry_users.parent) == 0o755
+    assert not any(" up " in command for command in commands)
+
+
 @pytest.mark.usefixtures("world_readable_umask")
 def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential copies and their directory stay private, including copies left world-readable by older versions."""
