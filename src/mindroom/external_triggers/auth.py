@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from mindroom.external_triggers.models import _MAX_REPLAY_KEY_LENGTH
+from mindroom.external_triggers.models import MAX_REPLAY_KEY_LENGTH
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -91,8 +91,8 @@ class TriggerSignatureHeaders:
         if not self.nonce:
             msg = "trigger signature nonce must not be empty"
             raise TriggerAuthError(msg)
-        if len(self.nonce) > _MAX_REPLAY_KEY_LENGTH:
-            msg = f"trigger signature nonce must be at most {_MAX_REPLAY_KEY_LENGTH} characters"
+        if len(self.nonce) > MAX_REPLAY_KEY_LENGTH:
+            msg = f"trigger signature nonce must be at most {MAX_REPLAY_KEY_LENGTH} characters"
             raise TriggerAuthError(msg)
 
 
