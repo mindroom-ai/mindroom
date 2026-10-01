@@ -45,6 +45,7 @@ Cancellation publishes its generation before cleanup and stays pending until own
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
 Config reload retains active jobs; controls and result admission check current authorization.
 Completion enters the existing response owner as a nonprojected internal journal source carrying the original requester and exact recipient; it never sends Matrix messages back through ingress.
+Its reply is recorded as the turn of that internal source, so Stop, recovery, and dedup treat it like any other reply.
 Accepted jobs retain their original source identity, so a still-pending request recovers stored outcomes instead of repeating its tool calls, and internal completion defers to that source while it remains pending.
 That re-run replaces the interrupted reply, as it does for any recovered request.
 It answers the original request, with a nonpersistent note naming the accepted jobs whose stored outcomes it retrieves instead of repeating their calls.

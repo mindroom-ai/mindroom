@@ -54,6 +54,7 @@ from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
+from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
@@ -533,6 +534,7 @@ def _build_response_runner(
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
             register_approval_interruption=lambda _source_event_id, _room_id: None,
+            turn_store=MagicMock(spec=TurnStore),
         ),
     )
 

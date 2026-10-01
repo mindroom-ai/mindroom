@@ -164,7 +164,8 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_origin import SenderKind, TurnIntent
-from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
+from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, TurnRecord, canonicalize_turn_record
+from mindroom.turn_store import record_user_stop_terminal
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -237,7 +238,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
-    from mindroom.turn_record import TurnRecord
+    from mindroom.turn_store import TurnStore
 
     from .response_admission import ResponseAdmissionGate
 
@@ -856,6 +857,7 @@ class ResponseRunnerDeps:
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
     register_approval_interruption: Callable[[str, str], None]
+    turn_store: TurnStore
 
 
 @dataclass(frozen=True)
@@ -3135,20 +3137,18 @@ class ResponseRunner:
                 # The original source still owns recovery or turn recording.
                 # Keep this wake pending until it settles; it may leave the job unconsumed.
                 return
-        initial = await self.deps.approval_store.load_matrix_delivery(
-            delivery_id=event.event_id,
-            stage=DeliveryStage.INITIAL,
+        # The completion's reply is a turn like a human one, so Stop and recovery find its durable owner.
+        turn = await self.deps.turn_store.record_pending_turn(
+            self.deps.turn_store.attach_response_context(
+                TurnRecord.create((event.event_id,), requester_id=envelope.requester_id, completed=False),
+                history_scope=None,
+                conversation_target=envelope.target,
+            ),
         )
-        request = ResponseRequest(
-            thread_history=(),
-            prompt=envelope.body,
-            response_envelope=envelope,
-            sources=ResponseSources((event.event_id,), (event.event_id,)),
-            existing_event_id=initial.acknowledged_event_id if initial is not None else None,
-            existing_event_is_placeholder=True,
-            user_id=envelope.requester_id,
-            on_no_response_handled=lambda: self.deps.approval_store.settle(event.event_id),
-        )
+        if turn is None or turn.completed:
+            await self.deps.approval_store.settle(event.event_id)
+            return
+        request = await self._completion_request(event, envelope, turn)
         team = self.deps.runtime.config.teams.get(self.deps.agent_name)
         member_names = team.agents if team is not None else []
         if team is None:
@@ -3163,14 +3163,56 @@ class ResponseRunner:
             # that own outstanding work so each result keeps its exact owner.
             member_names = sorted({job.owner.agent_name, *(pending.owner.agent_name for pending in jobs)})
         if team is None and member_names == [self.deps.agent_name]:
-            await self.generate_response(request)
+            response_event_id = await self.generate_response(request)
         else:
             registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-            await self.generate_team_response_helper(
+            response_event_id = await self.generate_team_response_helper(
                 request,
                 team_agents=[registry.current_ids[name] for name in member_names],
                 team_mode=team.mode if team is not None else "coordinate",
             )
+        if response_event_id is not None:
+            await self.deps.turn_store.record_responded_turn(
+                canonicalize_turn_record(turn, response_event_id=response_event_id),
+            )
+
+    async def _completion_request(
+        self,
+        event: JournalEvent,
+        envelope: MessageEnvelope,
+        turn: TurnRecord,
+    ) -> ResponseRequest:
+        """Build a completion's response request, settling its turn the way a human turn's reply settles."""
+        turns = self.deps.turn_store
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=event.event_id,
+            stage=DeliveryStage.INITIAL,
+        )
+
+        async def record_visible_response(response_event_id: str) -> None:
+            await turns.record_pending_turn(
+                canonicalize_turn_record(turn, response_event_id=response_event_id, completed=False),
+            )
+
+        async def record_no_response() -> None:
+            await turns.record_turn(turn)
+            await self.deps.approval_store.settle(event.event_id)
+
+        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
+            await record_user_stop_terminal(turns, turn, response_event_id, stop_receipt_order)
+
+        return ResponseRequest(
+            thread_history=(),
+            prompt=envelope.body,
+            response_envelope=envelope,
+            sources=ResponseSources((event.event_id,), (event.event_id,)),
+            existing_event_id=initial.acknowledged_event_id if initial is not None else None,
+            existing_event_is_placeholder=True,
+            user_id=envelope.requester_id,
+            on_no_response_handled=record_no_response,
+            on_user_stop_handled=record_user_stop,
+            on_visible_response=record_visible_response,
+        )
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
         """Transfer one durable continuation out of the journal lane and into response ownership."""

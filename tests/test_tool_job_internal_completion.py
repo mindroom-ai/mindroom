@@ -739,7 +739,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("interrupted", "Interrupted without replay.")
 
-    respond = AsyncMock()
+    respond = AsyncMock(return_value="$completion-reply")
 
     try:
         await start_job(
@@ -777,6 +777,10 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
             await runner._resume_tool_job_completion(admitted, "recovered", 0)
         respond.assert_awaited_once()
         assert respond.call_args.args[0].response_envelope.source_event_id == event.event_id
+        # The completion's reply is recorded as the responded turn of its internal source.
+        responded = bot._turn_store.turn_record_for_response_event_id("$completion-reply")
+        assert responded is not None
+        assert (responded.indexed_event_ids, responded.completed) == ((event.event_id,), True)
     finally:
         await runtime.shutdown()
 

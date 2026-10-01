@@ -772,6 +772,7 @@ class AgentBot:
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 register_approval_interruption=self._register_approval_interruption,
+                turn_store=self._turn_store,
             ),
         )
         self._edit_regenerator = EditRegenerator(

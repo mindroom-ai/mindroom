@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.response_runner import _EarlyPlaceholderState
+    from mindroom.response_runner import ResponseRequest, _EarlyPlaceholderState
 
 
 @pytest.mark.asyncio
@@ -147,6 +147,88 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(*(task for task in (response_task, stop_task) if task is not None), return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_on_an_idle_completion_reply_finds_its_durable_turn(tmp_path: Path) -> None:
+    """A completion's own reply is a turn like any other, so Stop on it settles durably and stops its jobs."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.background_tool_jobs.enabled = True
+    paths = runner.deps.runtime_paths
+    store = runner.deps.approval_store
+    await bot._turn_store.warm()
+    # The human turn that started the job has finished, so its completion wakes an idle conversation.
+    await admit(store, "$first")
+    await store.settle("$first")
+    target = MessageTarget.resolve(ROOM, "$thread", "$thread")
+    owner = replace(
+        job_owner(),
+        agent_name="general",
+        room_id=ROOM,
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=target.session_id,
+    )
+    runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
+    register_background_runtime(paths, runtime)
+    replying = asyncio.Event()
+
+    async def finished() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "prior result")
+
+    async def wake_reply(request: ResponseRequest) -> str:
+        try:
+            # The visible reply is bound to its turn as soon as it exists, like any other response.
+            if request.on_visible_response is not None:
+                await request.on_visible_response("$wake-reply")
+            await start_job(
+                runtime,
+                "wake-child",
+                tool_name="tool",
+                depth=0,
+                source_event_id=event.event_id,
+                adapter={},
+                owner=owner,
+                operation=asyncio.Event().wait,
+            )
+        finally:
+            replying.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    try:
+        await start_job(
+            runtime,
+            "prior-job",
+            tool_name="tool",
+            depth=0,
+            source_event_id="$first",
+            adapter={},
+            owner=owner,
+            operation=finished,
+        )
+        ready = await runtime.wait("prior-job", owner=owner, depth=0)
+        await runtime.release_wait("prior-job", ready.claim)
+        event = completion_event(ready.job, sender_id=bot.matrix_id.full_id)
+        await store.admit(event)
+        with patch.object(runner, "generate_response", new=wake_reply):
+            assert not await runner.handoff_tool_job_completion(await store.load_event(event.event_id))
+            await asyncio.wait_for(replying.wait(), JOB_TEST_TIMEOUT)
+            reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, _CountingGateway()))
+            assert await asyncio.wait_for(reconciler.finalize("$wake-reply", 100, AsyncMock()), JOB_TEST_TIMEOUT)
+        stopped = bot._turn_store.turn_record_for_response_event_id("$wake-reply")
+        assert stopped is not None
+        assert (stopped.indexed_event_ids, stopped.user_stop_receipt_order) == ((event.event_id,), 100)
+        child = await runtime.lookup("wake-child", owner=owner, depth=0)
+        assert child.user_stop_receipt_order == 100
+    finally:
+        wakes = tuple(runner._inbox_response_tasks)
+        for task in wakes:
+            task.cancel()
+        await asyncio.gather(*wakes, return_exceptions=True)
         await runtime.shutdown()
 
 

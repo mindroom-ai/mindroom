@@ -2758,6 +2758,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
+    "mindroom.turn_store",
     "mindroom.user_turn_time",
     "mindroom.cli_approval_waits",
     "mindroom.skill_learning.capture",
