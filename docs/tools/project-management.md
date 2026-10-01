@@ -117,8 +117,9 @@ Future persisted timestamps beyond the relevant cooldown or backstop window are 
 Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
 Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
 Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke with items written before requesters were recorded, and that poke dispatches as the assigned agent's own internal turn as every poke did before.
+Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke that dispatches as the assigned agent's own internal turn.
 Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
+Items written before requesters were recorded are not poked either, and each is logged once with `todo_poke_requester_unrecorded`, until an update by someone allowed to address the assigned agent records them as that requester's work.
 
 | Environment variable | Default | Behavior |
 | --- | --- | --- |

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import itertools
 import json
 from dataclasses import replace
@@ -38,6 +37,8 @@ _NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 _AGENT_REQUESTER = "@mindroom_planner:localhost"
 _BOT_ACCOUNT = "@bridge:localhost"
 _LOST_ACCESS = "@former:localhost"
+# Omits the requester, as every release before requester attribution wrote items.
+_UNRECORDED = object()
 
 
 def _requester_kind(requester_id: str, _agent_name: str, _room_id: str) -> TodoPokeRequesterKind:
@@ -57,7 +58,7 @@ def _item(
     priority: str = "medium",
     depends_on: list[str] | None = None,
     updated_at: datetime = _NOW - timedelta(minutes=10),
-    requester_id: object = None,
+    requester_id: object = _AGENT_REQUESTER,
 ) -> dict[str, object]:
     item: dict[str, object] = {
         "id": item_id,
@@ -70,8 +71,7 @@ def _item(
         "updated_at": updated_at.isoformat(),
         "completed_at": None,
     }
-    # Items without a requester are what every release before requester attribution wrote.
-    if requester_id is not None:
+    if requester_id is not _UNRECORDED:
         item["requester_id"] = requester_id
     return item
 
@@ -360,76 +360,37 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
 
 
 @pytest.mark.asyncio
-async def test_scan_pokes_legacy_items_as_assignee_turn_with_existing_dedup_state(tmp_path: Path) -> None:
-    """Pre-upgrade items keep poking as the assignee's own turn, sharing one poke and dedup key with agent work."""
+async def test_scan_never_pokes_items_without_a_recorded_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Work nobody is recorded as writing may come from a human the assignee refuses, so it never pokes as internal work."""
+    warnings: list[str] = []
+    monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
     todo_root = tmp_path / "todo"
     _write_thread(
         todo_root,
         "scope",
         items=[
-            _item("legacy", title="Legacy work"),
-            _item("agent", title="Agent work", requester_id=_AGENT_REQUESTER),
+            _item("unrecorded", title="Unrecorded work", requester_id=_UNRECORDED),
+            _item("agent", title="Agent work"),
         ],
+    )
+    _write_thread(
+        todo_root,
+        "only-unrecorded",
+        thread_id="$other",
+        items=[_item("alone", title="Lone unrecorded work", requester_id=_UNRECORDED)],
     )
     sent_requesters: list[str | None] = []
     deps, _queried_rooms, sent = _deps(todo_root, sent_requesters=sent_requesters)
-    policy = TodoPokePolicy(quiet_seconds=0)
 
-    assert await scan_todo_pokes(policy, deps) == 1
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
     assert sent_requesters == [None]
-    assert "Legacy work" in sent[0][1]
+    assert sent[0][2] == "$thread"
     assert "Agent work" in sent[0][1]
-    poke_state_path = todo_root / "poke_state.json"
-    poke_state = json.loads(poke_state_path.read_text(encoding="utf-8"))
-    # The key and record shape are what releases before requester attribution persisted.
-    assert list(poke_state["scopes"]) == ['["code","!room:localhost","$thread"]']
-
-    assert await scan_todo_pokes(policy, deps) == 0
-    assert len(sent) == 1
-
-
-def _pre_attribution_fingerprint(items: list[dict[str, object]], *, total: int, terminal: int) -> str:
-    """Compute a work fingerprint exactly as releases before requester attribution persisted it."""
-    payload = {
-        "items": [
-            {
-                "id": item["id"],
-                "title": item["title"],
-                "priority": item["priority"],
-                "depends_on": sorted(cast("list[str]", item["depends_on"])),
-                "assigned_agent": item["assigned_agent"],
-                "updated_at": datetime.fromisoformat(cast("str", item["updated_at"])).astimezone(UTC).isoformat(),
-            }
-            for item in sorted(items, key=lambda item: cast("str", item["id"]))
-        ],
-        "thread_total_count": total,
-        "thread_terminal_count": terminal,
-    }
-    return hashlib.sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
-
-
-@pytest.mark.asyncio
-async def test_upgrade_keeps_pre_attribution_dedup_record_for_legacy_work(tmp_path: Path) -> None:
-    """A dedup record written before the upgrade still governs legacy work, so upgrading causes no poke burst."""
-    todo_root = tmp_path / "todo"
-    legacy_item = _item("legacy")
-    _write_thread(todo_root, "scope", items=[legacy_item])
-    poke_state_path = todo_root / "poke_state.json"
-    seeded_state = {
-        "scopes": {
-            '["code","!room:localhost","$thread"]': {
-                "last_poked_at": (_NOW - timedelta(minutes=5)).timestamp(),
-                "last_fingerprint": _pre_attribution_fingerprint([legacy_item], total=1, terminal=0),
-                "unchanged_repoke_count": 3,
-            },
-        },
-    }
-    poke_state_path.write_text(json.dumps(seeded_state), encoding="utf-8")
-    deps, _queried_rooms, sent = _deps(todo_root, clock=lambda: _NOW + timedelta(hours=2))
-
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 0
-    assert sent == []
-    assert json.loads(poke_state_path.read_text(encoding="utf-8")) == seeded_state
+    assert "Unrecorded work" not in sent[0][1]
+    assert warnings == ["todo_poke_requester_unrecorded", "todo_poke_requester_unrecorded"]
 
 
 @pytest.mark.asyncio
@@ -437,7 +398,7 @@ async def test_scan_rotates_requester_pokes_without_starvation(tmp_path: Path) -
     """Each requester's work is poked as that requester, churn cannot starve others, and each scope keeps its limits."""
     todo_root = tmp_path / "todo"
     alice_item = _item("alice", title="Alice work", requester_id="@alice:localhost")
-    items = [alice_item, _item("bob", title="Bob work", requester_id="@bob:localhost"), _item("legacy")]
+    items = [alice_item, _item("bob", title="Bob work", requester_id="@bob:localhost"), _item("internal")]
     current_time = [_NOW]
     sent_requesters: list[str | None] = []
     deps, _queried_rooms, sent = _deps(todo_root, clock=lambda: current_time[0], sent_requesters=sent_requesters)
@@ -463,7 +424,7 @@ async def test_scan_rotates_requester_pokes_without_starvation(tmp_path: Path) -
     assert len(alice_times) == 4
     assert all(later - earlier >= timedelta(seconds=300) for earlier, later in itertools.pairwise(alice_times))
     for requester, body in zip(sent_requesters, (body for _room, body, _thread in sent), strict=True):
-        assert ("Alice work" in body, "Bob work" in body, "Task legacy" in body) == (
+        assert ("Alice work" in body, "Bob work" in body, "Task internal" in body) == (
             requester == "@alice:localhost",
             requester == "@bob:localhost",
             requester is None,
@@ -511,11 +472,11 @@ async def test_scan_skips_refused_requesters_without_reducing_other_pokes(
     """Work from a human who lost access or a bot account is never poked, is logged once, and costs no poke slots."""
     warnings: list[str] = []
     monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
-    baseline, _baseline_bodies = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("legacy")])
+    baseline, _baseline_bodies = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("internal")])
     history, bodies = await _poke_history_with_thread_churn(
         tmp_path / "refused",
         [
-            _item("legacy"),
+            _item("internal"),
             _item("former", title="Former work", requester_id=_LOST_ACCESS),
             _item("bridged", title="Bridged work", requester_id=_BOT_ACCOUNT),
         ],
