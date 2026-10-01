@@ -297,6 +297,17 @@ When reading threads through the raw `/messages` API, the streamed edits are `m.
 A deterministic stub on 9292 can also emit an OpenAI `tool_calls` delta when the user text contains a marker, which exercises MindRoom's tool hook chain end to end without a provider key.
 If `matty threads` looks empty or flaky, use `matty messages --format json` to discover the thread handle and then read it directly with `matty thread`.
 
+## Interaction Mechanics for Lifecycle Tests
+
+- Replies stream only while the requester's Matrix presence is online; check the `Streaming decision ... is_online=` log line.
+  A raw-API tester stays offline unless something keeps calling `/sync?set_presence=online`, so run a small keepalive loop for streaming scenarios and set presence `offline` to test the non-streaming path.
+- Stop is a `🛑` reaction on the agent reply.
+  Approve is a `✅` reaction on the router's `🔒 Approval required` card; deny is a text reply whose `m.in_reply_to` is the card (with `is_falling_back` false in a thread).
+- When a follow-up should go to another agent, put that agent in `m.mentions`; the body text alone does not route it.
+- Sync tools such as `sleep` run in threads that cannot be preempted: a cancelled job stays `cancel_requested` until the call returns, and the process lingers on SIGTERM until it does.
+- Stop backends by exact PID (`pgrep -f "venv/bin/mindroom run --api-port <port>"` can briefly match a forked child too), and wait for the old process to exit before restarting on the same port; otherwise the new backend dies with "Embedded API server exited unexpectedly" while the old one keeps serving.
+- Give background commands absolute log paths.
+
 ## Live API Checks
 
 When a change affects the bundled API, hit the live endpoint on the instance you started instead of testing a different local server by accident.
