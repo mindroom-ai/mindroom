@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 import pytest
 from agno.agent import Agent as AgnoAgent
+from agno.metrics import RunMetrics
 from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.models.response import ModelResponse
@@ -1038,6 +1039,26 @@ class TestChatCompletions:
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
         assert data["choices"][0]["finish_reason"] == "stop"
         assert data["usage"]["prompt_tokens"] == 0
+
+    def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
+        """Non-streaming usage comes from the run's own token metrics instead of zeros."""
+
+        async def respond(_ctx: object, **kwargs: object) -> str:
+            collector = kwargs.get("run_metadata_collector")
+            if isinstance(collector, dict):
+                collector[constants.AI_RUN_METADATA_KEY] = {
+                    "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+                }
+            return "Hello!"
+
+        with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["usage"] == {"prompt_tokens": 1200, "completion_tokens": 34, "total_tokens": 1234}
 
     def test_completion_lock_releases_when_request_is_cancelled(self, app_client: TestClient) -> None:
         """Cancellation after lock acquisition must not leave the OpenAI session locked."""
@@ -3286,6 +3307,42 @@ class TestTeamCompletion:
         assert run_input == "Build a feature"
         metadata = mock_team.arun.call_args.kwargs["metadata"]
         assert metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
+
+    def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
+        """Team usage sums the leader's and every member's model calls."""
+        mock_team = _make_test_team()
+        mock_team.arun = AsyncMock(
+            return_value=TeamRunOutput(
+                content="Team consensus result",
+                metrics=RunMetrics(input_tokens=100, output_tokens=20, total_tokens=120),
+                member_responses=[
+                    RunOutput(
+                        content="Member view",
+                        metrics=RunMetrics(input_tokens=50, output_tokens=10, total_tokens=60),
+                    ),
+                ],
+            ),
+        )
+        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+            ),
+            patch(
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new_callable=AsyncMock,
+            ) as mock_prepare,
+        ):
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build a feature")
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Build a feature"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["usage"] == {"prompt_tokens": 150, "completion_tokens": 30, "total_tokens": 180}
 
     def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
         """Non-streaming team completions should prepend the degraded knowledge notice."""

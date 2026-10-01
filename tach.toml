@@ -5471,6 +5471,7 @@ expose = [
     "TeamOutcome",
     "TeamResolution",
     "TeamResolutionMember",
+    "aggregate_team_usage_metrics",
     "resolve_configured_team",
     "decide_team_formation",
     "select_ad_hoc_team_mode",

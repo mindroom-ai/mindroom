@@ -191,7 +191,7 @@ The API accepts but ignores these OpenAI parameters (the agent's own config cont
 - `tools`, `tool_choice` (agents use their configured tools)
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
-- `stream_options` (usage stats are always zeros)
+- `stream_options` (streaming responses never include a usage chunk)
 - `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
 
 Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
@@ -232,7 +232,7 @@ Room-context tools and approval-gated tools remain unavailable in delegated API 
 
 ## Limitations
 
-- **Non-streaming token usage is zero** — the compatibility adapter does not populate usage fields from run metrics
+- **Streaming responses omit token usage** — only non-streaming responses report `usage`, taken from the run's model metrics and summed over the leader and members for teams
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
 - **No room memory** — only agent-scoped memory (no `room_id` in API requests)

@@ -16,7 +16,7 @@ import time
 import weakref
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, RunOutput
@@ -79,7 +79,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -98,6 +98,7 @@ from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI
 from mindroom.routing import suggest_responder
 from mindroom.teams import (
     TeamMode,
+    aggregate_team_usage_metrics,
     build_materialized_team_instance,
     format_team_response,
     is_cancelled_run_output,
@@ -120,6 +121,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
+    from agno.metrics import RunMetrics
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
@@ -240,11 +242,31 @@ class _ChatCompletionChoice(BaseModel):
 
 
 class _UsageInfo(BaseModel):
-    """Token usage fields default to zero and are not populated from run metrics."""
+    """Model token usage of the run behind one response, zero when the run reported none."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+
+
+def _usage_from_metrics(metrics: RunMetrics | None) -> _UsageInfo:
+    if metrics is None:
+        return _UsageInfo()
+    return _UsageInfo(
+        prompt_tokens=metrics.input_tokens,
+        completion_tokens=metrics.output_tokens,
+        total_tokens=metrics.total_tokens,
+    )
+
+
+def _usage_from_run_metadata(run_metadata: dict[str, Any]) -> _UsageInfo:
+    """Read usage from the versioned AI run metadata that an agent run reports."""
+    usage = run_metadata.get(AI_RUN_METADATA_KEY, {}).get("usage") or {}
+    return _UsageInfo(
+        prompt_tokens=usage.get("input_tokens", 0),
+        completion_tokens=usage.get("output_tokens", 0),
+        total_tokens=usage.get("total_tokens", 0),
+    )
 
 
 class _ChatCompletionResponse(BaseModel):
@@ -759,6 +781,7 @@ async def _non_stream_completion(
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
+    run_metadata: dict[str, Any] = {}
     response_text = await ai_response(
         _openai_agent_turn_context(agent_name, session_id=session_id, execution_identity=execution_identity),
         prompt=prompt,
@@ -768,6 +791,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         include_interactive_questions=False,
         include_openai_compat_guidance=True,
+        run_metadata_collector=run_metadata,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
     )
@@ -787,6 +811,7 @@ async def _non_stream_completion(
                 message=_ChatMessage(role="assistant", content=response_text),
             ),
         ],
+        usage=_usage_from_run_metadata(run_metadata),
     )
     return _OpenAIJSONResponse(content=response.model_dump())
 
@@ -1135,6 +1160,14 @@ async def _non_stream_team_completion(
                         message=_ChatMessage(role="assistant", content=response_text),
                     ),
                 ],
+                usage=_usage_from_metrics(
+                    aggregate_team_usage_metrics(
+                        response.metrics,
+                        response.member_responses if isinstance(response, TeamRunOutput) else (),
+                    )
+                    if isinstance(response, (TeamRunOutput, RunOutput))
+                    else None,
+                ),
             )
             return _OpenAIJSONResponse(content=result.model_dump())
     finally:
