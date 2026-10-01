@@ -40,6 +40,7 @@ Execution lifetime is independent of a caller's wait.
 Each outcome generation has one active result claim; only persisted consumption acknowledges it.
 Consumption records the reply that first consumed each generation, so that unfinished reply can recover after the model reads the result without waking unrelated replies.
 Approval continuations bind both job ID and generation, so stale cards cannot mutate newer work.
+Cancelling a job during its approval pause expires the card presenting that pause, which resumes the reply waiting on it.
 Cancellation publishes its generation before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
 Config reload retains active jobs; controls and result admission check current authorization.
