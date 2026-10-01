@@ -4681,7 +4681,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
             ["connect", "--provisioning-url", "https://provisioning.example", "--force"],
             cfg,
             # A terminal still confirms the approving account after pairing.
-            input="\n",
+            input="y\n",
         )
 
         assert result.exit_code == 0, result.output
