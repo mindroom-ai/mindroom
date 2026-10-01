@@ -90,6 +90,33 @@ def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPat
         assert probe["rss_bytes"] is None
 
 
+def test_probe_logs_allocator_totals_that_separate_live_from_retained_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live and freed-but-retained malloc bytes tell a leak apart from fragmentation."""
+    monkeypatch.setattr(heap_probe.gc, "get_objects", list)
+
+    with capture_logs() as logs:
+        _log_heap_type_probe()
+
+    [probe] = _probe_logs(logs)
+    assert isinstance(probe["python_allocated_blocks"], int)
+    assert probe["python_allocated_blocks"] > 0
+    malloc = probe["malloc"]
+    if heap_probe._mallinfo2() is None:
+        assert malloc is None
+    else:
+        assert isinstance(malloc, dict)
+        assert set(malloc) == {"arena_bytes", "mmap_bytes", "in_use_bytes", "free_bytes", "releasable_bytes"}
+        assert all(isinstance(value, int) and value >= 0 for value in malloc.values())
+        assert malloc["in_use_bytes"] > 0
+
+
+def test_allocator_totals_are_none_without_glibc_mallinfo2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Other C libraries have no mallinfo2, so the probe reports none instead of failing."""
+    monkeypatch.setattr(heap_probe, "_mallinfo2", lambda: None)
+
+    assert heap_probe._malloc_stats() is None
+
+
 @pytest.mark.asyncio
 async def test_probe_task_logs_once_per_interval_and_stops_on_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop waits one interval before each walk and ends cleanly when shutdown cancels it."""
