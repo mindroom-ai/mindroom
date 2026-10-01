@@ -88,6 +88,9 @@ logger = get_logger(__name__)
 # unblocks its dependent agents no slower than the bot-start retry loop did.
 _DISCOVERY_RETRY_INITIAL_DELAY_SECONDS = 5.0
 _DISCOVERY_RETRY_MAX_DELAY_SECONDS = 60.0
+# Tool-change notifications refresh one server at most this often, because a server may send them at any rate
+# and every changed catalog restarts the entities using it.
+_STALE_REFRESH_MIN_INTERVAL_SECONDS = 60.0
 # Bound request-local retries when concurrent credential or config publication keeps invalidating leases.
 _MAX_REQUEST_STATE_RETRIES = 8
 
@@ -1572,6 +1575,11 @@ class MCPServerManager:
             try:
                 if delay_seconds > 0:
                     await asyncio.sleep(delay_seconds)
+                else:
+                    wait_seconds = state.stale_refresh_not_before - monotonic()
+                    if wait_seconds > 0:
+                        await asyncio.sleep(wait_seconds)
+                    state.stale_refresh_not_before = monotonic() + _STALE_REFRESH_MIN_INTERVAL_SECONDS
                 changed = await self._refresh_server_catalog(state, notify=True)
                 if changed:
                     logger.info(

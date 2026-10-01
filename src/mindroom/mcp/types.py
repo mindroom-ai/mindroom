@@ -125,6 +125,7 @@ class MCPServerState:
     last_error: MCPError | None = None
     consecutive_failures: int = 0
     refresh_task: asyncio.Task[None] | None = None
+    stale_refresh_not_before: float = 0.0
     refresh_revision: int = 0
     oauth_lease_version: MCPOAuthLeaseVersion | None = None
     oauth_session_lease_version: MCPOAuthLeaseVersion | None = None
