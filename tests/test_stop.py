@@ -36,7 +36,7 @@ async def test_delayed_clear_preserves_replacement_tracker_and_stop() -> None:
         manager.set_current("$response", target, new_task)
         await asyncio.gather(*tuple(manager.cleanup_tasks))
 
-        assert manager.can_handle_stop_reaction("$response")
+        assert manager.can_handle_stop_reaction("$response", "!room:localhost")
         assert manager.tracked_messages["$response"].task is new_task
         assert manager.request_stop_if("$response", lambda: True)
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
@@ -76,7 +76,7 @@ async def test_clear_scheduled_before_replacement_never_redacts_new_stop_button(
 
         assert redacted == ["$old-stop"]
         assert manager.tracked_messages["$response"].reaction_event_id == "$new-stop"
-        assert manager.can_handle_stop_reaction("$response")
+        assert manager.can_handle_stop_reaction("$response", "!room:localhost")
     finally:
         release_new.set()
         await asyncio.gather(new_task, *tuple(manager.cleanup_tasks), return_exceptions=True)

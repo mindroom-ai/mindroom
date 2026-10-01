@@ -396,6 +396,7 @@ The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
 The stop button only works on messages currently being generated.
 Only non-agent users can trigger cancellation — agent reactions are ignored.
+A 🛑 reaction only stops a response in the room where the reaction was sent.
 
 See [Streaming — Cancellation](streaming.md#cancellation-and-errors) for details on how cancelled responses are finalized.
 
