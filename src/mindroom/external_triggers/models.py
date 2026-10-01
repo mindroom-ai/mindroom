@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.validation import non_empty_stripped
 
-# Event ids and thread keys are retained for days in a shared store, so keep them short.
+# Event ids, thread keys, and signature nonces are retained in a shared store, so keep them short.
 _MAX_REPLAY_KEY_LENGTH = 256
 
 
