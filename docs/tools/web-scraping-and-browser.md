@@ -704,6 +704,7 @@ With the default `workspace`, host `upload` accepts files in that artifact direc
 Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
 On a routed worker, `workspace` mode reads only files inside the worker workspace.
 With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
+`upload` copies each file into a private snapshot that stays on disk until its tab closes, and one browser keeps at most 256 MiB of snapshots, so an upload past that is refused until a tab closes.
 The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.

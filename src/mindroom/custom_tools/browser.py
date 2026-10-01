@@ -61,6 +61,7 @@ from mindroom.worker_computer.browser_proxy import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from typing import BinaryIO
 
     from playwright.async_api import Download
 
@@ -72,6 +73,8 @@ _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
+# Upload snapshots stay on disk until their tab closes, so bound what one browser holds at once.
+_MAX_STAGED_UPLOAD_BYTES = 256 * 1024 * 1024
 _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
 _PLAYWRIGHT_INSTALL_COMMAND = "uv run playwright install chromium"
@@ -282,6 +285,7 @@ class _BrowserTabState:
     pending_dialog: dict[str, Any] | None = None
     console: list[dict[str, Any]] = field(default_factory=list)
     upload_staging: list[TemporaryDirectory[str]] = field(default_factory=list)
+    upload_staged_bytes: int = 0
 
 
 @dataclass
@@ -536,9 +540,29 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     )
 
 
-def _stage_browser_upload_paths(sources: list[AuthorizedFile], staging_dir: Path) -> list[str]:
-    """Snapshot authorized descriptors to private paths that Playwright can reopen."""
+def _copy_within_limit(source: BinaryIO, output: BinaryIO, max_bytes: int) -> int:
+    """Copy one file and return its size, refusing it as soon as it passes ``max_bytes``."""
+    copied = 0
+    while chunk := source.read(1024 * 1024):
+        copied += len(chunk)
+        if copied > max_bytes:
+            msg = (
+                f"Browser uploads keep at most {_MAX_STAGED_UPLOAD_BYTES // (1024 * 1024)} MiB of files "
+                "until their tabs close; close tabs to release earlier uploads."
+            )
+            raise ValueError(msg)
+        output.write(chunk)
+    return copied
+
+
+def _stage_browser_upload_paths(
+    sources: list[AuthorizedFile],
+    staging_dir: Path,
+    max_bytes: int,
+) -> tuple[list[str], int]:
+    """Snapshot authorized descriptors to private paths that Playwright can reopen, and return their total size."""
     staged_paths: list[str] = []
+    staged_bytes = 0
     for index, source_file in enumerate(sources):
         # Open the canonical file relative to the root that authorized it, without following links.
         # Resolving a replaced child here would grant trust to its new destination.
@@ -546,9 +570,9 @@ def _stage_browser_upload_paths(sources: list[AuthorizedFile], staging_dir: Path
             destination = staging_dir / str(index) / source_file.name
             destination.parent.mkdir(mode=0o700)
             with destination.open("xb") as output:
-                shutil.copyfileobj(source, output, length=1024 * 1024)
+                staged_bytes += _copy_within_limit(source, output, max_bytes - staged_bytes)
         staged_paths.append(str(destination))
-    return staged_paths
+    return staged_paths, staged_bytes
 
 
 class _BrowserFunctionNotRegisteredError(RuntimeError):
@@ -1367,12 +1391,16 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         sources = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
+        retained_bytes = sum(
+            open_tab.upload_staged_bytes for profile in self._profiles.values() for open_tab in profile.tabs.values()
+        )
         staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
         try:
-            staged_paths = await run_blocking_until_complete(
+            staged_paths, staged_bytes = await run_blocking_until_complete(
                 _stage_browser_upload_paths,
                 sources,
                 Path(staging.name),
+                _MAX_STAGED_UPLOAD_BYTES - retained_bytes,
             )
             await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
         except BaseException:
@@ -1384,6 +1412,7 @@ class BrowserTools(Toolkit):
             staging.cleanup()
         else:
             tab.upload_staging.append(staging)
+            tab.upload_staged_bytes += staged_bytes
         return {
             "action": "upload",
             "paths": [source.display_path for source in sources],
