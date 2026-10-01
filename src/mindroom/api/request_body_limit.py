@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 _MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
-# Knowledge uploads stream their files to disk and enforce their own per-file limit.
+# Knowledge uploads are parsed only after authentication, then stream to disk under their own per-file limit.
 _KNOWLEDGE_UPLOAD_PATH = re.compile(r"/api/knowledge/bases/[^/]+/upload")
 _TOO_LARGE_DETAIL = f"Request body exceeds {_MAX_REQUEST_BODY_BYTES} bytes"
 

@@ -9,9 +9,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request
+from starlette.datastructures import UploadFile
 
 from mindroom.api import config_lifecycle
 from mindroom.constants import resolve_config_relative_path
@@ -680,12 +681,15 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
 
 
 @router.post("/bases/{base_id}/upload")
-async def upload_knowledge_files(
-    base_id: str,
-    request: Request,
-    files: Annotated[list[UploadFile], File(...)],
-) -> dict[str, Any]:
-    """Upload one or more files into a knowledge base folder."""
+async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, Any]:
+    """Upload the multipart ``files`` parts into a knowledge base folder."""
+    # Parsed here because FastAPI reads a File parameter before the router authenticates the caller.
+    async with request.form() as form:
+        files = [upload for upload in form.getlist("files") if isinstance(upload, UploadFile)]
+        return await _upload_knowledge_files(base_id, request, files)
+
+
+async def _upload_knowledge_files(base_id: str, request: Request, files: list[UploadFile]) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
     uploaded: list[str] = []
