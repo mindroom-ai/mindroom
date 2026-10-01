@@ -981,6 +981,56 @@ def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Pa
     assert any(entry["log_level"] == "warning" for entry in logs)
 
 
+@pytest.mark.parametrize("planted", ["skills", "scripts"])
+def test_workspace_skill_listings_stop_scanning_planted_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planted: str,
+) -> None:
+    """Every agent build examines a bounded number of workspace entries however many worker code planted."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    count = 2 * skills_module._MAX_WORKSPACE_SKILL_SCANNED_ENTRIES
+    if planted == "skills":
+        for index in range(count):
+            (workspace_skills / f"planted-{index:05d}").mkdir()
+    else:
+        scripts = _write_skill(workspace_skills, "many-scripts", "Scripted skill").parent / "scripts"
+        scripts.mkdir()
+        for index in range(count):
+            (scripts / f"script-{index:05d}.sh").touch()
+    scanned: list[int] = []
+    real_scandir = os.scandir
+
+    class CountingEntries:
+        def __init__(self, directory_fd: int) -> None:
+            self.entries = real_scandir(directory_fd)
+            self.index = len(scanned)
+            scanned.append(0)
+
+        def __enter__(self) -> CountingEntries:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            self.entries.close()
+
+        def __iter__(self) -> CountingEntries:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            entry = next(self.entries)
+            scanned[self.index] += 1
+            return entry
+
+    def counting_scandir(path: int | str = ".") -> object:
+        return CountingEntries(path) if isinstance(path, int) else real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    _load_workspace_only(tmp_path, storage)
+
+    assert scanned
+    assert max(scanned) <= skills_module._MAX_WORKSPACE_SKILL_SCANNED_ENTRIES
+
+
 def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
     """Loading a workspace skill or one of its files feeds the learner's inactivity clock; configured skills do not."""
     storage, workspace_skills = _workspace_skills(tmp_path)

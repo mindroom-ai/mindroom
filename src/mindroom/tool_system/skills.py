@@ -11,6 +11,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -47,6 +48,8 @@ _MAX_WORKSPACE_SKILLS_BYTES = 8 << 20
 MAX_WORKSPACE_SKILL_NAME_CHARS = 64
 MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
+# Worker code can plant any number of entries, so a workspace skill listing examines only this many.
+_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 _OS_ALIASES = {
@@ -606,15 +609,22 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
+def _workspace_entry_names(directory_fd: int, *, directories: bool) -> list[str]:
+    """Return sorted visible real directories or regular files among the first scanned entries, never links."""
+    with os.scandir(directory_fd) as entries:
+        return sorted(
+            entry.name
+            for entry in islice(entries, _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES)
+            if not entry.name.startswith(".")
+            and (entry.is_dir(follow_symlinks=False) if directories else entry.is_file(follow_symlinks=False))
+        )
+
+
 def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     """Return the regular files one workspace skill lists in ``dirname``, never following links."""
     try:
         with open_directory_within_root(skill_fd, dirname) as listing_fd:
-            names = sorted(
-                entry.name
-                for entry in os.scandir(listing_fd)
-                if not entry.name.startswith(".") and entry.is_file(follow_symlinks=False)
-            )
+            names = _workspace_entry_names(listing_fd, directories=False)
     except FileNotFoundError:
         return []
     except OSError as exc:
@@ -676,11 +686,7 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
             else:
                 skill = _load_workspace_skill(skills_fd, skills_root)
                 return [] if skill is None else [skill]
-            skill_names = sorted(
-                entry.name
-                for entry in os.scandir(skills_fd)
-                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
-            )
+            skill_names = _workspace_entry_names(skills_fd, directories=True)
             if len(skill_names) > _MAX_WORKSPACE_SKILLS:
                 logger.warning(
                     "Loading only the first workspace skills",
