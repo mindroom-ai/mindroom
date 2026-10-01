@@ -4915,7 +4915,8 @@ class TestLocalStackSetup:
         assert env_path.exists()
         env_content = env_path.read_text()
         assert "MATRIX_HOMESERVER=http://localhost:8008" in env_content
-        assert "MATRIX_SSL_VERIFY=false" in env_content
+        # A plain-HTTP homeserver needs no TLS override, which would also apply to hosted pairing later.
+        assert "MATRIX_SSL_VERIFY" not in env_content
         assert "MATRIX_SERVER_NAME=localhost" in env_content
         assert "Local stack is ready." in result.output
 

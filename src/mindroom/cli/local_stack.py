@@ -162,14 +162,11 @@ def _persist_local_matrix_env(
     config_path: Path,
 ) -> Path:
     """Write local Matrix settings to .env next to the active config file."""
-    return upsert_env_values(
-        env_path_for_config(config_path),
-        {
-            "MATRIX_HOMESERVER": homeserver_url,
-            "MATRIX_SSL_VERIFY": "false",
-            "MATRIX_SERVER_NAME": server_name,
-        },
-    )
+    values = {"MATRIX_HOMESERVER": homeserver_url, "MATRIX_SERVER_NAME": server_name}
+    # Plain HTTP needs no certificate override, and a persisted one would also stop verifying hosted provisioning calls.
+    if urlparse(homeserver_url).scheme == "https":
+        values["MATRIX_SSL_VERIFY"] = "false"
+    return upsert_env_values(env_path_for_config(config_path), values)
 
 
 def _require_supported_platform() -> None:

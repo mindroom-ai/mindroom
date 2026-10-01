@@ -1494,7 +1494,8 @@ mindroom connect --provisioning-url https://matrix.example.com
 
 Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
-By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+By default this command also writes `MATRIX_HOMESERVER` and `MATRIX_SERVER_NAME` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
+For an `https://` homeserver it also writes `MATRIX_SSL_VERIFY=false`, which turns off certificate checks for that homeserver and for the provisioning service, so remove it before pairing with hosted Matrix.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
