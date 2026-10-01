@@ -50,9 +50,10 @@ limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
-report expired or already claimed, and are then pruned. Each user keeps at most
-20 connections: pairing another deletes that user's revoked connections first,
-then the least recently seen ones.
+report expired or already claimed, and are then pruned. Each account keeps at
+most 20 paired installs, revoked ones included; pairing another at the limit
+removes one, preferring a revoked install and otherwise the one seen least
+recently.
 
 Last seen: paired installs authenticate with their client credentials. Agent
 registration, Google OAuth client fetches, and
