@@ -70,12 +70,12 @@ rc_registration_token_validity:
   per_second: 1000000
   burst_count: 1000000
 
-# The burst lets the runtime sign in every managed account from one container at startup,
-# while failed attempts keep Synapse's default brute-force protection.
+# Synapse sees every client proxied by Traefik as one address, so the address limit stays effectively infinite.
+# Per-account limits remain, and failed attempts keep Synapse's default brute-force protection.
 rc_login:
   address:
-    per_second: 0.5
-    burst_count: 100
+    per_second: 1000000
+    burst_count: 1000000
   account:
     per_second: 0.05
     burst_count: 10

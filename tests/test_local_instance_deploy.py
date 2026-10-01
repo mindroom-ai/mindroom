@@ -1477,6 +1477,10 @@ def test_created_synapse_instance_refuses_self_registration(tmp_path: Path, monk
     ):
         assert limit["per_second"] < 1
         assert limit["burst_count"] <= 10
+    # Synapse sees every client proxied by Traefik as one address, so an address limit would let one client block all logins.
+    address_limit = homeserver["rc_login"]["address"]
+    assert address_limit["per_second"] >= 1000000
+    assert address_limit["burst_count"] >= 1000000
 
 
 @pytest.mark.parametrize("env_generation", ["current", "older"])
