@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import newspaper
+from requests.utils import get_encodings_from_content
 
 from mindroom.bounded_bytes import collect_bounded_bytes_sync
 from mindroom.server_fetch_url import (
@@ -16,6 +17,9 @@ _DOWNLOAD_TIMEOUT_SECONDS = 7  # Newspaper4k's default request timeout.
 _MAX_REDIRECTS = 10
 _MAX_PAGE_BYTES = 10 * 1024 * 1024
 _HEADERS = {"User-Agent": f"newspaper/{newspaper.__version__}", "Accept-Encoding": "identity"}
+# The HTML standard requires a charset declaration within the first 1024 bytes; scanning only those keeps
+# the declaration regexes linear on hostile pages.
+_DECLARED_CHARSET_PREFIX_BYTES = 1024
 
 
 class _TextOnlyArticle(newspaper.Article):
@@ -23,6 +27,19 @@ class _TextOnlyArticle(newspaper.Article):
 
     def fetch_images(self) -> None:
         """Leave image fields empty; the toolkit returns only text fields."""
+
+
+def _decode_page(body: bytes, header_charset: str | None) -> str:
+    """Decode a page as newspaper4k does: the Content-Type charset, else the charset the page declares, else UTF-8."""
+    charset = header_charset
+    if not charset:
+        prefix = body[:_DECLARED_CHARSET_PREFIX_BYTES].decode("utf-8", errors="replace")
+        charset = next(iter(get_encodings_from_content(prefix)), "utf-8")
+    try:
+        return body.decode(charset, errors="replace")
+    except LookupError:
+        # Python has no codec for the named charset; newspaper4k falls back to UTF-8 the same way.
+        return body.decode("utf-8", errors="replace")
 
 
 def _download_html(url: str) -> str:
@@ -44,7 +61,7 @@ def _download_html(url: str) -> str:
                         msg = "The page must use identity content encoding."
                         raise httpx.DecodingError(msg, request=response.request)
                     body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
-                    return body.decode(response.encoding or "utf-8", errors="replace")
+                    return _decode_page(body, response.charset_encoding)
                 location = response.headers.get("location")
             request_url = validate_server_fetch_redirect_url(request_url, location)
     msg = "Newspaper4k download stopped after too many redirects."
@@ -72,6 +89,7 @@ def install_server_fetch_guard() -> None:
     # downloads; retain validation of each URL, redirect hop, and dialed address.
     # Coverage: tests/test_newspaper_tool.py::test_newspaper_rejects_unsafe_targets_without_connecting,
     # ::test_newspaper_revalidates_redirects_before_following,
-    # ::test_newspaper_extracts_public_article_without_fetching_its_images, and
+    # ::test_newspaper_extracts_public_article_without_fetching_its_images,
+    # ::test_newspaper_decodes_page_with_charset_declared_only_in_meta, and
     # tests/test_tools_metadata.py::test_local_url_fetch_tools_do_not_contact_loopback_targets.
     newspaper.article = _guarded_article  # ty: ignore[invalid-assignment]

@@ -112,3 +112,33 @@ def test_newspaper_extracts_public_article_without_fetching_its_images(
     assert "relays messages in both directions" in result["text"]
     assert requested_urls == [url]
     assert connect_attempts == []
+
+
+@pytest.mark.parametrize(
+    ("charset", "encoding"),
+    [
+        pytest.param("iso-8859-1", "iso-8859-1", id="declared"),
+        pytest.param("not-a-charset", "utf-8", id="unknown-falls-back-to-utf-8"),
+    ],
+)
+def test_newspaper_decodes_page_with_charset_declared_only_in_meta(
+    charset: str,
+    encoding: str,
+    monkeypatch: pytest.MonkeyPatch,
+    connect_attempts: list[object],
+) -> None:
+    """A page whose charset appears only in a meta tag is decoded with that charset."""
+    url = "https://example.com/artikel"
+    page = _ARTICLE_HTML.replace("<head>", f'<head>\n    <meta charset="{charset}">').replace(
+        "Bridges connect",
+        "Brücken verbinden Räume. Bridges connect",
+    )
+    _serve(
+        monkeypatch,
+        {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=page.encode(encoding))},
+    )
+
+    result = json.loads(newspaper4k_tools()().read_article(url))
+
+    assert "Brücken verbinden Räume." in result["text"]
+    assert connect_attempts == []
