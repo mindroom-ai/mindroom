@@ -145,7 +145,9 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     # Pin the interpreter this environment runs on and skip `--force`: either a bare `X.Y` request
     # resolving to another patch or arch, or `--force`, makes uv delete the live environment before
     # building, so a failed build would leave nothing behind. A pinned non-forced install is additive.
-    cmd = ["uv", "tool", "install", package_spec, "--python", getattr(sys, "_base_executable", sys.executable)]
+    # `_base_executable` is the pyvenv.cfg `home` interpreter that stdlib `venv` itself uses.
+    base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
+    cmd = ["uv", "tool", "install", package_spec, "--python", base_python]
     if quiet:
         cmd.append("-q")
     env = os.environ.copy()
