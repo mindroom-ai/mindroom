@@ -1,4 +1,4 @@
-"""Model-facing knowledge-search tool descriptions for agents."""
+"""Model-facing knowledge-search tool descriptions and governance of functions Agno generates for agents."""
 
 from __future__ import annotations
 
@@ -111,7 +111,10 @@ def _govern_generated_functions(
 
 
 class KnowledgeToolDescribingAgent(Agent):
-    """Agent subclass that owns MindRoom's model-facing knowledge-search metadata."""
+    """Agent subclass that owns knowledge-search metadata and governs functions Agno generates.
+
+    Generated functions get the approval function policy and the plugin tool hook bridge.
+    """
 
     knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
     tool_function_filter: Callable[[Function], bool] | None = None
