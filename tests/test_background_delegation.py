@@ -539,7 +539,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 for event in events
                 if isinstance(event, ToolCallCompletedEvent) and event.tool.tool_name == "write_report"
             ]
-            assert settled == [(False, f"Approved; it continues in background job {child.delegation_id}.")]
+            assert settled == [(False, f"Approved; background job {child.delegation_id} now owns it.")]
             await wait_for_status(runtime, child.delegation_id, "completed")
             assert side_effects == ["written"]
             return resumed

@@ -72,6 +72,7 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution, job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import (
+    READY_STATUSES,
     BackgroundOutcome,
     JobAccessError,
     JobContinuationError,
@@ -1231,13 +1232,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 config=config,
                                 runtime_paths=runtime_paths,
                             )
-                            if background_job.status == "running":
-                                # A bounded wait can end before the approved tools finish; they continue in the job.
+                            if background_job.status not in READY_STATUSES:
+                                # A bounded or released wait can end before the approved tools finish; the job owns them.
                                 _settle_pending_child_tools(
                                     response,
                                     unfinished,
                                     on_event,
-                                    reason=f"Approved; it continues in background job {child.delegation_id}.",
+                                    reason=f"Approved; background job {child.delegation_id} now owns it.",
                                     error=False,
                                 )
                         if background_job.status == "awaiting_approval" and waited.claim is not None:
