@@ -624,6 +624,7 @@ custom_scrape_website("https://matrix.org/blog/")
 - Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 

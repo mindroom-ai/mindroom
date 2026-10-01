@@ -5,11 +5,13 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from threading import Barrier
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol, Self, cast
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -23,6 +25,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.tools.agentql import agentql_tools
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from agno.tools.agentql import AgentQLTools
@@ -42,6 +45,8 @@ class _AgentQLBoundary:
     requests: list[requests.PreparedRequest] = field(default_factory=list)
     observed_auth: list[tuple[str | None, str | None]] = field(default_factory=list)
     browsers: list[_Browser] = field(default_factory=list)
+    launches: list[dict[str, object]] = field(default_factory=list)
+    on_goto: Callable[[], None] | None = None
     barrier: Barrier | None = None
     custom_data: object = field(
         default_factory=lambda: {"title": "An extracted title", "links": [{"href": "https://example.org/value"}]},
@@ -97,6 +102,8 @@ class _BrowserPage:
 
     def goto(self, url: str, **_kwargs: object) -> None:
         self.url = url
+        if self.boundary.on_goto is not None:
+            self.boundary.on_goto()
         if self.boundary.barrier is not None:
             self.boundary.barrier.wait(timeout=5)
 
@@ -136,8 +143,9 @@ def agentql_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _AgentQ
     monkeypatch.setattr(sdk_utils, "API_KEY_FILE_PATH_BEFORE_0_5_0", tmp_path / "absent-legacy.ini")
     boundary = _AgentQLBoundary(cast("_SDKConfig", sdk_config), config_path)
 
-    def launch(*, headless: bool) -> _Browser:
+    def launch(*, headless: bool, **kwargs: object) -> _Browser:
         assert headless is False
+        boundary.launches.append(kwargs)
         browser = _Browser(boundary)
         boundary.browsers.append(browser)
         return browser
@@ -406,6 +414,66 @@ def test_agentql_empty_url_does_not_start_browser(
     assert result == "No URL provided"
     assert agentql_boundary.browsers == []
     assert agentql_boundary.requests == []
+
+
+@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/hostname",
+        "http://127.0.0.1:8765/api/config/raw",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/admin",
+    ],
+)
+def test_agentql_rejects_unsafe_targets_before_starting_browser(
+    tmp_path: Path,
+    agentql_boundary: _AgentQLBoundary,
+    method: str,
+    url: str,
+) -> None:
+    """Local files and internal addresses are refused before any browser or provider work."""
+    result = getattr(_tool(tmp_path, "scoped-key"), method)(url)
+
+    assert result == "Error: URL is not allowed for server-side fetching"
+    assert agentql_boundary.browsers == []
+    assert agentql_boundary.requests == []
+
+
+def _socks5_connect_status(proxy_url: str, port: int) -> int:
+    """Ask a SOCKS5 proxy to connect to one loopback port and return its reply status."""
+    proxy = urlsplit(proxy_url)
+    assert proxy.hostname is not None
+    assert proxy.port is not None
+    with socket.create_connection((proxy.hostname, proxy.port), timeout=5) as connection:
+        connection.sendall(b"\x05\x01\x00")
+        assert connection.recv(2) == b"\x05\x00"
+        connection.sendall(b"\x05\x01\x00\x01" + socket.inet_aton("127.0.0.1") + port.to_bytes(2, "big"))
+        return connection.recv(10)[1]
+
+
+def test_agentql_browser_connects_only_through_destination_relay(
+    tmp_path: Path,
+    agentql_boundary: _AgentQLBoundary,
+) -> None:
+    """Every browser connection, including redirects that page routes miss, is validated at dial time."""
+    statuses: list[int] = []
+    with socket.create_server(("127.0.0.1", 0)) as loopback_service:
+        loopback_service.settimeout(0)
+
+        def probe_loopback_through_browser_proxy() -> None:
+            proxy = cast("dict[str, str]", agentql_boundary.launches[0]["proxy"])
+            assert proxy["bypass"] == "<-loopback>"
+            statuses.append(_socks5_connect_status(proxy["server"], loopback_service.getsockname()[1]))
+
+        agentql_boundary.on_goto = probe_loopback_through_browser_proxy
+
+        result = _tool(tmp_path, "scoped-key").scrape_website(_URL)
+
+        with pytest.raises(BlockingIOError):
+            loopback_service.accept()
+    assert not result.startswith("Error")
+    assert statuses == [2]
 
 
 def test_agentql_missing_custom_query_does_not_start_browser(

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast
 
 import requests
@@ -22,13 +25,25 @@ from agno.tools.agentql import AgentQLTools as AgnoAgentQLTools
 from playwright.sync_api import sync_playwright
 
 from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.server_fetch_url import ServerFetchUrlError, validate_server_fetch_url
+from mindroom.worker_computer.browser_proxy import (
+    PROXIED_WEBRTC_ONLY_ARG,
+    RELAY_ONLY_PROXY_BYPASS,
+    BrowserDestinationProxy,
+    browser_egress,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from typing import Any, Self
 
     from agentql._core._syntax.node import ContainerNode
     from agentql._core._typing import ResponseMode
     from playwright.sync_api import Page as PlaywrightPage
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 logger = get_logger(__name__)
 
@@ -158,8 +173,29 @@ class _CredentialedPage(AgentQLPage):
         return response, query_tree
 
 
+@contextmanager
+def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
+    """Run a browser destination relay on its own event loop for one synchronous browser session."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, name="mindroom-agentql-relay", daemon=True)
+    thread.start()
+    relay = BrowserDestinationProxy(egress=egress)
+    try:
+        asyncio.run_coroutine_threadsafe(relay.start(), loop).result()
+        yield relay.endpoint
+    finally:
+        asyncio.run_coroutine_threadsafe(relay.close(), loop).result()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+        loop.close()
+
+
 class MindRoomAgentQLTools(AgnoAgentQLTools):
     """Preserve Agno registration with scoped requests and complete custom results."""
+
+    def __init__(self, runtime_paths: RuntimePaths, **kwargs: Any) -> None:  # noqa: ANN401
+        super().__init__(**kwargs)
+        self._runtime_paths = runtime_paths
 
     def scrape_website(self, url: str) -> str:
         """Scrape all text content from a website using AgentQL.
@@ -199,9 +235,39 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
             return "Custom AgentQL query not provided. Please provide a custom AgentQL query."
         return self._scrape(url, self.agentql_query, custom=True)
 
+    # AGNO_COMPAT: AgentQLTools launches its browser without a destination policy.
+    # Reason: Agno 3.0.9 scrape_website and custom_scrape_website launch Chromium with no
+    # proxy and navigate to the model-chosen URL, so file:// paths, redirects, and subresources
+    # reached local files and loopback, private, and metadata targets from the MindRoom process.
+    # Upstream issue: Tracking gap; no matching issue identified on October 1, 2026.
+    # Upstream PR: None identified for a browser launch or navigation hook.
+    # Remove when: AgentQLTools accepts caller-supplied launch options or a page factory;
+    # retain URL validation before launch and dial-time validation of every connection.
+    # Coverage: tests/test_agentql_tools.py::test_agentql_rejects_unsafe_targets_before_starting_browser;
+    # tests/test_agentql_tools.py::test_agentql_browser_connects_only_through_destination_relay.
     def _scrape(self, url: str, query: str, *, custom: bool) -> str:
         try:
-            with sync_playwright() as playwright, playwright.chromium.launch(headless=False) as browser:
+            # The relay below resolves and validates every address Chromium dials.
+            validate_server_fetch_url(url, resolve_hostnames=False)
+        except ServerFetchUrlError as error:
+            return f"Error: {error}"
+        try:
+            egress = browser_egress(
+                self._runtime_paths.process_env,
+                os.environ,
+                egress_control=self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
+            )
+            # Page routes see neither redirects nor the addresses Chromium resolves itself, so the relay is
+            # Chromium's only proxy and validates every connection, redirects and subresources included, at dial time.
+            with (
+                _destination_relay(egress) as relay_endpoint,
+                sync_playwright() as playwright,
+                playwright.chromium.launch(
+                    headless=False,
+                    proxy={"server": relay_endpoint, "bypass": RELAY_ONLY_PROXY_BYPASS},
+                    args=[PROXIED_WEBRTC_ONLY_ARG],
+                ) as browser,
+            ):
                 page = _CredentialedPage.with_api_key(browser.new_page(), self.api_key)
                 page.goto(url)
                 try:
