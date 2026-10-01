@@ -7225,6 +7225,19 @@ from = ["mindroom.tools.agno_compat_trafilatura"]
 expose = ["install_server_fetch_guard"]
 
 [[modules]]
+path = "mindroom.tools.newspaper4k"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_newspaper4k"
+depends_on = ["mindroom.bounded_bytes", "mindroom.server_fetch_url"]
+visibility = ["mindroom.tools.newspaper4k"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_newspaper4k"]
+expose = ["install_server_fetch_guard"]
+
+[[modules]]
 path = "mindroom.tools.browser_mcp"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 

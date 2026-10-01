@@ -246,6 +246,8 @@ read_article("https://matrix.org/blog/")
 #### Notes
 
 - Use `newspaper` in `tools:`, not `newspaper4k`.
+- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
+- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
 - This tool is tuned for article-style pages rather than arbitrary websites.
 - For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
 

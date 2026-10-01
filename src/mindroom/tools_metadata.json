@@ -12003,7 +12003,7 @@
       "display_name": "Newspaper",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "get_article_data",
         "read_article"
