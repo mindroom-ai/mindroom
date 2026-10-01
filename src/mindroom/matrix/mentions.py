@@ -347,7 +347,7 @@ def _literal_user_resolution(user_id: str) -> _MentionResolution:
 
 
 def _extract_longest_valid_matrix_user_id(token: str) -> str | None:
-    """Return the longest valid Matrix user ID prefix from one non-whitespace token."""
+    """Return the longest token prefix shaped like a current-grammar Matrix user ID, when that prefix validates."""
     match = _MATRIX_USER_ID_PREFIX_PATTERN.match(token[:_MAX_MATRIX_USER_ID_LENGTH])
     if match is None or not _is_valid_explicit_matrix_user_id(match.group(0)):
         return None
