@@ -117,6 +117,11 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
+        if retained.status in {"completed", "failed", "cancelled", "denied"}:
+            # A settlement saved before a crash stands; only finish projecting it.
+            child.status, child.result = retained.status, retained.result
+            await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+            return
     config = delegation_storage_config(config, child.storage_bindings)
     response = await read_child_run(child, config, runtime_paths)
     if response is not None and response.status == RunStatus.completed:

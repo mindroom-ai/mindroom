@@ -1135,11 +1135,12 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shutdown", [False, True])
-async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_path: Path, shutdown: bool) -> None:
-    """Every child a job owns, including one running inline below it, records a shutdown as a restart."""
+@pytest.mark.parametrize("stop", ["cancel", "shutdown", "teardown"])
+async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_path: Path, stop: str) -> None:
+    """Every child a job owns, including one running inline below it, records a shutdown or teardown as a restart."""
     control = JobControl()
-    control.cancel(shutdown=shutdown)
+    if stop != "teardown":
+        control.cancel(shutdown=stop == "shutdown")
     interrupt = AsyncMock()
     with job_control_context(control), patch.object(delegation_execution, "interrupt_child", new=interrupt):
         await delegation_execution._interrupt_cancelled_child(
@@ -1149,7 +1150,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
         )
     reason = interrupt.await_args.kwargs["reason"]
     assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
-        (RESTART_INTERRUPTION_REASON, "failed") if shutdown else ("Delegation cancelled.", "cancelled")
+        ("Delegation cancelled.", "cancelled") if stop == "cancel" else (RESTART_INTERRUPTION_REASON, "failed")
     )
 
 

@@ -107,4 +107,5 @@ def job_owns_execution() -> bool:
 def job_stopped_by_shutdown() -> bool:
     """Return whether a runtime shutdown or restart, not a cancellation request, stopped the active job."""
     control = _control.get()
-    return control is not None and control.shutdown
+    # A job cancelled without any request is event-loop teardown, which recovery reports like a restart.
+    return control is not None and (control.shutdown or not control.cancelled)

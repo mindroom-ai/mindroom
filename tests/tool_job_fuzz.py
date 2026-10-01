@@ -417,13 +417,6 @@ class JobFuzzRunner:
             else:
                 assert after.status in TERMINAL_STATUSES, (job_id, after.status)
                 assert after.generation == before.generation + int(stopped_pause), job_id
-        payloads = {path.name for path in (self._root / "tool_jobs").glob("*.result.json")}
-        referenced = {
-            f"{job.job_id}.g{job.generation}.result.json"
-            for job in (entry.job for entry in self.runtime._entries.values())
-            if job.has_result_payload
-        }
-        assert payloads == referenced
 
     async def _idle(self) -> None:
         """Yield until no task is runnable; with blocking work inline, every waiter then awaits a test gate."""
@@ -443,9 +436,13 @@ class JobFuzzRunner:
             job = entry.job
             if entry.saved:
                 assert read_job_snapshot(root / f"{job_id}.json") == job, job_id
-                if job.has_result_payload:
-                    assert (root / f"{job_id}.g{job.generation}.result.json").exists(), job_id
             self._observe(job)
+        # Exactly the saved current generations' payloads exist; a replaced generation's file is gone.
+        assert {path.name for path in root.glob("*.result.json")} == {
+            f"{entry.job.job_id}.g{entry.job.generation}.result.json"
+            for entry in self.runtime._entries.values()
+            if entry.saved and entry.job.has_result_payload
+        }
         for admission in self.admissions.values():
             assert admission.executions <= 1
         for task in [task for task in self._cancels if task.done()]:
