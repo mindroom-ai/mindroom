@@ -20,8 +20,8 @@ Additional Atlassian sites can be added as separate, independently connected too
 | `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
 | `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
 | `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
-| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging. |
-| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, and current version number. |
+| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging, naming who created, owns, and last edited each result. |
+| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, current version number, and who created, owns, and last edited it. |
 | `confluence_list_attachments` | Confluence | no | List a page's attachments with media type, size, and version, with `cursor` paging. |
 | `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation as a context attachment. |
 | `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |

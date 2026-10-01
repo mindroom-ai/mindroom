@@ -75,6 +75,17 @@ def _connected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Atlassi
     return _tool(paths, manager), gateway
 
 
+def _confluence_user(account_id: str, display_name: str | None, public_name: str = "user") -> dict[str, object]:
+    """A Confluence v1 user object, whose displayName is null when the profile hides it."""
+    return {
+        "type": "known",
+        "accountId": account_id,
+        "accountType": "atlassian",
+        "publicName": public_name,
+        "displayName": display_name,
+    }
+
+
 def test_registered_metadata_matches_the_toolkit() -> None:
     """The catalog advertises exactly the functions the toolkit registers, as a primary-runtime OAuth tool."""
     metadata = TOOL_METADATA["atlassian"]
@@ -511,7 +522,11 @@ async def test_confluence_search_round_trips_encoded_cursors(tmp_path: Path, mon
             "title": "Release plan",
             "excerpt": "Plan",
             "space": "Docs",
+            "created": None,
             "last_modified": "2026-01-01T00:00:00Z",
+            "created_by": None,
+            "owned_by": None,
+            "last_modified_by": None,
             "url": f"{SITE_URL}/wiki/spaces/DOCS/pages/123",
         },
     ]
@@ -519,6 +534,72 @@ async def test_confluence_search_round_trips_encoded_cursors(tmp_path: Path, mon
     assert first["next_cursor"] == "a+b==+c"
     assert gateway.product_requests()[1].url.params["cursor"] == "a+b==+c"
     assert gateway.product_requests()[1].url.params["next"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_confluence_search_names_who_created_owns_and_last_edited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Search expands content history and version so each result names its people, or null for anonymous ones."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", "/wiki/rest/api/search"),
+        {
+            "results": [
+                {
+                    "content": {
+                        "id": "123",
+                        "type": "page",
+                        "history": {
+                            "latest": True,
+                            "createdBy": _confluence_user("557058:alice", "Alice Example"),
+                            "createdDate": "2025-12-01T09:00:00.000Z",
+                            "ownedBy": _confluence_user("557058:bob", "Bob Example"),
+                        },
+                        "version": {
+                            "number": 4,
+                            "when": "2026-01-01T00:00:00.000Z",
+                            "by": _confluence_user("557058:carol", None, public_name="carol"),
+                        },
+                    },
+                    "title": "Release plan",
+                    "url": "/spaces/DOCS/pages/123",
+                    "lastModified": "2026-01-01T00:00:00.000Z",
+                },
+                {
+                    "content": {
+                        "id": "456",
+                        "type": "page",
+                        "version": {"number": 1, "by": {"type": "anonymous", "displayName": "Anonymous"}},
+                    },
+                    "title": "Public notes",
+                    "url": "/spaces/DOCS/pages/456",
+                    "lastModified": "2026-01-02T00:00:00.000Z",
+                },
+            ],
+            "_links": {"base": f"{SITE_URL}/wiki"},
+        },
+    )
+
+    result = json.loads(await tool.confluence_search(cql="creator = currentUser()"))
+
+    expand = gateway.product_requests()[0].url.params["expand"]
+    assert expand == "content.history,content.history.ownedBy,content.version"
+    people = [
+        {key: item[key] for key in ("created", "created_by", "owned_by", "last_modified_by")}
+        for item in result["results"]
+    ]
+    assert people == [
+        {
+            "created": "2025-12-01T09:00:00.000Z",
+            "created_by": {"display_name": "Alice Example", "account_id": "557058:alice"},
+            "owned_by": {"display_name": "Bob Example", "account_id": "557058:bob"},
+            "last_modified_by": {"display_name": "carol", "account_id": "557058:carol"},
+        },
+        {"created": None, "created_by": None, "owned_by": None, "last_modified_by": None},
+    ]
 
 
 @pytest.mark.asyncio
@@ -538,7 +619,17 @@ async def test_confluence_get_page_reads_storage_body_through_cql(
                     "type": "page",
                     "title": "Runbook",
                     "space": {"key": "OPS", "name": "Operations"},
-                    "version": {"number": 7},
+                    "history": {
+                        "latest": True,
+                        "createdBy": _confluence_user("557058:alice", "Alice Example"),
+                        "createdDate": "2025-12-01T09:00:00.000Z",
+                        "ownedBy": _confluence_user("557058:bob", "Bob Example"),
+                    },
+                    "version": {
+                        "number": 7,
+                        "when": "2026-01-01T00:00:00.000Z",
+                        "by": _confluence_user("557058:alice", "Alice Example"),
+                    },
                     "body": {"storage": {"value": "<p>Steps</p>"}},
                     "_links": {"webui": "/spaces/OPS/pages/123/Runbook"},
                 },
@@ -551,13 +642,16 @@ async def test_confluence_get_page_reads_storage_body_through_cql(
 
     params = gateway.product_requests()[0].url.params
     assert params["cql"] == "id = 123"
-    assert params["expand"] == "body.storage,version,space"
+    assert params["expand"] == "body.storage,version,space,history,history.ownedBy"
     assert result["page"] == {
         "id": "123",
         "title": "Runbook",
         "space_key": "OPS",
         "space_name": "Operations",
         "version": 7,
+        "created_by": {"display_name": "Alice Example", "account_id": "557058:alice"},
+        "owned_by": {"display_name": "Bob Example", "account_id": "557058:bob"},
+        "last_modified_by": {"display_name": "Alice Example", "account_id": "557058:alice"},
         "body_storage": "<p>Steps</p>",
         "url": f"{SITE_URL}/wiki/spaces/OPS/pages/123/Runbook",
     }
