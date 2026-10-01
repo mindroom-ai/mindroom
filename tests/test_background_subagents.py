@@ -503,6 +503,41 @@ async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stoppe
 
 
 @pytest.mark.asyncio
+async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_path: Path) -> None:
+    """Work a crash left running settles as interrupted by the restart; a later cancel of a pause is a cancellation."""
+    runtime = tool_job_runtime(tmp_path)
+
+    async def blocked() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def pause() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+
+    running = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=blocked)
+    paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
+    waited = await runtime.wait(paused.job_id, owner=job_owner(), depth=0)
+    await runtime.acknowledge_wait(paused.job_id, waited.claim)
+    # The process dies: its storage lease goes away without an orderly shutdown.
+    runtime._lease.close()
+    by_restart: dict[str, bool] = {}
+
+    async def cleanup(job: background.BackgroundJob) -> BackgroundOutcome | None:
+        by_restart[job.job_id] = job_stopped_by_shutdown()
+        return None
+
+    restored = tool_job_runtime(tmp_path, cancel=cleanup)
+    try:
+        await restored.recover()
+        await restored.cancel(paused.job_id, owner=job_owner(), depth=0)
+        assert by_restart == {running.job_id: True, paused.job_id: False}
+    finally:
+        await restored.shutdown()
+        for task in [entry.task for entry in runtime._entries.values() if entry.task is not None]:
+            task.cancel()
+
+
+@pytest.mark.asyncio
 async def test_only_a_cancelled_approval_pause_withdraws_its_cards(tmp_path: Path) -> None:
     """A cancelled pause can never resume; an approved one may pause again behind a newer card."""
     runtime = tool_job_runtime(tmp_path)

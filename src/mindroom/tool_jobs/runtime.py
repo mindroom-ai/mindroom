@@ -502,7 +502,11 @@ class ToolJobRuntime:
                 if entry.job.status not in READY_STATUSES:
                     reason = "Tool execution was interrupted by a runtime restart; it was not replayed."
                     default = BackgroundOutcome("cancelled") if stopped else BackgroundOutcome("interrupted", reason)
-                    await self._publish_outcome(entry, self._settled(entry, await self._cleanup(entry), default))
+                    # The restart interrupted this work; only a Stop saved before it cancels it.
+                    entry.control.cancel(shutdown=not stopped)
+                    with job_control_context(entry.control):
+                        outcome = await self._cleanup(entry)
+                    await self._publish_outcome(entry, self._settled(entry, outcome, default))
                 self._add_entry(entry)
                 if entry.job.status in TERMINAL_STATUSES:
                     # A crash can separate a cancelled pause from withdrawing the card that presented it.

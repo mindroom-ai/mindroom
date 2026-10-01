@@ -7614,6 +7614,7 @@ path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
     "mindroom.delegation.execution",
+    "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
     "mindroom.tool_jobs.runtime",
     "mindroom.response_lifecycle",
@@ -7632,6 +7633,7 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.delegation.storage",
     "mindroom.tool_jobs.authorization",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.instances",
     "mindroom.tool_jobs.provenance",

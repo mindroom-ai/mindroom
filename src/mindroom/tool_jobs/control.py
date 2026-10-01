@@ -105,6 +105,6 @@ def job_owns_execution() -> bool:
 
 
 def job_stopped_by_shutdown() -> bool:
-    """Return whether runtime shutdown, not a cancellation request, stopped the active job."""
+    """Return whether a runtime shutdown or restart, not a cancellation request, stopped the active job."""
     control = _control.get()
     return control is not None and control.shutdown

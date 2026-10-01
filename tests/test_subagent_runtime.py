@@ -36,7 +36,7 @@ from mindroom.tool_jobs.authorization import (
     bind_toolkit_authority,
     function_authority,
 )
-from mindroom.tool_jobs.control import human_message_signal_context, job_checkpoint
+from mindroom.tool_jobs.control import JobControl, human_message_signal_context, job_checkpoint, job_control_context
 from mindroom.tool_jobs.disabled import ParkedWork
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
@@ -905,3 +905,36 @@ async def test_cancelled_pause_cards_expire_once_and_retry_after_a_failed_expiry
     finally:
         await runtime.shutdown()
     assert expired == [{job.job_id}, {job.job_id}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_it(
+    tmp_path: Path,
+    restart: bool,
+) -> None:
+    """A crash-interrupted child reads like any restart interruption; a cancelled recovered child stays cancelled."""
+    coordinator = ToolJobRuntimeCoordinator(
+        test_runtime_paths(tmp_path),
+        lambda: managed_team_config(tmp_path),
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+    )
+    recorded: list[tuple[str, str]] = []
+
+    async def interrupt(child: object, *, reason: str, status: str = "cancelled", **_kwargs: object) -> None:
+        recorded.append((reason, status))
+        child.status, child.result = status, reason
+
+    control = JobControl()
+    control.cancel(shutdown=restart)
+    job = replace(completed_delegation_job(), status="running", result=None)
+    with job_control_context(control), patch.object(runtime_module, "interrupt_child", new=interrupt):
+        outcome = await coordinator._interrupt_child(job)
+    assert outcome is not None
+    assert recorded == [
+        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
+        if restart
+        else ("Background execution was cancelled; tools were not replayed.", "cancelled"),
+    ]
+    assert outcome.status == ("failed" if restart else "cancelled")
