@@ -269,6 +269,19 @@ _SCP_STYLE_REMOTE_URL: re.Pattern[str] = re.compile(
 )
 
 
+def _remote_lfs_url(remote_url: str) -> str:
+    """Return the LFS endpoint git-lfs derives from a remote URL when no LFS URL is configured.
+
+    SSH and ``file:`` remotes are returned unchanged: git-lfs takes the repository path from them, and an SSH
+    server supplies the transfer URL itself.
+    """
+    if urlparse(remote_url).scheme.lower() in {"file", "ssh", "git+ssh", "ssh+git"} or _SCP_STYLE_REMOTE_URL.match(
+        remote_url,
+    ):
+        return remote_url
+    return f"{remote_url.removesuffix('/').removesuffix('.git')}.git/info/lfs"
+
+
 def _unwritable_remote(base_id: str, reason: str) -> RuntimeError:
     """Build the refusal raised instead of writing a remote URL to disk.
 
@@ -681,7 +694,10 @@ class GitKnowledgeSource:
         return {"GIT_LFS_SKIP_SMUDGE": "1"}
 
     def _lfs_pull_args(self, git_config: KnowledgeGitConfig) -> list[str]:
-        return ["lfs", "pull", "origin", git_config.branch]
+        # Command-line config outranks `.lfsconfig`, which the repository author or worker code can write,
+        # so LFS downloads go only to the endpoint git-lfs derives from the configured remote.
+        lfs_url = _remote_lfs_url(_persistable_remote_url(git_config.repo_url, self.base_id))
+        return ["-c", f"lfs.url={lfs_url}", "lfs", "pull", "origin", git_config.branch]
 
     async def _hydrate_lfs_worktree(
         self,

@@ -64,6 +64,8 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
+_LFS_PULL = ["-c", "lfs.url=https://example.com/org/repo.git/info/lfs", "lfs", "pull", "origin", "main"]
+
 
 def _github_app_manager(tmp_path: Path, *, lfs: bool = False) -> tuple[KnowledgeManager, KnowledgeGitConfig]:
     knowledge_path = tmp_path / "knowledge"
@@ -643,7 +645,7 @@ async def test_git_lfs_pull_resolves_github_app_credentials_for_each_operation(
         return "head"
 
     async def _run_git(args: list[str], *, env: dict[str, str] | None = None, remote: bool = False) -> str:
-        if args[:2] == ["lfs", "pull"]:
+        if args[2:4] == ["lfs", "pull"]:
             assert remote is True
             lfs_envs.append(env)
         return ""
@@ -1813,7 +1815,7 @@ async def test_sync_git_source_once_unchanged_head_skips_worktree_scan(
         "origin",
         "+refs/heads/main:refs/remotes/origin/main",
     ] in git_calls
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert _LFS_PULL in git_calls
     assert not any(call[:3] == ["diff", "--name-only", "--no-renames"] for call in git_calls)
 
 
@@ -1852,7 +1854,7 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
     assert updated is False
     assert changed_files == set()
     assert removed_files == set()
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert _LFS_PULL in git_calls
 
     hydrated_manager = _git_manager(tmp_path, lfs=True)
     repeated_git_calls: list[list[str]] = []
@@ -1873,7 +1875,7 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
     assert updated is False
     assert changed_files == set()
     assert removed_files == set()
-    assert ["lfs", "pull", "origin", "main"] not in repeated_git_calls
+    assert _LFS_PULL not in repeated_git_calls
 
 
 @pytest.mark.asyncio
@@ -1932,7 +1934,7 @@ async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
     assert updated is True
     assert changed_files == {"doc.md"}
     assert removed_files == set()
-    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
+    assert (_LFS_PULL in git_calls) is expects_lfs_pull
     assert (
         ["checkout", "--force", "-B", "main", "origin/main"],
         {"GIT_LFS_SKIP_SMUDGE": "1"},
@@ -2044,7 +2046,38 @@ async def test_hydrate_git_lfs_worktree_ignores_index_extension_filters(
 
     await manager.git_source._hydrate_lfs_worktree(manager.git_source._git_config())
 
-    assert ["lfs", "pull", "origin", "main"] in git_calls
+    assert _LFS_PULL in git_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("git-lfs") is None, reason="git-lfs is required")
+async def test_hydrate_git_lfs_worktree_ignores_repository_lfs_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout's `.lfsconfig` must not choose the server that LFS downloads contact."""
+    manager = _git_manager(tmp_path, lfs=True)
+    git_config = manager.git_source._git_config()
+    await manager.git_source._ensure_repository(git_config)
+    (manager.knowledge_path / ".lfsconfig").write_text(
+        '[lfs]\n\turl = http://169.254.169.254/latest\n[remote "origin"]\n\tlfsurl = http://127.0.0.1:8765/\n',
+        encoding="utf-8",
+    )
+    run_git = manager.git_source._run_git
+    endpoints: list[str] = []
+
+    async def _report_lfs_endpoint_instead_of_pulling(args: list[str], **kwargs: object) -> str:
+        if args[-4:-2] != ["lfs", "pull"]:
+            return await run_git(args, **kwargs)
+        output = await run_git([*args[:-3], "env"], **kwargs)
+        endpoints.extend(line for line in output.splitlines() if line.startswith("Endpoint="))
+        return ""
+
+    monkeypatch.setattr(manager.git_source, "_run_git", _report_lfs_endpoint_instead_of_pulling)
+
+    await manager.git_source._hydrate_lfs_worktree(git_config)
+
+    assert endpoints == ["Endpoint=https://example.com/org/repo.git/info/lfs (auth=none)"]
 
 
 @pytest.mark.asyncio
@@ -2103,7 +2136,7 @@ async def test_initial_sync_checks_out_with_explicit_lfs_hydration_policy(
     assert git_calls[0] == ["init", "--quiet", "--template="]
     assert not any(args[0] == "clone" for args in git_calls)
     assert (["checkout", "--force", "-B", "main", "origin/main"], {"GIT_LFS_SKIP_SMUDGE": "1"}) in git_envs
-    assert (["lfs", "pull", "origin", "main"] in git_calls) is expects_lfs_pull
+    assert (_LFS_PULL in git_calls) is expects_lfs_pull
 
 
 @pytest.mark.asyncio
