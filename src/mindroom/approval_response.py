@@ -13,6 +13,7 @@ from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -31,7 +32,7 @@ from mindroom.tool_approval import (
 )
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
-from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace, tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
@@ -497,16 +498,22 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        visible_reason = visible_text or (
-            _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else redact_sensitive_text(reason)
-        )
+        tool_trace = None
+        if visible_text is None and reason == _USER_STOP_FAILURE_REASON:
+            # A stopped approval keeps the answer and tool trace it was showing, like any stopped reply.
+            stopped_text = current.response_text.rstrip()
+            visible_text = f"{stopped_text}\n\n{_USER_STOP_VISIBLE_NOTE}" if stopped_text else _USER_STOP_VISIBLE_NOTE
+            stream_status = STREAM_STATUS_CANCELLED
+            if current.show_tool_calls:
+                tool_trace = deserialize_tool_trace(current.response_tool_trace)
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
-                new_text=visible_reason,
+                new_text=visible_text or redact_sensitive_text(reason),
                 extra_content={STREAM_STATUS_KEY: stream_status},
+                tool_trace=tool_trace,
                 delivery_turn_id=current.source_event_ids[0],
                 response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,

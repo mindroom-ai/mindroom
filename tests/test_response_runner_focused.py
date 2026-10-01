@@ -53,6 +53,7 @@ from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -4907,7 +4908,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
     assert outcome.terminal_status == "cancelled"
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**"),
+        (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -9813,8 +9814,8 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         assert in_flight == []
 
     assert outcome.terminal_status == "cancelled"
-    assert landed == [STREAM_STATUS_COMPLETED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+    assert landed == [STREAM_STATUS_CANCELLED]
+    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**")
 
 
 @dataclass

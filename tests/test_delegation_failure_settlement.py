@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,13 +11,17 @@ import pytest
 from mindroom.approval_recovery import ApprovalRecovery
 from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
+from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.events import ToolTraceEntry, serialize_tool_trace
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.delivery_gateway import EditTextRequest
 
 
 def _continuation() -> ApprovalContinuation:
@@ -81,13 +86,8 @@ async def test_source_failure_cancels_children_before_finishing(tmp_path: Path) 
     )
 
 
-@pytest.mark.asyncio
-async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> None:
-    """The room-visible failure reply never shows credentials carried by a raw exception reason."""
-    continuation = _continuation()
-    api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
-    password = "hunter" + "2secret"
-    reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
+async def _settled_edit(tmp_path: Path, continuation: ApprovalContinuation, reason: str) -> EditTextRequest:
+    """Settle one failed continuation and return the edit its reply received."""
     store = MagicMock(spec=PrincipalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
     store.finish_approval_continuation = AsyncMock(side_effect=[False, True])
@@ -106,11 +106,40 @@ async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> 
         patch("mindroom.approval_response.cancel_approval_delegations", new=AsyncMock()),
     ):
         assert await coordinator.settle_failure(continuation, reason)
+    return gateway.edit_text.await_args.args[0]
 
-    visible = gateway.edit_text.await_args.args[0].new_text
+
+@pytest.mark.asyncio
+async def test_failure_reply_redacts_credentials_from_reason(tmp_path: Path) -> None:
+    """The room-visible failure reply never shows credentials carried by a raw exception reason."""
+    api_key = "sk-" + "test" + "A1b2C3d4E5f6G7h8J9k0"
+    password = "hunter" + "2secret"
+    reason = f"Incorrect API key provided: {api_key} at https://user:{password}@mcp.internal/sse"
+
+    visible = (await _settled_edit(tmp_path, _continuation(), reason)).new_text
+
     assert api_key not in visible
     assert password not in visible
     assert "Incorrect API key provided" in visible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_stopped_approval_keeps_its_visible_answer_and_trace(tmp_path: Path, show_tool_calls: bool) -> None:
+    """A stopped approval ends cancelled with the answer and tool trace its reply was showing."""
+    trace = [ToolTraceEntry(type="tool_call_started", tool_name="write_file", tool_call_id="call-1")]
+    continuation = replace(
+        _continuation(),
+        response_text="About to write.\n\n🔧 `write_file` [1] ⏳\n\n",
+        response_tool_trace=serialize_tool_trace(trace, include_internal=True),
+        show_tool_calls=show_tool_calls,
+    )
+
+    request = await _settled_edit(tmp_path, continuation, "cancelled_by_user")
+
+    assert request.new_text == "About to write.\n\n🔧 `write_file` [1] ⏳\n\n**[Response cancelled by user]**"
+    assert request.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED}
+    assert request.tool_trace == (trace if show_tool_calls else None)
 
 
 @pytest.mark.asyncio
