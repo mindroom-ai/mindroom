@@ -847,7 +847,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = ["mindroom.knowledge_source_descriptions"]
+depends_on = ["mindroom.knowledge_source_descriptions", "mindroom.tool_system.tool_hooks"]
 visibility = [
     "mindroom.minimal_agent",
     "mindroom.agents",
@@ -6308,7 +6308,7 @@ expose = [
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_function_tool_hook", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]
