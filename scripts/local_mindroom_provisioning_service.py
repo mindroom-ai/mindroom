@@ -50,8 +50,9 @@ limit to throttle clients that follow it.
 
 Retention: pair sessions that expired or were claimed stay one more code
 lifetime after expiry or completion, so old codes and replayed polls still
-report expired or already claimed, and are then pruned. Connections are never
-pruned.
+report expired or already claimed, and are then pruned. Each user keeps at most
+20 connections: pairing another deletes that user's revoked connections first,
+then the least recently seen ones.
 
 Last seen: paired installs authenticate with their client credentials. Agent
 registration, Google OAuth client fetches, and
@@ -140,6 +141,7 @@ NAMESPACE_MISMATCH_DETAIL = "Requested username is outside this local connection
 PAIR_SESSION_ALREADY_CLAIMED_DETAIL = "Pair session already claimed"
 PAIR_STATUS_SESSION_HEADER = "X-Local-MindRoom-Pair-Session-Id"
 LAST_SEEN_RESOLUTION = timedelta(minutes=10)
+MAX_CONNECTIONS_PER_USER = 20
 # Browser tokens are resolved by the homeserver, so this per-address limit runs before that lookup.
 # It leaves room for several users behind one NAT to reach their per-user limits of 60 per minute.
 HOMESERVER_TOKEN_LOOKUP_LIMIT_PER_MINUTE = 300
@@ -720,7 +722,7 @@ def _prune_pair_sessions_unlocked(state: ProvisioningState, now: datetime, pair_
     poll still reports "expired" (410 / ``status="expired"``) instead of "not
     found" after the CLI renews its code. Connected sessions stay one code
     lifetime past completion so a replayed poll still reports 410. Connections
-    themselves are never pruned.
+    are bounded per user when one is created instead.
     """
     retain_after = now - timedelta(seconds=pair_code_ttl_seconds)
     finished_ids = []
@@ -1073,7 +1075,16 @@ def _create_connection_unlocked(
     fingerprint: str,
     now: datetime,
 ) -> tuple[LocalConnection, str]:
-    """Create a local connection and return it with its one-time plaintext secret."""
+    """Create a local connection and return it with its one-time plaintext secret.
+
+    Keeps the user within MAX_CONNECTIONS_PER_USER by deleting revoked connections first, then the least recently seen.
+    """
+    owned = sorted(
+        (connection for connection in state.connections.values() if connection.user_id == user_id),
+        key=lambda connection: (connection.revoked_at is None, connection.last_seen_at),
+    )
+    for stale in owned[: max(0, len(owned) - MAX_CONNECTIONS_PER_USER + 1)]:
+        del state.connections[stale.id]
     client_secret = secrets.token_urlsafe(32)
     connection = LocalConnection(
         id=secrets.token_urlsafe(18),

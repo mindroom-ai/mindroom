@@ -1660,6 +1660,56 @@ def test_connected_pair_sessions_are_pruned_after_one_more_code_lifetime(
     assert {connection["id"] for connection in listed["connections"]} == connection_ids
 
 
+def test_pairing_beyond_the_per_user_cap_deletes_revoked_then_least_recently_seen_connections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both pairing flows keep each user's persisted connections at the cap, and deleted ones stay gone after restart."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    _patch_openid_auth(monkeypatch)
+    monkeypatch.setattr(provisioning, "MAX_CONNECTIONS_PER_USER", 2)
+    state_path = tmp_path / "state.json"
+    started_at = provisioning._now_utc()
+
+    def _at(minutes: int) -> None:
+        moment = started_at + provisioning.timedelta(minutes=minutes)
+        monkeypatch.setattr(provisioning, "_now_utc", lambda: moment)
+
+    def _pair_device(client: TestClient, headers: dict[str, str]) -> dict[str, str]:
+        started = _start_device_pairing(client)
+        client.post("/v1/local-mindroom/pair/device/approve", json={"pair_code": started["pair_code"]}, headers=headers)
+        return client.post(
+            "/v1/local-mindroom/pair/device/poll",
+            json={"device_secret": started["device_secret"]},
+        ).json()
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        _at(0)
+        oldest = _pair_local_client(client)
+        _at(1)
+        revoked = _pair_local_client(client)
+        client.delete(
+            f"/v1/local-mindroom/connections/{revoked['client_id']}",
+            headers={"Authorization": "Bearer token-alice"},
+        )
+        _at(2)
+        bob = _pair_device(client, BOB_OPENID_HEADERS)
+        _at(3)
+        kept = _pair_local_client(client)
+        _at(4)
+        newest = _pair_device(client, ALICE_OPENID_HEADERS)
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    expected_ids = {kept["client_id"], newest["client_id"], bob["client_id"]}
+    assert {connection["id"] for connection in persisted["connections"]} == expected_ids
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        listed = restarted.get("/v1/local-mindroom/connections", headers=ALICE_OPENID_HEADERS).json()
+        assert {connection["id"] for connection in listed["connections"]} == {kept["client_id"], newest["client_id"]}
+        assert _post_heartbeat(restarted, oldest["client_id"], oldest["client_secret"]).status_code == 401
+        assert _post_heartbeat(restarted, kept["client_id"], kept["client_secret"]).status_code == 200
+
+
 def test_approve_extends_claim_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Approval near expiry extends the window so CLI can still claim credentials."""
     _patch_openid_auth(monkeypatch)

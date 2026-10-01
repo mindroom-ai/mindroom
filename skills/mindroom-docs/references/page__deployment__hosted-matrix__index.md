@@ -110,6 +110,7 @@ The Google app client configuration lets the local process exchange OAuth codes 
 Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
 Revoke them from `Settings -> Local MindRoom` in the chat UI.
 That page shows when each paired install was last seen.
+Each account keeps at most 20 paired installs; pairing another removes that account's revoked installs first, then the one seen least recently.
 A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
 Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
 The service records these reports with ten-minute resolution.
