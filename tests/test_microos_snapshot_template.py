@@ -55,14 +55,19 @@ def _gpg(home: Path, *args: str) -> str:
 @pytest.mark.parametrize("case", ["signed", "tampered_image", "unpinned_signer"])
 def test_download_step_refuses_images_without_a_matching_signed_checksum(tmp_path: Path, case: str) -> None:
     """A mirror can swap the image or its signing key, but only the pinned key's checksum lets the build continue."""
-    signer_home = tmp_path / "signer"
-    signer_home.mkdir(mode=0o700)
+    # The signer's keyring and the one the download step creates with mktemp both live here.
+    gnupg_homes = tmp_path / "gnupg"
+    signer_home = gnupg_homes / "signer"
+    signer_home.mkdir(mode=0o700, parents=True)
     fixtures = tmp_path / "mirror"
     fixtures.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     work = tmp_path / "work"
     work.mkdir()
+    wget = bin_dir / "wget"
+    wget.write_text(FAKE_WGET)
+    wget.chmod(0o755)
     try:
         _gpg(signer_home, "--quick-gen-key", "Mirror Test <mirror@example.invalid>", "ed25519", "sign", "never")
         listing = _gpg(signer_home, "--with-colons", "--list-keys")
@@ -74,27 +79,25 @@ def test_download_step_refuses_images_without_a_matching_signed_checksum(tmp_pat
         checksum.write_text(f"{hashlib.sha256(image.read_bytes()).hexdigest()}  {IMAGE_NAME}\n")
         _gpg(signer_home, "--armor", "--detach-sign", "--output", f"{checksum}.asc", str(checksum))
         (fixtures / "repomd.xml.key").write_text(_gpg(signer_home, "--armor", "--export"))
-    finally:
-        subprocess.run(["gpgconf", "--homedir", str(signer_home), "--kill", "all"], check=False)
-    if case == "tampered_image":
-        image.write_bytes(b"trojaned image")
-    wget = bin_dir / "wget"
-    wget.write_text(FAKE_WGET)
-    wget.chmod(0o755)
-    script = _download_script(pinned_fingerprint=None if case == "unpinned_signer" else fingerprint.group(1))
+        if case == "tampered_image":
+            image.write_bytes(b"trojaned image")
+        script = _download_script(pinned_fingerprint=None if case == "unpinned_signer" else fingerprint.group(1))
 
-    result = subprocess.run(
-        ["/bin/sh", "-e", "-c", script],
-        cwd=work,
-        env={
-            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-            "TMPDIR": str(tmp_path),
-            "FIXTURES": str(fixtures),
-            "IMAGE_URL": f"https://download.opensuse.org/tumbleweed/appliances/{IMAGE_NAME}",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+        result = subprocess.run(
+            ["/bin/sh", "-e", "-c", script],
+            cwd=work,
+            env={
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "TMPDIR": str(gnupg_homes),
+                "FIXTURES": str(fixtures),
+                "IMAGE_URL": f"https://download.opensuse.org/tumbleweed/appliances/{IMAGE_NAME}",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        for home in gnupg_homes.iterdir():
+            subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], check=False)
 
     assert (result.returncode == 0) is (case == "signed"), result.stderr
