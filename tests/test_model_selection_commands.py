@@ -25,7 +25,7 @@ from mindroom.thread_models import resolve_thread_model_override, set_thread_mod
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
-from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup, root_event
+from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
 from tests.test_turn_controller_focused import _build_harness
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -468,6 +468,57 @@ def test_thread_overrides_keep_the_selection_of_entities_the_next_setter_cannot_
     ):
         _run_model_command(config, args_text, requester_user_id)
         assert resolved_thread_models(config, paths) == expected, (args_text, requester_user_id)
+
+
+@pytest.mark.asyncio
+async def test_structured_picker_keeps_the_selection_of_entities_the_requester_cannot_address(tmp_path: Path) -> None:
+    """A picker set or reset changes only the entities its requester may address."""
+    config = restricted_config(tmp_path)
+    paths = runtime_paths_for(config)
+    registry = entity_identity_registry(config, paths)
+    agents = (registry.current_id(name).full_id for name in ("helper", "restricted"))
+    client = picker_client(config, paths, USER, OTHER, *agents)
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+
+    for number, (requester_user_id, operation, model, expected) in enumerate(
+        (
+            (OTHER, "set", "expensive", {"helper": "expensive", "restricted": "expensive"}),
+            (USER, "set", "cheap", {"helper": "cheap", "restricted": "expensive"}),
+            (USER, "reset", None, {"helper": "default", "restricted": "expensive"}),
+        ),
+    ):
+        metadata = {
+            "version": 1,
+            "runtime_user_id": client.user_id,
+            "runtime_device_id": "DEVICE",
+            "operation": operation,
+        }
+        if model is not None:
+            metadata["model"] = model
+        event = root_event(
+            event_id=f"$command{number}",
+            sender=requester_user_id,
+            content={"body": "!model", "msgtype": "m.text", "io.mindroom.model_selection": metadata},
+        )
+        await handle_command(
+            context=context,
+            room=client.rooms[ROOM],
+            event=event,
+            command=command_parser.parse(event.body),
+            requester_user_id=requester_user_id,
+        )
+        assert resolved_thread_models(config, paths) == expected, (requester_user_id, operation)
 
 
 def test_model_show_names_the_entities_each_thread_override_governs(tmp_path: Path) -> None:

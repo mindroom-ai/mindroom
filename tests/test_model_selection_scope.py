@@ -23,6 +23,8 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 ROOM = "!room:localhost"
 USER = "@user:localhost"
 
@@ -37,22 +39,27 @@ def picker_setup(tmp_path: Path) -> tuple:
         test_runtime_paths(tmp_path),
     )
     paths = runtime_paths_for(config)
-    registry = entity_identity_registry(config, paths)
-    router = registry.current_id("router").full_id
-    agent = registry.current_id("helper").full_id
+    agent = entity_identity_registry(config, paths).current_id("helper").full_id
+    client = picker_client(config, paths, USER, agent)
+    return client, config, paths, AgentReplyMembershipIndex(), client.user_id, agent
+
+
+def picker_client(config: Config, paths: RuntimePaths, *members: str) -> AsyncMock:
+    """Return the router's client in a room where the router and *members* are joined and ``$root`` is readable."""
+    router = entity_identity_registry(config, paths).current_id("router").full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = router
     client.device_id = "DEVICE"
     client.olm = None
     room = nio.MatrixRoom(ROOM, router)
-    for member in (USER, router, agent):
+    for member in (router, *members):
         room.add_member(member, member, None)
     room.members_synced = True
     client.rooms = {ROOM: room}
-    client.joined_members.return_value = joined_response(USER, router, agent)
+    client.joined_members.return_value = joined_response(router, *members)
     client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(root_event().source)
     client.room_messages.return_value = nio.RoomMessagesResponse(room_id=ROOM, chunk=[], start="", end=None)
-    return client, config, paths, AgentReplyMembershipIndex(), router, agent
+    return client
 
 
 def joined_response(*users: str) -> nio.JoinedMembersResponse:
