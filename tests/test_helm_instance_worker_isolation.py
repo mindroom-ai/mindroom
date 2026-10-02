@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import shutil
 import subprocess
+from contextlib import closing
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import yaml
 
+from mindroom import agent_storage
 from mindroom.agent_modes import set_agent_mode
+from mindroom.agent_storage import create_state_storage
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, pending_room_invites_path
 from mindroom.matrix.personal_room_store import personal_room_record_path
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
+
+if TYPE_CHECKING:
+    from agno.db.base import BaseDb
 
 
 def _render_chart(
@@ -831,7 +838,10 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
     ]
 
 
-def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(tmp_path: Path) -> None:
+def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Records and locks the primary acts on stay outside every storage subPath sidecar tool code can write."""
     runtime_chart = _render_chart(
         Path("cluster/k8s/runtime"),
@@ -855,20 +865,37 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
         paths.storage_root / "private_instances" / "s" / "helper",
     ):
         set_agent_mode(paths, state_root, "helper", "session", "minimal", "@alice:example.org")
+        with closing(_open_sessions(state_root)):
+            pass
     ensure_private_instance_identity(
         paths.storage_root,
         worker_key="v1:default:user:~@alice:example.org",
         requester_id="@alice:example.org",
     )
+    locks = list(paths.storage_root.rglob("*.lock"))
+    # Session recovery stays beside the sessions it guards, so its lock may sit in a mounted subPath only because
+    # a planted or held one fails storage creation after SQLite's busy timeout instead of stalling it.
+    recovery_locks = [lock for lock in locks if lock.name == ".sessions-recovery.lock"]
     trusted = [
         personal_room_record_path(paths, "helper", "@alice:example.org"),
         invited_rooms_path(paths, "helper"),
         pending_room_invites_path(paths, "helper"),
         *paths.storage_root.rglob("agent_modes.json"),
-        *paths.storage_root.rglob("*.lock"),
+        *(lock for lock in locks if lock not in recovery_locks),
     ]
     assert len(trusted) == 8
     assert not [path for path in trusted if path.relative_to(paths.storage_root).parts[0] in runner_subpaths]
+    assert len(recovery_locks) == 2
+    monkeypatch.setattr(agent_storage, "_BUSY_TIMEOUT_SECONDS", 0.2)
+    for lock in recovery_locks:
+        with lock.open("a") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            with pytest.raises(TimeoutError, match="Session recovery lock"):
+                _open_sessions(lock.parent)
+
+
+def _open_sessions(state_root: Path) -> BaseDb:
+    return create_state_storage("helper", state_root, subdir="sessions", session_table="helper_sessions")
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:

@@ -6645,7 +6645,7 @@ visibility = ["mindroom.legacy_private_storage"]
 
 [[modules]]
 path = "mindroom.session_storage_preflight"
-depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
+depends_on = ["mindroom.durable_write", "mindroom.file_locks", "mindroom.path_confinement"]
 visibility = ["mindroom.agent_storage"]
 
 [[modules]]

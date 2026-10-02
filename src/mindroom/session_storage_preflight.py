@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import stat
 from contextlib import closing, contextmanager
@@ -11,8 +12,9 @@ from uuid import uuid4
 from agno.db.sqlite.schemas import get_table_schema_definition
 
 from mindroom.durable_write import fsync_directory_durable
-from mindroom.file_locks import advisory_file_lock
+from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_RECOVERY_LOCK = ".sessions-recovery.lock"
 _REQUIRED_SESSION_COLUMNS = frozenset(
     name for name in get_table_schema_definition("sessions") if not name.startswith("_")
 )
@@ -45,7 +48,7 @@ def session_storage_preflight(
         msg = "Session storage name must identify a file directly inside its sessions directory"
         raise ValueError(msg)
 
-    with advisory_file_lock(state_root / ".sessions-recovery.lock"):
+    with _recovery_lock(state_root, timeout_seconds=timeout_seconds):
         if _existing_session_database(db_dir, db_file):
             try:
                 columns = _session_columns(db_file, session_table, timeout_seconds=timeout_seconds, mode="ro")
@@ -58,6 +61,25 @@ def session_storage_preflight(
             if columns is not None and (missing := _REQUIRED_SESSION_COLUMNS - columns):
                 _archive_sessions(db_dir, missing)
         yield
+
+
+@contextmanager
+def _recovery_lock(state_root: Path, *, timeout_seconds: float) -> Iterator[None]:
+    """Serialize recovery of one state root without following links, blocking on a FIFO, or waiting forever.
+
+    Sandbox runners can write state roots, so worker code can plant or hold this lock.
+    A holder then fails storage creation after SQLite's own busy timeout, as a held database lock would.
+    """
+    state_root.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(state_root) as directory:
+        descriptor = open_regular_file_at(directory, _RECOVERY_LOCK, os.O_RDONLY | os.O_CREAT)
+    try:
+        if not wait_for_exclusive_lock(descriptor, timeout_seconds=timeout_seconds):
+            msg = f"Session recovery lock stayed held for {timeout_seconds:g} seconds: {state_root / _RECOVERY_LOCK}"
+            raise TimeoutError(msg)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def _existing_session_database(db_dir: Path, db_file: Path) -> bool:

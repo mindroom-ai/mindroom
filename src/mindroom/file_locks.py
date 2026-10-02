@@ -68,6 +68,7 @@ __all__ = [
     "expose_inherited_file_lock",
     "file_lock_is_held",
     "release_file_lock",
+    "wait_for_exclusive_lock",
 ]
 
 
@@ -155,6 +156,21 @@ def release_file_lock(lock_file: TextIO) -> None:
         _unlock(lock_file.fileno())
     finally:
         lock_file.close()
+
+
+def wait_for_exclusive_lock(descriptor: int, *, timeout_seconds: float) -> bool:
+    """Lock an open descriptor exclusively, returning whether that succeeded within ``timeout_seconds``.
+
+    For lock files that untrusted code can also open: a holder that never
+    releases makes the caller fail instead of waiting forever. Closing the
+    descriptor releases the lock.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while not _try_lock_exclusive(descriptor):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_DEFAULT_POLL_SECONDS)
+    return True
 
 
 def file_lock_is_held(lock_path: Path) -> bool:
