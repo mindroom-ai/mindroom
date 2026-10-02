@@ -76,6 +76,7 @@ from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import postgres_journal_schema_url
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -5474,6 +5475,7 @@ class TestOutbox:
         # Registration and deletion share the echo writer's real ledger and
         # reservations, while the outbox retains its earlier immutable input.
         await store.register_edit_revision(source, (30, later))
+        await admit_room_event(principal, ROOM, later)
         await store.mark_source_redacted(later, room_id=ROOM)
         durable = {
             index: TurnRecordCodec._from_ledger_record(index, json.loads(raw))

@@ -693,6 +693,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
+                relations=self._journal_store.principal(self._journal_principal_id),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,

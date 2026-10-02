@@ -25,6 +25,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTests
@@ -470,6 +471,7 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
             source={},
         ),
     )
+    await admit_room_event(principal, "!room:localhost", "$source")
     await store.record_responded_turn(
         TurnRecord.create(
             ["$source"],

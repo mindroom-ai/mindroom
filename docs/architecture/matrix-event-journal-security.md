@@ -154,6 +154,7 @@ A refetch is also refused if the content it returns still holds a sidecar previe
 Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
+An event no turn has recorded yet is tombstoned in the turn ledger only when the journal admitted it in the redaction's room, so a redaction cannot pre-mark another room's event before the bot sees it there.
 
 ## Membership
 
