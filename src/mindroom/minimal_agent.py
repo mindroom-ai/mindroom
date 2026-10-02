@@ -265,6 +265,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
             shell_settings = CliShellSettings(
                 workspace=str(self.output_file_policy.workspace_root),
                 shell_path_prepend=shell_toolkits[0].shell_path_prepend,
+                extra_env_passthrough=shell_toolkits[0].extra_env_passthrough,
                 output_max_bytes=self.output_file_policy.max_bytes,
                 output_auto_save_threshold_bytes=self.output_file_policy.auto_save_threshold_bytes,
             )

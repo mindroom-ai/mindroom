@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 _COMMAND = (
     "mindroom-agent tools list && "
+    'printf "pass=%s\\n" "$PASSTHROUGH_PROBE" && '
     'printf "token=%s\\n" "$MINDROOM_AGENT_CLI_TOKEN_PATH" && '
     'stat -c "mode=%a" "$MINDROOM_AGENT_CLI_TOKEN_PATH"'
 )
@@ -68,11 +69,19 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        tools=["shell", "calculator"],
+        tools=[{"shell": {"extra_env_passthrough": ["PASSTHROUGH_PROBE"]}}, "calculator"],
         memory_backend="file",
         learning=False,
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=running_api))
+    runtime = replace(
+        runtime,
+        orchestrator=SimpleNamespace(agent_cli_registry=running_api),
+        runtime_paths=replace(
+            runtime.runtime_paths,
+            # Arbitrary process variables reach shells only through the agent's passthrough setting.
+            process_env={**runtime.runtime_paths.process_env, "PASSTHROUGH_PROBE": "visible"},
+        ),
+    )
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     assert shell_runs_in_primary(runtime.config, runtime.runtime_paths, "helper")
     provider = ScriptedProvider()
@@ -94,6 +103,8 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     output = next(str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool")
     assert '"toolkit":"calculator"' in output.replace(" ", ""), output
     assert "mode=600" in output, output
+    # The agent's own shell settings still apply, like in its ordinary local shell.
+    assert "pass=visible" in output, output
     token_path = Path(output.split("token=", 1)[1].splitlines()[0])
     # The grant file lives outside the workspace and disappears with the response.
     assert not token_path.is_relative_to(tmp_path)

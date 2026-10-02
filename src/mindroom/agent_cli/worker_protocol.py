@@ -41,6 +41,8 @@ class CliShellSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     workspace: str = Field(min_length=1, max_length=4096)
     shell_path_prepend: str | None = Field(max_length=4096)
+    # Names or patterns only; values come from the environment where the shell runs.
+    extra_env_passthrough: str | None = Field(default=None, max_length=4096)
     output_max_bytes: int = Field(gt=0)
     output_auto_save_threshold_bytes: int = Field(ge=0)
 

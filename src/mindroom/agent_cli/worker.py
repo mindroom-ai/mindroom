@@ -138,6 +138,9 @@ class CliWorkerLease:
                 msg = "CLI workspace has no unique canonical workspace mount"
                 raise ValueError(msg)
             shell = shell.model_copy(update={"workspace": str(projected[0])})
+        # A worker's own environment holds its runner credentials, and the primary does not
+        # forward passthrough values to CLI workers, so their shells pass nothing extra.
+        shell = shell.model_copy(update={"extra_env_passthrough": None})
         primary_url = cli_primary_url(runtime)
         if primary_url is None:
             msg = "CLI worker has no MindRoom API address to call back"

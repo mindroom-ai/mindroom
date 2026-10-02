@@ -60,6 +60,7 @@ def build_agent_cli_shell(
     toolkit = shell_tools()(
         base_dir=shell.workspace,
         shell_path_prepend=shell.shell_path_prepend,
+        extra_env_passthrough=shell.extra_env_passthrough,
         runtime_paths=runtime_paths,
         agent_cli_binding=binding,
     )

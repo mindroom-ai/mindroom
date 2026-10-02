@@ -56,6 +56,11 @@ class ShellRuntimeSettings(Protocol):
         """Return the resolved path entries from the normal configuration merge."""
         ...
 
+    @property
+    def extra_env_passthrough(self) -> str | None:
+        """Return the resolved extra env passthrough patterns from the normal configuration merge."""
+        ...
+
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
@@ -386,6 +391,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             """Expose the effective non-secret path setting after normal config merge."""
             return self._shell_path_prepend
 
+        @property
+        def extra_env_passthrough(self) -> str | None:
+            """Expose the effective passthrough patterns after normal config merge."""
+            return self._extra_env_passthrough
+
         def __init__(
             self,
             base_dir: Path | str | None = None,
@@ -420,6 +430,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
+            self._extra_env_passthrough = extra_env_passthrough
             if run_shell_command_function is not None:
                 notes = (
                     (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE)
