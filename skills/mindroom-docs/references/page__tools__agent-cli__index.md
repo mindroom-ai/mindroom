@@ -172,6 +172,7 @@ Workers call MindRoom back at `MINDROOM_AGENT_CLI_PRIMARY_URL` when it is set.
 Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
 Kubernetes workers and shared static runners need `MINDROOM_AGENT_CLI_PRIMARY_URL` unless the API listens on a specific non-loopback address.
 An API that listens only on loopback cannot be reached from workers, and a host firewall may drop connections from Docker networks; a `mindroom-agent` call that cannot connect names the address it tried.
+With the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 Provider credentials stay at the tools' existing authorized execution locations.
 The shell receives a grant for its own active response, not provider or administrator credentials.

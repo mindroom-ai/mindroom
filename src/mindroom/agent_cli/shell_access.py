@@ -49,14 +49,21 @@ def _shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_na
 
 
 @functools.cache
-def _local_bin_dir() -> str:
-    """Return a private directory exposing only `mindroom-agent`, not MindRoom's interpreter and dependencies."""
+def _launcher_dir() -> Path:
     bin_dir = Path(tempfile.mkdtemp(prefix="mindroom-agent-cli-"))
     atexit.register(shutil.rmtree, bin_dir, ignore_errors=True)
     launcher = bin_dir / "mindroom-agent"
     launcher.write_text(_LAUNCHER)
     launcher.chmod(0o700)
-    return str(bin_dir)
+    return bin_dir
+
+
+def _local_bin_dir() -> str:
+    """Return a private directory exposing only `mindroom-agent`, not MindRoom's interpreter and dependencies."""
+    if not (_launcher_dir() / "mindroom-agent").is_file():
+        # Temp cleaners remove idle files, so a long-running MindRoom makes the launcher again.
+        _launcher_dir.cache_clear()
+    return str(_launcher_dir())
 
 
 def _safe_origin(value: str) -> str:
@@ -139,11 +146,12 @@ def _worker_problems(runtime_paths: RuntimePaths) -> list[str]:
 
 def minimal_shell_problems(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
     """Return what keeps minimal Bash from reaching MindRoom where this agent's shell runs, each phrased as its fix."""
-    if not _shell_runs_in_primary(config, runtime_paths, agent_name):
-        return _worker_problems(runtime_paths)
+    # Only this process's API serves the response grants, wherever the shell runs.
     if get_api_server_address() is None:
         return ["Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it."]
-    return []
+    if _shell_runs_in_primary(config, runtime_paths, agent_name):
+        return []
+    return _worker_problems(runtime_paths)
 
 
 def agent_cli_shell_env(config: Config, runtime_paths: RuntimePaths, agent_name: str, token: str) -> AgentCliShellEnv:

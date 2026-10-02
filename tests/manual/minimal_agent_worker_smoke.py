@@ -44,6 +44,7 @@ from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import shutdown_primary_worker_manager
@@ -243,6 +244,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             },
         )
         primary_url = f"http://{_ip(primary)}:8080"
+        # Like `mindroom run`, record where the API is served; workers reach it there.
+        set_api_server_address(_ip(primary), 8080)
         plugin_dir = data / "plugin"
         plugin_dir.mkdir()
         (plugin_dir / "mindroom.plugin.json").write_text(
@@ -507,6 +510,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             storage.close if "storage" in locals() else lambda: None,
             shutdown_primary_worker_manager,
             patch.undo,
+            clear_api_server_address,
         ):
             try:
                 operation()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import socket
 from dataclasses import replace
 from pathlib import Path
@@ -173,10 +174,28 @@ def test_worker_shells_without_a_known_address_or_key_list_every_fix(tmp_path: P
     assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_PRIMARY_URL"]
 
 
-def test_minimal_bash_needs_the_running_api(tmp_path: Path) -> None:
-    """The CLI calls back through the API server, wherever the shell runs."""
+@pytest.mark.parametrize("worker", [False, True], ids=["local", "worker"])
+def test_minimal_bash_needs_the_running_api(tmp_path: Path, *, worker: bool) -> None:
+    """Only this process's API serves the grants, wherever the shell runs, even with an explicit URL."""
     runtime = _runtime_context(tmp_path)
+    paths = (
+        _worker_paths(tmp_path, MINDROOM_WORKER_BACKEND="docker", MINDROOM_AGENT_CLI_PRIMARY_URL="http://mindroom:8765")
+        if worker
+        else runtime.runtime_paths
+    )
 
-    assert minimal_shell_problems(runtime.config, runtime.runtime_paths, "helper") == [
+    assert minimal_shell_problems(runtime.config, paths, "helper") == [
         "Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it.",
     ]
+
+
+@pytest.mark.usefixtures("api_address")
+def test_local_launcher_survives_temp_cleaners(tmp_path: Path) -> None:
+    """A long-running MindRoom makes the launcher again after a temp cleaner removes it."""
+    runtime = _runtime_context(tmp_path)
+    first = Path(agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir or "")
+    shutil.rmtree(first)
+
+    second = Path(agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir or "")
+
+    assert os.access(second / "mindroom-agent", os.X_OK)
