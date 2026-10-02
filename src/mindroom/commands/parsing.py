@@ -433,7 +433,7 @@ How it works:
 - Thread agents require an existing thread; room-mode agents use one choice for the whole room
 - Private agents keep a separate choice for each requester; other agents and conversations are unaffected
 - Teams and OpenAI-compatible API requests do not use this selection
-- Minimal mode requires existing run/check/kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment; a refusal lists everything missing
+- Minimal mode requires existing run/check/kill shell permissions, a canonical workspace, and a shell that runs in MindRoom itself or in dedicated Docker workers; a refusal lists everything missing
 - If deployment settings change and minimal mode becomes unavailable, use `!mode <agent> standard` in the same conversation"""
 
     if topic == "model":

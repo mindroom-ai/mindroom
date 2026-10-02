@@ -1,27 +1,56 @@
-"""Fail-closed checks for the protected-endpoint Docker CLI profile.
+"""Fail-closed checks for the Docker minimal-mode profile.
 
-This profile preserves shell internet. It proves configured authority endpoints
-reject shell credentials; it does not claim TCP isolation or discover arbitrary
-operator listeners. Gateway-only routing is an operator deployment requirement.
+Worker shells keep network access, including to the primary API. These checks
+prove the primary API rejects worker credentials and that the worker reaches this
+primary's CLI routes with its own grant; they do not claim TCP isolation.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import secrets
 from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.agent_cli.worker_protocol import safe_origin
+from mindroom.agent_cli.worker_protocol import CLI_DOCKER_HOST_ALIAS, safe_origin
+from mindroom.runtime_state import get_api_server_address
 
 if TYPE_CHECKING:
     from mindroom.agent_cli.worker_protocol import CliWorkerLaunch
     from mindroom.constants import RuntimePaths
 
+_PRIMARY_URL_ENV = "MINDROOM_AGENT_CLI_PRIMARY_URL"
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def cli_primary_url(runtime_paths: RuntimePaths) -> str | None:
+    """Return the MindRoom API origin as reached from inside a Docker worker, when it is known.
+
+    An explicit setting wins; otherwise the running API's address is used, through the
+    Docker host alias when it listens on every interface. Raises ValueError for a
+    malformed explicit setting.
+    """
+    if configured := runtime_paths.env_value(_PRIMARY_URL_ENV):
+        return safe_origin(configured)
+    api_address = get_api_server_address()
+    if api_address is None or _loopback(api_address.host):
+        return None
+    host = CLI_DOCKER_HOST_ALIAS if api_address.host in {"0.0.0.0", "::"} else api_address.host  # noqa: S104
+    return safe_origin(f"http://{f'[{host}]' if ':' in host else host}:{api_address.port}")
+
 
 def cli_deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
-    """Return every primary auth or endpoint setting that would expose authority to the worker.
+    """Return every primary auth or endpoint setting that keeps Docker minimal mode from running safely.
 
     Each problem is phrased as its fix, so callers can show the whole list at once.
     """
@@ -44,31 +73,26 @@ def cli_deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
             "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
             "the unauthenticated OpenAI-compatible API.",
         )
-    origins = {}
-    for name, purpose in (
-        ("MINDROOM_AGENT_CLI_PRIMARY_URL", "the MindRoom API as reached from inside worker containers"),
-        (
-            "MINDROOM_AGENT_CLI_GATEWAY_URL",
-            "a proxy that forwards only `POST /api/agent-cli/operations` and "
-            "`GET /api/agent-cli/calls/<call-id>` to MindRoom",
-        ),
-    ):
-        try:
-            origins[name] = safe_origin(runtime_paths.env_value(name) or "")
-        except ValueError:
-            problems.append(f"Set `{name}` to the `http(s)://host:port` origin of {purpose}.")
-    if len(origins) == 2 and origins["MINDROOM_AGENT_CLI_GATEWAY_URL"] == origins["MINDROOM_AGENT_CLI_PRIMARY_URL"]:
-        problems.append(
-            "Point `MINDROOM_AGENT_CLI_GATEWAY_URL` at the gateway-only proxy, not at "
-            "`MINDROOM_AGENT_CLI_PRIMARY_URL`.",
-        )
+    try:
+        primary_url = cli_primary_url(runtime_paths)
+    except ValueError:
+        problems.append(f"Set `{_PRIMARY_URL_ENV}` to a plain `http(s)://host:port` origin.")
+    else:
+        if primary_url is None:
+            problems.append(
+                "Serve the MindRoom API on a non-loopback address, or set "
+                f"`{_PRIMARY_URL_ENV}` to the MindRoom API origin as reached from inside worker containers.",
+            )
     return problems
 
 
-def validate_cli_deployment(runtime_paths: RuntimePaths) -> None:
-    """Reject primary auth and endpoint settings which expose executable authority to the worker."""
+def validate_cli_deployment(runtime_paths: RuntimePaths) -> str:
+    """Return the worker-facing primary URL, rejecting settings which expose authority to the worker."""
     if problems := cli_deployment_problems(runtime_paths):
         raise ValueError(" ".join(problems))
+    primary_url = cli_primary_url(runtime_paths)
+    assert primary_url is not None
+    return primary_url
 
 
 def _headers_to_reject(*, grant: str, control_token: str) -> tuple[dict[str, str], ...]:
@@ -81,7 +105,7 @@ def _headers_to_reject(*, grant: str, control_token: str) -> tuple[dict[str, str
     )
 
 
-async def probe_cli_network(  # noqa: C901 - explicit endpoint authority checks
+async def probe_cli_network(
     launch: CliWorkerLaunch,
     *,
     control_token: str,
@@ -120,26 +144,13 @@ async def probe_cli_network(  # noqa: C901 - explicit endpoint authority checks
     for result in results:
         if isinstance(result, BaseException):
             raise result
-    # Authentication failure on a known existing gateway route proves forwarding;
-    # a 404 on an arbitrary path cannot establish a working isolation boundary.
-    response = await client.post(f"{launch.gateway_url}/api/agent-cli/operations", json={})
-    if response.status_code != 401:
-        msg = "CLI gateway does not expose the authenticated operations route"
-        raise ValueError(msg)
-    denied = (
-        ("GET", "/api/config/raw"),
-        ("POST", "/api/config/load"),
-        ("GET", "/api/sandbox-runner/workers"),
-        ("GET", "/v1/models"),
-        ("GET", "/docs"),
-        ("GET", "/api/agent-cli/operations"),
-        ("POST", "/api/agent-cli/calls/probe"),
-        ("CONNECT", "/"),
-        ("GET", "/api/agent-cli/%2e%2e/config/raw"),
-        ("GET", "/api/agent-cli/calls/probe%2f..%2f..%2fconfig/raw"),
+    # Only this primary accepts the worker's own grant, so success proves the URL
+    # names this MindRoom and the negative checks above probed the real API.
+    response = await client.post(
+        f"{launch.primary_url}/api/agent-cli/operations",
+        headers={"Authorization": f"Bearer {grant}"},
+        json={"operation": "context.list"},
     )
-    for method, path in denied:
-        response = await client.request(method, f"{launch.gateway_url}{path}")
-        if response.status_code not in {403, 404, 405}:
-            msg = "CLI gateway must forward only CLI operation and receipt routes"
-            raise ValueError(msg)
+    if response.status_code != 200:
+        msg = "CLI worker cannot reach this MindRoom's CLI routes at its primary URL"
+        raise ValueError(msg)

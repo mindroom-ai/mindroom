@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import httpx
 import yaml
 
-from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH
+from mindroom.agent_cli.worker_protocol import CLI_DOCKER_HOST_ALIAS, CLI_PRIVATE_ROOT_PATH
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests, source_files_fingerprint
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
@@ -1296,6 +1296,12 @@ class DockerWorkerBackend:
                     else {}
                 )
             )
+            # CLI workers call the primary API back, which usually listens on the Docker host.
+            host_kwargs = (
+                {"extra_hosts": {CLI_DOCKER_HOST_ALIAS: "host-gateway"}}
+                if is_cli_worker_key(metadata.worker_key)
+                else {}
+            )
             container = self._client.containers.run(
                 launch_config.image_reference,
                 command=["/app/run-sandbox-runner.sh"],
@@ -1312,6 +1318,7 @@ class DockerWorkerBackend:
                 read_only=True,
                 tmpfs=_WORKER_TMPFS,
                 **security_kwargs,
+                **host_kwargs,
             )
 
         self._reload_container(container)

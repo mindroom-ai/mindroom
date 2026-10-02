@@ -13,7 +13,8 @@ from uuid import uuid4
 import httpx
 from pydantic import SecretStr
 
-from mindroom.agent_cli.worker_network import validate_cli_deployment
+from mindroom.agent_cli.local_shell import open_local_cli_shell, shell_runs_in_primary
+from mindroom.agent_cli.worker_network import cli_primary_url, validate_cli_deployment
 from mindroom.agent_cli.worker_protocol import CliShellRequest, CliShellSettings, CliWorkerLaunch
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
@@ -28,11 +29,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.agent_cli.session import CliGrant, TurnToolBridge
+    from mindroom.agent_cli.shell_invocation import CliShell
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workers.models import WorkerHandle
 
 
-__all__ = ["CliWorkerLease", "open_cli_worker", "open_configured_cli_worker"]
+__all__ = ["CliWorkerLease", "open_cli_shell", "open_cli_worker"]
 
 logger = get_logger(__name__)
 
@@ -51,6 +53,10 @@ def _cli_worker_spec(context: ToolRuntimeContext) -> WorkerSpec:
         mirrored_credential_services=frozenset(),
         state_scope_worker_key=target.worker_key or base_key,
     )
+
+
+class _PrimaryUnreachableError(RuntimeError):
+    """The worker could not connect back to the primary API at its configured or derived URL."""
 
 
 @dataclass
@@ -85,6 +91,8 @@ class CliWorkerLease:
                 "Docker worker image does not support minimal mode; use a worker image built for this MindRoom release"
             )
             raise RuntimeError(msg)
+        if response.status_code == 504:
+            raise _PrimaryUnreachableError
         if response.status_code != 200:
             # Server validation details can echo input. Never include a launch
             # response body in provider-visible exceptions or audit traces.
@@ -130,6 +138,10 @@ class CliWorkerLease:
                 msg = "CLI workspace has no unique canonical workspace mount"
                 raise ValueError(msg)
             shell = shell.model_copy(update={"workspace": str(projected[0])})
+        primary_url = cli_primary_url(runtime)
+        if primary_url is None:
+            msg = "CLI worker has no MindRoom API address to call back"
+            raise RuntimeError(msg)
         launch = CliWorkerLaunch(
             protocol_version=WORKER_PROTOCOL_VERSION,
             worker_key=self.handle.worker_key,
@@ -137,22 +149,21 @@ class CliWorkerLease:
             turn_id=owner.turn_id,
             generation=owner.generation,
             token=SecretStr(grant.raw_token),
-            gateway_url=runtime.env_value("MINDROOM_AGENT_CLI_GATEWAY_URL") or "",
-            primary_url=runtime.env_value("MINDROOM_AGENT_CLI_PRIMARY_URL") or "",
+            primary_url=primary_url,
             control_urls=list(self.control_urls),
             shell=shell,
         )
         self._bridge = bridge
         try:
-            response = await self.client.get(
-                f"{launch.primary_url}/api/config/raw",
-                timeout=5,
-                headers={"Authorization": f"Bearer {runtime.env_value('MINDROOM_API_KEY')}"},
-            )
-            if response.status_code != 200:
-                msg = "CLI primary protected-route positive check failed"
-                raise RuntimeError(msg)  # noqa: TRY301 - grant revocation covers the entire install
+            # The worker proves it reaches this primary with the grant itself before installing it.
             await self._post("agent-cli-install", launch.model_dump(mode="json") | {"token": grant.raw_token})
+        except _PrimaryUnreachableError:
+            bridge.revoke()
+            msg = (
+                f"Docker workers could not reach MindRoom at {primary_url}. Allow connections from Docker containers "
+                "to that address, or set MINDROOM_AGENT_CLI_PRIMARY_URL to an address they can reach"
+            )
+            raise RuntimeError(msg) from None
         except BaseException:
             bridge.revoke()
             raise
@@ -271,7 +282,18 @@ async def open_cli_worker(
 
 
 @asynccontextmanager
-async def open_configured_cli_worker(context: ToolRuntimeContext) -> AsyncIterator[CliWorkerLease]:
+async def open_cli_shell(context: ToolRuntimeContext) -> AsyncIterator[CliShell]:
+    """Run minimal Bash where the agent's shell runs: in the primary or a dedicated Docker worker."""
+    if shell_runs_in_primary(context.config, context.runtime_paths, context.agent_name):
+        async with open_local_cli_shell(context.runtime_paths) as shell:
+            yield shell
+        return
+    async with _open_configured_cli_worker(context) as worker:
+        yield worker
+
+
+@asynccontextmanager
+async def _open_configured_cli_worker(context: ToolRuntimeContext) -> AsyncIterator[CliWorkerLease]:
     """Retain the existing configured manager lease for this isolated worker."""
     acquisition = asyncio.create_task(
         asyncio.to_thread(

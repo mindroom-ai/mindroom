@@ -266,7 +266,7 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(
         yield Worker()
         events.append("closed")
 
-    monkeypatch.setattr(module, "open_configured_cli_worker", open_worker)
+    monkeypatch.setattr(module, "open_cli_shell", open_worker)
     agent = agents.create_agent(
         "helper",
         context.config,
@@ -361,7 +361,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
         finally:
             events.append("closed")
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
 
     def create():
         agent = agents.create_agent(
@@ -452,7 +452,7 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
         message = "Docker worker is unavailable"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", unavailable_worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", unavailable_worker)
     agent = agents.create_agent(
         "helper",
         runtime.config,
@@ -713,7 +713,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
         return chunks()
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     monkeypatch.setattr(
         OpenAIChat,
         "get_async_client",
@@ -802,7 +802,7 @@ async def test_routed_shell_reuses_effective_global_and_agent_path_settings(
     async def worker(_runtime):
         yield Worker()
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     agent = agents.create_agent(
         "helper",
         runtime.config,

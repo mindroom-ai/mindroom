@@ -19,10 +19,11 @@ from agno.tools.toolkit import Toolkit
 from fastapi import FastAPI
 from structlog.testing import capture_logs
 
+from mindroom.agent_cli import shell_invocation
 from mindroom.agent_cli import worker as cli_worker
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolBridge, cli_turn_owner
 from mindroom.agent_cli.worker import CliWorkerLease, _cli_worker_spec, open_cli_worker
-from mindroom.agent_cli.worker_network import probe_cli_network
+from mindroom.agent_cli.worker_network import cli_primary_url, probe_cli_network
 from mindroom.agent_cli.worker_protocol import CliShellSettings, CliWorkerLaunch
 from mindroom.api import sandbox_runner_cli
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
@@ -35,6 +36,7 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     private_instance_scope_root_path,
@@ -106,7 +108,6 @@ def _launch(workspace: Path) -> dict[str, object]:
         "turn_id": "turn",
         "generation": "generation",
         "token": "turn-capability-0123456789",
-        "gateway_url": "http://gateway:8080",
         "primary_url": "http://primary:8766",
         "control_urls": [],
         "shell": _shell(str(workspace)).model_dump(),
@@ -178,14 +179,24 @@ async def test_shell_runs_normal_argv_output_and_rejects_foreign_handles(
         )  # Completed foreground runs have no background record.
 
 
+def _primary_response(request: httpx.Request, *, accepts_grant: bool = True) -> httpx.Response:
+    """Answer like a protected primary: only this worker's grant reaches its CLI operations."""
+    if (
+        accepts_grant
+        and request.method == "POST"
+        and request.url.path == "/api/agent-cli/operations"
+        and request.headers.get("authorization") == "Bearer turn-capability-0123456789"
+    ):
+        return httpx.Response(200, json={"items": []})
+    return httpx.Response(401)
+
+
 @pytest.mark.asyncio
-async def test_probe_rejects_unprotected_known_route_and_fake_gateway() -> None:
+async def test_probe_rejects_unprotected_known_route() -> None:
     launch = CliWorkerLaunch.model_validate(_launch(Path("/app/worker/agents/code/workspace")))
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "primary":
-            return httpx.Response(200)
-        return httpx.Response(404)
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(ValueError, match="protected"):
@@ -193,20 +204,22 @@ async def test_probe_rejects_unprotected_known_route_and_fake_gateway() -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_requires_known_protected_endpoints_and_gateway_filter() -> None:
+@pytest.mark.parametrize("accepts_grant", [True, False])
+async def test_probe_requires_protected_routes_and_this_primarys_cli(accepts_grant: bool) -> None:
+    """Protected routes reject every worker credential; only the turn's own grant proves the URL names this MindRoom."""
     launch = CliWorkerLaunch.model_validate(_launch(Path("/app/worker/agents/code/workspace")))
     seen = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        if request.url.host == "primary":
-            return httpx.Response(401)
-        if request.url.path == "/api/agent-cli/operations" and request.method == "POST":
-            return httpx.Response(401)
-        return httpx.Response(404)
+        return _primary_response(request, accepts_grant=accepts_grant)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        await probe_cli_network(launch, control_token="worker-only", client=client)
+        if accepts_grant:
+            await probe_cli_network(launch, control_token="worker-only", client=client)
+        else:
+            with pytest.raises(ValueError, match="cannot reach this MindRoom"):
+                await probe_cli_network(launch, control_token="worker-only", client=client)
     assert any(request.url.path == "/api/config/raw" for request in seen)
     assert any(request.url.path == "/v1/models" for request in seen)
     assert all("operator" not in json.dumps(dict(request.headers)) for request in seen)
@@ -231,11 +244,7 @@ async def test_probe_accepts_closed_peer_but_rejects_unsafe_peer_response(unsafe
                 return httpx.Response(200)
             message = "Connection refused"
             raise httpx.ConnectError(message, request=request)
-        if request.url.host == "primary" or (
-            request.url.path == "/api/agent-cli/operations" and request.method == "POST"
-        ):
-            return httpx.Response(401)
-        return httpx.Response(404)
+        return _primary_response(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         if unsafe_after_refusal:
@@ -251,16 +260,13 @@ async def test_probe_accepts_closed_peer_but_rejects_unsafe_peer_response(unsafe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("host", ["primary", "gateway"])
-async def test_probe_requires_reachable_primary_and_gateway(host: str) -> None:
-    """Only unavailable peers are acceptable; primary and gateway must be verified."""
+async def test_probe_requires_reachable_primary() -> None:
+    """Only unavailable peers are acceptable; the primary must be verified."""
     launch = CliWorkerLaunch.model_validate(_launch(Path("/app/worker/agents/code/workspace")))
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host == host:
-            message = "Connection refused"
-            raise httpx.ConnectError(message, request=request)
-        return httpx.Response(401)
+        message = "Connection refused"
+        raise httpx.ConnectError(message, request=request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         with pytest.raises(httpx.ConnectError):
@@ -290,11 +296,7 @@ async def test_probe_checks_peers_concurrently_and_rechecks_each_launch() -> Non
                 return httpx.Response(200 if unsafe else 401)
             finally:
                 active -= 1
-        if request.url.host == "primary" or (
-            request.url.path == "/api/agent-cli/operations" and request.method == "POST"
-        ):
-            return httpx.Response(401)
-        return httpx.Response(404)
+        return _primary_response(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         probe = asyncio.create_task(probe_cli_network(launch, control_token="worker-only", client=client))
@@ -323,7 +325,6 @@ async def test_worker_lease_cancellation_drains_startup_then_retires(
             process_env=MappingProxyType(
                 {
                     "MINDROOM_API_KEY": "operator-only",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway:8080",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary:8766",
                 },
             ),
@@ -440,7 +441,6 @@ async def test_lease_revokes_without_redundant_kills_and_keeps_canonical_argv(tm
                 {
                     "MINDROOM_API_KEY": "primary-only",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                 },
             ),
         ),
@@ -504,7 +504,6 @@ async def test_worker_retirement_waits_for_revoked_shell_io(
                 {
                     "MINDROOM_API_KEY": "primary-only",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                 },
             ),
         ),
@@ -574,7 +573,6 @@ async def test_worker_startup_failure_never_yields_lease(tmp_path: Path, monkeyp
             process_env=MappingProxyType(
                 {
                     "MINDROOM_API_KEY": "operator-only",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
                 },
             ),
@@ -608,7 +606,6 @@ async def test_worker_heartbeat_logs_touch_failure_and_keeps_touching(
             process_env=MappingProxyType(
                 {
                     "MINDROOM_API_KEY": "operator-only",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
                 },
             ),
@@ -670,7 +667,7 @@ async def test_worker_sync_poll_is_joined_on_repeated_cancellation(
             )
         ).status_code == 200
         monkeypatch.setattr(
-            sandbox_runner_cli,
+            shell_invocation,
             "shell_tools",
             lambda: lambda **_kwargs: Toolkit(name="shell", tools=[check_shell_command]),
         )
@@ -702,7 +699,6 @@ async def test_cancelled_shell_revokes_before_transport_shutdown(tmp_path: Path)
                 {
                     "MINDROOM_API_KEY": "primary-only",
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                 },
             ),
         ),
@@ -802,7 +798,7 @@ async def test_worker_validates_transport_arguments_with_canonical_shell_schema(
 
             super().__init__(name="shell", tools=[run_shell_command])
 
-    monkeypatch.setattr(sandbox_runner_cli, "shell_tools", lambda: Shell)
+    monkeypatch.setattr(shell_invocation, "shell_tools", lambda: Shell)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://worker",
@@ -902,7 +898,6 @@ def _scoped_context(tmp_path: Path, agent: AgentConfig) -> ToolRuntimeContext:
             process_env=MappingProxyType(
                 {
                     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary",
-                    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway",
                 },
             ),
         ),
@@ -1084,7 +1079,7 @@ async def test_configured_manager_acquisition_releases_on_repeated_cancellation(
     monkeypatch.setattr(cli_worker, "lease_configured_primary_worker_manager", acquire)
 
     async def use() -> None:
-        async with cli_worker.open_configured_cli_worker(_runtime_context(tmp_path)):
+        async with cli_worker._open_configured_cli_worker(_runtime_context(tmp_path)):
             pytest.fail("cancelled manager acquisition yielded a worker")
 
     task = asyncio.create_task(use())
@@ -1099,3 +1094,68 @@ async def test_configured_manager_acquisition_releases_on_repeated_cancellation(
         await task
     assert entry.active_leases == 0
     assert docker.containers.run_calls == []
+
+
+@pytest.mark.parametrize(
+    ("env", "api_address", "expected"),
+    [
+        ({"MINDROOM_AGENT_CLI_PRIMARY_URL": "https://mindroom.example.org/"}, None, "https://mindroom.example.org"),
+        ({}, ("0.0.0.0", 8765), "http://host.docker.internal:8765"),  # noqa: S104 - the default bind address
+        ({}, ("::", 8765), "http://host.docker.internal:8765"),
+        ({}, ("192.0.2.10", 9000), "http://192.0.2.10:9000"),
+        ({}, ("127.0.0.1", 8765), None),
+        ({}, ("localhost", 8765), None),
+        ({}, None, None),
+    ],
+)
+def test_primary_url_is_explicit_or_derived_from_the_running_api(
+    tmp_path: Path,
+    env: dict[str, str],
+    api_address: tuple[str, int] | None,
+    expected: str | None,
+) -> None:
+    """Workers call back through an explicit origin, or the API's own address as a container reaches it."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    if api_address is not None:
+        set_api_server_address(*api_address)
+    try:
+        assert cli_primary_url(paths) == expected
+    finally:
+        clear_api_server_address()
+
+
+@pytest.mark.asyncio
+async def test_unreachable_primary_is_reported_with_its_address_and_fix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that cannot call MindRoom back names the address it tried, not a generic isolation failure."""
+    app, workspace = _app(tmp_path, monkeypatch)
+
+    async def unreachable(launch: CliWorkerLaunch, **_kwargs: object) -> None:
+        message = "Connection refused"
+        raise httpx.ConnectError(message, request=httpx.Request("GET", launch.primary_url))
+
+    monkeypatch.setattr(sandbox_runner_cli, "probe_cli_network", unreachable)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker",
+        headers={"x-mindroom-sandbox-token": "worker-only"},
+    ) as worker_client:
+        response = await worker_client.post("/api/sandbox-runner/agent-cli/install", json=_launch(workspace))
+    assert response.status_code == 504
+    assert not (tmp_path / "private").exists()
+
+    context = _scoped_context(tmp_path, AgentConfig(display_name="Helper", worker_scope="user"))
+    spec = _cli_worker_spec(context)
+    worker = WorkerHandle("worker-id", spec.worker_key, "http://worker/api", "control", "ready", "docker", 0, 0)
+    bridge = TurnToolBridge(cli_turn_owner(context, _turn_context(), worker_id=worker.worker_id))
+    grant = bridge.issue(now_ns=time.time_ns(), expires_at_ns=time.time_ns() + 10**12)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(504))) as client:
+        lease = CliWorkerLease(worker, client, context, spec, container_storage_root=Path("/app/worker"))
+        workspace_root = context.runtime_paths.storage_root / "agents/helper/workspace"
+        with pytest.raises(RuntimeError, match="could not reach MindRoom at http://primary") as raised:
+            await lease.install_grant(bridge, grant, shell=_shell(str(workspace_root)))
+    assert "MINDROOM_AGENT_CLI_PRIMARY_URL" in str(raised.value)
+    with pytest.raises(CliAuthenticationError):
+        bridge.authenticate(grant.raw_token, now_ns=time.time_ns())

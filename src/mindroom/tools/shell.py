@@ -278,13 +278,17 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
 
 
 @dataclass(frozen=True, slots=True)
-class ShellWorkerBinding:
-    """Trusted isolated-worker supervisor binding, never provider tool arguments."""
+class AgentCliShellBinding:
+    """Trusted minimal-mode shell binding, never provider tool arguments.
 
-    socket_path: str
+    A worker runs commands through its supervisor socket with an owner-reserved
+    handle; the primary runs them in its own registry, so both are optional.
+    """
+
+    socket_path: str | None
     namespace: str
-    handle: str
-    gateway_url: str
+    handle: str | None
+    api_url: str
     token_path: str
 
 
@@ -391,7 +395,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
-            worker_binding: ShellWorkerBinding | None = None,
+            agent_cli_binding: AgentCliShellBinding | None = None,
             **kwargs: object,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
@@ -431,14 +435,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             # long-lived shell supervisor so background handles survive the
             # per-request process.
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
-            self._worker_binding = worker_binding
-            if worker_binding is not None:
-                self._supervisor_socket = worker_binding.socket_path
-                self._handle_namespace = worker_binding.namespace
+            self._agent_cli_binding = agent_cli_binding
+            if agent_cli_binding is not None:
+                self._supervisor_socket = agent_cli_binding.socket_path
+                self._handle_namespace = agent_cli_binding.namespace
                 self._runtime_env.update(
                     {
-                        "MINDROOM_AGENT_CLI_GATEWAY_URL": worker_binding.gateway_url,
-                        "MINDROOM_AGENT_CLI_TOKEN_PATH": worker_binding.token_path,
+                        "MINDROOM_AGENT_CLI_URL": agent_cli_binding.api_url,
+                        "MINDROOM_AGENT_CLI_TOKEN_PATH": agent_cli_binding.token_path,
                     },
                 )
 
@@ -505,7 +509,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
-                    handle=self._worker_binding.handle if self._worker_binding is not None else None,
+                    handle=self._agent_cli_binding.handle if self._agent_cli_binding is not None else None,
                     output_destination=output_destination,
                 )
             else:

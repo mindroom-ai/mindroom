@@ -11,6 +11,8 @@ from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 
 # Worker containers mount the root filesystem read-only; /tmp is their private tmpfs.
 CLI_PRIVATE_ROOT_PATH = "/tmp/.mindroom-agent-cli"  # noqa: S108
+# Docker CLI workers map this name to the host, where the primary API usually listens.
+CLI_DOCKER_HOST_ALIAS = "host.docker.internal"
 _ShellOperationName = Literal["run_shell_command", "check_shell_command", "kill_shell_command"]
 SHELL_OPERATION_NAMES: tuple[_ShellOperationName, ...] = get_args(_ShellOperationName)
 
@@ -53,7 +55,6 @@ class CliWorkerLaunch(BaseModel):
     turn_id: str = Field(min_length=1, max_length=1024)
     generation: str = Field(min_length=1, max_length=1024)
     token: SecretStr = Field(min_length=16, max_length=4096)
-    gateway_url: str = Field(max_length=2048)
     primary_url: str = Field(max_length=2048)
     control_urls: list[str] = Field(max_length=256)
     shell: CliShellSettings
@@ -67,7 +68,7 @@ class CliWorkerLaunch(BaseModel):
             raise ValueError(msg)
         return value
 
-    @field_validator("gateway_url", "primary_url")
+    @field_validator("primary_url")
     @classmethod
     def origin(cls, value: str) -> str:
         """Normalize only safe, fixed upstream origins."""

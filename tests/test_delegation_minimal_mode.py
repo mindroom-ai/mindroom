@@ -30,6 +30,7 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.response_turn import ResponseTurnContext
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context
@@ -133,15 +134,32 @@ async def _delegate(
 
 
 def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path) -> None:
-    """The description recommends minimal mode only where this deployment can run it."""
+    """The description recommends minimal mode, and the schema offers it, only where a subagent can run it."""
     config = _config(helper_tools=["shell"])
+
+    def offered(toolkit: DelegateTools) -> bool:
+        function = toolkit.async_functions["run_subagent"]
+        function.process_entrypoint()  # Agno derives the schema the model sees on first use.
+        has_option = "minimal" in function.parameters["properties"]
+        assert has_option == ("minimal mode" in (function.description or ""))
+        return has_option
+
     ready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), config)
     description = ready.async_functions["run_subagent"].description or ""
     assert "Subagents that support minimal mode: helper." in description
     assert "not important in its system prompt" in description
+    assert offered(ready)
 
+    # A local shell needs only the running API, which these tests do not start.
     unready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, {}), config)
-    assert "minimal mode" not in (unready.async_functions["run_subagent"].description or "")
+    assert not offered(unready)
+    # Hiding the option must not change the schema other callers receive.
+    assert offered(DelegateTools("leader", ["helper"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), config))
+    set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
+    try:
+        assert offered(DelegateTools("leader", ["helper"], _paths(tmp_path, {}), config))
+    finally:
+        clear_api_server_address()
 
     openai_caller = replace(_identity(), channel="openai_compat")
     detached = DelegateTools(
@@ -151,14 +169,14 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
         config,
         execution_identity=openai_caller,
     )
-    assert "minimal mode" not in (detached.async_functions["run_subagent"].description or "")
+    assert not offered(detached)
 
     gated = _config(
         helper_tools=["shell"],
         approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")]),
     )
     gated_tools = DelegateTools("leader", ["helper"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), gated)
-    assert "minimal mode" not in (gated_tools.async_functions["run_subagent"].description or "")
+    assert not offered(gated_tools)
 
 
 @pytest.mark.asyncio
@@ -253,7 +271,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         child_models.append(model)
         return model
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=identity)
 
@@ -370,7 +388,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
             ],
         ),
     }
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda _c, _p, name, *_a: models[name])
     turn = ResponseTurnContext(
         agent_mode="minimal",

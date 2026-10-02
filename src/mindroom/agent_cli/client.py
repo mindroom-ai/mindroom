@@ -40,7 +40,7 @@ class AgentCliClient:
     """Use the private token file; never print its contents or follow redirects."""
 
     def __init__(self) -> None:
-        self._url = os.environ.get("MINDROOM_AGENT_CLI_GATEWAY_URL", "").rstrip("/")
+        self._url = os.environ.get("MINDROOM_AGENT_CLI_URL", "").rstrip("/")
         token_path = os.environ.get("MINDROOM_AGENT_CLI_TOKEN_PATH", "")
         parsed = urlsplit(self._url)
         try:

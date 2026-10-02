@@ -23,6 +23,7 @@ from .config import (
     config_app,
     console,
     create_first_run_config,
+    ensure_worker_dashboard_api_key,
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
@@ -170,6 +171,13 @@ def run(
             console.print(f"[red]Error:[/red] {exc}")
             raise typer.Exit(1) from None
         # Pick up the new config and .env before pairing and startup.
+        runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if ensure_worker_dashboard_api_key(
+        runtime_paths,
+        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
+    ):
         runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     # Report a broken config or missing model keys before any pairing waits for a human.
     config = _load_active_config_or_exit(runtime_paths)

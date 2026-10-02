@@ -1,7 +1,8 @@
 # Internal turn CLI
 
-`mindroom-agent` is installed by the existing worker package.
-Its stdlib client reads `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_TOKEN_PATH` from trusted worker setup.
+`mindroom-agent` is installed with MindRoom, including in worker images.
+Its stdlib client reads `MINDROOM_AGENT_CLI_URL` and `MINDROOM_AGENT_CLI_TOKEN_PATH` from the trusted shell setup of its response.
+Bash runs where the agent's shell runs: in the primary for agents without a worker, or in a dedicated Docker worker.
 The token identifies one response turn; arguments cannot select another requester, agent, worker, or credential owner.
 Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shell-permission preflight.
 
@@ -47,11 +48,12 @@ Approval suspension uses the actual provider-batch checkpoint.
 Exit codes: 0 completed/read success; 1 tool failure/denial/cancellation; 2 invalid input; 3 queued/running/waiting; 4 unavailable authority or unknown transport/dispatch outcome.
 `--help` needs no runtime configuration.
 
-The existing API exposes only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/{call_id}` for this capability.
-The deployment gateway must restrict forwarding to those routes.
+The existing API exposes only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/{call_id}` for this capability; only a response grant authenticates them.
 Authentication precedes body parsing; invalid authority and another owner's receipt both return the same 401 response.
 The orchestrator owns the registry.
-The response owns the worker, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
+The response owns its shell, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
+A local shell writes its grant to a private temporary file that is removed when the response ends.
+A Docker worker first proves that the primary's protected routes reject its credentials and that its own grant reaches this primary's CLI routes.
 A response lease keeps its worker alive across worker-manager replacement.
 Normal completion retires that exact worker.
 After a primary crash, old grants are invalid immediately; the existing heartbeat and idle-timeout cleanup stop abandoned workers.

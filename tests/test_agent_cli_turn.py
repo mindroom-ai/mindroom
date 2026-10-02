@@ -319,7 +319,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
-    env.update(MINDROOM_AGENT_CLI_GATEWAY_URL=f"http://127.0.0.1:{port}", MINDROOM_AGENT_CLI_TOKEN_PATH=str(token))
+    env.update(MINDROOM_AGENT_CLI_URL=f"http://127.0.0.1:{port}", MINDROOM_AGENT_CLI_TOKEN_PATH=str(token))
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="none"))
     server_task = asyncio.create_task(server.serve(sockets=[sock]))
     try:

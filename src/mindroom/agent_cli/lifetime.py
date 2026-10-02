@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.agent_cli.shell_invocation import CliShell
     from mindroom.agent_cli.turn import LiveTurnTools
-    from mindroom.agent_cli.worker import CliWorkerLease
     from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
@@ -59,7 +59,7 @@ class CliTurnLifetime:
             self._provider[0].clear()
             self._provider = None
 
-    async def enter_worker(self, worker: AbstractAsyncContextManager[CliWorkerLease]) -> CliWorkerLease:
+    async def enter_worker[ShellT: CliShell](self, worker: AbstractAsyncContextManager[ShellT]) -> ShellT:
         """Acquire before constructing the trusted owner, retain until turn exit."""
         return await self._resources.enter_async_context(worker)
 

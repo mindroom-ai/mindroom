@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import os
 from dataclasses import dataclass, field
 from functools import partial
@@ -13,6 +11,11 @@ from typing import TYPE_CHECKING
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from mindroom.agent_cli.shell_invocation import (
+    InvalidShellArgumentsError,
+    build_agent_cli_shell,
+    invoke_agent_cli_shell,
+)
 from mindroom.agent_cli.worker_network import probe_cli_network
 from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH, CliShellRequest, CliWorkerLaunch
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_worker_prep
@@ -22,11 +25,9 @@ from mindroom.api.sandbox_runner import (
     app_runtime_paths,
     validate_runner_token,
 )
-from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.shell_supervisor import ensure_shell_supervisor
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
-from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
-from mindroom.tools.shell import ShellWorkerBinding, shell_tools
+from mindroom.tools.shell import AgentCliShellBinding
 from mindroom.workers.models import is_cli_worker_key
 
 if TYPE_CHECKING:
@@ -82,7 +83,11 @@ async def install_cli_runtime(payload: CliWorkerLaunch, request: Request) -> dic
     assert token is not None
     try:
         async with httpx.AsyncClient(timeout=5, trust_env=False, follow_redirects=False) as client:
-            await probe_cli_network(payload, control_token=token, client=client)
+            try:
+                await probe_cli_network(payload, control_token=token, client=client)
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                # Distinct from failed isolation: the primary can name its address and the fix.
+                raise HTTPException(504, "CLI worker cannot reach its primary") from exc
         prepared = await run_blocking_until_complete(
             partial(
                 sandbox_worker_prep.prepare_worker_request,
@@ -138,45 +143,22 @@ async def invoke_cli_shell(payload: CliShellRequest, request: Request) -> dict[s
     elif payload.handle not in state.handles:
         raise HTTPException(403, "CLI shell handle does not belong to this turn")
     launch = state.launch
-    binding = ShellWorkerBinding(
+    binding = AgentCliShellBinding(
         state.socket_path,
         f"agent-cli:{launch.worker_key}:{launch.turn_id}:{launch.generation}",
         payload.handle,
-        launch.gateway_url,
+        launch.primary_url,
         str(state.token_path),
     )
     shell_runtime = await run_blocking_until_complete(_shell_runtime, state, runtime)
-    toolkit = shell_tools()(
-        base_dir=launch.shell.workspace,
-        shell_path_prepend=launch.shell.shell_path_prepend,
-        runtime_paths=shell_runtime,
-        worker_binding=binding,
-    )
-    wrap_toolkit_for_output_files(
-        toolkit,
-        ToolOutputFilePolicy(
-            Path(launch.shell.workspace),
-            max_bytes=launch.shell.output_max_bytes,
-            auto_save_threshold_bytes=launch.shell.output_auto_save_threshold_bytes,
-        ),
-    )
-    function = toolkit.async_functions.get(operation.function_name) or toolkit.functions[operation.function_name]
-    entrypoint = function.entrypoint
-    assert entrypoint is not None
+    toolkit = build_agent_cli_shell(launch.shell, runtime_paths=shell_runtime, binding=binding)
     arguments = operation.model_dump(exclude={"function_name"}, exclude_none=True)
     if operation.function_name != "run_shell_command":
         arguments["handle"] = payload.handle
     elif "handle" in arguments:
         raise HTTPException(422, "Canonical shell run cannot select its supervisor handle")
-    function.process_entrypoint()
     try:
-        validate_tool_arguments(function_schema(function), arguments)
-    except ValueError as exc:
+        result = await invoke_agent_cli_shell(toolkit, operation.function_name, arguments)
+    except InvalidShellArgumentsError as exc:
         raise HTTPException(422, "Invalid canonical shell arguments") from exc
-    # Sync supervisor calls must finish before the HTTP operation's lifetime ends.
-    if inspect.iscoroutinefunction(entrypoint):
-        result = await entrypoint(**arguments)
-    else:
-        task = asyncio.create_task(asyncio.to_thread(entrypoint, **arguments))
-        result = await wait_for_future_until_complete(task)
     return {"result": result}

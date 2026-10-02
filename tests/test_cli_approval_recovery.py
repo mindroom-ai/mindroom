@@ -128,7 +128,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         resumed_counts.append(current_cli_lifetime().continuation_count)
         yield SimpleNamespace(handle=SimpleNamespace(worker_id="worker"), install_grant=AsyncMock())
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     monkeypatch.setattr(agents, "_initialize_agent_instance", build)
     monkeypatch.setattr(
         agents,
@@ -771,7 +771,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         "get_async_client",
         lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send))),
     )
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", worker)
     if nested:
         monkeypatch.setattr(approval_tools, "authorize_prepared_tool_call", authorize)
 

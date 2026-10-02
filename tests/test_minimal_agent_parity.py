@@ -172,7 +172,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
     async def open_worker(_runtime):
         yield worker
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", open_worker)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     identity = build_execution_identity_from_runtime_context(runtime)
@@ -266,7 +266,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         async def open_worker(_runtime, worker=worker):
             yield worker
 
-        monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+        monkeypatch.setattr(minimal_agent, "open_cli_shell", open_worker)
         provider = ScriptedProvider()
         provider.install(monkeypatch)
         for function, initial_arguments in (
@@ -334,7 +334,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
     async def open_worker(_runtime):
         yield worker
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", open_worker)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
 
@@ -785,7 +785,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     async def open_worker(runtime):
         yield ConcurrentWorker()
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    monkeypatch.setattr(minimal_agent, "open_cli_shell", open_worker)
 
     async def send(**request):
         runtime = get_tool_runtime_context()

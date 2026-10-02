@@ -395,6 +395,7 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.worker"
 depends_on = [
+    "mindroom.agent_cli.local_shell",
     "mindroom.agent_cli.worker_network",
     "mindroom.agent_cli.worker_protocol",
     "mindroom.tool_system.runtime_context",
@@ -407,12 +408,52 @@ visibility = [
 [[interfaces]]
 from = ["mindroom.agent_cli.worker"]
 expose = [
-    "open_configured_cli_worker",
+    "open_cli_shell",
+]
+
+[[modules]]
+path = "mindroom.agent_cli.local_shell"
+depends_on = [
+    "mindroom.agent_cli.shell_invocation",
+    "mindroom.runtime_state",
+    "mindroom.tool_system.sandbox_proxy",
+]
+visibility = [
+    "mindroom.agent_cli.worker",
+    "mindroom.minimal_mode_preflight",
+]
+
+[[interfaces]]
+from = ["mindroom.agent_cli.local_shell"]
+expose = [
+    "local_cli_shell_problems",
+    "open_local_cli_shell",
+    "shell_runs_in_primary",
+]
+
+[[modules]]
+path = "mindroom.agent_cli.shell_invocation"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.tool_access",
+]
+visibility = [
+    "mindroom.agent_cli.local_shell",
+    "mindroom.api.sandbox_runner_cli",
+]
+
+[[interfaces]]
+from = ["mindroom.agent_cli.shell_invocation"]
+expose = [
+    "InvalidShellArgumentsError",
+    "build_agent_cli_shell",
+    "invoke_agent_cli_shell",
 ]
 
 [[modules]]
 path = "mindroom.agent_cli.worker_network"
-depends_on = ["mindroom.agent_cli.worker_protocol"]
+depends_on = ["mindroom.agent_cli.worker_protocol", "mindroom.runtime_state"]
 visibility = [
     "mindroom.agent_cli.worker",
     "mindroom.api.sandbox_runner_cli",
@@ -423,6 +464,7 @@ visibility = [
 from = ["mindroom.agent_cli.worker_network"]
 expose = [
     "cli_deployment_problems",
+    "cli_primary_url",
     "probe_cli_network",
     "validate_cli_deployment",
 ]
@@ -437,11 +479,13 @@ visibility = [
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.workers.backends.docker",
 ]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.worker_protocol"]
 expose = [
+    "CLI_DOCKER_HOST_ALIAS",
     "CLI_PRIVATE_ROOT_PATH",
     "CliShellRequest",
     "CliShellSettings",
@@ -7506,6 +7550,7 @@ expose = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_cli"
 depends_on = [
+    "mindroom.agent_cli.shell_invocation",
     "mindroom.agent_cli.worker_network",
     "mindroom.agent_cli.worker_protocol",
     "mindroom.api.sandbox_env_assembly",
@@ -7513,8 +7558,6 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_worker_prep",
     "mindroom.background_tasks",
-    "mindroom.tool_system.output_files",
-    "mindroom.tool_system.tool_access",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -7601,6 +7644,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.minimal_mode_preflight"
 depends_on = [
+    "mindroom.agent_cli.local_shell",
     "mindroom.agent_cli.worker_network",
     "mindroom.agent_cli.worker_protocol",
     "mindroom.runtime_resolution",

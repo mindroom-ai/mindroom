@@ -14,7 +14,7 @@ from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_cli.worker import open_configured_cli_worker
+from mindroom.agent_cli.worker import open_cli_shell
 from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES, CliShellSettings
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.approval_tools import authorize_prepared_tool_call
@@ -286,7 +286,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
 
             owner = lifetime.owner
             if owner is None:
-                worker = await lifetime.enter_worker(open_configured_cli_worker(runtime))
+                worker = await lifetime.enter_worker(open_cli_shell(runtime))
                 owner = LiveTurnTools(
                     cli_turn_owner(
                         runtime,

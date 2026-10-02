@@ -243,26 +243,6 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             },
         )
         primary_url = f"http://{_ip(primary)}:8080"
-        gateway_conf = data / "gateway.conf"
-        gateway_conf.write_text(
-            "events {}\nhttp { access_log off; server { listen 8080;\n"
-            "location = /api/agent-cli/operations { if ($request_method != POST) { return 405; } proxy_pass "
-            + primary_url
-            + "; }\n"
-            "location ~ ^/api/agent-cli/calls/[a-zA-Z0-9_-]+$ { if ($request_method != GET) { return 405; } proxy_pass "
-            + primary_url
-            + "; }\n"
-            "location / { return 404; } } }\n",
-        )
-        gateway = client.containers.run(
-            "nginx:1.28-alpine",
-            name=f"{prefix}-gateway",
-            detach=True,
-            volumes={
-                str(gateway_conf): {"bind": "/etc/nginx/nginx.conf", "mode": "ro"},
-            },
-        )
-        gateway_url = f"http://{_ip(gateway)}:8080"
         plugin_dir = data / "plugin"
         plugin_dir.mkdir()
         (plugin_dir / "mindroom.plugin.json").write_text(
@@ -283,7 +263,6 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             storage_path=data / "state",
             process_env={
                 "MINDROOM_API_KEY": admin,
-                "MINDROOM_AGENT_CLI_GATEWAY_URL": gateway_url,
                 "MINDROOM_AGENT_CLI_PRIMARY_URL": primary_url,
                 "MINDROOM_WORKER_BACKEND": "docker",
                 "MINDROOM_SANDBOX_PROXY_TOKEN": control,

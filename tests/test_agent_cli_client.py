@@ -45,7 +45,7 @@ def test_real_http_client_and_redirect_fence(tmp_path: Path, monkeypatch: pytest
     thread.start()
     token = tmp_path / "token"
     token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
     payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
     try:
@@ -95,7 +95,7 @@ def test_wait_timeout_returns_pending_receipt(
     thread.start()
     token = tmp_path / "token"
     token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
     try:
         assert main(["calls", "wait", call_id, "--timeout", str(timeout)]) == 3
@@ -140,7 +140,7 @@ def test_rejection_relays_server_detail(
     thread.start()
     token = tmp_path / "token"
     token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
     payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
     try:

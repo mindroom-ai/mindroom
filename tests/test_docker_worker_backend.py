@@ -1722,6 +1722,10 @@ def test_docker_cli_worker_private_root_is_on_the_writable_tmpfs(
     run_call = fake_client.containers.run_calls[0]
     assert run_call["read_only"] is True
     assert any(PurePosixPath(CLI_PRIVATE_ROOT_PATH).is_relative_to(path) for path in run_call["tmpfs"])
+    # The CLI calls the primary API back through the Docker host by default.
+    assert run_call["extra_hosts"] == {"host.docker.internal": "host-gateway"}
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    assert "extra_hosts" not in fake_client.containers.run_calls[1]
 
 
 def test_docker_workers_mount_the_startup_manifest_directory_read_only(
