@@ -24,6 +24,7 @@ from mindroom.shell_execution import (
     ProcessRecord,
     check_command,
     kill_command,
+    kill_namespace_records,
     run_command,
 )
 from mindroom.shell_output_capture import ShellOutputDestination
@@ -125,6 +126,11 @@ _WORKING_METHOD_NOTE = (
 # This ensures handles survive toolkit re-creation for local execution; when a
 # supervisor socket is advertised, the supervisor owns the registry instead.
 _process_registry: dict[str, ProcessRecord] = {}
+
+
+def retire_local_shell_namespace(namespace: str) -> None:
+    """Stop this process's background commands in one namespace, as retiring a worker stops its own."""
+    kill_namespace_records(_process_registry, namespace)
 
 
 def _normalize_shell_command_line(command: str) -> list[str]:

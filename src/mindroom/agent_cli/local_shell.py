@@ -20,7 +20,7 @@ from uuid import uuid4
 from mindroom.agent_cli.shell_invocation import build_agent_cli_shell, invoke_agent_cli_shell
 from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.tools.shell import AgentCliShellBinding
+from mindroom.tools.shell import AgentCliShellBinding, retire_local_shell_namespace
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -72,6 +72,7 @@ class LocalCliShell:
     handle: _LocalHandle = field(default_factory=lambda: _LocalHandle(f"local:{uuid4().hex}"))
     _bridge: TurnToolBridge | None = field(default=None, init=False, repr=False)
     _private_dir: Path | None = field(default=None, init=False, repr=False)
+    _namespace: str | None = field(default=None, init=False, repr=False)
     _toolkit: Toolkit | None = field(default=None, init=False, repr=False)
 
     async def install_grant(self, bridge: TurnToolBridge, grant: CliGrant, *, shell: CliShellSettings) -> None:
@@ -91,9 +92,10 @@ class LocalCliShell:
             with os.fdopen(fd, "w") as stream:
                 stream.write(grant.raw_token)
             owner = bridge.owner
+            self._namespace = f"agent-cli:{self.handle.worker_id}:{owner.turn_id}:{owner.generation}"
             binding = AgentCliShellBinding(
                 socket_path=None,
-                namespace=f"agent-cli:{self.handle.worker_id}:{owner.turn_id}:{owner.generation}",
+                namespace=self._namespace,
                 handle=None,
                 api_url=api_address.base_url,
                 token_path=str(token_path),
@@ -117,10 +119,14 @@ class LocalCliShell:
         return await invoke_agent_cli_shell(self._toolkit, function_name, arguments)
 
     def close(self) -> None:
-        """Revoke the grant and remove its file; background commands keep their own lifetime."""
+        """Revoke the grant, stop this response's background commands, and remove the grant file."""
         self._toolkit = None
         if self._bridge is not None:
             self._bridge.revoke()
+        if self._namespace is not None:
+            # Nothing can reach these handles after the response, like a retired worker's.
+            retire_local_shell_namespace(self._namespace)
+            self._namespace = None
         if self._private_dir is not None:
             shutil.rmtree(self._private_dir, ignore_errors=True)
             self._private_dir = None

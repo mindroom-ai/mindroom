@@ -135,7 +135,7 @@ Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
 The isolated worker remains owned by the response across its live waits and continuations, then retires when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background command handles belong to that response's worker.
+Background command handles belong to that response and stop when it ends, with its worker or, for a shell in MindRoom itself, with its local shell.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
