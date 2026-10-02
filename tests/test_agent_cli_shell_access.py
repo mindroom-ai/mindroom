@@ -193,9 +193,11 @@ def test_minimal_bash_needs_the_running_api(tmp_path: Path, *, worker: bool) -> 
 def test_local_launcher_survives_temp_cleaners(tmp_path: Path) -> None:
     """A long-running MindRoom makes the launcher again after a temp cleaner removes it."""
     runtime = _runtime_context(tmp_path)
-    first = Path(agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir or "")
+    first = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
+    assert first is not None
     shutil.rmtree(first)
 
-    second = Path(agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir or "")
+    second = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
 
-    assert os.access(second / "mindroom-agent", os.X_OK)
+    assert second is not None
+    assert os.access(Path(second) / "mindroom-agent", os.X_OK)
