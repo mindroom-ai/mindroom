@@ -29,7 +29,7 @@ from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
@@ -85,7 +85,7 @@ async def test_catalog_prepares_only_included_functions(tmp_path: Path) -> None:
     )
 
     assert [(item["toolkit"], item["function"]) for item in catalog.metadata()] == [("mixed", "keep")]
-    with pytest.raises(ValueError, match="unavailable"):
+    with pytest.raises(UnknownToolError, match="no function 'drop'; its functions: keep"):
         await catalog.bind(ToolKey("mixed", "drop"))
 
 
