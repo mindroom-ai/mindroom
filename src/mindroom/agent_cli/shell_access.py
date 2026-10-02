@@ -9,6 +9,7 @@ the network, so the API must refuse requests without credentials.
 from __future__ import annotations
 
 import ipaddress
+import os
 import shlex
 import sys
 from typing import TYPE_CHECKING
@@ -51,8 +52,9 @@ def _local_bin_dir(runtime_paths: RuntimePaths) -> str:
     """
     bin_dir = runtime_paths.storage_root / "agent_cli_bin"
     launcher = bin_dir / "mindroom-agent"
-    # A launcher left by an earlier installation runs that installation's interpreter.
-    if not launcher.is_file() or launcher.read_text() != _LAUNCHER:
+    # A launcher left by an earlier installation runs that installation's interpreter, and one
+    # that lost its exec bit (a crash before `chmod`, a restore without modes) fails every command.
+    if not launcher.is_file() or launcher.read_text() != _LAUNCHER or not os.access(launcher, os.X_OK):
         bin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         launcher.write_text(_LAUNCHER)
         launcher.chmod(0o700)

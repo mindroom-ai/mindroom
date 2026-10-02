@@ -211,7 +211,7 @@ def test_local_launcher_directory_is_private_to_mindroom(tmp_path: Path) -> None
 
 
 @pytest.mark.usefixtures("api_address")
-def test_local_launcher_survives_temp_cleaners(tmp_path: Path) -> None:
+def test_local_launcher_is_recreated_after_removal(tmp_path: Path) -> None:
     """A long-running MindRoom makes the launcher again after something removes it."""
     runtime = _runtime_context(tmp_path)
     first = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
@@ -222,3 +222,16 @@ def test_local_launcher_survives_temp_cleaners(tmp_path: Path) -> None:
 
     assert second is not None
     assert os.access(Path(second) / "mindroom-agent", os.X_OK)
+
+
+@pytest.mark.usefixtures("api_address")
+def test_local_launcher_is_made_executable_again(tmp_path: Path) -> None:
+    """A launcher with the right content that lost its exec bit would fail every minimal command."""
+    runtime = _runtime_context(tmp_path)
+    first = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
+    assert first is not None
+    launcher = Path(first) / "mindroom-agent"
+    launcher.chmod(0o644)
+
+    assert agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir == first
+    assert os.access(launcher, os.X_OK)
