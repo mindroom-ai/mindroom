@@ -1633,6 +1633,31 @@ class TestBoundedReads:
 
         assert seen == [f"$m{index:03d}" for index in range(25)]
 
+    async def test_a_page_stops_at_its_content_budget_and_pages_on(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row limit does not bound a read whose rows anyone can make megabytes long.
+
+        The page keeps its newest messages that fit the budget and hands back a
+        cursor, so a reader sees history behind it instead of a whole thread.
+        """
+        monkeypatch.setattr(reads, "_PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        for index in range(5):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+        pages: list[list[str]] = []
+        cursor = None
+        while True:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
+            pages.insert(0, [m.logical_event_id for m in page.messages])
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert pages == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
+
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
         """A page is chronological."""
         for index in range(5):

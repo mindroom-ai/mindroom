@@ -27,6 +27,14 @@ _PAGE_COLUMNS = """
     logical_event_id, room_id, thread_id, sender, created_ts,
     revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
 """
+# Order and stored size only, so a page is sized before any content is loaded.
+# Stored content is ASCII-only JSON, so its length is its size in bytes.
+_PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, length(content_json) AS content_bytes"
+
+# How much stored content one page loads, newest message first. A resolved
+# long-text sidecar can be megabytes, and anyone who can post can make every
+# message in a thread name one, so a row limit alone does not bound a read.
+_PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 
 # Everything older than one page's last row, spelled as a row value.
 #
@@ -72,17 +80,36 @@ def read_conversation(
     returns it: the row's body was cleared in the same transaction that
     admitted the redaction, so no caller can serve deleted content, whether or
     not it is willing to wait for the refetch.
+
+    A page also ends before ``limit`` once its stored content passes a fixed
+    budget, and then carries a cursor exactly as a full page does. Its rows are
+    sized first and only the ones that fit are loaded.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
         raise ValueError(msg)
-    rows = _page_rows(
+    sizes = _page_rows(
         transaction,
         principal_id,
         room_id=room_id,
         thread_id=thread_id,
         limit=limit,
         before=before,
+        columns=_PAGE_SIZE_COLUMNS,
+    )
+    kept = _rows_within_content_budget(sizes)
+    rows = (
+        _page_rows(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            limit=kept,
+            before=before,
+            columns=_PAGE_COLUMNS,
+        )
+        if kept
+        else ()
     )
     messages: list[VisibleMessage] = []
     refresh_pending: list[RefreshRequest] = []
@@ -96,7 +123,7 @@ def read_conversation(
             created_ts=int(rows[-1]["created_ts"]),
             logical_event_id=rows[-1]["logical_event_id"],
         )
-        if len(rows) == limit
+        if rows and (kept < len(sizes) or len(sizes) == limit)
         else None
     )
     return ConversationPage(
@@ -114,6 +141,7 @@ def _page_rows(
     thread_id: str | None,
     limit: int,
     before: ConversationCursor | None,
+    columns: str,
 ) -> tuple[Row, ...]:
     """Return one page's rows, newest first.
 
@@ -127,7 +155,7 @@ def _page_rows(
     rows = list(
         transaction.fetchall(
             f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            SELECT {columns} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND thread_id = ?{cursor_clause}
             ORDER BY created_ts DESC, logical_event_id DESC
             LIMIT ?
@@ -138,7 +166,7 @@ def _page_rows(
     if thread_id is not None:
         root = transaction.fetchone(
             f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            SELECT {columns} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?{cursor_clause}
             """,  # noqa: S608 - a fixed column list and a fixed clause, not input
             (principal_id, room_id, thread_id, *cursor_params),
@@ -148,6 +176,20 @@ def _page_rows(
             rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
             del rows[limit:]
     return tuple(rows)
+
+
+def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
+    """Return how many of one page's newest rows fit its content budget, never fewer than one.
+
+    A row owing a refetch holds no content and costs nothing, so resolving it
+    can only shorten the next read of the same page, never lengthen it.
+    """
+    total = 0
+    for index, row in enumerate(rows):
+        total += int(row["content_bytes"] or 0)
+        if total > _PAGE_CONTENT_BUDGET_BYTES:
+            return max(index, 1)
+    return len(rows)
 
 
 def latest_visible_event_id(

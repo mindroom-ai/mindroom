@@ -121,6 +121,10 @@ A file that cannot be read settles the debt as a plain text message holding the 
 
 Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
 
+Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
+
+A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
+
 ## Edits
 
 An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.
