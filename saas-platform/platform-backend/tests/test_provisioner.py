@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import pytest
 from backend.openrouter import CreatedOpenRouterKey, OpenRouterError
+from backend.services import provisioner_service
 from fastapi.testclient import TestClient
 
 from tests.fake_supabase import FakeSupabase
@@ -572,7 +573,7 @@ class TestProvisionerEndpoints:
         update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
 
-    def test_hobby_provisioning_continues_if_openrouter_metadata_persist_fails(
+    def test_hobby_provisioning_deletes_a_key_whose_metadata_cannot_be_recorded(
         self,
         client: TestClient,
         mock_supabase: MagicMock,
@@ -582,7 +583,7 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """Generated OpenRouter keys should still be applied if audit metadata persistence fails."""
+        """A created key the instance row does not record is deleted, because only recorded keys are ever disabled."""
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
         created_key = CreatedOpenRouterKey(
@@ -600,6 +601,7 @@ class TestProvisionerEndpoints:
                 create=True,
             ),
             patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+            patch("backend.services.provisioner_service.delete_openrouter_key") as delete_key,
             patch(
                 "backend.services.provisioner_service._persist_openrouter_key_metadata",
                 side_effect=RuntimeError("supabase unavailable"),
@@ -615,9 +617,9 @@ class TestProvisionerEndpoints:
                 headers=valid_auth_header,
             )
 
-        assert response.status_code == 200
-        secret_data = _applied_instance_secret_data(apply_secret)
-        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        assert response.status_code == 500
+        delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="hobby_hash")
+        mock_helm.assert_not_called()
 
     def test_hobby_provisioning_missing_openrouter_management_key_returns_operator_error(
         self,
@@ -914,7 +916,7 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """Existing instances should only enable credential encryption explicitly."""
+        """An existing keyless instance can opt into credential encryption explicitly."""
         mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
         mock_kubectl.side_effect = _kubectl_without_credentials_encryption_secret
 
@@ -934,6 +936,53 @@ class TestProvisionerEndpoints:
         helm_args = mock_helm.call_args.args[0]
         _assert_helm_uses_external_instance_secret(helm_args)
         assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
+
+    @pytest.mark.parametrize(
+        ("pvc_names", "keyless"),
+        [
+            pytest.param([], False, id="torn-down"),
+            pytest.param(["mindroom-storage-456", "synapse-storage-456"], True, id="existing-volume"),
+        ],
+    )
+    def test_reprovision_without_a_stored_key_keeps_plaintext_only_on_an_existing_volume(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+        pvc_names: list[str],
+        keyless: bool,  # noqa: FBT001
+    ):
+        """A torn-down instance rebuilt on new volumes gets its derived key; only an old volume may stay keyless."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+
+        async def kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:
+            if args[:2] == ["get", "pvc"]:
+                return 0, json.dumps({"items": [{"metadata": {"name": name}, "spec": {}} for name in pvc_names]}), ""
+            return await _kubectl_without_credentials_encryption_secret(args, namespace)
+
+        mock_kubectl.side_effect = kubectl
+        with patch(
+            "backend.services.provisioner_service._apply_instance_secret", new_callable=AsyncMock
+        ) as apply_secret:
+            apply_secret.return_value = "hash"
+            response = client.post(
+                "/system/provision",
+                json={
+                    "subscription_id": "sub_test_123",
+                    "account_id": "acc_test_123",
+                    "tier": "byok",
+                    "instance_id": "456",
+                },
+                headers=valid_auth_header,
+            )
+
+        assert response.status_code == 200
+        key = _applied_instance_secret_data(apply_secret)["credentials_encryption_key"]
+        assert key == ("" if keyless else provisioner_service._instance_credentials_encryption_key("456"))
 
     def test_provision_re_provision_existing_fails_when_existing_key_lookup_fails(
         self,

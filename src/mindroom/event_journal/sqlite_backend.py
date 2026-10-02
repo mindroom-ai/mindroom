@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 
 from .legacy_response_attempts import migrate_response_attempts
-from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
+from .legacy_schema import upgrade_approval_argument_digests, upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
 
@@ -43,6 +43,8 @@ _WRITER_STOPPED_MESSAGE = "The event-journal writer stopped before running this 
 # handler will not retry. Short enough that a contended open is not noticeably
 # slower than an uncontended one, long enough not to spin.
 _WAL_RETRY_SECONDS = 0.05
+# The first SQLite release with a built-in ``octet_length``.
+_OCTET_LENGTH_VERSION = (3, 43, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,13 @@ def _enter_wal(connection: sqlite3.Connection) -> None:
             return
 
 
+def _octet_length(value: str | bytes | None) -> int | None:
+    """Return a stored value's size in bytes, as SQLite 3.43's ``octet_length`` does."""
+    if value is None:
+        return None
+    return len(value.encode() if isinstance(value, str) else value)
+
+
 def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
     """Open one connection onto the journal, durable as far as its role needs.
 
@@ -108,6 +117,10 @@ def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
     every statement below it waits rather than failing on the spot.
     """
     connection.row_factory = sqlite3.Row
+    if sqlite3.sqlite_version_info < _OCTET_LENGTH_VERSION:
+        # Reads size rows with ``octet_length``, which older libraries lack.
+        # This stand-in loads each value to measure it, as ``length`` would.
+        connection.create_function("octet_length", 1, _octet_length, deterministic=True)
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
     _enter_wal(connection)
     connection.execute(f"PRAGMA synchronous = {synchronous}")
@@ -210,10 +223,11 @@ class SqliteBackend:
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
-            upgrade_approval_toolkit_origins(
-                _SqliteTransaction(connection),
-                frozenset(str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")),
+            call_columns = frozenset(
+                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")
             )
+            upgrade_approval_toolkit_origins(_SqliteTransaction(connection), call_columns)
+            upgrade_approval_argument_digests(_SqliteTransaction(connection), call_columns)
             migrate_response_attempts(_SqliteTransaction(connection), existing_tables)
             connection.execute("COMMIT")
         except BaseException:

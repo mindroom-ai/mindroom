@@ -46,7 +46,9 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
     approval_denial_context,
+    approved_executions_context,
     record_approval_denials,
+    refuse_unapproved_executions,
     required_approval_tool_names,
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
@@ -2596,12 +2598,12 @@ def _team_approval_events(
     )
 
 
-def _member_approval_denials(
+def _member_calls_by_run(
     member_id: str | None,
     calls: Mapping[str, ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> dict[str, list[ApprovalCall]]:
-    """Bind denied member calls to their persisted native run identities."""
+    """Bind saved member calls to their persisted native run identities."""
     calls_by_run: dict[str, list[ApprovalCall]] = {}
     for requirement in requirements:
         tool = requirement.tool_execution
@@ -2613,6 +2615,20 @@ def _member_approval_denials(
             raise RuntimeError(msg)
         calls_by_run.setdefault(requirement.member_run_id, []).append(call)
     return calls_by_run
+
+
+def _enter_member_approval_contexts(
+    stack: ExitStack,
+    member: Agent,
+    calls: Sequence[ApprovalCall],
+    decisions: Mapping[str, bool],
+    requirements: Sequence[RunRequirement],
+) -> None:
+    """Allow only this member's approved stored calls to run, and apply its exact denials."""
+    approved = {call.tool_call_id: call for call in calls if decisions.get(call.tool_call_id)}
+    denied = {call.tool_call_id: call for call in calls if not decisions.get(call.tool_call_id)}
+    stack.enter_context(approved_executions_context(member, _member_calls_by_run(member.id, approved, requirements)))
+    stack.enter_context(approval_denial_context(member, _member_calls_by_run(member.id, denied, requirements)))
 
 
 def _approval_history_scope(
@@ -2756,11 +2772,9 @@ async def continue_paused_team_run(
             requirements=requirements,
         )
         validate_approval_tool_owners(members.agents, approved_calls, requirements)
-        denied_calls = {call.tool_call_id: call for call in local_calls if not decisions.get(call.tool_call_id)}
+        refuse_unapproved_executions(persisted, approved_calls)
         for member in members.agents:
-            stack.enter_context(
-                approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)),
-            )
+            _enter_member_approval_contexts(stack, member, local_calls, decisions, requirements)
             if member.model is not None:
                 install_approval_receipt_hooks(member.model, member.fallback_config)
         presentation = _TeamStreamPresentation.restore(

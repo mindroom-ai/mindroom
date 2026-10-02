@@ -195,8 +195,10 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
         sender: str | None = None,
         event_timestamp: int | None = None,
         cleanup_loop: asyncio.AbstractEventLoop | None = None,
+        retained_name: str | None = None,
     ) -> AttachmentRecord:
         assert cleanup_loop is not None
+        assert retained_name == local_path.name
         registration_thread_ids.append(threading.get_ident())
         return AttachmentRecord(
             attachment_id=attachment_id or "att_generated",
@@ -295,6 +297,128 @@ async def test_register_matrix_media_attachment_stops_reading_an_oversized_downl
     assert response.streamed_bytes <= limit + 64 * 1024
     assert response.released
     assert not (tmp_path / "incoming_media").exists()
+
+
+@pytest.mark.asyncio
+async def test_thread_history_media_that_failed_is_not_downloaded_again_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed registration leaves no record, so each turn used to download the media again.
+
+    Anyone who can post can name media that always fails, such as a file over
+    the size cap, and every turn in that conversation fetched each one in full.
+    """
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
+    history = [
+        make_visible_message(
+            event_id=f"$huge{index}",
+            content={"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        )
+        for index in range(3)
+    ]
+
+    for _turn in range(2):
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        assert attachment_ids == []
+
+    assert client.send.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) -> None:
+    """Each event keeps its own record, but events naming one upload share its single copy."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"%PDF-1.7 shared"))
+    records = []
+    for index in range(3):
+        event = nio.Event.parse_event(
+            {
+                "event_id": f"$copy{index}",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1780736400000,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.file", "body": "report.pdf", "url": "mxc://localhost/shared"},
+            },
+        )
+        assert isinstance(event, nio.RoomMessageFile)
+        records.append(
+            await register_matrix_media_attachment(
+                client,
+                tmp_path,
+                room_id="!room:localhost",
+                thread_id=None,
+                event=event,
+            ),
+        )
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    stored = [record for record in records if record is not None]
+    assert [record.attachment_id for record in stored] == [
+        _attachment_id_for_event(f"$copy{index}") for index in range(3)
+    ]
+    assert {record.local_path for record in stored} == {stored[0].local_path}
+    assert [path.read_bytes() for path in (tmp_path / "incoming_media").iterdir()] == [b"%PDF-1.7 shared"]
+
+
+def test_shared_media_reused_while_cleanup_runs_outlives_its_expired_record(tmp_path: Path) -> None:
+    """Cleanup counts references before deleting, so media reused in between must survive it.
+
+    Events naming one upload share a single file. When the only record a
+    cleanup counted for it had expired, the cleanup deleted the file under a
+    record that a new event had just registered against it.
+    """
+    payload = b"%PDF-1.7 shared"
+
+    def register(event_id: str) -> AttachmentRecord | None:
+        local_path = attachments_module._store_media_bytes_locally(tmp_path, payload, "application/pdf")
+        assert local_path is not None
+        return register_local_attachment(
+            tmp_path,
+            local_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event(event_id),
+            mime_type="application/pdf",
+            room_id="!room:localhost",
+            source_event_id=event_id,
+            retained_name=local_path.name,
+        )
+
+    old = register("$old")
+    assert old is not None
+    old_record_path = tmp_path / "attachments" / f"{old.attachment_id}.json"
+    expired = datetime.now(UTC) - timedelta(days=45)
+    old_record_path.write_text(
+        json.dumps(json.loads(old_record_path.read_text(encoding="utf-8")) | {"created_at": expired.isoformat()}),
+        encoding="utf-8",
+    )
+    os.utime(old.local_path, (expired.timestamp(), expired.timestamp()))
+
+    collect = attachments_module._collect_attachment_cleanup_state
+    reused: list[AttachmentRecord | None] = []
+
+    def collect_then_reuse(storage_path: Path, *, cutoff: datetime) -> object:
+        state = collect(storage_path, cutoff=cutoff)
+        reused.append(register("$new"))
+        return state
+
+    with patch.object(attachments_module, "_collect_attachment_cleanup_state", collect_then_reuse):
+        attachments_module._cleanup_attachment_storage(tmp_path)
+
+    [new] = reused
+    assert new is not None
+    assert new.local_path == old.local_path
+    assert load_attachment(tmp_path, old.attachment_id) is None
+    assert load_attachment(tmp_path, new.attachment_id) == new
+    assert new.local_path.read_bytes() == payload
 
 
 def test_register_bytes_attachment_retains_any_file_type_under_a_generated_name(tmp_path: Path) -> None:

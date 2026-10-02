@@ -16,7 +16,13 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KIND_KEY, STREAM_STATUS_KEY
+from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    SOURCE_KIND_KEY,
+    STREAM_STATUS_KEY,
+)
 from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchResponse
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -427,9 +433,39 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
     ctx.client.room_send.assert_awaited_once_with(
         room_id=ctx.room_id,
         message_type="m.room.message",
-        content=content,
+        content={**content, ACTING_REQUESTER_KEY: "@user:localhost"},
         ignore_unverified_devices=True,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requester_id", "acting_requester"),
+    [("@user:localhost", "@user:localhost"), ("@mindroom_general:localhost", None)],
+)
+async def test_matrix_api_send_event_room_message_names_the_human_requester(
+    requester_id: str,
+    acting_requester: str | None,
+) -> None:
+    """Agents a raw message mentions must act for the human the agent answers, not for the agent itself."""
+    tool = MatrixApiTools()
+    ctx = replace(_make_context(), requester_id=requester_id)
+    content = {
+        "msgtype": "m.text",
+        "body": "@mindroom_research:localhost please do the task",
+        "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+    }
+    ctx.client.room_send.return_value = nio.RoomSendResponse(event_id="$send:localhost", room_id=ctx.room_id)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(action="send_event", event_type="m.room.message", content=content),
+        )
+
+    assert payload["status"] == "ok"
+    sent = ctx.client.room_send.await_args.kwargs["content"]
+    assert sent.get(ACTING_REQUESTER_KEY) == acting_requester
+    assert {key: value for key, value in sent.items() if key != ACTING_REQUESTER_KEY} == content
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ from mindroom.constants import (
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
 from mindroom.redaction import redact_sensitive_text
@@ -247,6 +247,7 @@ class ApprovalResponseCoordinator:
                 tool_name=tool_name,
                 invoking_agent=invoking_agent,
                 toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
+                arguments_digest=approval_arguments_digest(tool.tool_args),
                 expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
                 decision=decisions[tool_call_id][0],
                 reason=(
@@ -256,7 +257,7 @@ class ApprovalResponseCoordinator:
                 ),
                 human_approval_required=decisions[tool_call_id][2],
             )
-            for _tool, tool_call_id, tool_name, invoking_agent in identified
+            for tool, tool_call_id, tool_name, invoking_agent in identified
         )
         if any(call.toolkit_name is None for call in calls):
             msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"

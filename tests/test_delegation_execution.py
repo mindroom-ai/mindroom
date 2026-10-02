@@ -37,7 +37,7 @@ from mindroom.delegation.lifecycle import note_child_run_id
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.teams import (
@@ -103,6 +103,7 @@ def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
                 invoking_agent=invoking_agent,
                 toolkit_name=toolkit_name,
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool["tool_args"]),
             ),
         )
     return tuple(calls)
@@ -493,6 +494,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                             invoking_agent="code",
                             toolkit_name="file",
                             expires_at_ns=2**62,
+                            arguments_digest=approval_arguments_digest(state.pending_tools[0]["tool_args"]),
                         ),
                     ),
                 }

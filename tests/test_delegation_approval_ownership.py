@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -9,8 +11,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agno.agent import Agent
-from agno.models.response import ModelResponse
+from agno.models.response import ModelResponse, ToolExecution
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 from agno.team import Team
 from agno.tools.calculator import CalculatorTools
 
@@ -23,12 +26,14 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.delegation.lifecycle import child_execution_identity
+from mindroom.delegation.recovery import read_child_run
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
 from mindroom.teams import TeamMode, _attach_team_pause_presentation, continue_paused_team_run
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
@@ -47,15 +52,26 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("parent_kind", ["agent", "self", "team"])
 @pytest.mark.parametrize(
     "decision",
-    ["approve", "deny_removed", "approve_removed", "wrong_owner", "deny_gate", "approve_gate"],
+    [
+        "approve",
+        "deny_removed",
+        "approve_removed",
+        "wrong_owner",
+        "approve_planted",
+        "deny_gate",
+        "approve_gate",
+        "rewrite_gate",
+        "approve_planted_gate",
+        "deny_planted_gate",
+    ],
 )
-async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR0915
+async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C901, PLR0912, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     parent_kind: str,
     decision: str,
 ) -> None:
-    """Reconstruction may restore an approved owner, but cannot substitute or revive a removed tool."""
+    """Reconstruction may restore an approved owner, but cannot substitute, add, or revive a tool call."""
     child_name = "leader" if parent_kind == "self" else "child"
     gate = decision.endswith("gate")
     config = Config(
@@ -175,6 +191,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
                 invoking_agent=invoking_agent,
                 toolkit_name="file" if decision == "wrong_owner" else toolkit_name,
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
             )
             if not gate:
                 child = DelegationState.from_metadata(response.metadata).children[0]
@@ -186,9 +203,59 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             dynamic_toolkits._loaded_tools.clear()
             if decision.endswith("removed"):
                 config.agents[child_name].tools = []
+            if decision == "rewrite_gate":
+                # Only the separate external requirement changes; the approved gate card keeps its arguments.
+                rewritten = deepcopy(response)
+                external = next(item for item in rewritten.requirements or () if item.needs_external_execution)
+                assert external.tool_execution is not None
+                external.tool_execution.tool_args = {
+                    **(external.tool_execution.tool_args or {}),
+                    "task": "Add 40 and 2",
+                }
+                storage.upsert_run(run=rewritten, session_id=identity.session_id, user_id=identity.requester_id)
+            elif decision.endswith("planted_gate"):
+                # A second delegation and an approved gate for it appear only in the stored run.
+                planted_run = deepcopy(response)
+                external = next(item for item in planted_run.requirements or () if item.needs_external_execution)
+                assert external.tool_execution is not None
+                planted_tool = deepcopy(external.tool_execution)
+                planted_tool.tool_call_id = "planted"
+                planted_tool.tool_args = {**(planted_tool.tool_args or {}), "task": "Add 40 and 2"}
+                planted = RunRequirement(planted_tool)
+                planted.member_agent_id = external.member_agent_id
+                planted.member_agent_name = external.member_agent_name
+                planted.member_run_id = external.member_run_id
+                planted_run.requirements = [*(planted_run.requirements or ()), planted]
+                planted_key = f"{planted.member_agent_id}:planted" if planted.member_agent_id else "planted"
+                planted_state = DelegationState.from_metadata(planted_run.metadata)
+                planted_state.gates[planted_key] = True
+                planted_run.metadata = {**(planted_run.metadata or {}), DELEGATION_STATE_KEY: planted_state.to_dict()}
+                storage.upsert_run(run=planted_run, session_id=identity.session_id, user_id=identity.requester_id)
+            elif decision == "approve_planted":
+                child = DelegationState.from_metadata(response.metadata).children[0]
+                child_run = await read_child_run(child, config, paths)
+                assert child_run is not None
+                child_run.tools = [
+                    *(child_run.tools or ()),
+                    ToolExecution(
+                        tool_call_id="planted",
+                        tool_name="add",
+                        tool_args={"a": 40, "b": 2},
+                        requires_confirmation=True,
+                        confirmed=True,
+                    ),
+                ]
+                child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
+                try:
+                    child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
+                finally:
+                    child_storage.close()
             decisions = {call.tool_call_id: not decision.startswith("deny")}
             reasons = {call.tool_call_id: "Requester declined"}
-            with tool_runtime_context(context):
+            with (
+                tool_runtime_context(context),
+                pytest.raises(RuntimeError, match="pending arguments") if decision == "rewrite_gate" else nullcontext(),
+            ):
                 if parent_kind == "team":
                     result = await continue_paused_team_run(
                         member_names=("leader",),
@@ -244,6 +311,19 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
                         typing_log_context={},
                         progress=None,
                     )
+            if decision == "rewrite_gate":
+                assert executed == []
+                assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
+                return
+            if decision.endswith("planted_gate"):
+                # Only the approved delegation may start; the planted one waits for its own card.
+                approved = decision.startswith("approve")
+                runs = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
+                assert len(runs) == (1 if approved else 0)
+                assert executed == ([(2, 3)] if approved else [])
+                assert isinstance(result, PausedAttempt)
+                assert [tool.tool_call_id for tool in result.tools] == [planted_key]
+                return
             assert isinstance(result, CompletedApprovalRun)
             assert executed == ([(2, 3)] if decision in {"approve", "approve_gate"} else [])
             child_result = str(
@@ -252,7 +332,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             if decision == "deny_gate":
                 assert "child was not executed" in child_result
                 assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
-            elif decision in {"approve_removed", "wrong_owner"}:
+            elif decision in {"approve_removed", "wrong_owner", "approve_planted"}:
                 assert "failed" in child_result
             else:
                 assert "Child finished." in child_result

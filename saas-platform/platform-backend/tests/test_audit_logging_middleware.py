@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -90,9 +91,9 @@ def test_accepted_mutations_are_audited_with_request_metadata_only(
     """Tenant, provisioner, and webhook mutations are audited, and their bodies never reach the row."""
     body = json.dumps({"customer_email": "payer@example.test", "payload": "a" * 100_000})
 
-    response = TestClient(_app_with_mutation_routes(MOUNTED_MUTATION_PATHS, actor=actor)).post(
-        path, content=body, headers={"Content-Type": "application/json", "X-Real-IP": "203.0.113.7"}
-    )
+    response = TestClient(
+        _app_with_mutation_routes(MOUNTED_MUTATION_PATHS, actor=actor), client=("203.0.113.7", 50000)
+    ).post(path, content=body, headers={"Content-Type": "application/json"})
 
     assert response.json() == {"received": len(body)}
     [row] = _inserted_rows(audit_table)
@@ -126,7 +127,7 @@ def _jwt_with_exp(expires_at: datetime) -> str:
 def test_authenticated_mutation_is_attributed_to_the_account(
     monkeypatch: pytest.MonkeyPatch, audit_table: Mock
 ) -> None:
-    """Audit rows name the verified account, its email, and the ingress-reported client IP."""
+    """Audit rows name the verified account, its email, and the client IP the trusted ingress reports."""
     auth_user = Mock()
     auth_user.user.id = "user_123"
     auth_user.user.email = "user@example.test"
@@ -138,9 +139,10 @@ def test_authenticated_mutation_is_attributed_to_the_account(
     )
     monkeypatch.setattr(deps, "_ensure_auth_client", lambda: auth_client)
     monkeypatch.setattr(deps, "ensure_supabase", lambda: sb)
+    monkeypatch.setattr(deps, "TRUSTED_PROXY_NETWORKS", (ipaddress.ip_network("10.42.0.0/16"),))
     token = _jwt_with_exp(datetime.now(UTC) + timedelta(minutes=5))
 
-    response = TestClient(app).post(
+    response = TestClient(app, client=("10.42.0.7", 50000)).post(
         "/my/sso-cookie",
         json={"password": "pw-secret"},
         headers={"Authorization": f"Bearer {token}", "X-Real-IP": "203.0.113.7"},
