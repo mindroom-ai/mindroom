@@ -6,12 +6,12 @@ import json
 import os
 import re
 import shlex
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import cast
 
 from agno.tools.toolkit import Toolkit
 
+from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
     RuntimePaths,
@@ -45,17 +45,6 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
-
-
-@runtime_checkable
-class ShellRuntimeSettings(Protocol):
-    """Non-secret effective settings retained by the canonical shell toolkit."""
-
-    @property
-    def shell_path_prepend(self) -> str | None:
-        """Return the resolved path entries from the normal configuration merge."""
-        ...
-
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
@@ -277,17 +266,6 @@ def _handle_namespace(*, runtime_paths: RuntimePaths, base_dir: Path | None) -> 
     return f"{storage_root}::{resolved_base_dir}"
 
 
-@dataclass(frozen=True, slots=True)
-class ShellWorkerBinding:
-    """Trusted isolated-worker supervisor binding, never provider tool arguments."""
-
-    socket_path: str
-    namespace: str
-    handle: str
-    gateway_url: str
-    token_path: str
-
-
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
@@ -377,11 +355,6 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
     class MindRoomShellTools(Toolkit):
         """MindRoom shell toolkit with async execution and timeout-to-handle support."""
 
-        @property
-        def shell_path_prepend(self) -> str | None:
-            """Expose the effective non-secret path setting after normal config merge."""
-            return self._shell_path_prepend
-
         def __init__(
             self,
             base_dir: Path | str | None = None,
@@ -391,7 +364,6 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
-            worker_binding: ShellWorkerBinding | None = None,
             **kwargs: object,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
@@ -431,16 +403,6 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             # long-lived shell supervisor so background handles survive the
             # per-request process.
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
-            self._worker_binding = worker_binding
-            if worker_binding is not None:
-                self._supervisor_socket = worker_binding.socket_path
-                self._handle_namespace = worker_binding.namespace
-                self._runtime_env.update(
-                    {
-                        "MINDROOM_AGENT_CLI_GATEWAY_URL": worker_binding.gateway_url,
-                        "MINDROOM_AGENT_CLI_TOKEN_PATH": worker_binding.token_path,
-                    },
-                )
 
         async def run_shell_command(
             self,
@@ -478,10 +440,16 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
                 return f"Error: {exc}"
+            runtime_env = self._runtime_env
+            shell_path_prepend = self._shell_path_prepend
+            if (cli_env := current_agent_cli_shell_env()) is not None:
+                runtime_env = {**runtime_env, **cli_env.env()}
+                if cli_env.bin_dir is not None:
+                    shell_path_prepend = ",".join(entry for entry in (shell_path_prepend, cli_env.bin_dir) if entry)
             subprocess_env = _shell_subprocess_env(
-                self._runtime_env,
+                runtime_env,
                 base_process_env=self._base_process_env,
-                shell_path_prepend=self._shell_path_prepend,
+                shell_path_prepend=shell_path_prepend,
                 workspace_dir=self.base_dir,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
@@ -505,7 +473,6 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
-                    handle=self._worker_binding.handle if self._worker_binding is not None else None,
                     output_destination=output_destination,
                 )
             else:

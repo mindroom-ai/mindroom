@@ -1317,6 +1317,51 @@ class TestConfigInit:
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
         assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
+    @pytest.mark.parametrize(
+        ("env_text", "process_env", "has_credential", "generated"),
+        [
+            ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
+            (None, {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
+            ("MINDROOM_API_KEY=\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, False),
+            ("OPENAI_API_KEY=sk-existing\n", {}, False, False),
+            ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, True, False),
+        ],
+        ids=["docker", "docker-without-env-file", "explicit-open", "local-tools", "platform-auth"],
+    )
+    def test_run_protects_the_dashboard_api_from_dedicated_workers(
+        self,
+        tmp_path: Path,
+        env_text: str | None,
+        process_env: dict[str, str],
+        has_credential: bool,
+        generated: bool,
+    ) -> None:
+        """Worker shells can reach the primary, so a dashboard without any credential gets a key at startup."""
+        env_path = tmp_path / ".env"
+        if env_text is not None:
+            env_path.write_text(env_text, encoding="utf-8")
+        runtime_paths = constants_module.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env=process_env,
+        )
+
+        assert (
+            config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=has_credential)
+            is generated
+        )
+
+        keys = (
+            re.findall(r"^MINDROOM_API_KEY=(.*)$", env_path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+            if env_path.exists()
+            else []
+        )
+        if generated:
+            assert len(keys) == 1
+            assert len(keys[0]) >= 32
+            assert env_path.stat().st_mode & 0o777 == 0o600
+        else:
+            assert keys == ([""] if env_text == "MINDROOM_API_KEY=\n" else [])
+
     def test_init_no_input_self_hosted_defaults_to_openai_without_prompting(self, tmp_path: Path) -> None:
         """Self-hosted config init --no-input skips the provider prompt and uses OpenAI."""
         target = tmp_path / "config.yaml"

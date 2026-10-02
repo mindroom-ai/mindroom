@@ -478,13 +478,13 @@ async def test_failed_deferred_preparation_retains_agent_cleanup_owner(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_canonical_shell_releases_only_worker_leaf_and_retains_hooks(tmp_path: Path) -> None:
-    """A nested worker request progresses while canonical hooks stay serialized."""
+async def test_canonical_shell_releases_only_shell_leaf_and_retains_hooks(tmp_path: Path) -> None:
+    """A nested CLI request progresses while canonical hooks stay serialized."""
     seen: list[str] = []
 
     async def run_shell_command(args: str) -> str:
         del args
-        pytest.fail("ordinary shell worker must never execute")
+        pytest.fail("only the owner's shell leaf runs the command")
 
     async def mutate(run_context: RunContext) -> str:
         seen.append("mutate")
@@ -515,7 +515,7 @@ async def test_canonical_shell_releases_only_worker_leaf_and_retains_hooks(tmp_p
             binding,
             "shell-inner",
             {"args": "nested"},
-            worker_leaf=leaf,
+            shell_leaf=leaf,
         )
     ]
     assert events[-1].execution.result == "shell done"

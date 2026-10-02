@@ -63,6 +63,7 @@ class ServiceManager(NamedTuple):
     is_available: Callable[[], bool]
     check_uv_installed: Callable[[], tuple[bool, Path | None]]
     install_uv: Callable[[], tuple[bool, str]]
+    install_runtime: Callable[[Path], bool]
     install_service: Callable[[], InstallResult]
     uninstall_service: Callable[[], UninstallResult]
     start_service: Callable[[], ServiceActionResult]
@@ -75,14 +76,36 @@ class ServiceManager(NamedTuple):
     get_recent_logs: Callable[[int], list[str]]
 
 
-def build_service_command(uv_path: Path, *, package_version: str | None = None) -> list[str]:
-    """Build a service command pinned to the installing MindRoom version."""
+def _service_version(package_version: str | None = None) -> str:
+    """Return the MindRoom version a service is pinned to: the installing one, or the release a source checkout builds on."""
     installed_version = Version(package_version or distribution_version(_PACKAGE_NAME))
     resolved_version = installed_version.public
     if installed_version.is_devrelease:
         resolved_version = resolved_version.partition(".post")[0].partition(".dev")[0]
-    requirement = f"{_PACKAGE_NAME}=={resolved_version}"
+    return resolved_version
+
+
+def build_service_command(uv_path: Path, *, package_version: str | None = None) -> list[str]:
+    """Build a service command pinned to the installing MindRoom version."""
+    requirement = f"{_PACKAGE_NAME}=={_service_version(package_version)}"
     return [str(uv_path), "tool", "run", "--from", requirement, "mindroom", "run"]
+
+
+def install_service_runtime(uv_path: Path, *, package_version: str | None = None) -> bool:
+    """Install the service's pinned MindRoom as a uv tool unless that version already is, and return whether it is.
+
+    `uv tool run --from mindroom==X` runs an installed tool of version X instead of an environment in uv's cache,
+    which `uv cache clean` deletes along with the extras MindRoom installs into it at runtime.
+    An installed X is left alone, because reinstalling it without those extras would remove them.
+    """
+    version = _service_version(package_version)
+    tools = subprocess.run([str(uv_path), "tool", "list"], capture_output=True, text=True, check=False)
+    if tools.returncode != 0:
+        # Without the list, an installed X cannot be told apart from a missing one, so leave the tools alone.
+        return False
+    if f"{_PACKAGE_NAME} v{version}" in tools.stdout.splitlines():
+        return True
+    return subprocess.run([str(uv_path), "tool", "install", f"{_PACKAGE_NAME}=={version}"], check=False).returncode == 0
 
 
 def find_uv(extra_paths: list[Path] | None = None) -> Path | None:

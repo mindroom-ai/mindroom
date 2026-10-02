@@ -26,7 +26,7 @@ from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
-from mindroom import agents, ai, minimal_agent, provider_stream_retry
+from mindroom import agents, ai, provider_stream_retry
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -35,6 +35,7 @@ from mindroom.agent_cli.protocol import (
     parse_operation,
 )
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -58,32 +59,40 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    PLUGIN,
+    ScriptedProvider,
+    agent_cli_api,
+    install_scripted_shell,
+    shell_cli_owner,
+)
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_delegation_execution import DelegationModel
 
-pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "agent_cli_api")
 
 
-class ProtocolWorker:
-    """Use the real live protocol while replacing only the shell transport."""
+class ProtocolShell:
+    """Use the real live protocol while replacing only the shell's subprocess."""
 
-    def __init__(self) -> None:
-        self.handle = SimpleNamespace(worker_id=str(uuid4()))
+    def __init__(self, registry: TurnToolRegistry) -> None:
+        self.registry = registry
         self.owner = None
         self.receipts = []
-        self.grants = []
+        self.tokens = []
         self.catalog_snapshots = []
 
-    async def install_grant(self, owner, grant, *, shell) -> None:
-        """Retain the real response owner and its issued capability."""
-        self.owner = owner
-        self.grants.append(grant)
+    def bind(self) -> None:
+        """Reach the response owner only through the grant this Bash call exports."""
+        self.owner = shell_cli_owner(self.registry)
+        token = current_agent_cli_shell_env().token
+        if token not in self.tokens:
+            self.tokens.append(token)
 
-    async def invoke_shell(self, name, arguments) -> str:
+    async def run_shell_command(self, args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
         """Dispatch through the actual owner protocol inside the Bash window."""
-        assert name == "run_shell_command"
-        toolkit, function, values = json.loads(arguments["args"])
+        self.bind()
+        toolkit, function, values = json.loads(args)
         listing = await self.owner.operation(ToolListOperation(operation="tools.list"))
         assert toolkit in str(listing)
         description = await self.owner.operation(
@@ -166,13 +175,8 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
         return toolkit
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
-    worker = ProtocolWorker()
-
-    @asynccontextmanager
-    async def open_worker(_runtime):
-        yield worker
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
+    install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     identity = build_execution_identity_from_runtime_context(runtime)
@@ -209,15 +213,15 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
     assert effects[1][4] == identity
     assert len(effects) == 2
     assert hooks == [(function, "before"), (function, "after")] * 2
-    assert worker.receipts[0]["outcome"] == "result:7"
-    assert worker.owner.catalog.run_context.session_state["parity"] == 7
+    assert shell.receipts[0]["outcome"] == "result:7"
+    assert shell.owner.catalog.run_context.session_state["parity"] == 7
     assert all("done" in str(result) for result in results)
     assert len(provider.requests) == 4
     assert function in str(provider.requests[0]["tools"])
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests[2:])
     assert "result:7" in str(provider.requests[1]["messages"])
     assert "result:7" in str(provider.requests[3]["messages"])
-    assert worker.grants[0].raw_token not in str(provider.requests)
+    assert shell.tokens[0] not in str(provider.requests)
 
 
 @pytest.mark.asyncio
@@ -260,13 +264,8 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             return "child done"
 
         monkeypatch.setattr(ai, "run_delegated_child_response", child_response)
-        worker = ProtocolWorker()
-
-        @asynccontextmanager
-        async def open_worker(_runtime, worker=worker):
-            yield worker
-
-        monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+        shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
+        install_scripted_shell(monkeypatch, shell.run_shell_command)
         provider = ScriptedProvider()
         provider.install(monkeypatch)
         for function, initial_arguments in (
@@ -303,9 +302,9 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
         assert all(child.execution_identity["requester_id"] == runtime.requester_id for child in children)
         if mode == "minimal":
             assert [child.parent_tool_call_id for child in children] == [
-                receipt["call_id"] for receipt in worker.receipts
+                receipt["call_id"] for receipt in shell.receipts
             ]
-            assert all(receipt["parent_bash_call_id"] != receipt["call_id"] for receipt in worker.receipts)
+            assert all(receipt["parent_bash_call_id"] != receipt["call_id"] for receipt in shell.receipts)
             assert all(
                 [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests
             )
@@ -328,17 +327,12 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         memory_backend="file",
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
-    worker = ProtocolWorker()
-
-    @asynccontextmanager
-    async def open_worker(_runtime):
-        yield worker
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
+    install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
 
-    h = SimpleNamespace(runtime=runtime, worker=worker, provider=provider)
+    h = SimpleNamespace(runtime=runtime, shell=shell, provider=provider)
 
     async def respond(steps, *, mode="minimal", prompt="release parity"):
         runtime = h.runtime
@@ -378,7 +372,7 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     )
     old_messages = [message.to_dict() for message in storage.get_session(h.runtime.session_id).runs[0].messages]
     await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
-    assert h.worker.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
+    assert h.shell.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
     found = await search_agent_memories(
         "Release parity durable",
         "helper",
@@ -445,7 +439,7 @@ async def test_generated_tools_actual_minimal_response(response_harness, monkeyp
     }[generated]
     result = await h.respond([_bash_call("agent", function, arguments), "done"])
     assert "done" in str(result)
-    assert expected in str(h.worker.receipts[-1]["outcome"])
+    assert expected in str(h.shell.receipts[-1]["outcome"])
     assert expected in str(h.provider.requests[-1]["messages"])
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
     if generated == "learning":
@@ -471,10 +465,10 @@ async def test_dynamic_load_unload_rebuild_keeps_one_bash(response_harness) -> N
         ],
     )
     assert "done" in str(result)
-    assert len(h.worker.receipts) == 3
-    assert '"result": 5' in h.worker.receipts[1]["outcome"]
-    assert all(receipt["status"] == "completed" for receipt in h.worker.receipts)
-    assert len(h.worker.grants) == 1
+    assert len(h.shell.receipts) == 3
+    assert '"result": 5' in h.shell.receipts[1]["outcome"]
+    assert all(receipt["status"] == "completed" for receipt in h.shell.receipts)
+    assert len(h.shell.tokens) == 1
     assert len(h.provider.requests) == 4
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
     assert not get_loaded_tools_for_session(
@@ -525,14 +519,14 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
         sync_mcp_tool_registry(h.runtime.config)
         result = await h.respond([_bash_call("mcp_echo", "echo_echo", {"text": "same requester"}), "done"])
         assert "done" in str(result)
-        assert "echo:same requester" in h.worker.receipts[-1]["outcome"]
+        assert "echo:same requester" in h.shell.receipts[-1]["outcome"]
         assert len(calls) == 1
         server, function, arguments, kwargs = calls[0]
         assert (server, function, arguments) == ("echo", "echo", {"text": "same requester"})
         assert kwargs["worker_target"].execution_identity.requester_id == h.runtime.requester_id
         assert kwargs["include_tools"] == ["echo"]
         assert kwargs["exclude_tools"] == ["secret"]
-        metadata = h.worker.catalog_snapshots[-1]
+        metadata = h.shell.catalog_snapshots[-1]
         assert next(item for item in metadata if item["toolkit"] == "duckduckgo")["deferred"] is True
         assert not any(item.get("function") == "echo_secret" for item in metadata)
         assert all(
@@ -594,8 +588,8 @@ async def test_compaction_cli_marks_real_session_before_next_reply(response_harn
     h.runtime.config.models["default"].context_window = 128000
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
     assert "done" in str(result)
-    assert "before the next reply" in h.worker.receipts[-1]["outcome"]
-    state = h.worker.owner.catalog.run_context.session_state
+    assert "before the next reply" in h.shell.receipts[-1]["outcome"]
+    state = h.shell.owner.catalog.run_context.session_state
     assert state["mindroom_pending_compaction_scope_keys"]
     assert len(h.provider.requests) == 2
 
@@ -606,12 +600,13 @@ async def test_interactive_context_actual_response_and_selection(response_harnes
     h = response_harness
     guidance = []
 
-    async def invoke(name, arguments):
-        document = await h.worker.owner.operation(ContextReadOperation(operation="context.read", name="interactive"))
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+        h.shell.bind()
+        document = await h.shell.owner.operation(ContextReadOperation(operation="context.read", name="interactive"))
         guidance.append(document["text"])
         return document["text"]
 
-    monkeypatch.setattr(h.worker, "invoke_shell", invoke)
+    install_scripted_shell(monkeypatch, run_shell_command)
     question = '```interactive\n{"question":"Which path?","options":[{"id":"fast","label":"Fast"},{"id":"careful","label":"Careful"}]}\n```'
     result = await h.respond([[("bash", {"command": "read interactive context"})], question], prompt="ask me")
     assert guidance
@@ -622,7 +617,7 @@ async def test_interactive_context_actual_response_and_selection(response_harnes
     result = await h.respond(["same-session selection accepted"], prompt=f"The user selected: {chosen}")
     assert "same-session selection accepted" in result
     assert "Which path?" in str(h.provider.requests[-1]["messages"])
-    assert h.worker.owner.catalog.run_context.session_id == h.runtime.session_id
+    assert h.shell.owner.catalog.run_context.session_id == h.runtime.session_id
 
 
 @pytest.mark.asyncio
@@ -686,7 +681,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     await h.respond([_bash_call("calculator", "action", {"value": "exact value"}), "done"])
     assert len(decisions) == 1
     assert effects == (["exact value"] if decision == "allow" else [])
-    assert h.worker.receipts[-1]["status"] == ("completed" if decision == "allow" else "failed")
+    assert h.shell.receipts[-1]["status"] == ("completed" if decision == "allow" else "failed")
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
 
 
@@ -715,7 +710,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
         [_bash_call("self_config", "update_own_config", {"instructions": ["new persisted instruction"]}), "done"],
     )
     assert len(approved) == 1
-    receipt = h.worker.receipts[-1]
+    receipt = h.shell.receipts[-1]
     assert receipt["status"] == "completed"
     saved = yaml.safe_load(h.runtime.runtime_paths.config_path.read_text())
     assert saved["agents"]["helper"]["instructions"] == ["new persisted instruction"]
@@ -749,43 +744,37 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     registry = TurnToolRegistry()
     all_entered = asyncio.Event()
     all_completed = asyncio.Event()
-    workers = {}
+    shells = {}
     providers = {}
     runtimes = {}
     secrets = {}
     completed = []
 
-    class ConcurrentWorker(ProtocolWorker):
-        async def invoke_shell(self, name, arguments):
-            workers[self.owner.owner.execution_identity.session_id] = self
-            if len(workers) == 4:
-                all_entered.set()
-            await all_entered.wait()
-            result = await super().invoke_shell(name, arguments)
-            completed.append(self)
-            if len(completed) == 4:
-                all_completed.set()
-            await all_completed.wait()
-            for peer in workers.values():
-                if peer is self:
-                    continue
-                with pytest.raises(CliAuthenticationError):
-                    self.owner.authenticate(
-                        peer.grants[-1].raw_token,
-                        now_ns=time.time_ns(),
-                    )
-                with pytest.raises(CliAuthenticationError):
-                    await self.owner.get_call(peer.receipts[-1]["call_id"])
-            for field in ("requester_id", "agent_name", "session_id", "worker_id", "generation"):
-                with pytest.raises(ValidationError):
-                    parse_operation({"operation": "tools.list", field: "forged"})
-            return result
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+        shell = ProtocolShell(registry)
+        shell.bind()
+        shells[shell.owner.owner.execution_identity.session_id] = shell
+        if len(shells) == 4:
+            all_entered.set()
+        await all_entered.wait()
+        result = await shell.run_shell_command(args)
+        completed.append(shell)
+        if len(completed) == 4:
+            all_completed.set()
+        await all_completed.wait()
+        for peer in shells.values():
+            if peer is shell:
+                continue
+            with pytest.raises(CliAuthenticationError):
+                shell.owner.authenticate(peer.tokens[-1], now_ns=time.time_ns())
+            with pytest.raises(CliAuthenticationError):
+                await shell.owner.get_call(peer.receipts[-1]["call_id"])
+        for field in ("requester_id", "agent_name", "session_id", "generation"):
+            with pytest.raises(ValidationError):
+                parse_operation({"operation": "tools.list", field: "forged"})
+        return result
 
-    @asynccontextmanager
-    async def open_worker(runtime):
-        yield ConcurrentWorker()
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", open_worker)
+    install_scripted_shell(monkeypatch, run_shell_command)
 
     async def send(**request):
         runtime = get_tool_runtime_context()
@@ -857,14 +846,14 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     async with asyncio.timeout(20):
         results = await asyncio.gather(*(respond(runtime) for runtime in runtimes.values()))
     assert all("done" in result for result in results)
-    assert len(workers) == 4
+    assert len(shells) == 4
     assert len(secrets) == (4 if scope == "user_agent" else 2)
-    for session, worker in workers.items():
-        assert worker.receipts[-1]["outcome"] == "primary credential accepted"
+    for session, shell in shells.items():
+        assert shell.receipts[-1]["outcome"] == "primary credential accepted"
         with pytest.raises(CliAuthenticationError):
-            registry.resolve("Bearer " + worker.grants[-1].raw_token, now_ns=time.time_ns())
+            registry.resolve("Bearer " + shell.tokens[-1], now_ns=time.time_ns())
         with pytest.raises(CliAuthenticationError):
-            await worker.owner.get_call(worker.receipts[-1]["call_id"])
+            await shell.owner.get_call(shell.receipts[-1]["call_id"])
         assert not any(secret in str(providers[session].requests) for secret in secrets.values())
         assert all(
             [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
@@ -958,7 +947,7 @@ async def test_provider_sdk_initial_and_continued_minimal_requests(
     result = await h.respond([])
     assert "done" in str(result)
     assert len(requests) == 2
-    assert '"result": 5' in h.worker.receipts[-1]["outcome"]
+    assert '"result": 5' in h.shell.receipts[-1]["outcome"]
     for request in requests:
         if provider_name == "anthropic":
             assert [tool["name"] for tool in request["tools"]] == ["bash"]
@@ -980,7 +969,7 @@ async def test_model_switch_timing_actual_minimal_requests(response_harness, whe
         "test-model",
         "other-model" if when == "after-toolcall" else "test-model",
     ]
-    assert len(h.worker.grants) == 1
+    assert len(h.shell.tokens) == 1
     await h.respond(["next turn done"])
     assert h.provider.requests[-1]["model"] == "other-model"
     assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)

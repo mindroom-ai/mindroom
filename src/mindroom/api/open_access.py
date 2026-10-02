@@ -1,8 +1,9 @@
 """Browser guards for requests the API serves without a credential.
 
 Such a request is authorized only by who can reach the server, so it must name
-one of this runtime's own hosts, which defeats DNS rebinding, and must not come
-from another site's page. Dashboard authentication applies these guards when no
+one of this runtime's own hosts, which defeats DNS rebinding as long as any proxy
+in front preserves the browser's Host header, and must not come from another
+site's page. Dashboard authentication applies these guards when no
 dashboard credential is configured, and `/v1` applies them when it is
 unauthenticated. Both read the allow-list from the request's current runtime.
 """

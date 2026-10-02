@@ -423,5 +423,5 @@ Existing tool-specific authorization, provider scopes, worker isolation, and fil
 
 ## Agent CLI
 
-The [minimal-mode agent CLI](../tools/agent-cli.md) belongs to an active agent response and uses a separate restricted gateway.
+The [minimal-mode agent CLI](../tools/agent-cli.md) belongs to an active agent response and calls MindRoom's own CLI routes with that response's grant.
 It does not change external MCP authentication, saved selections, or compatible-tool restrictions.

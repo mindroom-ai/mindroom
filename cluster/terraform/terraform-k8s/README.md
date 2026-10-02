@@ -89,6 +89,7 @@ Terraform configuration for deploying MindRoom on Kubernetes, with separate clus
    packer build hcloud-microos-snapshots.pkr.hcl
    ```
    This creates OpenSUSE MicroOS snapshots in the project selected by `HCLOUD_TOKEN`.
+   The build writes a downloaded MicroOS image to disk only after it matches the checksum signed by the openSUSE Project Signing Key, and stops otherwise; rerun it if openSUSE published a new image during the download.
    Packer's `HCLOUD_TOKEN` and Terraform's `hcloud_token` must target the intended project because [Hetzner API tokens are scoped to projects](https://docs.hetzner.com/cloud/api/getting-started/using-api/).
    Suitable snapshots can be reused within that project.
    For another project, build the snapshots there or [move existing snapshots to that project](https://docs.hetzner.com/cloud/servers/backups-snapshots/faq/#are-backupssnapshots-moveable).

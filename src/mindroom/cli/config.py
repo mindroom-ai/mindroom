@@ -1316,6 +1316,43 @@ MINDROOM_API_KEY={api_key}
 """
 
 
+def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:
+    """Give the dashboard API a key when dedicated workers could otherwise call it without one.
+
+    Worker shells keep network access to the primary, so an open API would hand them
+    MindRoom's configuration. An explicitly empty key keeps open access.
+    """
+    from mindroom.workers.runtime import primary_worker_backend_is_dedicated  # noqa: PLC0415
+
+    if (
+        dashboard_has_credential
+        or runtime_paths.env_value("MINDROOM_API_KEY") is not None
+        or not primary_worker_backend_is_dedicated(runtime_paths)
+    ):
+        return False
+    env_path = runtime_paths.env_path
+    try:
+        if not env_path.exists():
+            write_private_env_text(env_path, "")
+        _append_missing_env_defaults(
+            env_path,
+            (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
+            title="Dashboard API key protecting /api/* from dedicated workers; the dashboard login page asks for it",
+        )
+    except OSError as exc:
+        # Read-only configuration mounts keep the open API; minimal mode then names the missing key.
+        console.print(
+            f"[yellow]Warning:[/yellow] Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+            f"and {env_path} could not be updated: {escape(str(exc))}",
+        )
+        return False
+    console.print(
+        f"[green]Generated MINDROOM_API_KEY in {env_path}[/green] because dedicated workers can reach the "
+        "dashboard API; the dashboard login page asks for this key.",
+    )
+    return True
+
+
 def _new_dashboard_api_key() -> str:
     """Return a random MINDROOM_API_KEY for a new or kept `.env`."""
     return secrets.token_urlsafe(32)

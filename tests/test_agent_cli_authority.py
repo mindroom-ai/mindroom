@@ -84,11 +84,10 @@ def _turn_context() -> ResponseTurnContext:
 
 
 def test_owner_factory_binds_exact_runtime_and_turn_identity(tmp_path: Path) -> None:
-    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context(), worker_id="worker-1")
+    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
 
     assert owner.turn_id == "$driving:example.test"
     assert owner.generation == "generation-1"
-    assert owner.worker_id == "worker-1"
     assert owner.execution_identity.agent_name == "helper"
     assert owner.execution_identity.requester_id == "@alice:example.test"
 
@@ -112,27 +111,21 @@ def test_owner_factory_rejects_mismatched_or_missing_turn_identity(
     value: object,
 ) -> None:
     with pytest.raises(ValueError, match="CLI turn owner"):
-        cli_turn_owner(_runtime_context(tmp_path), replace(_turn_context(), **{field: value}), worker_id="worker-1")
+        cli_turn_owner(_runtime_context(tmp_path), replace(_turn_context(), **{field: value}))
 
 
-def test_owner_factory_rejects_team_context_and_untrusted_worker(tmp_path: Path) -> None:
+def test_owner_factory_rejects_team_context_and_missing_turn(tmp_path: Path) -> None:
     runtime = _runtime_context(tmp_path)
 
     with pytest.raises(ValueError, match="agent dispatch"):
-        cli_turn_owner(
-            replace(runtime, agent_name="team"),
-            replace(_turn_context(), entity_label="team"),
-            worker_id="worker-1",
-        )
-    with pytest.raises(ValueError, match="worker"):
-        cli_turn_owner(runtime, _turn_context(), worker_id="")
+        cli_turn_owner(replace(runtime, agent_name="team"), replace(_turn_context(), entity_label="team"))
     with pytest.raises(ValueError, match="turn"):
-        cli_turn_owner(replace(runtime, membership_turn_id=None), _turn_context(), worker_id="worker-1")
+        cli_turn_owner(replace(runtime, membership_turn_id=None), _turn_context())
 
 
 @pytest.mark.parametrize("revoke_first", [False, True])
 def test_bridge_cannot_issue_another_grant(tmp_path: Path, revoke_first: bool) -> None:
-    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context(), worker_id="worker-1")
+    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
     bridge = TurnToolBridge(owner)
     bridge.issue(now_ns=10, expires_at_ns=20)
     if revoke_first:
@@ -142,7 +135,7 @@ def test_bridge_cannot_issue_another_grant(tmp_path: Path, revoke_first: bool) -
 
 
 def test_bridge_hashes_tokens_caps_expiry_and_authenticates_bearer(tmp_path: Path) -> None:
-    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context(), worker_id="worker-1")
+    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
     bridge = TurnToolBridge(owner)
 
     grant = bridge.issue(now_ns=10, expires_at_ns=10 + 48 * 60 * 60 * 1_000_000_000)
@@ -157,7 +150,7 @@ def test_bridge_hashes_tokens_caps_expiry_and_authenticates_bearer(tmp_path: Pat
 
 
 def test_bridge_expiry_revocation_resume_and_restart_fail_closed(tmp_path: Path) -> None:
-    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context(), worker_id="worker-1")
+    owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
     bridge = TurnToolBridge(owner)
     expired = bridge.issue(now_ns=10, expires_at_ns=20)
     with pytest.raises(CliAuthenticationError):
@@ -169,7 +162,7 @@ def test_bridge_expiry_revocation_resume_and_restart_fail_closed(tmp_path: Path)
     with pytest.raises(CliAuthenticationError):
         bridge.authenticate(revoked.raw_token, now_ns=31)
 
-    resumed_owner = replace(owner, generation="generation-2", worker_id="worker-2")
+    resumed_owner = replace(owner, generation="generation-2")
     resumed_bridge = TurnToolBridge(resumed_owner)
     resumed = resumed_bridge.issue(now_ns=40, expires_at_ns=100)
     assert resumed_bridge.authenticate(resumed.raw_token, now_ns=41) == resumed_owner
