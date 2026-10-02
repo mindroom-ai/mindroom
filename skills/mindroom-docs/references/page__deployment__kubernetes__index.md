@@ -292,7 +292,8 @@ Important behavior and constraints:
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
-- Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
+- Only services listed in `defaults.worker_grantable_credentials` are mirrored into a dedicated worker's shared credentials.
+- That allowlist does not limit the called tool's own settings: as with the `static_runner` backend, unscoped calls still lease the called tool's saved settings from the primary credential store, including the `openai` and `groq` provider keys, because those tools share their service names with the model providers (see [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases)).
 - `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
 - `workers.kubernetes.extraEnv` and `MINDROOM_KUBERNETES_WORKER_ENV_JSON` are filtered before reaching worker pods or startup manifests: generated worker env, runtime control env, Kubernetes backend config env, and vendor telemetry env are dropped.
 - The one sandbox-control value intentionally allowed through Kubernetes worker extra env is `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, so operators can tune runner subprocess timeouts.
