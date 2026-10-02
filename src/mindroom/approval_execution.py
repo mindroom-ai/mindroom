@@ -30,6 +30,7 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
     approval_denial_context,
+    approved_executions_context,
     authorize_prepared_tool_call,
     required_approval_tool_names,
     toolkit_owners_for_agents,
@@ -558,13 +559,16 @@ class AgentApprovalExecution:
                     )
                     validate_approval_tool_owners([agent], approved_calls, requirements)
 
-                    with approval_denial_context(
-                        agent,
-                        {
-                            continuation.run_id: tuple(
-                                call for call in local_calls if not decisions.get(call.tool_call_id)
-                            ),
-                        },
+                    with (
+                        approved_executions_context(agent, {continuation.run_id: approved_calls}),
+                        approval_denial_context(
+                            agent,
+                            {
+                                continuation.run_id: tuple(
+                                    call for call in local_calls if not decisions.get(call.tool_call_id)
+                                ),
+                            },
+                        ),
                     ):
                         result = await self.tool_runtime.run_in_context(
                             tool_context=runtime_context_from_dispatch_context(tool_dispatch),

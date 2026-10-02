@@ -399,6 +399,7 @@ This happens when the arguments exceed the 2MB completeness cap, when they nest 
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
 MindRoom's approval record keeps a digest of each paused call's arguments, and the continuation fails without running an approved call whose saved arguments no longer match it.
+The continuation also fails, and runs none of the saved calls, when the saved run would execute any call other than one approved on the card with the arguments it showed.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
 Current-format pending cards and recorded decisions recover after restart or configuration reload, and an accepted decision resumes the exact paused run through the normal stoppable response lifecycle.
 Legacy, malformed, and orphan approval rows never authorize tool execution.

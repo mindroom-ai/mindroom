@@ -7278,7 +7278,7 @@ visibility = ["mindroom.approval_tools"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_approval"]
-expose = ["append_denied_tool_result", "before_tool_lookup"]
+expose = ["append_denied_tool_result", "before_tool_lookup", "continuation_executes"]
 
 [[modules]]
 path = "mindroom.agno_compat_model_hooks"
