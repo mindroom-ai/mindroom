@@ -224,6 +224,7 @@ Opening a thread is atomic per key.
 While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
 A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
 Reservations are fenced: a delivery that outlives its reservation can neither bind its root over a newer reservation nor release it, so a slow first delivery cannot orphan the thread that replaced it.
+If the trigger's `thread_key` records reach their limit while such a slow delivery is posting, its message is still recorded as delivered but its key is not kept, so a later delivery with that key opens a new thread once there is room.
 
 A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
 

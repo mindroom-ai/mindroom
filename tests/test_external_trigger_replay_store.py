@@ -541,6 +541,24 @@ def test_full_replay_scope_refuses_new_thread_keys(tmp_path: Path, monkeypatch: 
     assert len(stored["threads"]["campground"]) <= 2
 
 
+def test_expired_reservation_finalized_in_a_full_scope_is_not_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivery that outlived its reservation cannot bind its key past the live-claim limit."""
+    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    store = ExternalTriggerReplayStore(tmp_path)
+    reservation = _reserve(store, now=1_000)
+    # The reservation expires after 1_060, and other keys fill the scope meanwhile.
+    assert _claim(store, "site-1", now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-2", now=1_061) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+    assert _bind(store, "$root-1", reservation=reservation, now=1_062) is None
+
+    stored = json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))
+    assert sorted(stored["threads"]["campground"]) == ["site-1", "site-2"]
+
+
 def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:
     """Replay files written before thread keys existed still load."""
     _store_path(tmp_path).write_text(

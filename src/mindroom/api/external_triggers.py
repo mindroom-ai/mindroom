@@ -247,10 +247,11 @@ async def _claim_and_execute_trigger(
             ttl_seconds=_THREAD_KEY_TTL_SECONDS,
         )
         if bound_root != intended_root:
-            # The delivery outlived its reservation and another one opened the
-            # thread meanwhile. The message is posted; only its root is orphaned.
+            # The delivery outlived its reservation, and another one opened the
+            # thread meanwhile or the trigger's thread keys reached their limit.
+            # The message is posted; only its root is orphaned.
             logger.warning(
-                "External trigger delivery lost its thread key to a newer delivery",
+                "External trigger delivery lost its thread key",
                 trigger_id=snapshot.trigger_id,
                 thread_key=thread_key,
                 matrix_event_id=matrix_event_id,

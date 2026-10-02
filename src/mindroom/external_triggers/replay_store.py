@@ -186,8 +186,9 @@ class ExternalTriggerReplayStore:
 
         Returns the root the key is bound to afterwards, or ``None`` when the
         caller lost its claim: another delivery reserved the key after the
-        caller's lease expired and has not finished yet. A root already bound in
-        the same room is kept and returned, whoever calls.
+        caller's lease expired and has not finished yet, or the expired key no
+        longer fits in its full scope. A root already bound in the same room is
+        kept and returned, whoever calls.
         """
         with advisory_file_lock(self._lock_path):
             store = self._read_store()
@@ -202,6 +203,10 @@ class ExternalTriggerReplayStore:
             elif record is not None:
                 # The key now belongs to a delivery for another room (the trigger
                 # was re-pointed mid-flight); leave that record alone.
+                return None
+            elif len(replay_threads) >= _MAX_LIVE_CLAIMS_PER_SCOPE:
+                # The message is already posted, so refusing here would only stop
+                # the caller from marking its event delivered.
                 return None
             replay_threads[thread_key] = {
                 "room_id": room_id,
