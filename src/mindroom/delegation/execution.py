@@ -815,7 +815,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
-    if tool_may_require_approval(config, tool.tool_name or "run_subagent") and requirement_key not in state.gates:
+    gated = tool_may_require_approval(config, tool.tool_name or "run_subagent")
+    approved_here = decisions is not None and decisions.get(requirement_key) is True
+    if gated and retained is None and not approved_here and state.gates.get(requirement_key) is not False:
+        # Saved gates live in session storage that worker code can write, so only an approval
+        # consumed by this continuation can start a fresh child; otherwise ask again.
+        state.gates.pop(requirement_key, None)
+    if gated and requirement_key not in state.gates:
         projected = deepcopy(tool)
         projected.external_execution_required = False
         projected.requires_confirmation = True
