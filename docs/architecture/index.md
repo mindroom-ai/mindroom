@@ -82,7 +82,6 @@ MindRoom's architecture consists of several key components working together.
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
-| `api/sandbox_runner_cli.py` | Worker CLI grant installation, network verification, and pinned shell transport |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |

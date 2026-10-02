@@ -35,7 +35,7 @@ The tool description and schema offer minimal mode only for allowed subagents th
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it, and minimal mode is not offered while shell commands require approval.
 Minimal subagents run only inside Matrix conversations.
-A minimal child runs Bash where its own shell runs; with Docker workers, each minimal child response gets its own worker, which retires when that response ends.
+A minimal child runs Bash where its own shell runs.
 
 ## Instructions and context
 
@@ -133,16 +133,16 @@ Submitting a fresh ID may repeat a side effect.
 
 Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
-The response owns its shell across its live waits and continuations; a Docker worker retires and a local shell closes when the response ends.
+The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background command handles belong to that response and stop when it ends.
+Background commands behave like the agent's ordinary shell commands, but their `mindroom-agent` calls stop working when the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
 Ordinary call results and duplicate-call tracking live only as long as their response owner.
 They are unavailable after process restart.
 Pending approvals use existing durable approval recovery.
-If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh shell after the decision.
+If a pending approval outlasts the CLI grant's 24-hour limit, its grant expires and the approval resumes with a fresh grant after the decision.
 Recovery does not directly rerun a saved outer Bash script, and an already claimed interrupted approval is not dispatched again.
 When the recovered approval is for the outer Bash command itself, the agent is told that the command was not run and can issue it again.
 A recovered approval streams its progress into the paused reply through the same continuation driver as a standard approval.
@@ -160,27 +160,23 @@ When the agent's shell runs in the MindRoom process, which is the default withou
 Bash runs in MindRoom like the agent's ordinary shell, and `mindroom-agent` calls the running API over its local address.
 Such an agent is already fully trusted, as described in [the security posture](../architecture/security-posture.md), so no worker, key, or URL is required.
 
-### Dedicated Docker workers
+### Shell in a worker
 
-With `MINDROOM_WORKER_BACKEND=docker`, each minimal response runs in a fresh dedicated Docker worker with the `mindroom-agent` CLI installed.
-Docker worker images from earlier releases lack the CLI routes; minimal mode reports that the image must be updated, while standard mode keeps using them.
+When the agent's shell runs in a worker, minimal Bash runs in that same worker through the sandbox proxy, like the agent's ordinary shell commands.
+Each command receives the response's grant and MindRoom's API address in its environment, so the worker image must come from the same MindRoom release.
 Worker shells keep network access to MindRoom's API, so that API must require `MINDROOM_API_KEY`.
-`mindroom run` adds a generated key to `.env` when dedicated workers are configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
+`mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
 Unauthenticated OpenAI execution and spoofable trusted-upstream header authentication are unsupported.
 
 Workers call MindRoom back at `MINDROOM_AGENT_CLI_PRIMARY_URL` when it is set.
-Otherwise MindRoom uses its own API address, reached through `host.docker.internal` when the API listens on every interface, which is the default.
-An API that listens only on loopback cannot be reached from containers, and a host firewall may drop connections from Docker networks; a worker that cannot connect reports the address it tried.
-Before a worker receives its grant, it checks that MindRoom's protected routes reject its credentials and that its own grant reaches this MindRoom's CLI routes.
-Shared static runners and Kubernetes workers are not supported yet.
-The Docker profile isolates processes, mounted state, and injected credentials; it is not a network sandbox.
-Outbound internet, LAN services, and cloud metadata endpoints remain reachable when the deployment's network allows them.
-Operators must block access to network-provided credentials, including cloud metadata, through their deployment's egress controls.
-The startup probes check MindRoom's protected routes; they do not certify isolation from arbitrary network services.
+Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
+Kubernetes workers and shared static runners need `MINDROOM_AGENT_CLI_PRIMARY_URL` unless the API listens on a specific non-loopback address.
+An API that listens only on loopback cannot be reached from workers, and a host firewall may drop connections from Docker networks; a `mindroom-agent` call that cannot connect names the address it tried.
 
 Provider credentials stay at the tools' existing authorized execution locations.
 The shell receives a grant for its own active response, not provider or administrator credentials.
-That grant is readable by its authorized shell and cannot select another agent, requester, or conversation.
+That grant cannot select another agent, requester, or conversation.
+Other code in the same worker can read it while the response runs; agents and requesters that share a worker already share its trust, as described in [the security posture](../architecture/security-posture.md).
 The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach MindRoom's API, until expiry or revocation.
 The external MCP gateway keeps its separate authentication and compatible-tool restrictions; minimal mode does not widen its exposed tool set.
 

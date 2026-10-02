@@ -20,7 +20,6 @@ from mindroom.api.sandbox_runner import (
     validate_runner_token,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
-from mindroom.api.sandbox_runner_cli import router as sandbox_runner_cli_router
 from mindroom.api.sandbox_runner_scripts import (
     prepare_script_worker_before_serving,
 )
@@ -103,7 +102,6 @@ app.add_middleware(_RunnerTokenMiddleware)
 app.include_router(sandbox_runner_router)
 app.include_router(worker_computer_router)
 app.include_router(sandbox_runner_scripts_router)
-app.include_router(sandbox_runner_cli_router)
 
 
 @app.get("/healthz")

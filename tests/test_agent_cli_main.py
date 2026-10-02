@@ -1,4 +1,4 @@
-"""The worker CLI parses strict input without loading the runtime."""
+"""The agent CLI parses strict input without loading the runtime."""
 
 # ruff: noqa: D103, ANN001
 from __future__ import annotations
@@ -48,7 +48,7 @@ def test_help_and_imports_need_no_runtime() -> None:
 def test_main_reports_missing_authority(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("MINDROOM_AGENT_CLI_URL", raising=False)
-    monkeypatch.delenv("MINDROOM_AGENT_CLI_TOKEN_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_AGENT_CLI_TOKEN", raising=False)
     assert main(["tools", "list"]) == 4
     assert json.loads(capsys.readouterr().out)["error"] == "Agent CLI authority is unavailable"
 

@@ -12,7 +12,7 @@ import pytest
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, minimal_mode_preflight
-from mindroom.agent_cli.worker_network import cli_primary_url
+from mindroom.agent_cli.shell_access import agent_cli_shell_env
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.commands import mode_commands
 from mindroom.commands.handler import handle_command
@@ -40,12 +40,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
+# Agents' shells run in Docker workers, which call MindRoom back over the network.
 _CLI_DEPLOYMENT_ENV = {
     "MINDROOM_API_KEY": "fake-admin-key",
     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary.test",
     "MINDROOM_WORKER_BACKEND": "docker",
     "MINDROOM_DOCKER_WORKER_IMAGE": "mindroom-worker:test",
-    "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
 }
 
 
@@ -222,26 +222,31 @@ def test_mode_parser_preserves_target_and_action() -> None:
     assert command.args == {"args_text": "helper minimal"}
 
 
-_NON_ROOT_USER_REQUIRED = "Set `MINDROOM_DOCKER_WORKER_USER` to a non-root user such as `1000:1000`."
-
-
 @pytest.mark.parametrize(
     ("invalid_env", "reason"),
     [
-        ({"MINDROOM_DOCKER_WORKER_USER": "root"}, _NON_ROOT_USER_REQUIRED),
-        ({"MINDROOM_DOCKER_WORKER_USER": "0:1000"}, _NON_ROOT_USER_REQUIRED),
-        ({"MINDROOM_DOCKER_WORKER_USER": ""}, _NON_ROOT_USER_REQUIRED),
         (
-            {"MINDROOM_DOCKER_WORKER_IMAGE": ""},
-            "MINDROOM_DOCKER_WORKER_IMAGE must be set when MINDROOM_WORKER_BACKEND=docker.",
+            {"MINDROOM_API_KEY": ""},
+            "Set `MINDROOM_API_KEY` to a long random secret, because minimal-mode worker shells can reach "
+            "the MindRoom API; the dashboard then asks for this key.",
         ),
         (
-            {"MINDROOM_DOCKER_WORKER_ENV_JSON": '{"CUSTOM_SECRET": "fake-secret-value"}'},
-            "Unset `MINDROOM_DOCKER_WORKER_ENV_JSON`, because minimal-mode workers accept no extra environment.",
+            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
+            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
+            "trusted-upstream headers.",
+        ),
+        (
+            {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+            "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
+            "the unauthenticated OpenAI-compatible API.",
+        ),
+        (
+            {"MINDROOM_AGENT_CLI_PRIMARY_URL": "http://admin:fake-secret-value@primary.test"},
+            "Set `MINDROOM_AGENT_CLI_PRIMARY_URL` to a plain `http(s)://host:port` origin.",
         ),
     ],
 )
-def test_selection_refuses_invalid_docker_profile_before_saving(
+def test_selection_refuses_unsafe_worker_shell_deployment_before_saving(
     tmp_path: Path,
     invalid_env: dict[str, str],
     reason: str,
@@ -488,8 +493,8 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
     bullets = [line for line in result.splitlines() if line.startswith("- ")]
     assert len(bullets) == 2, bullets
     assert "`MINDROOM_API_KEY`" in bullets[0]
-    assert "non-loopback address" in bullets[1]
     assert "`MINDROOM_AGENT_CLI_PRIMARY_URL`" in bullets[1]
+    assert "inside worker shells" in bullets[1]
     assert f"`{paths.env_path}`" in result
     assert "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements" in result
     assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
@@ -544,4 +549,6 @@ def test_docker_worker_callback_url_is_derived_from_the_running_api(tmp_path: Pa
     )
 
     assert "uses `minimal`" in result, result
-    assert cli_primary_url(paths) == "http://host.docker.internal:8765"
+    shell_env = agent_cli_shell_env(context.config, paths, "helper", "grant")
+    assert shell_env.api_url == "http://host.docker.internal:8765"
+    assert shell_env.bin_dir is None

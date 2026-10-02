@@ -1,9 +1,9 @@
-"""Minimal mode runs Bash in MindRoom itself for agents whose shell already runs there."""
+"""Minimal Bash runs where the agent's shell runs and calls MindRoom back from there."""
 
 from __future__ import annotations
 
 import asyncio
-import signal
+import os
 import socket
 from dataclasses import replace
 from pathlib import Path
@@ -16,30 +16,28 @@ import uvicorn
 from fastapi import FastAPI
 
 from mindroom import ai
-from mindroom.agent_cli.local_shell import LocalCliShell, shell_runs_in_primary
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agent_cli.worker_protocol import CliShellSettings
+from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.config.agent import AgentConfig
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tools import shell as shell_tool_module
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
+
+    from mindroom.constants import RuntimePaths
 
 _COMMAND = (
     # A `mindroom` directory where the agent works, like a checkout, must not replace the installed CLI.
     "mkdir -p checkout/mindroom && echo 'raise SystemExit(9)' > checkout/mindroom/__init__.py && cd checkout && "
     "mindroom-agent tools list && "
     'printf "path=%s\\n" "$PATH" && '
-    'printf "pass=%s\\n" "$PASSTHROUGH_PROBE" && '
-    'printf "token=%s\\n" "$MINDROOM_AGENT_CLI_TOKEN_PATH" && '
-    'stat -c "mode=%a" "$MINDROOM_AGENT_CLI_TOKEN_PATH"'
+    'printf "pass=%s\\n" "$PASSTHROUGH_PROBE"'
 )
 
 
@@ -72,7 +70,7 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,
 ) -> None:
-    """Without workers, the response's Bash finds `mindroom-agent`, reaches the API, and keeps its grant private."""
+    """Without workers, the response's Bash finds `mindroom-agent` and reaches the API with its grant."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
@@ -90,7 +88,6 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
         ),
     )
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
-    assert shell_runs_in_primary(runtime.config, runtime.runtime_paths, "helper")
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     provider.steps = [[("bash", {"command": _COMMAND})], "done"]
@@ -109,46 +106,77 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     assert [tool["function"]["name"] for tool in provider.requests[0]["tools"]] == ["bash"]
     output = next(str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool")
     assert '"toolkit":"calculator"' in output.replace(" ", ""), output
-    assert "mode=600" in output, output
     # The agent's own shell settings still apply, like in its ordinary local shell.
     assert "pass=visible" in output, output
-    token_path = Path(output.split("token=", 1)[1].splitlines()[0])
-    first_path_entry = output.split("path=", 1)[1].splitlines()[0].split(":")[0]
-    # Only `mindroom-agent` is added, from the response's private directory, not MindRoom's whole environment.
-    assert first_path_entry == str(token_path.parent / "bin")
-    # The grant file lives outside the workspace and disappears with the response.
-    assert not token_path.is_relative_to(tmp_path)
-    assert not token_path.exists()
+    # Only `mindroom-agent` is added, from a private directory, not MindRoom's whole environment.
+    bin_dir = Path(output.split("path=", 1)[1].splitlines()[0].split(os.pathsep)[0])
+    assert [path.name for path in bin_dir.iterdir()] == ["mindroom-agent"]
+    assert not bin_dir.is_relative_to(tmp_path)
+    # The grant dies with the response.
     assert not running_api._owners
 
 
-@pytest.mark.asyncio
-async def test_response_end_stops_only_its_own_background_commands(tmp_path: Path) -> None:
-    """Nothing can reach a finished response's handles, so they stop with it, like a retired worker's."""
-    set_api_server_address("127.0.0.1", 8765)
-    shells = []
-    try:
-        for turn in ("first", "second"):
-            shell = LocalCliShell(_runtime_context(tmp_path).runtime_paths)
-            bridge = SimpleNamespace(owner=SimpleNamespace(turn_id=turn, generation="run"), revoke=lambda: None)
-            settings = CliShellSettings(
-                workspace=str(tmp_path),
-                shell_path_prepend=None,
-                output_max_bytes=DEFAULT_TOOL_OUTPUT_MAX_BYTES,
-                output_auto_save_threshold_bytes=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
-            )
-            grant = SimpleNamespace(raw_token=f"grant-{turn}")
-            await shell.install_grant(bridge, grant, shell=settings)  # type: ignore[arg-type]
-            result = str(await shell.invoke_shell("run_shell_command", {"args": "sleep 30", "timeout": 1}))
-            handle = next(line.split(":", 1)[1].strip() for line in result.splitlines() if line.startswith("Handle:"))
-            shells.append((shell, handle))
-        (first, first_handle), (second, second_handle) = shells
-        first_process = shell_tool_module._process_registry[first_handle].process
-        first.close()
-        assert first_handle not in shell_tool_module._process_registry
-        assert await asyncio.wait_for(first_process.wait(), timeout=5) == -signal.SIGKILL
-        assert "RUNNING" in str(await second.invoke_shell("check_shell_command", {"handle": second_handle}))
-    finally:
-        clear_api_server_address()
-        for shell, _handle in shells:
-            shell.close()
+@pytest.fixture
+def api_address() -> Iterator[None]:
+    """Run like `mindroom run`, which serves its API on every interface by default."""
+    set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
+    yield
+    clear_api_server_address()
+
+
+def _worker_paths(tmp_path: Path, **env: str) -> RuntimePaths:
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_API_KEY": "dashboard-key", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test", **env},
+    )
+
+
+@pytest.mark.usefixtures("api_address")
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"MINDROOM_WORKER_BACKEND": "docker"}, "http://host.docker.internal:8765"),
+        (
+            {"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://mindroom:8765/"},
+            "http://mindroom:8765",
+        ),
+    ],
+)
+def test_worker_shells_call_back_through_the_address_workers_reach(
+    tmp_path: Path,
+    env: dict[str, str],
+    expected: str,
+) -> None:
+    """The agent's ordinary worker gets the API as the worker reaches it, with no launcher directory."""
+    config = _runtime_context(tmp_path).config
+    paths = _worker_paths(tmp_path, **env)
+
+    assert minimal_shell_problems(config, paths, "helper") == []
+    shell_env = agent_cli_shell_env(config, paths, "helper", "grant")
+    assert shell_env.env() == {"MINDROOM_AGENT_CLI_URL": expected, "MINDROOM_AGENT_CLI_TOKEN": "grant"}
+    assert shell_env.bin_dir is None
+
+
+@pytest.mark.usefixtures("api_address")
+def test_worker_shells_without_a_known_address_or_key_list_every_fix(tmp_path: Path) -> None:
+    """Only Docker maps a wildcard bind to the host, and worker shells need a protected API."""
+    config = _runtime_context(tmp_path).config
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"},
+    )
+
+    problems = minimal_shell_problems(config, paths, "helper")
+
+    assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_PRIMARY_URL"]
+
+
+def test_minimal_bash_needs_the_running_api(tmp_path: Path) -> None:
+    """The CLI calls back through the API server, wherever the shell runs."""
+    runtime = _runtime_context(tmp_path)
+
+    assert minimal_shell_problems(runtime.config, runtime.runtime_paths, "helper") == [
+        "Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it.",
+    ]

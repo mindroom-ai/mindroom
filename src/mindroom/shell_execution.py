@@ -477,12 +477,6 @@ def kill_all_records(registry: dict[str, ProcessRecord]) -> None:
     registry.clear()
 
 
-def kill_namespace_records(registry: dict[str, ProcessRecord], namespace: str) -> None:
-    """Kill and drop every record of one namespace, leaving other namespaces untouched."""
-    for handle in [handle for handle, record in registry.items() if record.namespace == namespace]:
-        _kill_record(registry.pop(handle))
-
-
 def discard_background_record(registry: dict[str, ProcessRecord], handle: str) -> None:
     """Kill and drop one just-registered background record whose handle is undeliverable."""
     record = registry.pop(handle, None)

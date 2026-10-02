@@ -8,16 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.local_shell import local_cli_shell_problems, shell_runs_in_primary
-from mindroom.agent_cli.worker_network import cli_deployment_problems
-from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_access import minimal_shell_problems
+from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
-from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
-from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
@@ -30,23 +26,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements"
-
-
-def _location_problems(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> list[str]:
-    """Return what keeps minimal Bash from running where this agent's shell runs."""
-    if shell_runs_in_primary(config, runtime_paths, agent_name):
-        return local_cli_shell_problems()
-    backend = primary_worker_backend_name(runtime_paths)
-    if backend != "docker":
-        return [
-            f"Run the shell of `{agent_name}` in MindRoom itself or in dedicated Docker workers; "
-            f"minimal mode does not support `{backend}` workers yet.",
-        ]
-    try:
-        problems = DockerWorkerBackendConfig.from_runtime(runtime_paths).cli_profile_problems()
-    except WorkerBackendError as exc:
-        problems = [str(exc)]
-    return [*problems, *cli_deployment_problems(runtime_paths)]
 
 
 def _authored_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
@@ -112,7 +91,7 @@ def minimal_mode_problems(
     )
     if workspace is None:
         problems.append(f"Give `{agent_name}` an agent workspace, for example with `memory_backend: file`.")
-    return [*problems, *_location_problems(config, runtime_paths, agent_name)]
+    return [*problems, *minimal_shell_problems(config, runtime_paths, agent_name)]
 
 
 def minimal_subagent_candidates(
@@ -131,7 +110,7 @@ def minimal_subagent_candidates(
         for name in agent_names
         if name in config.agents
         and _authored_shell(config, name) is not None
-        and not _location_problems(config, runtime_paths, name)
+        and not minimal_shell_problems(config, runtime_paths, name)
     ]
 
 
