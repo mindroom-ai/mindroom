@@ -183,25 +183,35 @@ async def test_approval_gated_tools_stay_native_only(
     assert '"function":"add"' not in listing, listing
 
 
-@pytest.mark.parametrize(("channel", "api_running"), [("matrix", False), ("openai_compat", True), ("matrix", True)])
-def test_cli_shell_agent_needs_a_matrix_turn_and_the_running_api(
+@pytest.mark.parametrize(
+    ("channel", "api_running", "response_turn"),
+    [("matrix", False, True), ("openai_compat", True, True), ("matrix", True, False), ("matrix", True, True)],
+)
+def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
     tmp_path: Path,
     channel: str,
     *,
     api_running: bool,
+    response_turn: bool,
 ) -> None:
-    """Without the API server, or outside Matrix, the agent gets neither the CLI class nor its prompt note."""
+    """Without the API server, outside Matrix, or outside a response turn (teams, calls), there is no CLI or note."""
     runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
     identity = replace(build_execution_identity_from_runtime_context(runtime), channel=channel)
     if api_running:
         set_api_server_address("127.0.0.1", 8765)
     try:
-        agent = agents.create_agent("helper", runtime.config, runtime.runtime_paths, identity)
+        agent = agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            identity,
+            agent_cli_in_shell=response_turn,
+        )
     finally:
         clear_api_server_address()
 
     try:
-        eligible = channel == "matrix" and api_running
+        eligible = channel == "matrix" and api_running and response_turn
         assert isinstance(agent, CliShellAgent) is eligible
         assert isinstance(agent, KnowledgeToolDescribingAgent)
         assert (STANDARD_CLI_NOTE in agent.instructions) is eligible

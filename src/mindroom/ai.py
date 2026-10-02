@@ -1112,6 +1112,7 @@ async def _prepare_agent_and_prompt(
                 supports_native_tool_approval=supports_native_tool_approval,
                 eager_deferred_tools=eager_deferred_tools,
                 agent_mode=ctx.agent_mode,
+                agent_cli_in_shell=True,
             )
             prewarm_agent_model_client(
                 agent,

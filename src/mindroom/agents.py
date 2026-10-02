@@ -1911,6 +1911,7 @@ def create_agent(
     eager_deferred_tools: bool = False,
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
+    agent_cli_in_shell: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1954,6 +1955,8 @@ def create_agent(
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
         agent_mode: Operating mode frozen by the response owner; standard by default.
+        agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
+            reach MindRoom; only callers that bind the response turn to the agent pass True.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2104,7 +2107,8 @@ def create_agent(
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     cli_shell = (
-        agent_mode == "standard"
+        agent_cli_in_shell
+        and agent_mode == "standard"
         and not disable_runtime_capabilities
         and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
         and wrap_native_shell_window(tool_assembly.tools)
