@@ -1668,6 +1668,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_state_root_records",
     "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.api.computers",
@@ -2622,6 +2623,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_state_root_records",
     "mindroom.legacy_tool_credentials",
     "mindroom.legacy_usage_storage",
     "mindroom.orchestration.computer_runtime",
@@ -6596,6 +6598,18 @@ depends_on = [
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 
 [[modules]]
+path = "mindroom.legacy_state_root_records"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.durable_write",
+    "mindroom.logging_config",
+    "mindroom.matrix.personal_room_store",
+    "mindroom.path_confinement",
+]
+visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+
+[[modules]]
 path = "mindroom.legacy_tool_credentials"
 depends_on = [
     "mindroom.background_tasks",
@@ -7571,6 +7585,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_modes"
 depends_on = [
+    "mindroom.constants",
     "mindroom.durable_write",
     "mindroom.file_locks",
 ]

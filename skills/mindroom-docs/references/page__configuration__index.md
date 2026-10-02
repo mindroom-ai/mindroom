@@ -1244,7 +1244,7 @@ No tools or workspace reset behavior are added.
 Operators can preserve an existing room ID and history by writing a trusted `PersonalRoomRecord` before enabling onboarding.
 Stop the runtime before importing records.
 Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_personal_room(path, record)` from `mindroom.matrix.personal_room_store` to atomically persist validated current-format records.
-The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
+The storage location is `tracking/agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root, outside every directory a worker mounts.
 These files are trusted operator state, never user-submitted input.
 
 For a private room with shared history and one already permitted guest, a seed looks like this:

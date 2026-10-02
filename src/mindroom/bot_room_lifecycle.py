@@ -212,11 +212,11 @@ class BotRoomLifecycle:
 
     def _invited_rooms_file_path(self) -> Path:
         """Return the durable path for invited room IDs for this entity."""
-        return invited_rooms_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
+        return invited_rooms_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def _pending_room_invites_file_path(self) -> Path:
         """Return the durable path for outstanding invites for this entity."""
-        return pending_room_invites_path(self.deps.runtime_paths.storage_root, self.deps.agent_name)
+        return pending_room_invites_path(self.deps.runtime_paths, self.deps.agent_name)
 
     def _load_invited_rooms(self) -> set[str]:
         """Load invited rooms persisted for one eligible entity."""

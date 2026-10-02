@@ -936,6 +936,15 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
+def primary_records_dir(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root to the primary-only directory for the records the primary trusts about it.
+
+    The Kubernetes sandbox runner sidecar mounts `agents` and `private_instances` read-write,
+    so these records keep the state root's storage-relative path below the tracking directory, which no worker mounts.
+    """
+    return tracking_dir(runtime_paths) / state_root.relative_to(runtime_paths.storage_root.expanduser().resolve())
+
+
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"

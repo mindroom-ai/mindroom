@@ -3376,7 +3376,7 @@ class ResponseRunner:
             self.deps.runtime_paths,
             runtime.tool_dispatch.execution_identity,
         ).state_root
-        agent_mode = resolve_agent_mode(state_root, self.deps.agent_name, runtime.session_id)
+        agent_mode = resolve_agent_mode(self.deps.runtime_paths, state_root, self.deps.agent_name, runtime.session_id)
         return ResponseTurnContext(
             agent_mode=agent_mode,
             entity_label=self.deps.agent_name,

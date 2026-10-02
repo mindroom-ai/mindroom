@@ -149,7 +149,7 @@ class _BoundHookMatrixAdmin:
         entity_name = self._managed_entity_name_for_user_id(self.client.user_id)
         if entity_name is None or not should_persist_invited_rooms(self.config, entity_name):
             return
-        path = invited_rooms_path(self.runtime_paths.storage_root, entity_name)
+        path = invited_rooms_path(self.runtime_paths, entity_name)
         remember_invited_room(path, room_id)
 
     def _managed_entity_name_for_user_id(self, user_id: str | None) -> str | None:

@@ -30,7 +30,7 @@ from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
 from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging, estimate_agent_static_tokens
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -335,8 +335,8 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(root, "helper", runtime.session_id, "minimal", runtime.requester_id)
-    saved_choice = (root / "agent_modes.json").read_bytes()
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    saved_choice = (primary_records_dir(root, runtime.runtime_paths) / "agent_modes.json").read_bytes()
     workspace = root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     notes = workspace / "notes.md"
@@ -369,7 +369,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             runtime.config,
             runtime.runtime_paths,
             identity,
-            agent_mode=resolve_agent_mode(root, "helper", runtime.session_id),
+            agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
             session_id=runtime.session_id,
         )
         resources.callback(close_agent_runtime_state_dbs, agent)
@@ -429,7 +429,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     for grant in grants:
         with pytest.raises(CliAuthenticationError):
             registry.resolve("Bearer " + grant.raw_token, now_ns=0)
-    assert (root / "agent_modes.json").read_bytes() == saved_choice
+    assert (primary_records_dir(root, runtime.runtime_paths) / "agent_modes.json").read_bytes() == saved_choice
     assert notes.read_text() == "Keep this workspace note."
 
 
@@ -444,7 +444,7 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     identity = build_execution_identity_from_runtime_context(runtime)
     root = resolve_agent_storage("helper", runtime.config, runtime.runtime_paths, identity).state_root
-    set_agent_mode(root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
 
@@ -458,7 +458,7 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
         runtime.config,
         runtime.runtime_paths,
         identity,
-        agent_mode=resolve_agent_mode(root, "helper", runtime.session_id),
+        agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
         session_id=runtime.session_id,
     )
     agent.response_context = _turn_context()
@@ -471,7 +471,7 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
                 assert "!mode helper standard" in result.content
                 assert lifetime.owner is None
         assert provider.requests == []
-        assert resolve_agent_mode(root, "helper", runtime.session_id) == "minimal"
+        assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "minimal"
     finally:
         close_agent_runtime_state_dbs(agent)
 
@@ -748,6 +748,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert saved.runs
         assert saved.runs[-1].status == "COMPLETED", [(run.status, len(run.messages or [])) for run in saved.runs or []]
         set_agent_mode(
+            runtime.runtime_paths,
             runtime.runtime_paths.storage_root / "agents/helper",
             "helper",
             ctx.session_id,

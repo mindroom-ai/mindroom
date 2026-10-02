@@ -42,6 +42,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -110,11 +111,11 @@ def _membership_transport_for_invite_business_tests(
 
 
 def _invited_rooms_path(config: Config, agent_name: str) -> Path:
-    return invited_rooms_path(runtime_paths_for(config).storage_root, agent_name)
+    return invited_rooms_path(runtime_paths_for(config), agent_name)
 
 
 def _pending_room_invites(config: Config, agent_name: str) -> dict[str, str]:
-    path = pending_room_invites_path(runtime_paths_for(config).storage_root, agent_name)
+    path = pending_room_invites_path(runtime_paths_for(config), agent_name)
     return load_pending_room_invites(path)
 
 
@@ -2916,3 +2917,32 @@ def test_corrupt_retention_stops_lifecycle_initialization(tmp_path: Path, conten
             runtime_paths=runtime_paths_for(config),
         )
     assert invited_rooms_path.read_bytes() == contents
+
+
+@pytest.mark.parametrize("contents", [b'["!attacker:evil.example"]', b"{}"])
+def test_ledgers_planted_in_a_worker_mounted_state_root_are_ignored(tmp_path: Path, contents: bytes) -> None:
+    """Sandbox runners write agents/, so a room or junk planted there neither joins a room nor stops setup."""
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(
+        Config(agents={"agent1": AgentConfig(display_name="Agent 1", role="Test agent")}),
+        test_runtime_paths(tmp_path),
+    )
+    planted = agent_state_root_path(runtime_paths_for(config).storage_root, "agent1")
+    planted.mkdir(parents=True)
+    (planted / "invited_rooms.json").write_bytes(contents)
+    (planted / "pending_room_invites.json").write_text('{"!attacker:evil.example": "@attacker:evil.example"}')
+
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle._pending_room_invites == {}

@@ -59,6 +59,7 @@ from mindroom.hooks import (
 )
 from mindroom.matrix import client_session
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration import config_lifecycle as config_lifecycle_module
@@ -93,7 +94,6 @@ from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -2225,9 +2225,9 @@ class TestMultiAgentOrchestrator:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        invited_rooms_path = agent_state_root_path(runtime_paths.storage_root, "general") / "invited_rooms.json"
-        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-        invited_rooms_path.write_text('[\n  "!ad-hoc:localhost"\n]\n', encoding="utf-8")
+        ledger_path = invited_rooms_path(runtime_paths, "general")
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text('[\n  "!ad-hoc:localhost"\n]\n', encoding="utf-8")
 
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config

@@ -179,6 +179,7 @@ Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker v
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> Records the primary acts on as authority, such as invited-room ledgers, personal-room records, and conversation modes, live below the storage root's `tracking/` directory, which the sidecar does not mount.
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
 > Header-only trusted-upstream authentication is still forgeable from the sidecar.

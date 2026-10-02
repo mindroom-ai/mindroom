@@ -13,7 +13,12 @@ from typing import Any
 import pytest
 import yaml
 
+from mindroom.agent_modes import set_agent_mode
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, pending_room_invites_path
+from mindroom.matrix.personal_room_store import personal_room_record_path
+from mindroom.private_instance_identity_store import ensure_private_instance_identity
 
 
 def _render_chart(
@@ -824,6 +829,46 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
         "/mindroom_data/agents",
         "/mindroom_data/private_instances",
     ]
+
+
+def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(tmp_path: Path) -> None:
+    """Records and locks the primary acts on stay outside every storage subPath sidecar tool code can write."""
+    runtime_chart = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    runner_subpaths = {
+        mount["subPath"]
+        for doc in (*_render_instance_chart(), *runtime_chart)
+        if doc.get("kind") == "Deployment"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        if any(env["name"] == "MINDROOM_SANDBOX_RUNNER_MODE" for env in container.get("env", []))
+        for mount in container["volumeMounts"]
+        if "subPath" in mount
+    }
+    assert runner_subpaths == {"sandbox-runner", "agents", "private_instances"}
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    for state_root in (
+        paths.storage_root / "agents" / "helper",
+        paths.storage_root / "private_instances" / "s" / "helper",
+    ):
+        set_agent_mode(paths, state_root, "helper", "session", "minimal", "@alice:example.org")
+    ensure_private_instance_identity(
+        paths.storage_root,
+        worker_key="v1:default:user:~@alice:example.org",
+        requester_id="@alice:example.org",
+    )
+    trusted = [
+        personal_room_record_path(paths, "helper", "@alice:example.org"),
+        invited_rooms_path(paths, "helper"),
+        pending_room_invites_path(paths, "helper"),
+        *paths.storage_root.rglob("agent_modes.json"),
+        *paths.storage_root.rglob("*.lock"),
+    ]
+    assert len(trusted) == 8
+    assert not [path for path in trusted if path.relative_to(paths.storage_root).parts[0] in runner_subpaths]
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:

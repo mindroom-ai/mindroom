@@ -17,6 +17,7 @@ from mindroom.commands import mode_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.constants import primary_records_dir
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -34,6 +35,7 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -45,6 +47,10 @@ _CLI_DEPLOYMENT_ENV = {
     "MINDROOM_DOCKER_WORKER_IMAGE": "mindroom-worker:test",
     "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
 }
+
+
+def _mode_file(paths: RuntimePaths, state_root: Path) -> Path:
+    return primary_records_dir(state_root, paths) / "agent_modes.json"
 
 
 def _runtime_context(tmp_path: Path) -> ToolRuntimeContext:
@@ -80,7 +86,7 @@ async def test_mode_command_matches_response_runner_session(
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
     result = mode_commands.handle_mode_command(
         f"general {action}",
         config=config,
@@ -101,7 +107,7 @@ async def test_mode_command_matches_response_runner_session(
     assert turn.agent_mode == expected
     assert f"uses `{expected}`" in result
     # Choosing the default keeps no record in the bounded mode store.
-    assert clear_agent_mode(root, "general", target.session_id) is (action == "show")
+    assert clear_agent_mode(paths, root, "general", target.session_id) is (action == "show")
 
 
 @pytest.mark.asyncio
@@ -116,7 +122,7 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
 
     def show(requester_id: str) -> str:
         return mode_commands.handle_mode_command(
@@ -159,7 +165,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
     ).state_root
-    set_agent_mode(root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
     room = nio.MatrixRoom(runtime.room_id, "@router:example.test")
     event = nio.RoomMessageText.from_dict(
         {
@@ -202,7 +208,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         command=_CommandParser().parse(event.body),
         requester_user_id=runtime.requester_id,
     )
-    assert resolve_agent_mode(root, "helper", runtime.session_id) == "standard"
+    assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "standard"
 
 
 def test_mode_parser_preserves_target_and_action() -> None:
@@ -246,8 +252,8 @@ def test_selection_refuses_invalid_docker_profile_before_saving(
         paths,
         build_execution_identity_from_runtime_context(context),
     )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    saved = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    saved = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
@@ -258,7 +264,7 @@ def test_selection_refuses_invalid_docker_profile_before_saving(
     )
     assert result.splitlines()[:2] == ["Minimal mode is not available for `helper` yet:", f"- {reason}"]
     assert "fake-secret-value" not in result
-    assert (storage.state_root / "agent_modes.json").read_bytes() == saved
+    assert _mode_file(paths, storage.state_root).read_bytes() == saved
 
 
 def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
@@ -282,12 +288,12 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
     ).state_root
-    set_agent_mode(root, "helper", context.session_id, "minimal", context.requester_id)
+    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal", context.requester_id)
     assert "minimal" in mode_commands.handle_mode_command("helper show", **kwargs)
     assert "shell" in mode_commands.handle_mode_command("helper minimal", **kwargs)
-    assert resolve_agent_mode(root, "helper", context.session_id) == "minimal"
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
     assert "standard" in mode_commands.handle_mode_command("helper standard", **kwargs)
-    assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "standard"
     assert "standard" in mode_commands.handle_mode_command("helper reset", **kwargs)
     assert "denied" in mode_commands.handle_mode_command(
         "helper minimal",
@@ -364,8 +370,8 @@ def test_selection_checks_effective_shell_permissions(
             worker_target=target,
             primary_built_tool=primary_built,
         )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    prior_choice = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    prior_choice = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
@@ -394,11 +400,11 @@ def test_selection_checks_effective_shell_permissions(
     required = {"run_shell_command", "check_shell_command", "kill_shell_command"}
     assert required.issubset(shell_functions) is permitted
     assert ("uses `minimal`" if permitted else "run, check, and kill") in result
-    assert resolve_agent_mode(storage.state_root, "helper", context.session_id) == (
+    assert resolve_agent_mode(paths, storage.state_root, "helper", context.session_id) == (
         "minimal" if permitted else "standard"
     )
     if not permitted:
-        assert (storage.state_root / "agent_modes.json").read_bytes() == prior_choice
+        assert _mode_file(paths, storage.state_root).read_bytes() == prior_choice
 
 
 @pytest.mark.parametrize("failure", ["registry_import", "tool_import", "tool_config"])
@@ -417,8 +423,15 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
     )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    saved = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(
+        context.runtime_paths,
+        storage.state_root,
+        "helper",
+        context.session_id,
+        "standard",
+        context.requester_id,
+    )
+    saved = _mode_file(context.runtime_paths, storage.state_root).read_bytes()
 
     def unavailable(*_args: object, **_kwargs: object) -> None:
         error = ValueError if failure == "tool_config" else ImportError
@@ -443,7 +456,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "- Fix the `shell` tool configuration of `helper` so it loads.",
     ]
     assert "fake-secret" not in result
-    assert (storage.state_root / "agent_modes.json").read_bytes() == saved
+    assert _mode_file(context.runtime_paths, storage.state_root).read_bytes() == saved
 
 
 def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path) -> None:
@@ -480,4 +493,4 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
     ]
     assert f"`{paths.env_path}`" in result
     assert "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements" in result
-    assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
+    assert resolve_agent_mode(paths, root, "helper", context.session_id) == "standard"

@@ -414,7 +414,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         }
 
         async def respond(prompt):
-            mode = resolve_agent_mode(state_root, "helper", runtime.session_id)
+            mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
                 return await ai.ai_response(
                     replace(_turn_context(), session_id=runtime.session_id, agent_mode=mode, run_id=None),

@@ -62,7 +62,7 @@ def invited_export_rooms(
     grouped: list[tuple[str, list[ThreadExportRoom]]] = []
     for entity_name in invited_room_entity_names(config):
         entity_rooms: list[ThreadExportRoom] = []
-        for room_id in sorted(load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, entity_name))):
+        for room_id in sorted(load_invited_rooms(invited_rooms_path(runtime_paths, entity_name))):
             if room_id in known_room_ids:
                 continue
             if normalized_filter is not None and normalized_filter not in room_id.casefold():

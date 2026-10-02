@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agent_modes import set_agent_mode
 from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import _RESERVED_PRIVATE_ROOT_FIRST_PARTS, AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -31,7 +30,6 @@ def test_primary_state_written_beside_a_private_workspace_is_reserved(tmp_path: 
         knowledge_bases={"notes": KnowledgeBaseConfig(path=str(tmp_path / "notes"), mode="files")},
     )
 
-    set_agent_mode(state_root, "mind", "session", "minimal", "@alice:localhost")
     with session_storage_preflight(state_root, storage_name="mind", session_table="sessions", timeout_seconds=1):
         pass
     create_state_storage("mind", state_root, subdir="sessions", session_table="sessions")
