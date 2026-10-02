@@ -339,7 +339,14 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     config.models["room"] = ModelConfig(provider="openai", id="room-model")
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
     set_room_model_override(paths, room_id=ROOM, model_name="room", set_by=USER)
-    set_thread_model_override(paths, room_id=ROOM, thread_id="$root", model_name="thread", set_by=USER)
+    set_thread_model_override(
+        paths,
+        room_id=ROOM,
+        thread_id="$root",
+        model_name="thread",
+        set_by=USER,
+        entity_names=("helper",),
+    )
     await callback(request())
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
@@ -352,6 +359,30 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     del event.source["content"]["thread_id"]
     await callback(event)
     assert "thread_id" not in sent.call_args.kwargs["content"]
+    assert sent.call_args.kwargs["content"]["selection"]["override"] is None
+
+
+@pytest.mark.asyncio
+async def test_selection_reports_only_an_override_governing_every_picker_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override that another setter applied outside the picker's entities is not this picker's selection."""
+    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    paths = runtime_paths_for(config)
+    config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
+    set_thread_model_override(
+        paths,
+        room_id=ROOM,
+        thread_id="$root",
+        model_name="thread",
+        set_by="@other:localhost",
+        entity_names=("router", "restricted"),
+    )
+
+    await callback(request())
+
     assert sent.call_args.kwargs["content"]["selection"]["override"] is None
 
 

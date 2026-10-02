@@ -11,7 +11,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.delegation.execution import advance_delegation_call, persist_delegation_state, prepare_delegation_state
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
@@ -35,6 +35,7 @@ def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tupl
             tool_name=str(tool.tool_name),
             invoking_agent=invoking_agent,
             toolkit_name=paused.toolkit_owners.get((invoking_agent, str(tool.tool_name))),
+            arguments_digest=approval_arguments_digest(tool.tool_args),
             expires_at_ns=0,
         )
         for tool in paused.tools

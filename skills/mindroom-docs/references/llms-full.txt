@@ -1760,6 +1760,8 @@ When the complete redacted arguments cannot be delivered, the card sets `approva
 This happens when the arguments exceed the 2MB completeness cap, when they nest deeper than the 32 levels redaction inspects, or when the sidecar upload fails.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
+MindRoom's approval record keeps a digest of each paused call's arguments, and the continuation fails without running an approved call whose saved arguments no longer match it.
+The continuation also fails, and runs none of the saved calls, when the saved run would execute any call other than one approved on the card with the arguments it showed.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
 Current-format pending cards and recorded decisions recover after restart or configuration reload, and an accepted decision resumes the exact paused run through the normal stoppable response lifecycle.
 Legacy, malformed, and orphan approval rows never authorize tool execution.
@@ -9566,10 +9568,11 @@ The other three functions require an active thread context and return an error o
 Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
 With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to all agents and teams in the thread and persists across restarts.
-`get_thread_model` returns the active override and the available model names.
-When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
-`reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
+Every other entity keeps its own thread override or room-level model.
+`get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
+`reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
 
 ### Configuration
 
@@ -9593,7 +9596,7 @@ reset_thread_model()
 
 ### Notes
 
-- The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
+- The override is stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
 - Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
 - An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
 
@@ -9607,6 +9610,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
+An `m.room.message` that `send_event` sends for a human requester names that requester, so the agents and teams it mentions act for that human, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
@@ -18960,6 +18964,7 @@ MindRoom automatically prunes attachment metadata and eligible managed `incoming
 Pruning runs opportunistically during new attachment registration, with a one-hour cleanup throttle.
 Managed files with active attachment references are retained, and filesystem failures can delay deletion.
 This is not an exact deletion deadline and does not delete unmanaged source or workspace files or Matrix homeserver copies.
+Downloaded Matrix media is stored once per content and file type, so events that share one file keep their own attachment records but a single copy of its bytes.
 
 ## Limitations
 
@@ -18967,6 +18972,7 @@ This is not an exact deletion deadline and does not delete unmanaged source or w
   MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
   This is a post-download check, so use a smaller file when it is rejected.
   Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
+- **Earlier media that fails** -- a file, image, or video earlier in the conversation that cannot be downloaded, decrypted, or stored is not tried again for an hour, so later turns do not fetch it each time.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
 
@@ -19202,7 +19208,7 @@ Run `!mode helper standard` or `!mode helper reset` in the same conversation to 
 
 ### `!model`
 
-Show or switch the model that every agent, team, and the router uses in the current thread.
+Show or switch the model that the agents, teams, and router you may address use in the current thread.
 
 ```
 !model
@@ -19211,7 +19217,10 @@ Show or switch the model that every agent, team, and the router uses in the curr
 !model reset
 ```
 
-`!model` and `!model list` show the current override and the available model names.
+The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+`!model reset` likewise removes the override only for the entities you may address.
+
+`!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
 Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.
@@ -19851,6 +19860,7 @@ Schedule state written by any other account, including a room admin or the inter
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
 When it reads one task, MindRoom takes the author from the event fetched by its ID, or from the task in current room state when history visibility hides that event, so a sender written inside state content is never trusted, even on a homeserver that ignores `format=event`.
+Each such read also compares the room's create event with and without `format=event`, so on a homeserver that ignores it, task reads fail instead of accepting state content that names an older bot-written version of the task.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 
@@ -20410,7 +20420,7 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
-An agent's or team's reply does not carry that bypass to the entities it mentions when a human requested the reply.
+An agent's or team's reply, including a raw `m.room.message` an agent sends with `matrix_api`, does not carry that bypass to the entities it mentions when a human requested the reply.
 A mentioned agent or team then acts for that human: it applies its own `access` to the human and does not respond when that excludes them, and it runs with the human as requester for credentials, requester-private instances, memory, learning, and approvals.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
@@ -21396,6 +21406,7 @@ The private reply type is `io.mindroom.models.response`:
 
 The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
+It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
 This explains what resetting the thread will use, including different defaults across agents and teams.
 
@@ -21749,7 +21760,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_streaming.py`][legacy-streaming] | Streaming replay encounters body-only `[cancelled]` or `[error]` suffixes (each preceded by one space). | Current markers stay in `streaming.py`; `execution_preparation.py` gives recognized structured status precedence and delegates body fallback to the streaming reader. |
 | [`src/mindroom/history/legacy_compaction_state.py`][legacy-compaction-state] | Opening a conversation database whose archive tables do not exist yet finds v2 state carrying `compacted_run_ids` or last-compaction audit fields, or a replayed summary. | `migrate_compaction_database` creates the archive and, in the same transaction, records one content-free legacy generation per such scope with its tombstones, plus the summary and its seen ids for the scope that owns the summary, then strips the retired keys; the legacy summary keeps replaying, `history/storage.py` prunes tombstoned runs by archive membership, and it owns legacy redaction invalidation. |
 | [`src/mindroom/legacy_revision_replay.py`][legacy-revision-replay] | Turn-record merges and redaction cleanup encounter reconstructed revision provenance from pre-v2026.9.43 summaries. | Current revision facts win, storage mutation stays in `turn_store.py`, and source-only summary ownership applies only to labeled historical replay. |
-| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, or a current approval generation has executable calls without toolkit origins. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision. |
+| [`src/mindroom/event_journal/legacy_schema.py`][journal-legacy-schema] | A journal lacks Nio-owned `matrix_sync_consumers`, a current approval generation has executable calls without toolkit origins, or approval calls lack an argument digest column. | Schema setup preserves history and frozen deliveries while retiring obsolete work; unresumable approvals enter normal failure recovery before another card decision, and calls without a recorded argument digest never execute. |
 | [`src/mindroom/config/legacy_access.py`][access-legacy] | Config loading or `mindroom config migrate` finds retired access fields. | Complete-source validation, concrete grants, a backup, and atomic membership-schema publication are retained. |
 | [`src/mindroom/legacy_private_storage.py`][private-legacy], [`legacy_private_storage_aliases.py`][private-legacy-aliases], and [`private_storage_paths.py`][private-paths] | Startup without the `tracking/private_storage_migrated.json` receipt finds a verified private scope with the historical requester spelling. | Intent records, owner and inode checks, worker quiescence, ordered renames, and verified aliases protect recovery and current callers. Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, while a separate session root keeps its fail-closed checks. The receipt, written once a start finishes every verified move, keeps later starts from scanning `private_instances` again. |
 | `src/mindroom/legacy_state_root_records.py` | Primary or standalone API startup without the `tracking/state_root_records_moved.json` receipt finds invited-room, pending-invite, personal-room, or conversation-mode records inside `agents/` or `private_instances/`. | Each old file is read without following links or blocking; a valid one is copied below `tracking/` at the same relative path unless a record already exists there and is then removed, anything else stays in place with a warning, and the receipt stops later starts from reading the worker-mounted locations again. An invalid old invited-room ledger is not adopted, so that entity leaves the rooms it kept on its first room pass after the upgrade. |
@@ -21780,7 +21791,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
 | [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
-| [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] cover released DDL, missing and already-added toolkit columns, rejection of stale approval clicks, preserved current generations and frozen deliveries, and stable repeat opening on both database backends. |
+| [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] cover released DDL, missing and already-added toolkit columns, a missing argument digest column, rejection of stale approval clicks, preserved current generations and frozen deliveries, and stable repeat opening on both database backends. |
 | [`legacy_delivery_payloads.py`][legacy-delivery] and [`legacy_approval_payloads.py`][legacy-approval] | [Journal store][journal-store-tests], [response runner][response-runner-tests], and [approval][approval-tests] tests cover visible-result precedence, wire sanitation, frozen visibility, origin recovery, and sparse card identity. |
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
@@ -22253,6 +22264,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Knowledge insertion lacks caller-controlled error propagation and validation. | Reproduce swallowed vector failures and propose validation before publishing content status. | `agno_compat_knowledge.py`. |
 | Embedder requests are built separately across sync, async, and batch paths. | Add shared request and response hooks while retaining typed provider failures. | `agno_compat_openai_embedder.py`. |
 | Denying a persisted tool call requires a live Function and private continuation interception. | Support denial after tool removal and an owner callback before resumed-tool lookup. | `agno_compat_approval.py`. |
+| Agent and Team continuation run every confirmed call in the stored run, not only the supplied requirements, Team continuation first confirms stored calls marked `required` from the approvals table in that storage, and a run continued by ID is re-read from session storage first. | Tracking gap: continue exactly the supplied requirements, or expose a public callback over the calls about to run; no matching issue or PR identified. | `agno_compat_approval.py` mirrors which stored calls a continuation runs; `approval_tools.py` refuses any call that no saved approval binds, including in the team's own run. |
+| A routed team member whose continuation fails before yielding its run is reported to the leader as completed without output. | Tracking gap: fail the team run when a routed member continuation fails; no matching issue or PR identified. | `approval_tools.py` raises a recorded member refusal again when the continuation exits. |
 | Message projection and historical-media policy require private message interception. | Propose supported message-preparation hooks with explicit history-mutation ownership. | `agno_compat_model_hooks.py`, `history/agno_compat_message_builder.py`. |
 | Post-tool callbacks lack mutable messages/results at the required stage; approved continuations bypass them. | Extend the callback surface after result formatting, media insertion, and resumed batches at response entry. | `agno_compat_model_hooks.py`. |
 | Invocation, retry-cycle, scoped request, and final SDK payload hooks are missing. | Define each lifecycle stage separately, including wrapper order, cache behavior, and cancellation cleanup. | `agno_compat_model_hooks.py`. |
@@ -22290,7 +22303,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_run_messages.py` | Version-guarded Agent/Team terminal snapshots, retention and model attribution of metered request messages, and one-time settlement of abandoned async model streams. | `agent_storage.py` installs the patch; provider adapters own reported counters, and `usage_storage.py` retains content-free projection and retry exclusions. Aggregate accounting remains with Agno and the session-metrics repair. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
-| `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
+| `agno_compat_approval.py` | Private rejected-tool result creation, temporary continuation tool-lookup interception, and the rule for which stored calls a continuation runs. | `approval_tools.py` retains exact call/run identity, authorization, denial state, and refusal of stored calls that no saved approval binds. |
 | `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media, asynchronous post-batch checkpoint chaining, and resumed-response callbacks, the per-loop model request gate, permanent and scoped invocation/retry bindings, the scoped response-loop observer, answer-cache bypass, and provider client factories. | Approval receipts, queued notices and mid-turn judgments, the model-call cap and its warning, the skill review's input budget and its fork of the final request, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_cli_checkpoint.py` | Task-scoped real provider batch snapshots, including resolved fallback instances, keyed by exact FunctionCall identity. The response lifetime resolves lazy prepared bindings per pull; completed sibling Bash media stays in native result messages. | `agent_cli/turn.py` owns admission and calls the existing propagating `agent_storage` boundary before binding or effects; `cli_approval_recovery.py` persists interrupted-replay sessions through the same `save_cli_session` boundary. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation, temporary instruction restoration, call-local result-stream/thread lifetime ownership, per-execution stop signaling, and reporting the Bash facade's actual per-run Function copy. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns voice policy; `tool_system/agent_tool_calls.py` owns qualified live-turn bindings and serialized execution. |
@@ -25687,6 +25700,12 @@ Platform ingress hosts:
 - `api.{domain}` - Platform backend API
 - `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
+The backend keys its rate limits and its authentication-failure lockout on the client address.
+It takes that address from `X-Real-IP` only when the connection comes from a network in `trustedProxyCidrs` (`TRUSTED_PROXY_CIDRS`), and keys every other caller by its own connection address.
+The default lists the private IPv4 ranges, so an in-cluster ingress-nginx controller, which overwrites `X-Real-IP`, is trusted, while instance pods cannot reach the backend port to use that trust.
+Narrow the list to the controller's pod network when you know it, and include only proxies that overwrite `X-Real-IP`.
+Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is keyed by its connection address.
+
 ## Local Development with Kind
 
 ```bash
@@ -25745,6 +25764,7 @@ If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner f
 Keep this source stable because changing it changes future derived credential encryption keys.
 New provisioned instances receive a derived credential encryption key by default.
 When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
+An existing instance whose MindRoom storage PVC no longer exists, such as one torn down after its grace period, starts on an empty volume and also receives the derived key.
 To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
 Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
@@ -25786,6 +25806,8 @@ Checkout grants a plan's trial only to a Stripe customer who never had a trial, 
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
 Re-provisioning a `deprovisioned` instance claims the row only while it is still `deprovisioned`, whether a customer's provision request or a lifecycle resume after teardown does it, so concurrent runs on several replicas deploy it once and mint one OpenRouter key.
 A losing provision request gets `409`, and a losing lifecycle resume, including one a provision request started for a held instance, stops without enabling a key or clearing the hold.
+Every provision records a newly created OpenRouter key only while the instance records no key, and before it writes the key into the instance Secret, so when concurrent redeploys of one instance each create a key, the first recorded key is kept and the others are deleted before their run publishes them or deploys the instance; a key whose record fails to save is deleted too.
+If writing the instance Secret then fails, the provision deletes its key and, once OpenRouter confirms the key is gone, clears the recorded key, unless another run has recorded a different key in the meantime; a key whose deletion fails stays recorded, so revoking or disabling the instance's key still reaches it.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
 When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
@@ -26647,6 +26669,7 @@ Export Matrix threads to YAML files for grep/ripgrep search.
 Keep MindRoom running with its API enabled while exporting; both one-shot and `--watch` exports use its live Matrix clients and journal readers.
 The CLI calls `--url`, then `MINDROOM_URL` from the selected runtime environment, or `http://127.0.0.1:8765` by default.
 Set `MINDROOM_API_KEY` when API authentication is enabled; hosted deployments require an authorized bearer token.
+When `MINDROOM_API_KEY` is set, the CLI sends it only over HTTPS or loopback HTTP and refuses a remote `http://` URL before making any request, even with `--watch`; redirects are disabled.
 The selected `--config` and `--storage-path` must match the running installation, and output paths refer to that runtime's filesystem.
 There is no offline export mode or separate Matrix login.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
@@ -26882,7 +26905,8 @@ On first run in a terminal, a plain `mindroom run` offers the same installation 
 The offer is skipped when a MindRoom service is already installed, when systemd is not running (for example in containers), with `--no-service`, and when `run` was given `--config`, `--storage-path`, `--no-api`, `--api-host`, or `--api-port`, because the service runs a plain `mindroom run`.
 If installation fails, MindRoom starts in the terminal instead.
 `mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
-Provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) are saved to `.env` first, because the service does not see your shell's environment.
+Both `mindroom service install` and `mindroom run` save `MINDROOM_API_KEY` and the provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) to `.env` before installing, because the service does not see your shell's environment and would otherwise serve the dashboard on every interface without the key your terminal runs used.
+Keys are quoted where needed so `.env` reads them back unchanged, and installation stops with an error when an exported key contains `${`, which reading `.env` would expand, or when a key that needs quoting ends in a backslash.
 If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
 On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 

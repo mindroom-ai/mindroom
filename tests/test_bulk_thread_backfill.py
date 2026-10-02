@@ -23,6 +23,7 @@ from mindroom.matrix.room_history_reads import (
     find_response_event_ids_via_room_messages,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
+from tests.conftest import serve_media_from_download
 from tests.cpu_budget_helpers import cpu_budget
 
 
@@ -635,6 +636,60 @@ async def test_thread_messages_from_source_resolves_edits_without_touching_a_sto
     # so the parameter list is the thing worth pinning.
     parameters = inspect.signature(fetch_thread_messages_from_source).parameters
     assert not [name for name in parameters if "cache" in name or "store" in name]
+
+
+@pytest.mark.asyncio
+async def test_thread_messages_from_source_never_download_sidecars() -> None:
+    """A freshness read must not fetch one attachment per message in the thread.
+
+    Its callers read senders, relations, and MindRoom metadata, which a sidecar
+    preview carries itself. Downloading every sidecar, original and edit alike,
+    let anyone who can post make each summary pass hold hundreds of files.
+    """
+    root_id = "$root:localhost"
+    reply_id = "$reply:localhost"
+    sidecar = {
+        "msgtype": "m.file",
+        "url": "mxc://localhost/sidecar",
+        "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+    }
+    client = AsyncMock()
+    client.download = AsyncMock(
+        return_value=nio.DownloadResponse(b'{"msgtype":"m.text","body":"full text"}', "application/json", None),
+    )
+    serve_media_from_download(client)
+    client.room_messages = AsyncMock(
+        side_effect=[
+            _messages_response(
+                [
+                    _edit_event(
+                        "$reply-edit:localhost",
+                        reply_id,
+                        timestamp=3000,
+                        thread_root_id=root_id,
+                        new_body="edited preview",
+                        msgtype="m.file",
+                        extra_content=sidecar,
+                    ),
+                    _message_event(
+                        reply_id,
+                        "preview",
+                        timestamp=2000,
+                        thread_root_id=root_id,
+                        msgtype="m.file",
+                        extra_content=sidecar,
+                    ),
+                    _message_event(root_id, "the question", timestamp=1000),
+                ],
+                end=None,
+            ),
+        ],
+    )
+
+    messages = await fetch_thread_messages_from_source(client, _ROOM_ID, root_id)
+
+    assert [message.body for message in messages] == ["the question", "edited preview"]
+    client.download.assert_not_awaited()
 
 
 def _one_page_thread_client(chunk: list[nio.Event]) -> AsyncMock:

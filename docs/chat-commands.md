@@ -234,7 +234,7 @@ Run `!mode helper standard` or `!mode helper reset` in the same conversation to 
 
 ### `!model`
 
-Show or switch the model that every agent, team, and the router uses in the current thread.
+Show or switch the model that the agents, teams, and router you may address use in the current thread.
 
 ```
 !model
@@ -243,7 +243,10 @@ Show or switch the model that every agent, team, and the router uses in the curr
 !model reset
 ```
 
-`!model` and `!model list` show the current override and the available model names.
+The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+`!model reset` likewise removes the override only for the entities you may address.
+
+`!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
 Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -26,7 +27,7 @@ from openai import AsyncOpenAI
 
 from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_agents
 from mindroom.config.main import Config
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal.approval_continuations import ApprovalDecision
 from mindroom.history.session_context import (
     close_team_runtime_state_dbs,
@@ -41,7 +42,7 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
-    _member_approval_denials,
+    _member_calls_by_run,
     build_materialized_team_instance,
     continue_paused_team_run,
     materialize_exact_team_members,
@@ -324,13 +325,20 @@ async def _exercise_team_member_assembly(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["approved", "denied", "removed"])
-async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa: PLR0915
+@pytest.mark.parametrize(
+    "scenario",
+    ["approved", "denied", "removed", "planted_member", "planted_team", "planted_team_record"],
+)
+async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
 ) -> None:
-    """Persist a delegated member pause, then restore only its owner after losing selection."""
+    """Persist a delegated member pause, then restore only its owner after losing selection.
+
+    A confirmed call added to the stored member or team run must not run under the approval, nor may
+    an unconfirmed one that a stored Agno approval record would confirm.
+    """
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate(
@@ -456,10 +464,52 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 display_names=["Alpha", "Beta"],
                 show_tool_calls=False,
             )
+            if scenario.startswith("planted"):
+                session = scope.storage.get_session("team-session", SessionType.TEAM)
+                assert isinstance(session, TeamSession)
+                team_run = session.get_run(output.run_id)
+                assert isinstance(team_run, TeamRunOutput)
+                if scenario == "planted_member":
+                    planted_run = next(
+                        run for run in team_run.member_responses if run.run_id == pause.requirements[0].member_run_id
+                    )
+                    planted_name, planted_args = "add", {"a": 40, "b": 2}
+                else:
+                    # A team-level requirement makes Agno run the team's own stored confirmed calls.
+                    assert team_run.requirements is not None
+                    team_run.requirements[0].member_agent_id = None
+                    planted_run = team_run
+                    planted_name, planted_args = "delegate_task_to_member", {"member_id": "alpha", "task": "Add 4"}
+                planted = ToolExecution(
+                    tool_call_id="planted",
+                    tool_name=planted_name,
+                    tool_args=planted_args,
+                    requires_confirmation=True,
+                    confirmed=True,
+                )
+                if scenario == "planted_team_record":
+                    # Agno's team continuation confirms this entry from the approvals table in the same storage.
+                    # Keying the record to the member run also answers Agno's lookup for the real call.
+                    planted.confirmed = None
+                    planted.approval_type = "required"
+                    planted.approval_id = "planted-approval"
+                    scope.storage.create_approval(
+                        {
+                            "id": "planted-approval",
+                            "run_id": pause.requirements[0].member_run_id,
+                            "session_id": "team-session",
+                            "status": "approved",
+                            "approval_type": "required",
+                            "pause_type": "confirmation",
+                            "source_type": "team",
+                        },
+                    )
+                planted_run.tools = [*(planted_run.tools or ()), planted]
+                scope.storage.upsert_run(run=team_run, session_id="team-session", user_id=identity.requester_id)
             close_team_runtime_state_dbs(agents=members.agents, team_db=team.db, shared_scope_storage=scope.storage)
         assert executed == []
         dynamic_toolkits._loaded_tools.clear()
-        if scenario != "approved":
+        if scenario in {"denied", "removed"}:
             config.agents["alpha"].tools = []
         calls = tuple(
             ApprovalCall(
@@ -468,6 +518,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 invoking_agent="alpha",
                 toolkit_name=pause.toolkit_owners[("alpha", "add")],
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool.tool_args),
             )
             for tool in pause.tools
         )
@@ -496,6 +547,10 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
             with pytest.raises(ExceptionGroup):
                 await continue_paused_team_run(**arguments)
             assert len(requests) == 2
+        elif scenario.startswith("planted"):
+            with pytest.raises(RuntimeError, match="does not cover"):
+                await continue_paused_team_run(**arguments)
+            assert len(requests) == (3 if scenario == "planted_member" else 2)
         else:
             result = await continue_paused_team_run(**arguments)
             assert isinstance(result, CompletedApprovalRun)
@@ -592,7 +647,7 @@ async def test_member_denials_survive_other_runs_on_the_same_actor(earlier_run: 
     session = TeamSession(session_id="team-session", team_id="research", runs=[parent, *runs])
     context = RunContext(run_id="team-run", session_id="team-session", session_state={})
     denied_calls = {call.tool_call_id: call for call in calls}
-    with approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)):
+    with approval_denial_context(member, _member_calls_by_run(member.id, denied_calls, requirements)):
         if earlier_run == "ordinary":
             unrelated = await member.arun("Another task", session_id="other-session")
             assert unrelated.status == RunStatus.completed
@@ -634,4 +689,4 @@ def test_member_denial_requires_persisted_run_identity() -> None:
         expires_at_ns=2**62,
     )
     with pytest.raises(RuntimeError, match="no paused run identity"):
-        _member_approval_denials("alpha", {"call-1": call}, [requirement])
+        _member_calls_by_run("alpha", {"call-1": call}, [requirement])

@@ -24,7 +24,7 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.records import DelegationRecordOwner
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -336,6 +336,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                         invoking_agent="child",
                         toolkit_name="calculator",
                         expires_at_ns=2**62,
+                        arguments_digest=approval_arguments_digest(tool["tool_args"]),
                     )
                     for tool in state.pending_tools
                 )

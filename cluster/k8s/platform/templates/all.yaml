@@ -67,6 +67,7 @@ data:
   ENVIRONMENT: {{ .Values.environment }}
   ENABLE_CLEANUP_SCHEDULER: {{ .Values.cleanupScheduler.enabled | default "false" | quote }}
   INSTANCE_TEARDOWN_GRACE_DAYS: {{ .Values.cleanupScheduler.teardownGraceDays | default 30 | quote }}
+  TRUSTED_PROXY_CIDRS: {{ (.Values.trustedProxyCidrs | default (list) | join ",") | quote }}
   INSTANCE_BASE_DOMAIN: {{ .Values.provisioner.instanceBaseDomain | default .Values.domain | quote }}
   INSTANCE_STORAGE_CLASS_NAME: {{ .Values.provisioner.instanceStorageClassName | default "" | quote }}
   INSTANCE_INGRESS_CONTROLLER_NAMESPACE: {{ .Values.provisioner.instanceIngressControllerNamespace | default "" | quote }}
