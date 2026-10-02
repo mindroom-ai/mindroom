@@ -9,6 +9,7 @@ from agno.tools.models.groq import GroqTools
 from agno.utils.log import log_error
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.model_defaults import GROQ_TRANSCRIPTION
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,8 +23,8 @@ class MindRoomGroqTools(GroqTools):
     def __init__(
         self,
         api_key: str | None = None,
-        transcription_model: str = "whisper-large-v3",
-        translation_model: str = "whisper-large-v3",
+        transcription_model: str = GROQ_TRANSCRIPTION,
+        translation_model: str = GROQ_TRANSCRIPTION,
         tts_model: str = "playai-tts",
         tts_voice: str = "Chip-PlayAI",
         enable_transcribe_audio: bool = True,
