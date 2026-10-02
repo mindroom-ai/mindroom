@@ -424,7 +424,7 @@ def _entry_snapshot(entry: Path) -> object:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plant", ["file", "fifo", "record", "misbound", "intent", "link"])
+@pytest.mark.parametrize("plant", ["file", "fifo", "record", "nested", "misbound", "intent", "link"])
 async def test_first_start_leaves_planted_entries_and_writes_its_receipt(tmp_path: Path, plant: str) -> None:
     """Without a receipt, entries sandbox runners planted stay untouched with a warning while verified scopes still move."""
     paths = _paths(tmp_path)
@@ -440,6 +440,9 @@ async def test_first_start_leaves_planted_entries_and_writes_its_receipt(tmp_pat
         planted.mkdir()
         if plant == "record":
             (planted / _RECORD).write_text("{")
+        elif plant == "nested":
+            # Deep enough to exceed the JSON decoder's recursion limit while staying under the record size cap.
+            (planted / _RECORD).write_text("[" * 50_000)
         elif plant == "misbound":
             (planted / _RECORD).write_text((source / _RECORD).read_text())
         else:

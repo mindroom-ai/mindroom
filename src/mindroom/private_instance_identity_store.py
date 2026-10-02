@@ -225,7 +225,7 @@ def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 
         return json.loads(raw_payload, object_pairs_hook=object_with_unique_keys)
     except DuplicateJSONKeyError:
         _raise_invalid_record("contains duplicate JSON fields")
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError) as error:
         _raise_unreadable_record(error)
 
 
