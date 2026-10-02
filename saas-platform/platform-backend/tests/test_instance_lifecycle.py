@@ -1192,6 +1192,7 @@ async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forg
 ) -> None:
     db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
     alive: set[str] = set()
+    recorded_at_publication: list[str | None] = []
 
     def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
         alive.add("hash_ours")
@@ -1201,7 +1202,7 @@ async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forg
         alive.discard(key_hash)
 
     async def apply_secret(_instance_id: str, _namespace: str, _secret_data: dict[str, str]) -> str:
-        assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_ours"
+        recorded_at_publication.append(db.row("instances", instance_id=7)["openrouter_key_hash"])
         if recorded_during_publication is not None:
             # Another run revoked this key and recorded its own replacement.
             db.row("instances", instance_id=7)["openrouter_key_hash"] = recorded_during_publication
@@ -1223,6 +1224,7 @@ async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forg
     ):
         await provision_instance(db, data=data, background_tasks=None)
 
+    assert recorded_at_publication == ["hash_ours"]
     assert alive == set()
     assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
     helm.assert_not_awaited()
