@@ -30,7 +30,8 @@ Models, MCP servers, plugin settings, and every other section stay in the primar
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so the records the primary acts on as authority live below the primary-only `tracking/` directory instead: invited-room and pending-invite ledgers, personal-room records, and conversation modes, each at its state root's storage-relative path.
-Their locks and the lock that serializes private-instance owner records live outside both directories too, and startup stops scanning `private_instances` once the private-storage migration has nothing left to move.
+Their locks and the lock that serializes private-instance owner records live outside both directories too, and startup stops scanning `private_instances` once the private-storage migration has finished its verified moves, leaving any invalid entry there untouched instead of failing.
+The session recovery lock stays beside the sessions it guards, so it is opened without following links or blocking, and a holder that keeps it past SQLite's busy timeout fails session storage creation instead of stalling it.
 Which workspaces a worker mounts follows its scope.
 Only private workspaces separate requesters: a non-private agent's workspace, `agents/<agent>/workspace`, is the same directory in every requester's worker that mounts it.
 
