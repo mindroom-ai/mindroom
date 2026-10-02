@@ -41,6 +41,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.cli_shell_agent import CliShellAgent
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -1008,6 +1009,23 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _standard_turn_enrichment(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    session_preamble: str,
+    transient_memory: str,
+) -> str:
+    """Put enrichment in the prompt and bind the turn for an agent whose shell can call its other tools."""
+    if isinstance(agent, CliShellAgent):
+        agent.response_context = ctx
+    _append_additional_context(agent, session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+    return render_transient_context(
+        (transient_memory, render_enrichment_block(list(ctx.transient_enrichment_items))),
+    )
+
+
 def _minimal_turn_enrichment(
     agent: MinimalAgent,
     ctx: ResponseTurnContext,
@@ -1028,7 +1046,7 @@ def _minimal_turn_enrichment(
 
 
 @timed("system_prompt_assembly")
-async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard preparation beside explicit minimal context
+async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
     *,
     prompt: str,
@@ -1185,17 +1203,11 @@ async def _prepare_agent_and_prompt(  # noqa: PLR0915 - preserve standard prepar
                 prompt_parts.transient_turn_context,
             )
         else:
-            _append_additional_context(agent, prompt_parts.session_preamble)
-            if ctx.system_enrichment_items:
-                _append_additional_context(
-                    agent,
-                    _render_system_enrichment_context(ctx.system_enrichment_items),
-                )
-            transient_turn_context = render_transient_context(
-                (
-                    prompt_parts.transient_turn_context,
-                    render_enrichment_block(list(ctx.transient_enrichment_items)),
-                ),
+            transient_turn_context = _standard_turn_enrichment(
+                agent,
+                ctx,
+                prompt_parts.session_preamble,
+                prompt_parts.transient_turn_context,
             )
 
         prepared_execution = await prepare_agent_execution_context(
@@ -1946,7 +1958,7 @@ async def _stream_agent_attempt_chunks(
         )
         if transform_events is not None:
             stream_generator = transform_events(stream_generator)
-        if run_context.turn.agent_mode == "minimal":
+        if run_context.turn.agent_mode == "minimal" or isinstance(agent, CliShellAgent):
             stream_generator = stream_cli_events(stream_generator)
         chunks = _process_stream_events(
             stream_generator,

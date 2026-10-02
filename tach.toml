@@ -279,6 +279,7 @@ visibility = [
     "mindroom.cli_approval_waits",
     "mindroom.minimal_agent",
     "mindroom.response_turn",
+    "mindroom.cli_shell_agent",
 ]
 
 [[interfaces]]
@@ -426,6 +427,7 @@ visibility = [
     "mindroom.agent_cli.response_owner",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
+    "mindroom.cli_shell_agent",
 ]
 
 [[interfaces]]
@@ -682,6 +684,7 @@ depends_on = ["mindroom.durable_write", "mindroom.path_confinement"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.cli_shell_agent",
     "mindroom.minimal_agent",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
@@ -807,6 +810,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.cli_shell_agent",
     "mindroom.path_confinement",
     "mindroom.minimal_agent",
     "mindroom.tool_system.agent_tool_calls",
@@ -864,6 +868,7 @@ depends_on = ["mindroom.knowledge_source_descriptions", "mindroom.tool_system.to
 visibility = [
     "mindroom.minimal_agent",
     "mindroom.agents",
+    "mindroom.cli_shell_agent",
 ]
 
 [[modules]]
@@ -7526,6 +7531,7 @@ visibility = [
     "mindroom.agent_cli.turn",
     "mindroom.cli_approval_recovery",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.cli_shell_agent",
 ]
 
 [[modules]]
@@ -7567,6 +7573,23 @@ path = "mindroom.agent_modes"
 depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
+]
+
+[[modules]]
+path = "mindroom.cli_shell_agent"
+depends_on = [
+    "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.response_owner",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_knowledge_descriptions",
+    "mindroom.agno_compat_cli_checkpoint",
+    "mindroom.tool_system.agent_tool_calls",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = [
+    "mindroom.agents",
+    "mindroom.ai",
 ]
 
 [[modules]]

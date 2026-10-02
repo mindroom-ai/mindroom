@@ -20,6 +20,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
+from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
@@ -1476,7 +1477,8 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     )
     tool_hook_bridge = cast("Callable[..., Any] | None", agent_kwargs.pop("tool_hook_bridge", None))
     install_message_builder_patch()
-    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else Agent
+    cli_shell = agent_kwargs.pop("cli_shell")
+    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else CliShellAgent if cli_shell else Agent
     agent = agent_class(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
@@ -2100,6 +2102,15 @@ def create_agent(
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
+    # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    cli_shell = (
+        agent_mode == "standard"
+        and not disable_runtime_capabilities
+        and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
+        and wrap_native_shell_window(tool_assembly.tools)
+    )
+    if cli_shell:
+        instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
     knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
@@ -2119,6 +2130,7 @@ def create_agent(
 
     agent = _initialize_agent_instance(
         agent_mode=agent_mode,
+        cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
         role=role_context.role,
@@ -2176,6 +2188,14 @@ def create_agent(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
         )
+    if isinstance(agent, CliShellAgent):
+        agent.output_file_policy = _agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+        agent.delegation_depth = delegation_depth
+        agent.refresh_scheduler = refresh_scheduler
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
 
