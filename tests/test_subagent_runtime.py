@@ -22,6 +22,7 @@ from mindroom.agents import create_agent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
+from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.matrix import state as matrix_state
@@ -374,7 +375,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shutdown owns detached tasks and removes the managed runtime lookup."""
-    monkeypatch.setattr(runtime_module, "interrupt_child", AsyncMock())
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.sync()
     started, cancelled = asyncio.Event(), asyncio.Event()
@@ -420,7 +421,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A replacement transport must signal jobs launched by its retired runner."""
-    monkeypatch.setattr(runtime_module, "interrupt_child", AsyncMock())
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
     await coordinator.initialize()
     runtime = coordinator.runtime
@@ -929,7 +930,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     control = JobControl()
     control.cancel(shutdown=restart)
     job = replace(completed_delegation_job(), status="running", result=None)
-    with job_control_context(control), patch.object(runtime_module, "interrupt_child", new=interrupt):
+    with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):
         outcome = await coordinator._interrupt_child(job)
     assert outcome is not None
     assert recorded == [

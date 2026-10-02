@@ -22,6 +22,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.types import HistoryScope
+from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+_RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
 
 
 async def resolve_subagent(
@@ -99,9 +100,29 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason=RESTART_INTERRUPTION_REASON,
+        reason=_RESTART_INTERRUPTION_REASON,
         status="failed",
     )
+
+
+async def interrupt_stopped_child(
+    child: DelegationChild,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    cancel_reason: str = "Delegation cancelled.",
+) -> None:
+    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled."""
+    if job_stopped_by_shutdown():
+        await interrupt_child(
+            child,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=_RESTART_INTERRUPTION_REASON,
+            status="failed",
+        )
+    else:
+        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=cancel_reason)
 
 
 async def interrupt_child(

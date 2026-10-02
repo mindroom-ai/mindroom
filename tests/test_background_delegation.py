@@ -29,10 +29,11 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
+from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import continue_delegation, delegation_child
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
-from mindroom.delegation.recovery import RESTART_INTERRUPTION_REASON, read_child_run
+from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
@@ -1147,7 +1148,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
     interrupt = AsyncMock()
 
     async def unwind() -> None:
-        await delegation_execution._interrupt_cancelled_child(
+        await delegation_recovery.interrupt_stopped_child(
             job_child(),
             config=Config(),
             runtime_paths=_runtime_paths(tmp_path),
@@ -1160,7 +1161,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
             await unwind()
             raise
 
-    with job_control_context(control), patch.object(delegation_execution, "interrupt_child", new=interrupt):
+    with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):
         if stop == "teardown":
             task = asyncio.create_task(torn_down())
             await asyncio.sleep(0)
@@ -1171,7 +1172,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
             await unwind()
     reason = interrupt.await_args.kwargs["reason"]
     assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
-        (RESTART_INTERRUPTION_REASON, "failed")
+        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
         if stop in {"shutdown", "teardown"}
         else ("Delegation cancelled.", "cancelled")
     )

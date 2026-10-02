@@ -51,12 +51,7 @@ from mindroom.delegation.lifecycle import (
     settle_child_response,
     start_child_turn,
 )
-from mindroom.delegation.recovery import (
-    RESTART_INTERRUPTION_REASON,
-    interrupt_child,
-    read_child_run,
-    resolve_subagent,
-)
+from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run, resolve_subagent
 from mindroom.delegation.sessions import (
     SubagentSessionError,
     subagent_liveness,
@@ -70,7 +65,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
-from mindroom.tool_jobs.control import job_owns_execution, job_stopped_by_shutdown
+from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import (
     READY_STATUSES,
     BackgroundOutcome,
@@ -673,20 +668,6 @@ def _child_result_text(child: DelegationChild, receipt: str) -> str:
     return f"{result}\n\n{receipt}"
 
 
-async def _interrupt_cancelled_child(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Settle a cancelled child; shutdown of its owning job interrupts it like a restart instead."""
-    if job_stopped_by_shutdown():
-        await interrupt_child(
-            child,
-            config=config,
-            runtime_paths=runtime_paths,
-            reason=RESTART_INTERRUPTION_REASON,
-            status="failed",
-        )
-    else:
-        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
-
-
 async def _background_child_outcome(
     child: DelegationChild,
     *,
@@ -727,7 +708,7 @@ async def _background_child_outcome(
                     },
                 )
         except asyncio.CancelledError:
-            await _interrupt_cancelled_child(child, config=config, runtime_paths=runtime_paths)
+            await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
             raise
         except Exception as error:
             primary_error = error
@@ -1189,12 +1170,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     if output_request is not None and output_request.path is not None
                                     else None
                                 ),
-                                cancel=partial(
-                                    interrupt_child,
-                                    config=config,
-                                    runtime_paths=runtime_paths,
-                                    reason="Delegation cancelled.",
-                                ),
+                                cancel=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
                             )
                         await liveness.aclose()
                         waited = await background.wait(
@@ -1322,7 +1298,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     )
                     await persist(state)
                     raise
-                await _interrupt_cancelled_child(child, config=config, runtime_paths=runtime_paths)
+                await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
                 await after_delegation(
                     hook_state,
                     config=config,

@@ -31,12 +31,11 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.recovery import RESTART_INTERRUPTION_REASON, interrupt_child, read_child_run
+from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import READY_STATUSES, TERMINAL_STATUSES, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -176,18 +175,9 @@ class DelegationFuzzRunner:
 
     async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
         """Settle a recovered child as the delivery coordinator does: a restart interrupts it, anything else cancels."""
-        restarted = job_stopped_by_shutdown()
         return await reconcile_delegation(
             job,
-            cleanup=partial(
-                interrupt_child,
-                config=self.config,
-                runtime_paths=self.paths,
-                reason=RESTART_INTERRUPTION_REASON
-                if restarted
-                else "Background execution was cancelled; tools were not replayed.",
-                status="failed" if restarted else "cancelled",
-            ),
+            cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
             runtime_paths=self.paths,
         )
 

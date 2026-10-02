@@ -15,11 +15,10 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.lifecycle import active_delegation_edges
-from mindroom.delegation.recovery import RESTART_INTERRUPTION_REASON, interrupt_child
+from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.disabled import index_parked_work
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
@@ -125,18 +124,13 @@ class ToolJobRuntimeCoordinator:
         if config is None:
             msg = "Cannot settle a background job without runtime configuration."
             raise RuntimeError(msg)
-        restarted = job_stopped_by_shutdown()
         return await reconcile_delegation(
             job,
             cleanup=partial(
-                interrupt_child,
+                interrupt_stopped_child,
                 config=config,
                 runtime_paths=self.runtime_paths,
-                # A restart interrupts the child as crash recovery of a subagent does; anything else cancels it.
-                reason=RESTART_INTERRUPTION_REASON
-                if restarted
-                else "Background execution was cancelled; tools were not replayed.",
-                status="failed" if restarted else "cancelled",
+                cancel_reason="Background execution was cancelled; tools were not replayed.",
             ),
             runtime_paths=self.runtime_paths,
         )
