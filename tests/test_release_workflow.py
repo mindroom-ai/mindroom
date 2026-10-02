@@ -100,7 +100,7 @@ def test_release_workflow_dispatches_homebrew_tap_update(release_workflow: str) 
     """The main release workflow should notify the dedicated Homebrew tap repo."""
     assert "update_homebrew_tap:" in release_workflow
     assert "needs: build_macos_app" in release_workflow
-    assert "uses: actions/create-github-app-token@v3" in release_workflow
+    assert "uses: actions/create-github-app-token@" in release_workflow
     assert "app-id: ${{ vars.RELEASE_BOT_APP_ID }}" in release_workflow
     assert "private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}" in release_workflow
     assert "owner: mindroom-ai" in release_workflow

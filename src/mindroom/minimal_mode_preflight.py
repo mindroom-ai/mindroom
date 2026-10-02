@@ -8,15 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agent_cli.worker_network import cli_deployment_problems
-from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_access import minimal_shell_problems
+from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
-from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
-from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
@@ -29,21 +26,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements"
-
-
-def _deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
-    """Return every unmet deployment requirement, reading only environment settings."""
-    if primary_worker_backend_name(runtime_paths) != "docker":
-        problems = [
-            "Set `MINDROOM_WORKER_BACKEND=docker` and `MINDROOM_DOCKER_WORKER_IMAGE`, "
-            "because minimal mode runs each response in a dedicated Docker worker.",
-        ]
-    else:
-        try:
-            problems = DockerWorkerBackendConfig.from_runtime(runtime_paths).cli_profile_problems()
-        except WorkerBackendError as exc:
-            problems = [str(exc)]
-    return [*problems, *cli_deployment_problems(runtime_paths)]
 
 
 def _authored_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
@@ -109,7 +91,7 @@ def minimal_mode_problems(
     )
     if workspace is None:
         problems.append(f"Give `{agent_name}` an agent workspace, for example with `memory_backend: file`.")
-    return [*problems, *_deployment_problems(runtime_paths)]
+    return [*problems, *minimal_shell_problems(config, runtime_paths, agent_name)]
 
 
 def minimal_subagent_candidates(
@@ -119,13 +101,17 @@ def minimal_subagent_candidates(
     caller_identity: ToolExecutionIdentity | None,
 ) -> list[str]:
     """List agents to advertise as minimal subagents; a child that still cannot run fails with a recovery hint."""
-    if (
-        (caller_identity is not None and caller_identity.channel != "matrix")
-        or _deployment_problems(runtime_paths)
-        or any(tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES)
+    if (caller_identity is not None and caller_identity.channel != "matrix") or any(
+        tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES
     ):
         return []
-    return [name for name in agent_names if name in config.agents and _authored_shell(config, name) is not None]
+    return [
+        name
+        for name in agent_names
+        if name in config.agents
+        and _authored_shell(config, name) is not None
+        and not minimal_shell_problems(config, runtime_paths, name)
+    ]
 
 
 def render_minimal_mode_problems(agent_name: str, problems: list[str], runtime_paths: RuntimePaths) -> str:

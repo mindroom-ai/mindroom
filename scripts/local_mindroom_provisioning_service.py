@@ -2,10 +2,14 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#   "fastapi>=0.116.1",
-#   "httpx>=0.27",
-#   "uvicorn>=0.35",
+#   "fastapi==0.136.3",
+#   "httpx==0.28.1",
+#   "uvicorn==0.40.0",
 # ]
+#
+# [tool.uv]
+# # Resolve transitive packages only from releases published before this date.
+# exclude-newer = "2026-10-01T00:00:00Z"
 # ///
 """Standalone local MindRoom provisioning service.
 

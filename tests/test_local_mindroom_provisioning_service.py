@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
+import tomllib
 from contextlib import closing
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from urllib.parse import urlparse
@@ -24,7 +27,19 @@ from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+
+def test_service_script_pins_its_whole_dependency_set() -> None:
+    """A newly published release of a direct or transitive dependency must not change what the service imports."""
+    source = Path(provisioning.__file__).read_text(encoding="utf-8")
+    block = re.search(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$", source)
+    assert block is not None
+    lines = block.group("content").splitlines(keepends=True)
+    metadata = tomllib.loads("".join(line[2:] if line.startswith("# ") else line[1:] for line in lines))
+
+    assert metadata["dependencies"]
+    assert all(re.fullmatch(r"[a-z0-9-]+==[0-9.]+", dependency) for dependency in metadata["dependencies"])
+    assert datetime.fromisoformat(metadata["tool"]["uv"]["exclude-newer"]).tzinfo is not None
 
 
 def _service_config(

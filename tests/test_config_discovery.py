@@ -243,7 +243,6 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             # and passes execution_identity explicitly to the routing helper.
             # Keep exact expressions: a new free helper call still needs review.
             bound_target_calls = {
-                ("src/mindroom/agent_cli/worker.py", "context.resolve_worker_target"),
                 ("src/mindroom/approval_execution.py", "runtime_context.resolve_worker_target"),
                 ("src/mindroom/approval_tools.py", "context.resolve_worker_target"),
                 ("src/mindroom/minimal_agent.py", "runtime.resolve_worker_target"),

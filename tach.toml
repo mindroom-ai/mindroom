@@ -178,6 +178,7 @@ expose = [
 path = "mindroom.agent_cli.client"
 depends_on = [
     "mindroom.agent_cli.json_io",
+    "mindroom.agent_cli.shell_contract",
 ]
 visibility = [
     "mindroom.agent_cli.main",
@@ -372,6 +373,7 @@ depends_on = [
     "mindroom.agent_cli.projection",
     "mindroom.agent_cli.protocol",
     "mindroom.agent_cli.session",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.agno_compat_cli_checkpoint",
     "mindroom.agno_compat_prepared_tools",
     "mindroom.cancellation",
@@ -393,61 +395,47 @@ expose = [
 ]
 
 [[modules]]
-path = "mindroom.agent_cli.worker"
+path = "mindroom.agent_cli.shell_access"
 depends_on = [
-    "mindroom.agent_cli.worker_network",
-    "mindroom.agent_cli.worker_protocol",
-    "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.worker_routing",
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.runtime_state",
+    "mindroom.tool_system.sandbox_proxy",
 ]
 visibility = [
     "mindroom.minimal_agent",
-]
-
-[[interfaces]]
-from = ["mindroom.agent_cli.worker"]
-expose = [
-    "open_configured_cli_worker",
-]
-
-[[modules]]
-path = "mindroom.agent_cli.worker_network"
-depends_on = ["mindroom.agent_cli.worker_protocol"]
-visibility = [
-    "mindroom.agent_cli.worker",
-    "mindroom.api.sandbox_runner_cli",
     "mindroom.minimal_mode_preflight",
 ]
 
 [[interfaces]]
-from = ["mindroom.agent_cli.worker_network"]
+from = ["mindroom.agent_cli.shell_access"]
 expose = [
-    "cli_deployment_problems",
-    "probe_cli_network",
-    "validate_cli_deployment",
+    "agent_cli_shell_env",
+    "minimal_shell_problems",
 ]
 
 [[modules]]
-path = "mindroom.agent_cli.worker_protocol"
+path = "mindroom.agent_cli.shell_contract"
 depends_on = []
 visibility = [
-    "mindroom.agent_cli.worker",
-    "mindroom.agent_cli.worker_network",
-    "mindroom.api.sandbox_runner_cli",
+    "mindroom.agent_cli.client",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.turn",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tools.shell",
 ]
 
 [[interfaces]]
-from = ["mindroom.agent_cli.worker_protocol"]
+from = ["mindroom.agent_cli.shell_contract"]
 expose = [
-    "CLI_PRIVATE_ROOT_PATH",
-    "CliShellRequest",
-    "CliShellSettings",
-    "CliWorkerLaunch",
+    "AGENT_CLI_TOKEN_ENV",
+    "AGENT_CLI_URL_ENV",
+    "AgentCliShellEnv",
     "SHELL_OPERATION_NAMES",
-    "safe_origin",
+    "bound_agent_cli_shell_env",
+    "current_agent_cli_shell_env",
 ]
 
 [[modules]]
@@ -1878,7 +1866,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_app"
 depends_on = [
-    "mindroom.api.sandbox_runner_cli",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_browser",
     "mindroom.api.sandbox_exec",
@@ -4726,6 +4713,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
@@ -7484,7 +7472,7 @@ visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker"
 [[modules]]
 path = "mindroom.tool_system.agent_tool_calls"
 depends_on = [
-    "mindroom.agent_cli.worker_protocol",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.agno_compat_cli_checkpoint",
     "mindroom.agno_compat_prepared_tools",
     "mindroom.background_tasks",
@@ -7504,21 +7492,6 @@ expose = [
     "PreparedAgentToolCatalog",
     "execute_agent_tool_call",
     "execute_agent_shell_call",
-]
-
-[[modules]]
-path = "mindroom.api.sandbox_runner_cli"
-depends_on = [
-    "mindroom.agent_cli.worker_network",
-    "mindroom.agent_cli.worker_protocol",
-    "mindroom.api.sandbox_env_assembly",
-    "mindroom.api.sandbox_exec",
-    "mindroom.api.sandbox_runner",
-    "mindroom.api.sandbox_worker_prep",
-    "mindroom.background_tasks",
-    "mindroom.tool_system.output_files",
-    "mindroom.tool_system.tool_access",
-    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -7581,9 +7554,9 @@ depends_on = [
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.session",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.agent_cli.turn",
-    "mindroom.agent_cli.worker",
-    "mindroom.agent_cli.worker_protocol",
     "mindroom.agent_knowledge_descriptions",
     "mindroom.approval_tools",
     "mindroom.tool_system.agent_tool_calls",
@@ -7604,8 +7577,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.minimal_mode_preflight"
 depends_on = [
-    "mindroom.agent_cli.worker_network",
-    "mindroom.agent_cli.worker_protocol",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.runtime_resolution",
     "mindroom.tool_approval",
     "mindroom.tool_system.catalog",
