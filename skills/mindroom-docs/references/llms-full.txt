@@ -24004,7 +24004,7 @@ All three limits apply to `search_tools`, `get_tool`, and `invoke_tool`; the fir
 Excess calls do not queue or retry automatically.
 Cancelled or timed-out calls retain their allowances until background work and cleanup finish.
 These defaults are conservative starting values, not measured capacity; tune them against available resources, tool latency, and upstream quotas.
-Synchronous tool bodies run on a dedicated pool of 32 threads, separate from the threads that authentication, OAuth storage, and the Matrix runtime use, and admitted calls beyond that pool wait for a free thread within their timeout.
+Synchronous tool bodies and the worker requests of async worker-routed tools run on a dedicated pool of 32 threads, separate from the threads that authentication, OAuth storage, the Matrix runtime, and chat worker tool calls use, and admitted calls beyond that pool wait for a free thread within their timeout.
 Keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` below 32 so that one user cannot occupy every gateway tool thread.
 
 Public registration and authorization starts share an aggregate admission limit of 60 requests per minute per API process and a per-source limit of 10 requests per minute.

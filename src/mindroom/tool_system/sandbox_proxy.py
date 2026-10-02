@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import functools
@@ -13,7 +12,6 @@ import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
@@ -1027,9 +1025,10 @@ def _call_proxy_sync(
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     """Run one blocking worker proxy call outside asyncio's default executor."""
-    context = copy_context()
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_WORKER_PROXY_EXECUTOR, context.run, call)
+    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call  # noqa: PLC0415
+
+    return await run_async_entrypoint_blocking_call(call, executor=_WORKER_PROXY_EXECUTOR)
 
 
 def _wrap_sync_function(
