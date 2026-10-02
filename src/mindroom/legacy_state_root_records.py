@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Primary records kept inside worker-mounted state roots.
 # Legacy format: `invited_rooms.json`, `pending_room_invites.json`, and `personal_rooms/<sha256>.json` in `agents/<entity>/`, and `agent_modes.json` in `agents/<agent>/` or `private_instances/<scope>/<agent>/`, which the static-runner sidecar mounts read-write.
-# Last legacy release: v2026.10.24; replacement: the next release keeps them at the same relative paths below `tracking/`.
+# Last legacy release: v2026.10.29; replacement: the next release keeps them at the same relative paths below `tracking/`.
 # Handling: before serving, once per storage root, every old file that is a regular file reached without links and holds a valid record moves below `tracking/`, unless a record already exists there; anything else stays behind with a warning, and a receipt stops later starts from reading worker-written entries again.
 # Coverage: tests/test_legacy_state_root_records.py::test_startup_moves_valid_records_once,
 # tests/test_legacy_state_root_records.py::test_planted_entries_stay_behind_without_stopping_startup.
