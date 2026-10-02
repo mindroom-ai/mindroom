@@ -101,7 +101,7 @@ def version() -> None:
 
 
 @app.command()
-def run(
+def run(  # noqa: C901 - one CLI entry point for setup, pairing, service and run modes
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
