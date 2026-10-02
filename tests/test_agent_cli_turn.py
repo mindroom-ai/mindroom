@@ -147,6 +147,49 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
 
 
 @pytest.mark.asyncio
+async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: Path) -> None:
+    """A standard-mode shell call opens the response's CLI window and environment around its own work."""
+
+    async def mutate(run_context: RunContext) -> str:
+        run_context.session_state["count"] = run_context.session_state.get("count", 0) + 1
+        return "mutated"
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[mutate])])
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async def command() -> str:
+        assert current_agent_cli_shell_env() is _SHELL_ENV
+        queued = await owner.operation(
+            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
+        )
+        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
+            await asyncio.sleep(0.001)
+        assert receipt["status"] == "completed", receipt
+        return "shell done"
+
+    async with asyncio.timeout(3):
+        assert await owner.run_native_shell(command) == "shell done"
+    assert catalog.run_context.session_state["count"] == 1
+    assert current_agent_cli_shell_env() is None
+    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+        await owner.operation(
+            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
+        )
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end() -> None:
 
     events = []

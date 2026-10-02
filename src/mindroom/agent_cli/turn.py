@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import ToolResult
@@ -438,6 +439,18 @@ class LiveTurnTools(TurnToolBridge):
                 yield event
         for media in self._media:
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
+
+    async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
+        """Run one standard-mode native shell call inside this response's CLI window and environment."""
+        async with self._outer:
+            self._check_live()
+            if self.shell_env is None:
+                msg = "Native shell has no CLI environment"
+                raise RuntimeError(msg)
+            self._media = []
+            async with self._window(f"native-{uuid4().hex}"):
+                with bound_agent_cli_shell_env(self.shell_env):
+                    return await run()
 
     async def _invoke_shell(self, binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> object:
         """Run the agent's own shell function, wherever it runs, with this response's CLI environment."""
