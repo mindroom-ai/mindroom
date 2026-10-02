@@ -42,9 +42,11 @@ _PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 # object: a string or number of a few bytes takes 35 to 55 bytes once decoded,
 # an array about 70 and an object about 190, so a list of short values decodes
 # to about 10 times its size and nested empty containers to over 40. Weighing
-# every structural array, object and separator keeps each such shape at 0.6 to
-# 0.85 of its estimate, while 16 MiB of prose and tool traces, including JSON
-# text inside their strings, stays under this bound. Strings holding a character
+# every structural array, object and separator keeps such shapes near their
+# estimate (measured worst: a dict just past a hash table resize, or a list of
+# one-character non-ASCII strings, holds about 1.25 times it, and a page peaks
+# near 1.35 times this bound), while 16 MiB of prose and tool traces, including
+# spaced JSON text inside their strings as tool previews write it, stays under it. Strings holding a character
 # outside the Basic Multilingual Plane decode at 4 bytes per character, so a page
 # of them can reach about twice this bound before the byte budget stops it.
 _PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
