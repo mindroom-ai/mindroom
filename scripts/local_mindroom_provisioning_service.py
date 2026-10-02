@@ -70,7 +70,9 @@ a change writes only the records it touches. The service loads every row at
 startup and serves from memory. On the first start with a new database it
 imports the ``.json`` file of the same name beside it (``state.json`` for the
 default path), where earlier versions kept the whole state; later starts never
-read that file again, so it can be deleted after that start.
+read that file again, so it can be deleted after that start. A state path that
+still names the ``.json`` file opens the ``.sqlite3`` database beside it, which
+imports that file the same way.
 
 Agent passwords: register-agent creates each agent account with a random
 one-time password and returns it once, only when the account was created. The
@@ -693,12 +695,10 @@ def _delete_excess_connections_unlocked(state: ProvisioningState, owned: list[Lo
 
 def _open_state_database(state_path: Path) -> sqlite3.Connection:
     """Open the state database in WAL mode, so each commit appends only the rows it changed."""
-    if state_path.suffix == ".json":
-        # The .json path beside the database names the legacy state file that _create_state_tables imports.
-        msg = f"MINDROOM_PROVISIONING_STATE_PATH names the SQLite state database, not a .json file: {state_path}"
-        raise ValueError(msg)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(state_path)
+    # A path still naming the legacy .json file opens the .sqlite3 database beside it, which imports that file.
+    database_path = state_path.with_suffix(".sqlite3") if state_path.suffix == ".json" else state_path
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(database_path)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
     # Like the earlier unsynced state file, a power loss can lose the latest commits, but it never corrupts the database.
@@ -712,10 +712,10 @@ def _create_state_tables(db: sqlite3.Connection, state_path: Path) -> None:
     for statement in STATE_SCHEMA:
         db.execute(statement)
     # LEGACY_COMPAT: provisioning state kept as one JSON file rewritten on every change
-    # Legacy format: a JSON object with `pair_sessions` and `connections` lists at the configured state path, by default /var/lib/mindroom-local-provisioning/state.json; selected on the first start with a new database when the `.json` file of the same name exists beside it.
+    # Legacy format: a JSON object with `pair_sessions` and `connections` lists at the configured state path, by default /var/lib/mindroom-local-provisioning/state.json; selected on the first start with a new database when the `.json` file of the same name exists beside it, or when the configured state path still names that file.
     # Last legacy release: unversioned service state; the service runs from a repository checkout, every revision before this change wrote that file, and this change replaces it with one SQLite row per record.
-    # Handling: every record is imported through the current row readers in the transaction that creates the tables, the file is never read again, and a state path ending in .json is refused so the database cannot overwrite it.
-    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_first_start_imports_the_legacy_state_file_once.
+    # Handling: every record is imported through the current row readers in the transaction that creates the tables, and the file is never read again; a state path ending in .json opens the .sqlite3 database beside it, so deployments still configured with the old path import the same way and never overwrite the file.
+    # Coverage: tests/test_local_mindroom_provisioning_service.py::test_first_start_imports_the_legacy_state_file_once, tests/test_local_mindroom_provisioning_service.py::test_legacy_json_state_path_opens_the_database_beside_it.
     legacy_state_path = state_path.with_suffix(".json")
     if legacy_state_path.exists():
         payload = json.loads(legacy_state_path.read_text(encoding="utf-8"))

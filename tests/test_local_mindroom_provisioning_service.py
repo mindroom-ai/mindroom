@@ -1963,12 +1963,31 @@ def test_first_start_imports_the_legacy_state_file_once(tmp_path: Path, monkeypa
         assert _post_heartbeat(restarted, paired["client_id"], paired["client_secret"]).status_code == 200
     assert [connection["id"] for connection in _stored_rows(state_path, "connections")] == [paired["client_id"]]
 
-    with (
-        pytest.raises(ValueError, match=r"not a \.json file"),
-        TestClient(provisioning.create_app(_service_config(legacy_path))),
-    ):
-        pass
-    assert legacy_path.read_text(encoding="utf-8") == "not json"
+
+def test_legacy_json_state_path_opens_the_database_beside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment still configured with the old state.json path imports it into state.sqlite3 and keeps the file."""
+    _patch_legacy_access_token_auth(monkeypatch)
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "old.sqlite3"))) as client:
+        paired = _pair_local_client(client)
+    legacy_path = tmp_path / "state.json"
+    legacy_text = json.dumps(
+        {
+            "pair_sessions": _stored_rows(tmp_path / "old.sqlite3", "pair_sessions"),
+            "connections": _stored_rows(tmp_path / "old.sqlite3", "connections"),
+        },
+    )
+    legacy_path.write_text(legacy_text, encoding="utf-8")
+
+    with TestClient(provisioning.create_app(_service_config(legacy_path))) as client:
+        assert _post_heartbeat(client, paired["client_id"], paired["client_secret"]).status_code == 200
+    assert legacy_path.read_text(encoding="utf-8") == legacy_text
+    state_path = tmp_path / "state.sqlite3"
+    assert [connection["id"] for connection in _stored_rows(state_path, "connections")] == [paired["client_id"]]
+
+    legacy_path.write_text("not json", encoding="utf-8")
+    for configured_path in (legacy_path, state_path):
+        with TestClient(provisioning.create_app(_service_config(configured_path))) as restarted:
+            assert _post_heartbeat(restarted, paired["client_id"], paired["client_secret"]).status_code == 200
 
 
 def _install_homeserver(
