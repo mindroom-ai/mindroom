@@ -49,6 +49,7 @@ async def migrate_tool_credential_defaults(runtime_paths: RuntimePaths) -> None:
 # Coverage: tests/test_legacy_tool_credentials.py::test_startup_deletes_worker_copies_of_primary_only_tool_settings_once,
 # tests/test_legacy_tool_credentials.py::test_a_worker_store_that_cannot_be_cleaned_keeps_the_cleanup_pending,
 # tests/test_legacy_tool_credentials.py::test_a_worker_store_hidden_from_discovery_keeps_the_cleanup_pending,
+# tests/test_legacy_tool_credentials.py::test_a_worker_copy_that_cannot_be_inspected_keeps_the_cleanup_pending,
 # tests/test_legacy_tool_credentials.py::test_both_entry_points_clean_up_before_credentials_are_used.
 def _remove_worker_copies_of_primary_tool_settings(runtime_paths: RuntimePaths) -> None:
     receipt = get_runtime_credentials_manager(runtime_paths).base_path / _WORKER_COPIES_RECEIPT_NAME

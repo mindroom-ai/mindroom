@@ -850,8 +850,12 @@ def remove_worker_service_credentials(
             continue
         try:
             with open_directory_within_root(directory) as directory_fd:
-                for name, _entry_stat in _credentials_file_entries(directory_fd):
-                    if name in file_names:
+                for name in file_names:
+                    try:
+                        entry_mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(entry_mode):
                         os.unlink(name, dir_fd=directory_fd)
                         removed += 1
         except OSError as exc:
