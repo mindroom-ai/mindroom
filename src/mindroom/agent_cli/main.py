@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             client = AgentCliClient()
             result = client.operation(payload)
             if args.action == "call" and call_id is not None:
-                # The call is admitted; if polling fails, print its last known receipt so `calls wait` can resume.
+                # The call is admitted; if polling fails, print its submission receipt so `calls wait` can resume.
                 with suppress(AgentCliUnavailableError):
                     result = _wait(client, call_id, result, args.timeout)
         print(canonical_json(result))
