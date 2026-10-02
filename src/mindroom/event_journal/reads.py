@@ -38,12 +38,16 @@ _PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) A
 _PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 
 # What the loaded rows of one page may decode to, estimated before decoding.
-# Text decodes to about its stored size, but every JSON object or array becomes
-# a Python container of about 88 bytes, so content of nested empty containers
-# decodes to over 40 times its size. Weighing each container keeps such a page
-# near this bound while ordinary long threads stay within the byte budget.
+# Prose decodes to about its stored size, but every JSON value becomes a Python
+# object: a string or number of a few bytes takes 35 to 55 bytes once decoded,
+# an array about 70 and an object about 190, so a list of short values decodes
+# to about 10 times its size and nested empty containers to over 40. Weighing
+# every array, object and separator keeps each such shape at 0.6 to 0.85 of
+# its estimate, while 16 MiB of prose and tool traces stays under this bound.
 _PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
-_DECODED_BYTES_PER_CONTAINER = 96
+_DECODED_BYTES_PER_ARRAY = 96
+_DECODED_BYTES_PER_OBJECT = 192
+_DECODED_BYTES_PER_SEPARATOR = 56
 
 # Everything older than one page's last row, spelled as a row value.
 #
@@ -214,8 +218,12 @@ def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
     total = 0
     for index, row in enumerate(rows):
         content_json = row["content_json"] or ""
-        containers = content_json.count("{") + content_json.count("[")
-        total += len(content_json) + _DECODED_BYTES_PER_CONTAINER * containers
+        total += (
+            len(content_json)
+            + _DECODED_BYTES_PER_ARRAY * content_json.count("[")
+            + _DECODED_BYTES_PER_OBJECT * content_json.count("{")
+            + _DECODED_BYTES_PER_SEPARATOR * (content_json.count(",") + content_json.count(":"))
+        )
         if total > _PAGE_DECODED_BUDGET_BYTES:
             return max(index, 1)
     return len(rows)

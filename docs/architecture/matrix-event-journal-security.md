@@ -123,7 +123,8 @@ Keeping the debt instead would let anyone who can post make every strict read of
 
 Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
 
-Decoding stored JSON can take about 45 times its size in memory when it is made of nested empty containers, so a page also stops once its estimated decoded size, its bytes plus 96 bytes per JSON object or array, passes 64 MiB.
+Decoding stored JSON can take about 10 times its size in memory for a list of short strings or numbers, and about 45 times for nested empty containers.
+So a page also stops once its estimated decoded size passes 64 MiB, counting its bytes plus 96 bytes per JSON array, 192 per JSON object and 56 per comma or colon.
 
 A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
 

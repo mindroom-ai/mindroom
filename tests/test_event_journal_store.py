@@ -147,6 +147,24 @@ _MOST_ONE_PAGE_MAY_DECODE_TO = 100 * 1024 * 1024
 # record header already holds, so the value itself is never loaded.
 _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ = 0xC0
 
+
+def _nested_empty_containers(depth: int) -> object:
+    """Return an empty object wrapped in ``depth`` single-item lists."""
+    nested: object = {}
+    for _depth in range(depth):
+        nested = [nested]
+    return nested
+
+
+# Message padding that decodes to many times its stored size, each about the
+# size of one Matrix event, the most a message can carry inline.
+_PADDING_COSTLIEST_TO_DECODE = {
+    "nested-empty-containers": [_nested_empty_containers(32)] * 900,
+    "short-strings": ["ab"] * 12_000,
+    "three-digit-ints": [999] * 15_000,
+    "one-key-objects": [{"a": 1}] * 7_500,
+}
+
 # `PRAGMA synchronous` reports the mode it is set to as an integer.
 _SQLITE_SYNCHRONOUS_NORMAL = 1
 _SQLITE_SYNCHRONOUS_FULL = 2
@@ -1672,7 +1690,7 @@ class TestBoundedReads:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Rows that fit the byte budget still stop where their containers would decode too large."""
-        monkeypatch.setattr(reads, "_PAGE_DECODED_BUDGET_BYTES", 30_000)
+        monkeypatch.setattr(reads, "_PAGE_DECODED_BUDGET_BYTES", 40_000)
         for index in range(4):
             await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x") | {"pad": [[]] * 100})
 
@@ -1717,21 +1735,21 @@ class TestBoundedReads:
         assert page.next_cursor is not None
         assert measured
 
+    @pytest.mark.parametrize("padding", _PADDING_COSTLIEST_TO_DECODE.values(), ids=_PADDING_COSTLIEST_TO_DECODE)
     async def test_a_page_of_the_costliest_json_to_decode_stays_small_in_memory(
         self,
         alice: PrincipalStore,
+        padding: list[object],
     ) -> None:
         """The budget bounds what a page decodes to, not only what it stores.
 
-        JSON of nested empty containers decodes to about 45 times its stored
-        size, so a budget sized for text let anyone who can post make one page
-        hold hundreds of megabytes, once for every agent reading the thread.
+        Every decoded JSON value is a Python object, so a list of short strings
+        or numbers decodes to about 10 times its stored size, one of one-key
+        objects to about 24 and nested empty containers to about 45. A budget
+        sized for text let anyone who can post make one page hold hundreds of
+        megabytes, once for every agent reading the thread.
         """
-        nested: object = {}
-        for _depth in range(32):
-            nested = [nested]
-        # About the size of one Matrix event, the most a message can carry inline.
-        content = text("x") | {"pad": [nested] * 900}
+        content = text("x") | {"pad": padding}
         stored_bytes = len(json.dumps(content, separators=(",", ":")))
         for index in range(reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
             await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
@@ -1745,7 +1763,35 @@ class TestBoundedReads:
 
         assert page.next_cursor is not None
         assert peak <= _MOST_ONE_PAGE_MAY_DECODE_TO
-        assert peak >= len(page.messages) * stored_bytes * 30
+        assert peak >= reads._PAGE_DECODED_BUDGET_BYTES // 2
+
+    async def test_a_page_of_ordinary_replies_fills_its_content_budget(self, alice: PrincipalStore) -> None:
+        """Prose, code and tool traces decode to about their stored size, so the decoded cap does not cut them short."""
+        sentence = "The agent read the file and reported back: 12 tests passed, none failed. "
+        code = "```python\ndef handle(event: dict[str, object], *, limit: int = 10) -> list[str]:\n    ...\n```\n"
+        trace = [
+            {
+                "type": "tool_call_completed",
+                "tool_name": "read_file",
+                "args_preview": f"path=src/mindroom/module_{index}.py, limit=200",
+                "result_preview": sentence * 5,
+                "truncated": False,
+            }
+            for index in range(20)
+        ]
+        content = text(sentence * 250 + code * 20) | {
+            "format": "org.matrix.custom.html",
+            "formatted_body": f"<p>{sentence * 250}</p>",
+            "io.mindroom.tool_trace": {"version": 2, "events": trace},
+        }
+        stored_bytes = len(json.dumps(content, separators=(",", ":")))
+        for index in range(reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+            await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2_000)
+
+        assert page.next_cursor is not None
+        assert len(page.messages) == reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes
 
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
         """A page is chronological."""
