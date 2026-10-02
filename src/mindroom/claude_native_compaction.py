@@ -39,6 +39,15 @@ def _effective_context_management(params: dict[str, Any]) -> dict[str, Any]:
     return (params.get("extra_body") or {}).get("context_management", params.get("context_management")) or {}
 
 
+def _is_unsigned_thinking(block: dict[str, Any]) -> bool:
+    """Return whether a stored thinking block was never signed, as when a stream stops mid-block.
+
+    The API rejects an unsigned thinking block on replay. Empty thinking text is
+    normal and stays; only the missing signature makes the block invalid.
+    """
+    return block.get("type") == "thinking" and not block.get("signature")
+
+
 class ClaudeNativeCompaction(NativeCompactionModel):
     """Adapt native checkpoints without changing the stored conversation."""
 
@@ -195,7 +204,11 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                 dropped_types.update({"thinking", "redacted_thinking", "redacted_reasoning_content"})
             next_data = dict(data)
             for key, blocks in block_lists.items():
-                next_data[key] = [block for block in blocks if block.get("type") not in dropped_types]
+                next_data[key] = [
+                    block
+                    for block in blocks
+                    if block.get("type") not in dropped_types and not _is_unsigned_thinking(block)
+                ]
             if items:
                 next_data["content_blocks"] = items
             updates: dict[str, Any] = {"provider_data": next_data}
