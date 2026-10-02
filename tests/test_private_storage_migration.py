@@ -88,6 +88,23 @@ def _forget_receipt(paths: RuntimePaths) -> None:
     (paths.storage_root / "tracking" / "private_storage_migrated.json").unlink()
 
 
+async def _start_leaving_invalid(paths: RuntimePaths, *entries: Path) -> None:
+    """Start once: each invalid entry stays in place with a warning, and startup still completes and writes its receipt."""
+    migration = importlib.import_module("mindroom.legacy_private_storage")
+    with capture_logs() as logs:
+        await migration.migrate_private_storage(paths)
+    assert set(_left_errors(logs)) == {str(entry.parent.resolve() / entry.name) for entry in entries}
+    assert (paths.storage_root / "tracking" / "private_storage_migrated.json").is_file()
+
+
+def _left_errors(logs: list[dict[str, object]]) -> dict[object, object]:
+    return {
+        log["entry"]: log["error"]
+        for log in logs
+        if log["event"] == "Leaving an invalid private storage entry untouched; not migrating"
+    }
+
+
 def _files(scope: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(scope)): path.read_bytes()
@@ -288,11 +305,11 @@ async def test_every_filesystem_mutation_boundary_resumes(tmp_path: Path, monkey
     "conflict",
     ["primary", "session", "owner", "null_owner", "orphan", "scope_link", "record_link", "intent"],
 )
-async def test_preflight_rejects_conflicts_before_any_move(
+async def test_preflight_leaves_conflicts_before_any_move(
     tmp_path: Path,
     conflict: str,
 ) -> None:
-    """A conflicting later scope must not leave an earlier verified scope partially moved."""
+    """A conflicting entry is left untouched without moving its scope or stopping verified ones."""
     migration = importlib.import_module("mindroom.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
@@ -321,8 +338,16 @@ async def test_preflight_rejects_conflicts_before_any_move(
     else:
         (source / _INTENT).write_text('{"unrelated": true}')
     before = _files(source)
-    with pytest.raises(ValueError, match=r"[Pp]rivate"):
-        await migration.migrate_private_storage(paths)
+    if conflict == "orphan":
+        # The session root, which no sandbox runner mounts, stays fail-closed.
+        with pytest.raises(ValueError, match=r"[Pp]rivate"):
+            await migration.migrate_private_storage(paths)
+    elif conflict == "scope_link":
+        await _start_leaving_invalid(paths, source.parent / "linked")
+        source = private_instance_scope_root_path(paths.storage_root, _NEW)
+        sessions = resolve_session_state_root(source, paths)
+    else:
+        await _start_leaving_invalid(paths, source)
     assert source.exists()
     assert sessions.exists()
     assert _files(source) == before
@@ -361,26 +386,72 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("plant", ["file", "record", "intent", "link"])
-async def test_entries_planted_after_the_receipt_cannot_stop_startup(tmp_path: Path, plant: str) -> None:
+async def test_entries_planted_after_the_receipt_are_never_read(tmp_path: Path, plant: str) -> None:
     """Sandbox runners write private_instances, so a completed migration never scans it again."""
     migration = importlib.import_module("mindroom.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     await migration.migrate_private_storage(paths)
+    current = private_instance_scope_root_path(paths.storage_root, _NEW)
     if plant == "file":
-        (source.parent / "junk").write_text("not a scope")
+        planted = source.parent / "junk"
+        planted.write_text("not a scope")
     elif plant == "record":
-        (private_instance_scope_root_path(paths.storage_root, _NEW) / _RECORD).write_text("{")
+        planted = current
+        (current / _RECORD).write_text("{")
     elif plant == "intent":
-        (private_instance_scope_root_path(paths.storage_root, _NEW) / _INTENT).write_text('{"unrelated": true}')
+        planted = current
+        (current / _INTENT).write_text('{"unrelated": true}')
     else:
-        (source.parent / "dangling").symlink_to("nowhere", target_is_directory=True)
+        planted = source.parent / "dangling"
+        planted.symlink_to("nowhere", target_is_directory=True)
 
-    await migration.migrate_private_storage(paths)
+    with capture_logs() as logs:
+        await migration.migrate_private_storage(paths)
+    assert not [log for log in logs if log["log_level"] == "warning"]
 
     _forget_receipt(paths)
-    with pytest.raises(ValueError, match=r"[Pp]rivate"):
-        await migration.migrate_private_storage(paths)
+    await _start_leaving_invalid(paths, *([planted, source] if plant == "record" else [planted]))
+
+
+def _entry_snapshot(entry: Path) -> object:
+    info = entry.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return "link", os.readlink(entry)
+    if stat.S_ISDIR(info.st_mode):
+        return "directory", {child.name: child.read_bytes() for child in entry.iterdir()}
+    return stat.S_IFMT(info.st_mode), entry.read_bytes() if stat.S_ISREG(info.st_mode) else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plant", ["file", "fifo", "record", "misbound", "intent", "link"])
+async def test_first_start_leaves_planted_entries_and_writes_its_receipt(tmp_path: Path, plant: str) -> None:
+    """Without a receipt, entries sandbox runners planted stay untouched with a warning while verified scopes still move."""
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    planted = source.parent / "planted"
+    if plant == "file":
+        planted.write_text("not a scope")
+    elif plant == "fifo":
+        os.mkfifo(planted)
+    elif plant == "link":
+        planted.symlink_to("nowhere", target_is_directory=True)
+    else:
+        planted.mkdir()
+        if plant == "record":
+            (planted / _RECORD).write_text("{")
+        elif plant == "misbound":
+            (planted / _RECORD).write_text((source / _RECORD).read_text())
+        else:
+            (planted / _INTENT).write_text('{"unrelated": true}')
+    before = _entry_snapshot(planted)
+
+    await _start_leaving_invalid(paths, planted)
+
+    assert _entry_snapshot(planted) == before
+    current = private_instance_scope_root_path(paths.storage_root, _NEW)
+    assert os.readlink(source) == current.name
+    assert (current / "writer" / "workspace" / "notes.txt").read_bytes() == b"private workspace\x00retained"
 
 
 async def _interrupt_after_session_move(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -404,7 +475,7 @@ async def _interrupt_after_session_move(paths: RuntimePaths, monkeypatch: pytest
     "damage",
     ["missing_session", "duplicate_session", "copied_scope", "changed_root", "boolean_inode", "wrong_owner"],
 )
-async def test_recovery_rejects_missing_or_unrelated_evidence(
+async def test_recovery_never_trusts_missing_or_unrelated_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     damage: str,
@@ -437,8 +508,12 @@ async def test_recovery_rejects_missing_or_unrelated_evidence(
         payload = json.loads((source / _RECORD).read_text())
         payload["requester_id"] = "@intruder:example.org"
         (source / _RECORD).write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match=r"[Pp]rivate"):
-        await migration.migrate_private_storage(paths)
+    if damage in {"missing_session", "changed_root"}:
+        await _start_leaving_invalid(paths, source)
+    else:
+        # The session mirror already moved, so it has no valid primary owner; the session root stays fail-closed.
+        with pytest.raises(ValueError, match="session-only private data"):
+            await migration.migrate_private_storage(paths)
     assert source.exists()
     assert not target.exists()
 
@@ -532,10 +607,10 @@ async def test_primary_admission_fails_before_credentials(
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
 ) -> None:
-    """Both primary entry points must reject invalid ownership before starting runtime work."""
+    """Both primary entry points must reject unrecoverable storage before starting runtime work."""
     paths = _paths(tmp_path)
-    source = _seed(paths, _OLD, _REQUESTER)
-    (source / _RECORD).write_text("null")
+    _seed(paths, _OLD, _REQUESTER)
+    (paths.storage_root / ".mindroom-storage-upgrade.json").write_text("{}")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
     monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
     if entrypoint == "api":
@@ -552,13 +627,12 @@ async def test_primary_admission_fails_before_credentials(
 @pytest.mark.parametrize("payload", ["null", "false", "[]", '{"version": 1}'])
 async def test_malformed_intent_never_becomes_fresh_migration(tmp_path: Path, payload: str) -> None:
     """A present but invalid intent must not be replaced with newly inferred evidence."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     (source / _INTENT).write_text(payload)
-    with pytest.raises(ValueError, match="intent"):
-        await migration.migrate_private_storage(paths)
+    await _start_leaving_invalid(paths, source)
     assert (source / _INTENT).read_text() == payload
+    assert not private_instance_scope_root_path(paths.storage_root, _NEW).exists()
 
 
 @pytest.mark.asyncio
@@ -636,8 +710,9 @@ async def test_absent_optional_mirror_stays_absent_on_resume(tmp_path: Path, mon
     target = private_instance_scope_root_path(paths.storage_root, _NEW)
     assert json.loads((target / _INTENT).read_text())["session_inode"] is None
     resolve_session_state_root(target, paths).mkdir()
-    with pytest.raises(ValueError, match="unexpected session"):
-        await migration.migrate_private_storage(paths)
+    await _start_leaving_invalid(paths, target)
+    assert (target / _INTENT).is_file()
+    assert not any(resolve_session_state_root(target, paths).iterdir())
 
 
 @pytest.mark.asyncio
@@ -674,8 +749,10 @@ async def test_recovery_rejects_boolean_owner_version(tmp_path: Path, monkeypatc
     payload = json.loads((source / _RECORD).read_text())
     payload["version"] = True
     (source / _RECORD).write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="version"):
+    # The session mirror already moved, so it has no valid primary owner; the session root stays fail-closed.
+    with capture_logs() as logs, pytest.raises(ValueError, match="session-only private data"):
         await migration.migrate_private_storage(paths)
+    assert "version" in str(_left_errors(logs)[str(source.parent.resolve() / source.name)])
     assert source.exists()
 
 
@@ -1122,6 +1199,10 @@ async def test_completed_aliases_reject_tampering(tmp_path: Path, damage: str) -
     else:
         old.unlink()
     _forget_receipt(paths)
+    if damage == "owner":
+        await _start_leaving_invalid(paths, old, new)
+        return
+    # Each other damage breaks the alias pairing with the session root, which stays fail-closed.
     with pytest.raises(ValueError, match=r"[Pp]rivate"):
         await migration.migrate_private_storage(paths)
 
@@ -1215,8 +1296,13 @@ async def test_recovery_aliases_require_recorded_publication_state(
             payload = json.loads((new / _RECORD).read_text())
             payload["worker_key"] = _OLD
             (new / _RECORD).write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match=r"[Pp]rivate"):
-        await migration.migrate_private_storage(paths)
+    if damage == "primary_before_session":
+        await _start_leaving_invalid(paths, new)
+    elif damage == "changed_owner":
+        await _start_leaving_invalid(paths, new, old)
+    else:
+        with pytest.raises(ValueError, match=r"[Pp]rivate"):
+            await migration.migrate_private_storage(paths)
     assert (new if new.exists() else old).joinpath(_INTENT).is_file()
 
 
