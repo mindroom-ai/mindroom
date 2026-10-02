@@ -1567,6 +1567,24 @@ def test_expired_pair_sessions_are_pruned_on_new_start(tmp_path: Path, monkeypat
         )
 
 
+def test_superseded_browser_code_stays_expired_after_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second pair start persists the user's earlier pending session as expired, so its code cannot complete later."""
+    _patch_openid_auth(monkeypatch)
+    state_path = tmp_path / "state.sqlite3"
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as client:
+        first = client.post("/v1/local-mindroom/pair/start", headers=ALICE_OPENID_HEADERS).json()
+        client.post("/v1/local-mindroom/pair/start", headers=ALICE_OPENID_HEADERS).raise_for_status()
+
+    with TestClient(provisioning.create_app(_service_config(state_path))) as restarted:
+        complete = restarted.post(
+            "/v1/local-mindroom/pair/complete",
+            json={"pair_code": first["pair_code"], "client_name": "x", "client_pubkey_or_fingerprint": "x"},
+        )
+    assert complete.status_code == 410
+    assert complete.json()["detail"] == "Pair code expired"
+
+
 def test_recently_expired_device_code_still_reports_expired_after_another_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
