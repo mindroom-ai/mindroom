@@ -704,6 +704,22 @@ def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path
     assert "`oversized`" not in listing
 
 
+def test_list_templates_stops_reading_workspace_templates_after_its_budget(tmp_path: Path) -> None:
+    """However many templates worker code plants, one listing reads and returns a bounded amount of their text."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(20):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n", description="d" * 60 * 1024))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`planted-00`" in listing
+    assert "`planted-19`" not in listing
+    assert "`mindroom-dev`" in listing
+
+
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
     """A workspace template that shadows a built-in name should not inherit the built-in schema."""
     config = _config(tmp_path)

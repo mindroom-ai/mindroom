@@ -32,6 +32,7 @@ from mindroom.custom_tools.todo_state import (
     todos_path,
 )
 from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
+from mindroom.logging_config import get_logger
 from mindroom.path_confinement import read_regular_file_within_root, resolve_path_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
+
+logger = get_logger(__name__)
 
 _VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
@@ -55,6 +58,8 @@ _TEMPLATE_RECURSION_LIMIT = 3
 _MAX_TEMPLATE_SIZE = 64 * 1024
 _MAX_TEMPLATE_TODOS = 100
 _MAX_TEMPLATE_RENDER_SECONDS = 5.0
+# One list_templates call stops reading workspace templates after this much text, however many worker code planted.
+_MAX_TEMPLATE_LISTING_CHARS = 1024 * 1024
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
 
 
@@ -423,8 +428,8 @@ def _validate_dependency_cycle(template_name: str, todos: list[dict[str, Any]]) 
         visit(node_id)
 
 
-def _load_template_metadata(path: Path, template_root: _TemplateRoot) -> dict[str, str]:
-    template = _load_template_document(path, template_root.read_text(path))
+def _load_template_metadata(path: Path, text: str) -> dict[str, str]:
+    template = _load_template_document(path, text)
     expected_name = path.name.removesuffix(".yaml.j2")
     name = template.get("name")
     version = template.get("version")
@@ -1074,6 +1079,7 @@ class TodoTools(Toolkit):
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
         seen_names: set[str] = set()
+        remaining_workspace_chars = _MAX_TEMPLATE_LISTING_CHARS
         for template_root in _visible_template_roots(agent):
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
@@ -1085,7 +1091,13 @@ class TodoTools(Toolkit):
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
                     raise ValueError(msg) from None
                 try:
-                    metadata = _load_template_metadata(path, template_root)
+                    text = template_root.read_text(path)
+                    if template_root.source == "workspace":
+                        remaining_workspace_chars -= len(text)
+                        if remaining_workspace_chars < 0:
+                            logger.warning("Listing only the first workspace todo templates", template=path.name)
+                            break
+                    metadata = _load_template_metadata(path, text)
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue
