@@ -26,12 +26,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
-from mindroom.minimal_mode_preflight import minimal_subagent_problems
-from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
-    get_detached_requester_context,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -250,7 +245,7 @@ async def observe_child_event(event: object) -> None:
     await record_child_event(event)
 
 
-def authorize_delegation(  # noqa: C901, PLR0911
+def authorize_delegation(  # noqa: PLR0911
     caller_name: str,
     agent_name: str,
     task: str,
@@ -261,7 +256,6 @@ def authorize_delegation(  # noqa: C901, PLR0911
     depth: int,
     allowed_targets: Sequence[str] | None = None,
     model: str | None = None,
-    minimal: bool = False,
 ) -> Config | str:
     """Recheck the current caller allowlist and requester authority."""
     if allowed_targets is None:
@@ -318,20 +312,6 @@ def authorize_delegation(  # noqa: C901, PLR0911
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
         available_models = ", ".join(sorted(active_config.models))
         return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
-    if minimal:
-        # A minimal child binds its CLI worker to the live Matrix response that runs it.
-        problems = (
-            minimal_subagent_problems(
-                active_config,
-                runtime_paths,
-                agent_name,
-                replace(build_execution_identity_from_runtime_context(runtime_context), agent_name=agent_name),
-            )
-            if runtime_context is not None
-            else ["Minimal subagents run only inside a Matrix conversation."]
-        )
-        if problems:
-            return f"Cannot run '{agent_name}' as a minimal subagent: {' '.join(problems)} Start a new subagent without minimal."
     return active_config
 
 

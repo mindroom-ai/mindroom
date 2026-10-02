@@ -78,11 +78,17 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
 
 
+@pytest.mark.parametrize("delegation_depth", [0, 1])
 @pytest.mark.parametrize(
     "failure",
     [ImportError("No module named 'praw'"), ValueError("Tool requires a separate service.")],
 )
-def test_toolkit_construction_failure_keeps_minimal_recovery_hint(tmp_path, monkeypatch, failure) -> None:
+def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
+    tmp_path,
+    monkeypatch,
+    failure,
+    delegation_depth,
+) -> None:
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
@@ -107,11 +113,13 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(tmp_path, monk
             identity,
             agent_mode="minimal",
             persist_runtime_state=False,
+            delegation_depth=delegation_depth,
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
     assert str(failure) in message
-    assert "!mode helper standard" in message
+    # A minimal subagent's caller starts a standard child; a conversation switches mode.
+    assert ("Start a new subagent without minimal." if delegation_depth else "!mode helper standard") in message
     assert raised.value.__cause__ is failure
 
     standard = agents.create_agent(

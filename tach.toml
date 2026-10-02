@@ -6946,7 +6946,6 @@ depends_on = [
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.error_handling",
-    "mindroom.minimal_mode_preflight",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
     "mindroom.delegation.sessions",

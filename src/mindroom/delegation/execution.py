@@ -775,7 +775,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         execution_identity=caller_identity,
         depth=delegation_depth,
         model=model,
-        minimal=target.agent_mode == "minimal",
     )
     output_request = None
     if not isinstance(authorization, str):

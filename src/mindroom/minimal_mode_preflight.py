@@ -15,7 +15,7 @@ from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig, cli_profile_problems
+from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
@@ -33,21 +33,17 @@ _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirement
 
 def _deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
     """Return every unmet deployment requirement, reading only environment settings."""
-    problems = []
     if primary_worker_backend_name(runtime_paths) != "docker":
-        problems.append(
+        problems = [
             "Set `MINDROOM_WORKER_BACKEND=docker` and `MINDROOM_DOCKER_WORKER_IMAGE`, "
             "because minimal mode runs each response in a dedicated Docker worker.",
-        )
+        ]
     else:
         try:
-            DockerWorkerBackendConfig.from_runtime(runtime_paths)
+            problems = DockerWorkerBackendConfig.from_runtime(runtime_paths).cli_profile_problems()
         except WorkerBackendError as exc:
-            problems.append(str(exc))
-    # A malformed extra environment is reported by both checks; list it once.
-    return list(
-        dict.fromkeys([*problems, *cli_profile_problems(runtime_paths), *cli_deployment_problems(runtime_paths)]),
-    )
+            problems = [str(exc)]
+    return [*problems, *cli_deployment_problems(runtime_paths)]
 
 
 def _authored_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
@@ -55,10 +51,6 @@ def _authored_shell(config: Config, agent_name: str) -> EffectiveToolConfig | No
         (entry for entry in config.resolve_entity(agent_name).authored_tool_configs if entry.name == "shell"),
         None,
     )
-
-
-def _gated_shell_operations(config: Config) -> list[str]:
-    return [name for name in SHELL_OPERATION_NAMES if tool_may_require_approval(config, name)]
 
 
 def _shell_problems(
@@ -126,32 +118,14 @@ def minimal_subagent_candidates(
     agent_names: Sequence[str],
     caller_identity: ToolExecutionIdentity | None,
 ) -> list[str]:
-    """Cheaply list agents to advertise as minimal subagents; each delegation still runs the full preflight."""
+    """List agents to advertise as minimal subagents; a child that still cannot run fails with a recovery hint."""
     if (
         (caller_identity is not None and caller_identity.channel != "matrix")
         or _deployment_problems(runtime_paths)
-        or _gated_shell_operations(config)
+        or any(tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES)
     ):
         return []
     return [name for name in agent_names if name in config.agents and _authored_shell(config, name) is not None]
-
-
-def minimal_subagent_problems(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    execution_identity: ToolExecutionIdentity,
-) -> list[str]:
-    """Also require ungated shell commands, because a minimal child cannot pause for approval."""
-    gated = _gated_shell_operations(config)
-    problems = minimal_mode_problems(config, runtime_paths, agent_name, execution_identity)
-    if gated:
-        problems.insert(
-            0,
-            f"Remove the `tool_approval` requirement on {', '.join(f'`{name}`' for name in gated)}, "
-            "because a minimal subagent cannot pause for approval.",
-        )
-    return problems
 
 
 def render_minimal_mode_problems(agent_name: str, problems: list[str], runtime_paths: RuntimePaths) -> str:

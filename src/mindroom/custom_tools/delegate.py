@@ -270,7 +270,6 @@ class DelegateTools(Toolkit):
             depth=self._delegation_depth,
             allowed_targets=self._delegate_to,
             model=model,
-            minimal=minimal,
         )
         if isinstance(config, str):
             return config

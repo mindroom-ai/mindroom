@@ -4867,8 +4867,8 @@ The child starts with the short prompt and Bash tool described here instead of i
 Use it for self-contained tasks whose child does not need its role, instructions, and tool guidance up front; the child can still read them with `mindroom-agent context`.
 `continue_subagent` keeps the child's mode.
 The tool description offers minimal mode only when the deployment meets the [deployment requirements](#deployment-requirements), and lists the allowed subagents that have the `shell` tool.
-Each request still checks the child's shell permissions and workspace, and refuses with every missing requirement before the child starts.
-A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it and its shell commands must not require approval.
+A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
+A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it, and minimal mode is not offered while shell commands require approval.
 Minimal subagents run only inside Matrix conversations.
 Each minimal child response gets its own dedicated Docker worker, which retires when that response ends.
 

@@ -88,17 +88,18 @@ def _live_context(config: Config, paths: RuntimePaths) -> object:
     )
 
 
-async def _run_subagent(
+async def _delegate(
     toolkit: DelegateTools,
     config: Config,
     paths: RuntimePaths,
+    tool_name: str,
     *,
-    agent_name: str,
     native: bool,
+    **arguments: object,
 ) -> str:
-    """Request a minimal child directly or through a parent Agent and the native delegation driver."""
+    """Call a delegate function directly or through a parent Agent and the native delegation driver."""
     if not native:
-        return await toolkit.run_subagent(task="Report", agent_name=agent_name, minimal=True)
+        return await toolkit.async_functions[tool_name].entrypoint(**arguments)
     identity = _identity()
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
@@ -109,9 +110,7 @@ async def _run_subagent(
         model=DelegationModel(
             id="parent",
             responses=[
-                ModelResponse(
-                    tool_calls=[_call("run_subagent", "delegate", task="Report", agent_name=agent_name, minimal=True)],
-                ),
+                ModelResponse(tool_calls=[_call(tool_name, f"{tool_name}-call", **arguments)]),
                 ModelResponse(content="Parent done"),
             ],
         ),
@@ -128,7 +127,7 @@ async def _run_subagent(
             execution_identity=identity,
         )
         assert response.status == RunStatus.completed
-        return next(str(tool.result) for tool in response.tools or () if tool.tool_name == "run_subagent")
+        return next(str(tool.result) for tool in response.tools or () if tool.tool_name == tool_name)
     finally:
         storage.close()
 
@@ -165,36 +164,41 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
 @pytest.mark.parametrize(
-    ("target", "approval", "expected"),
+    ("target", "approval"),
     [
-        ("plain", None, "Add the `shell` tool to `plain`"),
+        ("plain", None),
         (
             "helper",
             ToolApprovalConfig(rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")]),
-            "Remove the `tool_approval` requirement on `run_shell_command`",
         ),
     ],
 )
-async def test_unsupported_minimal_request_is_refused_before_a_child_starts(
+async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
     tmp_path: Path,
     target: str,
     approval: ToolApprovalConfig | None,
-    expected: str,
     native: bool,
 ) -> None:
-    """A capability-less or approval-gated target is refused with its fix and no child record."""
+    """A child without usable shell commands fails before any Bash and tells the caller how to recover."""
     config = _config(helper_tools=["shell"], approval=approval)
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=_identity())
 
     with tool_runtime_context(_live_context(config, paths)):
-        result = await _run_subagent(toolkit, config, paths, agent_name=target, native=native)
+        result = await _delegate(
+            toolkit,
+            config,
+            paths,
+            "run_subagent",
+            native=native,
+            task="Report",
+            agent_name=target,
+            minimal=True,
+        )
 
-    assert result.startswith(f"Cannot run '{target}' as a minimal subagent: ")
-    assert expected in result
-    assert result.endswith("Start a new subagent without minimal.")
-    assert not list((paths.storage_root / "subagent_sessions").glob("*.json"))
+    assert "run, check, and kill shell permissions" in result, result
+    assert "Start a new subagent without minimal." in result
 
 
 @pytest.mark.asyncio
@@ -254,14 +258,31 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=identity)
 
     with tool_runtime_context(_live_context(config, paths)):
-        result = await _run_subagent(toolkit, config, paths, agent_name="helper", native=native)
+        result = await _delegate(
+            toolkit,
+            config,
+            paths,
+            "run_subagent",
+            native=native,
+            task="Report",
+            agent_name="helper",
+            minimal=True,
+        )
         assert "Child answer 0" in result, result
 
         handles = list((paths.storage_root / "subagent_sessions").glob("*.json"))
         assert len(handles) == 1
         child = json.loads(handles[0].read_text())["child"]
         assert child["agent_mode"] == "minimal"
-        follow_up = await toolkit.continue_subagent(child["subagent_id"], "More detail")
+        follow_up = await _delegate(
+            toolkit,
+            config,
+            paths,
+            "continue_subagent",
+            native=native,
+            subagent_id=child["subagent_id"],
+            message="More detail",
+        )
         assert "Child answer 1" in follow_up, follow_up
 
     assert len(child_models) == 2
