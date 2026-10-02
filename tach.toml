@@ -6585,6 +6585,7 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.legacy_private_storage"
 depends_on = [
     "mindroom.background_tasks",
+    "mindroom.constants",
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.private_instance_identity_store",

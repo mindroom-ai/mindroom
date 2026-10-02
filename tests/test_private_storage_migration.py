@@ -83,6 +83,11 @@ def _seed(paths: RuntimePaths, old_key: str, requester: str) -> Path:
     return scope
 
 
+def _forget_receipt(paths: RuntimePaths) -> None:
+    """Start as the first release with the receipt does on storage an earlier release migrated."""
+    (paths.storage_root / "tracking" / "private_storage_migrated.json").unlink()
+
+
 def _files(scope: Path) -> dict[str, bytes]:
     return {
         str(path.relative_to(scope)): path.read_bytes()
@@ -348,7 +353,34 @@ async def test_current_and_fresh_startup_skip_workers_and_contents(
     assert (target / "new-traffic.txt").read_text() == "legitimate new traffic"
     fresh = replace(paths, storage_root=tmp_path / "fresh", process_env={})
     await migration.migrate_private_storage(fresh)
-    assert not fresh.storage_root.exists()
+    assert [path.relative_to(fresh.storage_root) for path in fresh.storage_root.rglob("*")] == [
+        Path("tracking"),
+        Path("tracking/private_storage_migrated.json"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plant", ["file", "record", "intent", "link"])
+async def test_entries_planted_after_the_receipt_cannot_stop_startup(tmp_path: Path, plant: str) -> None:
+    """Sandbox runners write private_instances, so a completed migration never scans it again."""
+    migration = importlib.import_module("mindroom.legacy_private_storage")
+    paths = _paths(tmp_path)
+    source = _seed(paths, _OLD, _REQUESTER)
+    await migration.migrate_private_storage(paths)
+    if plant == "file":
+        (source.parent / "junk").write_text("not a scope")
+    elif plant == "record":
+        (private_instance_scope_root_path(paths.storage_root, _NEW) / _RECORD).write_text("{")
+    elif plant == "intent":
+        (private_instance_scope_root_path(paths.storage_root, _NEW) / _INTENT).write_text('{"unrelated": true}')
+    else:
+        (source.parent / "dangling").symlink_to("nowhere", target_is_directory=True)
+
+    await migration.migrate_private_storage(paths)
+
+    _forget_receipt(paths)
+    with pytest.raises(ValueError, match=r"[Pp]rivate"):
+        await migration.migrate_private_storage(paths)
 
 
 async def _interrupt_after_session_move(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -1089,6 +1121,7 @@ async def test_completed_aliases_reject_tampering(tmp_path: Path, damage: str) -
         old_mirror.symlink_to("different")
     else:
         old.unlink()
+    _forget_receipt(paths)
     with pytest.raises(ValueError, match=r"[Pp]rivate"):
         await migration.migrate_private_storage(paths)
 

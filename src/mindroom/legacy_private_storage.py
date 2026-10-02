@@ -8,7 +8,9 @@ Managed workers must be absent before inspecting or moving any scope contents.
 # Legacy format: requester-derived private directories used keys without the lossless `~` prefix.
 # Last legacy release: v2026.9.32; prefixed lossless encoding introduced in v2026.9.33.
 # Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
-# Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents.
+# A start that leaves nothing to move writes a receipt in the primary-only tracking directory, and later starts never scan `private_instances` again, because sandbox runners can write it.
+# Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents,
+# tests/test_private_storage_migration.py::test_entries_planted_after_the_receipt_cannot_stop_startup.
 
 # LEGACY_COMPAT: Private scopes without authoritative owner records.
 # Legacy format: private scopes created without authoritative owner records.
@@ -27,6 +29,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, cast
 
+from mindroom.constants import tracking_dir
 from mindroom.durable_write import fsync_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.legacy_private_storage_aliases import (
@@ -51,6 +54,7 @@ if TYPE_CHECKING:
 _RECORD = ".mindroom-private-instance.json"
 _INTENT = ".mindroom-private-storage-migration.json"
 _LOCK = ".mindroom-storage-upgrade.lock"
+_RECEIPT = "private_storage_migrated.json"
 logger = get_logger(__name__)
 
 
@@ -426,6 +430,14 @@ def _apply(roots: tuple[Path, Path], intent: _Intent) -> None:
 
 
 def _migrate(runtime_paths: RuntimePaths) -> None:
+    receipt = tracking_dir(runtime_paths) / _RECEIPT
+    if receipt.exists():
+        return
+    _migrate_pending(runtime_paths)
+    write_json_file_durable(receipt, {"version": 1}, strict_atomic_replace=True)
+
+
+def _migrate_pending(runtime_paths: RuntimePaths) -> None:
     roots = _roots(runtime_paths)
     if not _discover(roots):
         return
