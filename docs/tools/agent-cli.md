@@ -44,7 +44,7 @@ It is available automatically in Matrix conversations when the agent's shell mee
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
-Calls are admitted only while the shell command that made them is running, and shell commands of one response take turns when they use the CLI.
+Calls are admitted only while the shell command that made them is running, so the agent's shell commands in one response run one at a time.
 Media returned by those calls reaches the model with the shell command's result.
 Calls through the CLI count against their own `max_tool_calls_per_turn` budget, separate from the agent's ordinary tool calls.
 Streamed responses show calls made through the CLI as their own tool-trace entries.

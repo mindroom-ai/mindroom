@@ -30,14 +30,18 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _helper_runtime(tmp_path: Path, registry: TurnToolRegistry, **agent: object) -> ToolRuntimeContext:
+def _helper_runtime(
+    tmp_path: Path,
+    registry: TurnToolRegistry,
+    *,
+    memory_backend: str = "file",
+) -> ToolRuntimeContext:
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         tools=["shell", "calculator"],
-        memory_backend="file",
+        memory_backend=memory_backend,
         learning=False,
-        **agent,
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -61,13 +65,15 @@ def _tool_output(provider: ScriptedProvider) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("memory_backend", ["file", "none"], ids=["workspace", "no-workspace"])
 async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+    memory_backend: str,
 ) -> None:
-    """A native shell command composes a native tool call; the grant ends with the response."""
-    runtime = _helper_runtime(tmp_path, running_api)
+    """A native shell command composes a native tool call, with or without an agent workspace; the grant ends with the response."""
+    runtime = _helper_runtime(tmp_path, running_api, memory_backend=memory_backend)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     arguments = json.dumps({"a": 2, "b": 3})
@@ -137,7 +143,9 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
             (
                 "run_shell_command",
                 {
-                    "args": _call_and_wait(
+                    # The slow command still calls after the fast one finished, so they must not share a window.
+                    "args": ("sleep 1; " if index == 1 else "")
+                    + _call_and_wait(
                         f"00000000-0000-4000-8000-00000000001{index}",
                         "calculator",
                         "add",

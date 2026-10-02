@@ -33,7 +33,7 @@ def bind_response_owner(
     response_context: ResponseTurnContext,
     run_id: str | None,
     context_documents: Mapping[str, str],
-    output_file_policy: ToolOutputFilePolicy,
+    output_file_policy: ToolOutputFilePolicy | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     failure_message: Callable[[str], str],

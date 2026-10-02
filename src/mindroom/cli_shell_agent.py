@@ -124,13 +124,7 @@ class CliShellAgent(KnowledgeToolDescribingAgent):
         )
         lifetime = current_cli_lifetime()
         runtime = get_tool_runtime_context()
-        if (
-            lifetime is None
-            or runtime is None
-            or runtime.orchestrator is None
-            or self.response_context is None
-            or self.output_file_policy is None
-        ):
+        if lifetime is None or runtime is None or runtime.orchestrator is None or self.response_context is None:
             return tools
         catalog = PreparedAgentToolCatalog(self, run_context, run_response, session, runtime)
         try:
