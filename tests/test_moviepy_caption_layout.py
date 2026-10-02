@@ -148,6 +148,7 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     """Default-font glyphs fit both canvases and the timed background darkens video."""
     video = ColorClip(video_size, color=(255, 255, 255), duration=3).with_fps(30)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
     output = tmp_path / "captioned.mp4"
@@ -298,6 +299,7 @@ def test_oversized_captions_preserve_existing_output(
     """An impossible requested size fails before rendering or replacing output."""
     video = ColorClip((320, 180), color=(255, 255, 255), duration=3).with_fps(30)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
     output = tmp_path / "captioned.mp4"

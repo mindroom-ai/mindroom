@@ -1,13 +1,17 @@
-"""Caption styling with fake video rendering and no font lookup."""
+"""Caption styling and media paths with fake video rendering, plus FFmpeg's real format detection."""
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tracemalloc
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
+from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
@@ -54,6 +58,8 @@ def caption_renderer(
     }
     for name, factory in factories.items():
         monkeypatch.setattr(adapter, name, factory)
+    # The fake input is not real media, so skip FFmpeg's plain-media check as well as decoding.
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     (tmp_path / "input.mp4").write_bytes(b"input video")
     return toolkit_class(tool_output_workspace_root=tmp_path), factories
 
@@ -247,3 +253,102 @@ def test_media_paths_follow_file_access(
     assert config.read_text(encoding="utf-8") == "administrators: []\n"
     assert [entry.name for entry in primary.iterdir()] == ["config.yaml"]
     assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]
+
+
+def test_outputs_publish_without_buffering_the_rendered_file(
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    tmp_path: Path,
+) -> None:
+    """Rendered audio and video reach the workspace in chunks instead of being read into memory whole."""
+    toolkit, factories = caption_renderer
+    size = 4 * 1024 * 1024
+    (tmp_path / "empty.srt").write_text("", encoding="utf-8")
+
+    def render(path: str, **_kwargs: object) -> None:
+        # A sparse file, so the fake encoder itself allocates nothing.
+        with Path(path).open("wb") as output:
+            output.truncate(size)
+
+    def composite(_clips: list[object], **kwargs: object) -> MagicMock:
+        clip = _clip(**kwargs)
+        clip.write_videofile.side_effect = render
+        return clip
+
+    video = _clip(size=(1280, 720))
+    video.audio.write_audiofile.side_effect = render
+    factories["VideoFileClip"].side_effect = lambda _path: video
+    factories["CompositeVideoClip"].side_effect = composite
+
+    tracemalloc.start()
+    try:
+        assert toolkit.extract_audio("input.mp4", "audio.wav") == "audio.wav"
+        assert toolkit.embed_captions("input.mp4", "empty.srt", "captioned.mp4") == "captioned.mp4"
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < size // 4
+    assert (tmp_path / "audio.wav").stat().st_size == size
+    assert (tmp_path / "captioned.mp4").stat().st_size == size
+
+
+def _encode_clip(path: Path) -> None:
+    """Encode one second of tiny video with silent audio through MoviePy's FFmpeg binary."""
+    subprocess.run(
+        [
+            FFMPEG_BINARY,
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=size=16x16:duration=1:rate=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=8000:cl=mono",
+            "-t",
+            "1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_video_inputs_refuse_playlists_and_manifests(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """A playlist or manifest the agent wrote never makes FFmpeg read media outside the workspace."""
+    toolkit = moviepy_video_tools()(tool_output_workspace_root=tmp_path)
+    secret = tmp_path_factory.mktemp("outside") / "secret.mp4"
+    _encode_clip(secret)
+    shutil.copyfile(secret, tmp_path / "clip.mp4")
+    (tmp_path / "empty.srt").write_text("", encoding="utf-8")
+    playlist = f"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\n{secret}\n#EXT-X-ENDLIST\n"
+    manifest = (
+        '<?xml version="1.0"?>\n'
+        '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011"'
+        ' type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S"><Period>'
+        '<AdaptationSet mimeType="audio/mp4"><Representation id="secret" bandwidth="128000">'
+        f"<BaseURL>{secret}</BaseURL></Representation></AdaptationSet></Period></MPD>\n"
+    )
+
+    # Plain media still works, so only inputs FFmpeg would open as manifests are refused.
+    assert toolkit.extract_audio("clip.mp4", "clip.wav") == "clip.wav"
+    # FFmpeg detects DASH by content, so a manifest named like a video is refused too.
+    for name, text in (("playlist.m3u8", playlist), ("manifest.mp4", manifest)):
+        assert toolkit.create_srt(text, name) == name
+        assert toolkit.extract_audio(name, "leak.wav").startswith("Failed to extract audio:"), name
+        assert toolkit.embed_captions(name, "empty.srt", "leak.mp4").startswith("Failed to embed captions:"), name
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [
+        "clip.mp4",
+        "clip.wav",
+        "empty.srt",
+        "manifest.mp4",
+        "playlist.m3u8",
+    ]

@@ -252,6 +252,7 @@ async def _extract_audio_with_moviepy(
         return SimpleNamespace(audio=audio, close=lambda: None)
 
     monkeypatch.setattr(moviepy_module, "VideoFileClip", open_video)
+    monkeypatch.setattr(moviepy_module, "_require_plain_media", lambda _path: None)
     tool = MindRoomMoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
     tool.extract_audio(raw_path, "audio.wav")
     return videos == [_PNG]

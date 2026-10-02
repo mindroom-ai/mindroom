@@ -42,6 +42,7 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
     audio = AudioClip(lambda _time: 0.0, duration=1, fps=8000)
     video = ColorClip((32, 24), color=(0, 0, 0), duration=1).with_fps(1).with_audio(audio)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     audio_paths: list[Path] = []
     video_paths: list[Path] = []
 

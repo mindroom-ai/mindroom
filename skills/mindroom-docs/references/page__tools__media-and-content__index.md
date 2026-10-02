@@ -44,6 +44,8 @@ Caption boxes follow the rendered text height and align to the video bottom; a w
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
 MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output replaces its target only once it is complete.
+Video inputs must be plain media files such as MP4, MOV, Matroska, WebM, AVI, MPEG-TS, Ogg, WAV, MP3, FLAC, or AAC.
+FFmpeg playlists and manifests such as HLS and DASH are refused whatever their file name, because FFmpeg would open the files and URLs they list.
 
 ### Configuration
 

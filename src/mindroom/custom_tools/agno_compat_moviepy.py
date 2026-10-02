@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import tempfile
 from contextlib import closing, suppress
 from math import ceil
@@ -11,15 +12,20 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 from agno.tools import moviepy_video as agno_moviepy
 from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
+from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
 from mindroom.file_access import resolve_agent_file
 from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
+    from typing import BinaryIO
+
     from mindroom.config.models import FileAccess
 
 _STAGING_PREFIX = "mindroom-moviepy-"
+# FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
+_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav,mp3,flac,aac"
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
@@ -64,19 +70,57 @@ _STAGING_PREFIX = "mindroom-moviepy-"
 # Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
 # in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
 # create_srt, read any file, or point FFmpeg at a URL, whatever the agent's file_access.
+# FFmpeg also follows the paths and URLs inside an HLS playlist or DASH manifest, which it
+# detects by content, so a staged input must be refused unless it is a plain media file.
 # Upstream issue: Tracking gap; upstream tracking has not been verified.
 # Upstream PR: None identified.
 # Remove when: the toolkit accepts caller-supplied input readers and output writers;
-# retain resolution under file_access, private FFmpeg staging, and no-follow publication.
-# Coverage: tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access and
+# retain resolution under file_access, private FFmpeg staging, the plain-media check,
+# and streamed no-follow publication.
+# Coverage: tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access,
+# tests/test_moviepy_video_tools.py::test_video_inputs_refuse_playlists_and_manifests,
+# tests/test_moviepy_video_tools.py::test_outputs_publish_without_buffering_the_rendered_file, and
 # tests/test_file_access_contract.py::test_outside_files_follow_file_access.
+
+
+def _require_plain_media(staged: str) -> None:
+    """Refuse a staged input unless FFmpeg opens it as a plain media file that references no other file or URL.
+
+    FFmpeg picks the format from the private copy's fixed content and name, so MoviePy later opens the same format.
+    """
+    probe = subprocess.run(
+        [
+            FFMPEG_BINARY,
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            _PLAIN_MEDIA_FORMATS,
+            "-i",
+            staged,
+            "-t",
+            "0",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        msg = "Video input must be a plain media file; playlists, manifests, and unrecognized formats are refused."
+        raise ValueError(msg)
 
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
     """Apply advertised caption styles without shared rendering state, with media paths that follow ``file_access``.
 
-    Inputs are copied through no-follow descriptors into a private staging directory, MoviePy and
-    FFmpeg read and write only there, and outputs below the workspace are published by atomic replacement.
+    Inputs are copied through no-follow descriptors into a private staging directory, video inputs must be
+    plain media files rather than playlists or manifests, MoviePy and FFmpeg read and write only there,
+    and outputs below the workspace are streamed into place by atomic replacement.
     """
 
     def __init__(
@@ -113,7 +157,13 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             shutil.copyfileobj(source, target)
         return str(staged)
 
-    def _publish(self, raw_path: str, payload: bytes) -> None:
+    def _stage_video(self, raw_path: str, staging: Path) -> str:
+        """Stage one video input that FFmpeg reads as a plain media file, never as a playlist or manifest."""
+        staged = self._stage_input(raw_path, "video_path", staging)
+        _require_plain_media(staged)
+        return staged
+
+    def _publish(self, raw_path: str, payload: bytes | BinaryIO) -> None:
         """Atomically write one output where the agent's file_access allows, without following links below the workspace."""
         write_agent_file(raw_path, payload, workspace_root=self._workspace_root, file_access=self._file_access)
 
@@ -133,12 +183,13 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX) as staging_dir:
                 staging = Path(staging_dir)
                 staged_output = staging / f"output{Path(output_path).suffix}"
-                with closing(VideoFileClip(self._stage_input(video_path, "video_path", staging))) as video:
+                with closing(VideoFileClip(self._stage_video(video_path, staging))) as video:
                     if video.audio is None:
                         message = "Video has no audio track."
                         raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
                     video.audio.write_audiofile(str(staged_output))
-                self._publish(output_path, staged_output.read_bytes())
+                with staged_output.open("rb") as rendered:
+                    self._publish(output_path, rendered)
         except Exception as exc:
             agno_moviepy.logger.exception("Failed to extract audio")
             return f"Failed to extract audio: {exc}"
@@ -343,7 +394,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                 output_path = video_path.rsplit(".", 1)[0] + "_captioned.mp4"
 
             # Load video
-            video = VideoFileClip(self._stage_input(video_path, "video_path", staging))
+            video = VideoFileClip(self._stage_video(video_path, staging))
 
             # Read caption file and parse SRT
             srt_content = Path(self._stage_input(srt_path, "srt_path", staging)).read_text(encoding="utf-8")
@@ -402,7 +453,8 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                 threads=4,
                 # Disable default progress bar
             )
-            self._publish(output_path, staged_output.read_bytes())
+            with staged_output.open("rb") as rendered:
+                self._publish(output_path, rendered)
 
         except Exception as exc:
             agno_moviepy.logger.exception("Failed to embed captions")
