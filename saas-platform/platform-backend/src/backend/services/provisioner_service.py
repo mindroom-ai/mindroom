@@ -627,8 +627,8 @@ async def _provision_openrouter_key(
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
     Stored keys keep their usage across plan changes; only their spending limit changes.
-    A created key is recorded after its Secret is published, or discarded if publication fails or another run
-    recorded a key first.
+    A created key is recorded before its Secret is published, so a run that loses the record to another run never
+    publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
@@ -663,9 +663,9 @@ async def _provision_openrouter_key(
 
 
 async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Record a newly published key, or delete it when it cannot be recorded.
+    """Record a newly created key before it is published, or delete it when it cannot be recorded.
 
-    Disabling, limiting, and revoking act only on the recorded key, so a published key is never left unrecorded.
+    Disabling, limiting, and revoking act only on the recorded key, so a created key is never left unrecorded.
     Concurrent provisions of one instance may each create a key; only the first one recorded is kept, and the
     others get `InstanceClaimLostError`.
     """
@@ -692,6 +692,12 @@ async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id
         logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
 
 
+async def _discard_recorded_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+    """Delete a recorded key whose Secret was not published, and forget it unless another run replaced the record."""
+    await _discard_openrouter_key(created_key, instance_id)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=created_key.hash)
+
+
 class InstanceClaimLostError(HTTPException):
     """Another run claimed the instance or recorded its key first, so this run neither deploys it nor keeps a key."""
 
@@ -715,7 +721,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
     Runs that claim the instance without a condition may each create a key, but only the first one recorded is
-    kept; the others delete theirs and get `InstanceClaimLostError` before deploying.
+    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -955,16 +961,17 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             ]
 
         _append_matrix_oidc_helm_args(helm_args)
+        # Record a created key before publishing it, so a run that loses the record never publishes its key.
+        if created_openrouter_key is not None:
+            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         # Apply before Helm so pods restarted by the new secret hash read the new values;
         # Synapse reads its OIDC client secret only at startup.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
             if created_openrouter_key is not None:
-                await _discard_openrouter_key(created_openrouter_key, customer_id)
+                await _discard_recorded_openrouter_key(sb, customer_id, created_openrouter_key)
             raise
-        if created_openrouter_key is not None:
-            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"

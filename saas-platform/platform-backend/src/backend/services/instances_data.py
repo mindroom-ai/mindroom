@@ -64,12 +64,14 @@ def update_instance(
     *,
     expected_status: str | None = None,
     without_openrouter_key: bool = False,
+    expected_openrouter_key_hash: str | None = None,
 ) -> list[dict[str, Any]]:
     """Update an instance row by instance_id and return the updated rows.
 
     With ``expected_status``, only a row still in that status is updated, so one of several concurrent callers wins.
     With ``without_openrouter_key``, only a row that records no OpenRouter key is updated, so one of several
     concurrent provisions records the key it created.
+    With ``expected_openrouter_key_hash``, only a row that still records that OpenRouter key is updated.
     Stamps ``updated_at`` automatically unless the caller provides its own value.
     """
     payload = {"updated_at": datetime.now(UTC).isoformat(), **fields}
@@ -78,6 +80,8 @@ def update_instance(
         query = query.eq("status", expected_status)
     if without_openrouter_key:
         query = query.is_("openrouter_key_hash", "null")
+    if expected_openrouter_key_hash is not None:
+        query = query.eq("openrouter_key_hash", expected_openrouter_key_hash)
     return query.execute().data or []
 
 
