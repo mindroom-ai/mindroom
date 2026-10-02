@@ -78,8 +78,9 @@ class MinimalModel(Model):
 
 
 class _FakeDriveRequest:
-    def __init__(self, response: dict[str, object]) -> None:
+    def __init__(self, response: dict[str, object], media_content: bytes = b"hello") -> None:
         self._response = response
+        self.media_content = media_content
 
     def execute(self) -> dict[str, object]:
         return self._response
@@ -91,6 +92,7 @@ class _FakeDriveFilesResource:
         self.get_kwargs: dict[str, object] | None = None
         self.get_media_kwargs: dict[str, object] | None = None
         self.export_media_kwargs: dict[str, object] | None = None
+        self.media_content = b"hello"
         self.create_kwargs: dict[str, object] | None = None
         self.update_kwargs: dict[str, object] | None = None
         self.file_metadata: dict[str, object] = {
@@ -114,11 +116,11 @@ class _FakeDriveFilesResource:
 
     def get_media(self, **kwargs: object) -> _FakeDriveRequest:
         self.get_media_kwargs = kwargs
-        return _FakeDriveRequest({})
+        return _FakeDriveRequest({}, self.media_content)
 
     def export_media(self, **kwargs: object) -> _FakeDriveRequest:
         self.export_media_kwargs = kwargs
-        return _FakeDriveRequest({})
+        return _FakeDriveRequest({}, self.media_content)
 
     def create(self, **kwargs: object) -> _FakeDriveRequest:
         self.create_kwargs = kwargs
@@ -154,13 +156,14 @@ def _valid_credentials() -> GoogleOAuthCredentials:
 
 
 class _FakeMediaIoBaseDownload:
-    def __init__(self, file_handle: object, _request: object) -> None:
+    def __init__(self, file_handle: object, request: _FakeDriveRequest) -> None:
         self._file_handle = file_handle
+        self._media_content = request.media_content
         self._done = False
 
     def next_chunk(self) -> tuple[None, bool]:
         if not self._done:
-            self._file_handle.write(b"hello")
+            self._file_handle.write(self._media_content)
             self._done = True
         return None, self._done
 
@@ -1315,7 +1318,6 @@ def test_google_drive_download_rejects_symlinked_download_root(
     if not before_construction:
         download_root.symlink_to(outside, target_is_directory=True)
     service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
-    tool._download_bytes = lambda _request: b"exported"
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
@@ -1333,7 +1335,6 @@ def test_google_drive_download_pins_directory_during_request_creation(
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
     service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
-    tool._download_bytes = lambda _request: b"exported"
     download_root = tmp_path / "google-drive-downloads"
     original_root = tmp_path / "original-downloads"
     outside = tmp_path / "outside"
@@ -1353,8 +1354,7 @@ def test_google_drive_download_pins_directory_during_request_creation(
 
     assert outside_file.read_bytes() == b"outside"
     assert "error" not in result
-    expected_bytes = b"hello" if mime_type == "text/plain" else b"exported"
-    assert (original_root / "notes.txt").read_bytes() == expected_bytes
+    assert (original_root / "notes.txt").read_bytes() == b"hello"
 
 
 def test_google_drive_download_failure_preserves_existing_file_and_cleans_partial_download(
@@ -1407,7 +1407,6 @@ def test_google_drive_download_stops_writing_past_max_download_size(
     """A stream longer than the limit is cut off and leaves no file, whatever the metadata said."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch, max_download_size=8)
     service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
-    tool._download_bytes = lambda _request: b"exported-document"
     chunks_written: list[bytes] = []
 
     class OversizedDownload(_FakeMediaIoBaseDownload):
@@ -1435,7 +1434,7 @@ def test_google_drive_download_adds_export_extension_inside_download_dir(
         "mimeType": "application/vnd.google-apps.document",
         "webViewLink": "https://drive.google.com/document/d/example",
     }
-    tool._download_bytes = lambda _request: b"docx"
+    service.files_resource.media_content = b"docx"
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
@@ -1459,7 +1458,7 @@ def test_google_drive_download_exports_complete_spreadsheet_as_xlsx(
         "mimeType": "application/vnd.google-apps.spreadsheet",
         "webViewLink": "https://drive.google.com/spreadsheets/d/example",
     }
-    tool._download_bytes = lambda _request: b"xlsx workbook"
+    service.files_resource.media_content = b"xlsx workbook"
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
@@ -1483,7 +1482,7 @@ def test_google_drive_download_preserves_existing_export_extension(
         "mimeType": "application/vnd.google-apps.document",
         "webViewLink": "https://drive.google.com/document/d/example",
     }
-    tool._download_bytes = lambda _request: b"docx"
+    service.files_resource.media_content = b"docx"
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 

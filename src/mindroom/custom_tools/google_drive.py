@@ -587,8 +587,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 # Exports carry no size in their metadata, so the limit also holds while bytes arrive.
                 output = _BoundedDownloadWriter(file_handle, self.max_download_size)
                 if target_mime:
-                    request = service.files().export_media(fileId=file_id, mimeType=target_mime)
-                    output.write(self._download_bytes(request))
+                    _download_media(output, service.files().export_media(fileId=file_id, mimeType=target_mime))
                     result = {
                         "fileId": file_id,
                         "path": str(path),
