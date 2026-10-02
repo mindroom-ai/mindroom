@@ -6577,7 +6577,7 @@ visibility = ["mindroom.api.main"]
 
 [[modules]]
 path = "mindroom.cli.thread_export"
-depends_on = ["mindroom.constants", "mindroom.thread_export.models"]
+depends_on = ["mindroom.cli.api", "mindroom.thread_export.models"]
 visibility = ["mindroom.cli.main"]
 
 

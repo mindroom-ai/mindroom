@@ -732,6 +732,7 @@ Export Matrix threads to YAML files for grep/ripgrep search.
 Keep MindRoom running with its API enabled while exporting; both one-shot and `--watch` exports use its live Matrix clients and journal readers.
 The CLI calls `--url`, then `MINDROOM_URL` from the selected runtime environment, or `http://127.0.0.1:8765` by default.
 Set `MINDROOM_API_KEY` when API authentication is enabled; hosted deployments require an authorized bearer token.
+When `MINDROOM_API_KEY` is set, the CLI sends it only over HTTPS or loopback HTTP and refuses a remote `http://` URL before making any request, even with `--watch`; redirects are disabled.
 The selected `--config` and `--storage-path` must match the running installation, and output paths refer to that runtime's filesystem.
 There is no offline export mode or separate Matrix login.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
