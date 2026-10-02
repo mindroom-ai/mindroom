@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.tools.file import FileTools as AgnoFileTools
+from agno.tools.file.file import TEXT_EXTENSIONS, _extract_snippet, _format_size
 from agno.utils.log import log_debug, log_error
 
-from mindroom.path_confinement import is_git_metadata_path
+from mindroom.path_confinement import is_git_metadata_path, read_regular_file_within_root
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -35,7 +37,12 @@ from mindroom.tools.path_safety import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.config.models import FileAccess
+
+# Agno searches only text files below this size.
+_SEARCH_CONTENT_MAX_BYTES = 500 * 1024
 
 
 class _MindRoomFileTools(AgnoFileTools):
@@ -255,7 +262,9 @@ class _MindRoomFileTools(AgnoFileTools):
         safe, search_dir = self._check_path(directory or ".", self.base_dir)
         if not safe:
             return blocked_file_action_message("searching content", directory or ".", self.base_dir)
-        if self.restrict_to_base_dir or is_within_base_dir(search_dir, self.base_dir):
+        if self.restrict_to_base_dir:
+            return self._search_workspace_content(query, directory, search_dir, limit)
+        if is_within_base_dir(search_dir, self.base_dir):
             return super().search_content(query, directory, limit)
         if not search_dir.is_dir():
             return f"Error: '{directory}' is not a directory"
@@ -280,6 +289,62 @@ class _MindRoomFileTools(AgnoFileTools):
         for match in payload["files"]:
             match["file"] = str(search_dir / match["file"])
         return json.dumps(payload, indent=2)
+
+    def _search_workspace_content(self, query: str, directory: str | None, search_dir: Path, limit: int) -> str:
+        """Search like Agno, reading each walked file through the same checks and descriptors as ``read_file``."""
+        # AGNO_COMPAT: FileTools.search_content checks one path and then opens another.
+        # Reason: Agno 3.0.9 checks each walked file with safe_join_relative_path, which
+        # NFKC-normalizes the path and strips trailing dots and spaces from every segment, then
+        # opens the unsanitized path by name and follows its links, so worker code that writes the
+        # workspace can plant `d /x.txt` linked to any file beside a real `d/x.txt` and make a
+        # primary-process search return its lines.
+        # This copy keeps Agno's walk, exclusions, text extensions, size limit, snippets, and
+        # result format through its private helpers, but resolves each file with MindRoom's
+        # resolver and reads that canonical path through no-follow descriptors.
+        # Upstream issue: Tracking gap; no issue for search_content opening a different path than
+        # it validated has been identified.
+        # Upstream PR: None identified.
+        # Remove when: Agno's search_content opens exactly the path it validated without following
+        # links out of base_dir, or accepts a caller-supplied file reader; keep MindRoom's
+        # descriptor reads for workspace mode.
+        # Coverage: tests/test_file_access_contract.py::test_file_tool_content_search_never_reads_a_planted_link_target.
+        if not query or not query.strip():
+            return "Error: Query cannot be empty"
+        if not search_dir.is_dir():
+            return f"Error: '{directory}' is not a directory"
+        lower_query = query.lower()
+        matches: list[dict[str, str]] = []
+        for file_path in self._searchable_files(search_dir):
+            if len(matches) >= limit:
+                break
+            try:
+                resolved = resolve_base_dir_path(self.base_dir, str(file_path.relative_to(self.base_dir)))
+                payload = read_regular_file_within_root(
+                    self.base_dir,
+                    resolved.relative_to(self.base_dir),
+                    max_bytes=_SEARCH_CONTENT_MAX_BYTES,
+                )
+            except (OSError, ValueError):
+                continue
+            content = payload.decode("utf-8", errors="ignore")
+            if lower_query in content.lower():
+                matches.append(
+                    {
+                        "file": file_path.relative_to(self.base_dir).as_posix(),
+                        "size": _format_size(len(payload)),
+                        "snippet": _extract_snippet(content, query),
+                    },
+                )
+        return json.dumps({"query": query, "matches_found": len(matches), "files": matches}, indent=2)
+
+    def _searchable_files(self, search_dir: Path) -> Iterator[Path]:
+        """Walk without following directory links, yielding the text files Agno's content search would read."""
+        for dirpath, dirnames, filenames in os.walk(search_dir):
+            dirnames[:] = [name for name in dirnames if not self._is_excluded(Path(dirpath) / name)]
+            for name in filenames:
+                file_path = Path(dirpath) / name
+                if not self._is_excluded(file_path) and file_path.suffix.lower() in TEXT_EXTENSIONS:
+                    yield file_path
 
 
 @register_tool_with_metadata(
