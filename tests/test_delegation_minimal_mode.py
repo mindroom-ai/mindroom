@@ -346,7 +346,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
                 ),
             )
             while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # type: ignore[attr-defined]  # noqa: ASYNC110 - actual CLI receipt protocol
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.01)
             assert receipt["status"] == "completed", json.dumps(receipt, default=str)
             return str(receipt["outcome"])
 
