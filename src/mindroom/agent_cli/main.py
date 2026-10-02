@@ -14,6 +14,11 @@ from uuid import UUID, uuid4
 from mindroom.agent_cli.client import AgentCliClient, AgentCliUnavailableError
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
 
+# Parsed options the CLI handles itself instead of sending in the operation payload.
+_LOCAL_ARGUMENTS = frozenset(
+    {"group", "action", "json", "json_argument", "json_file", "json_stdin", "call_id", "timeout"},
+)
+
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse only fixed operations; runtime configuration is unnecessary for help."""
@@ -35,6 +40,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("toolkit", help="toolkit name, or TOOLKIT.FUNCTION")
         command.add_argument("function", nargs="?")
         if action == "call":
+            command.add_argument("json_argument", nargs="?", metavar="JSON", help="tool arguments, same as --json")
             command.add_argument("--call-id", type=UUID)
             command.add_argument(
                 "--timeout",
@@ -72,7 +78,19 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     read.add_argument("--offset", type=int, default=0)
     read.add_argument("--limit", type=int, default=8000)
     args = parser.parse_args(argv)
-    if args.group == "tools" and args.action in {"describe", "call"} and args.function is None:
+    if args.group == "tools" and args.action in {"describe", "call"}:
+        _select_tool(parser, args)
+    if (args.group, args.action) in {("calls", "wait"), ("tools", "call")} and args.timeout < 0:
+        parser.error("--timeout must be nonnegative")
+    return args
+
+
+def _select_tool(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Accept TOOLKIT.FUNCTION and, for calls, a trailing JSON object in place of --json."""
+    call = args.action == "call"
+    if call and args.json_argument is None and args.function is not None and args.function.startswith("{"):
+        args.function, args.json_argument = None, args.function
+    if args.function is None:
         toolkit, _, function = args.toolkit.rpartition(".")
         if not toolkit or not function:
             parser.error(
@@ -80,9 +98,10 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
                 f"find function names with: mindroom-agent tools search {args.toolkit}",
             )
         args.toolkit, args.function = toolkit, function
-    if (args.group, args.action) in {("calls", "wait"), ("tools", "call")} and args.timeout < 0:
-        parser.error("--timeout must be nonnegative")
-    return args
+    if call and args.json_argument is not None:
+        if args.json is not None or args.json_file is not None or args.json_stdin:
+            parser.error("give tool arguments once: a JSON argument or one of --json, --json-file, --json-stdin")
+        args.json = args.json_argument
 
 
 def read_call_arguments(namespace: argparse.Namespace) -> dict[str, object]:
@@ -139,10 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = _wait(client, call_id, result, args.timeout)
         else:
             payload = {
-                key: value
-                for key, value in vars(args).items()
-                if key not in {"group", "action", "json", "json_file", "json_stdin", "call_id", "timeout"}
-                and value is not None
+                key: value for key, value in vars(args).items() if key not in _LOCAL_ARGUMENTS and value is not None
             }
             payload["operation"] = f"{args.group}.{args.action}"
             if args.action == "call":

@@ -7,7 +7,7 @@ Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shel
 
 Discover tool names and schemas with `tools list`, `tools search`, and `tools describe`.
 Listing accepts `--cursor` and `--limit`; schemas are loaded only when described.
-Call input is one JSON object supplied with `--json`, `--json-file`, or `--json-stdin`.
+Call input is one JSON object supplied as a final argument or with `--json`, `--json-file`, or `--json-stdin`.
 These options are exclusive.
 Omission means `{}`.
 

@@ -27,6 +27,27 @@ def test_dotted_name_selects_toolkit_and_function() -> None:
     assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", 30)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["tools", "call", "matrix_room", "matrix_room", '{"action":"threads"}'],
+        ["tools", "call", "matrix_room.matrix_room", '{"action":"threads"}'],
+    ],
+)
+def test_trailing_json_object_supplies_call_arguments(argv: list[str]) -> None:
+
+    args = parse_arguments(argv)
+    assert (args.toolkit, args.function) == ("matrix_room", "matrix_room")
+    assert read_call_arguments(args) == {"action": "threads"}
+
+
+def test_call_arguments_are_given_once(capsys: pytest.CaptureFixture[str]) -> None:
+
+    with pytest.raises(SystemExit):
+        parse_arguments(["tools", "call", "a.b", '{"x":1}', "--json", '{"x":2}'])
+    assert "give tool arguments once" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("argv", [["tools", "describe", "scheduler"], ["tools", "call", "scheduler"]])
 def test_missing_function_names_the_search(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
 
