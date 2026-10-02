@@ -723,6 +723,17 @@ class TurnStore:
         room yet, the journal admitted the event in this room. Otherwise this
         returns None and changes nothing.
         """
+        # LEGACY_COMPAT: Room-less ledger tombstones of events not known in the redaction's room.
+        # Legacy format: A turn record without a conversation_target whose redacted_source_event_ids
+        # names an event tombstoned by a redaction delivered in a room where the journal never admitted
+        # that event, written because no turn had recorded a room for it.
+        # Last legacy release: v2026.10.24; replacement: the next release writes a tombstone without a
+        # room only when the journal admitted the event in the redaction's room.
+        # Handling: Such a tombstone carries no room, so the ledger cannot tell it apart from one written
+        # after the journal admitted its event in the redaction's room, and it is not migrated. It stays
+        # in effect until ordinary ledger retention drops it: its event counts as handled, and preparing
+        # a reply in a thread that contains it raises RevisionSnapshotChangedError.
+        # Coverage: tests/test_turn_store.py::test_room_less_tombstone_from_an_earlier_release_stays_in_effect.
         recorded_rooms = {
             record.conversation_target.room_id
             for record in (self._ledger.get_turn_record(source_event_id), *self._revision_owners(source_event_id))

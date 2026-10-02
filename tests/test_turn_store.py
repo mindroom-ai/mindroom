@@ -51,7 +51,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_record import EditPreparation, PreparedVoiceSource, RevisionReplay
+from mindroom.turn_record import EditPreparation, PreparedVoiceSource, RevisionReplay, RevisionSnapshotChangedError
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -545,21 +545,24 @@ async def test_redaction_delivered_in_another_room_leaves_the_recorded_conversat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("admitted_before_redaction", [False, True])
-async def test_redaction_in_another_room_cannot_tombstone_an_event_no_turn_recorded(
+@pytest.mark.parametrize("known_before_redaction", ["unseen", "admitted", "pending_without_room"])
+async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_recorded_room(
     journal_store: EventJournalStore,
-    admitted_before_redaction: bool,
+    known_before_redaction: str,
 ) -> None:
     """A foreign redaction of an unanswered event must not drop it or block replies in its own room."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    if admitted_before_redaction:
+    if known_before_redaction != "unseen":
         await admit_room_event(principal, target.room_id, "$victim")
+    if known_before_redaction == "pending_without_room":
+        await store.record_pending_turn(TurnRecord.create(["$victim"], completed=False))
+    before = store.get_turn_record("$victim")
 
     assert await store.mark_source_redacted("$victim", room_id="!elsewhere:example.org") is None
 
-    assert store.get_turn_record("$victim") is None
+    assert store.get_turn_record("$victim") == before
     assert not store.is_handled("$victim")
     await admit_room_event(principal, target.room_id, "$victim")
     await store.record_pending_turn(replace(_owned_turn_record(target), response_event_id=None, completed=False))
@@ -570,6 +573,30 @@ async def test_redaction_in_another_room_cannot_tombstone_an_event_no_turn_recor
         thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
     )
     assert suppressed is False
+
+
+@pytest.mark.asyncio
+async def test_room_less_tombstone_from_an_earlier_release_stays_in_effect(journal_store: EventJournalStore) -> None:
+    """A tombstone an earlier release wrote for another room's redaction records no room, so it still applies."""
+    store = await _store(journal_store)
+    # v2026.10.24 wrote this record for a redaction of an event it had not seen in the redaction's room.
+    await store._ledger.record_handled_turn(
+        TurnRecord.create(["$victim"], redacted_source_event_ids=["$victim"], completed=False),
+    )
+    _reset_handled_turn_ledger_runtime()
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await admit_room_event(journal_store.principal("agent@alice"), target.room_id, "$victim")
+
+    assert store.is_handled("$victim")
+    await store.record_pending_turn(replace(_owned_turn_record(target), response_event_id=None, completed=False))
+    with pytest.raises(RevisionSnapshotChangedError):
+        await store.prepare_pending_response_source(
+            target=target,
+            source_event_ids=("$user_msg",),
+            terminal_source_event_ids=("$user_msg",),
+            thread_history=[make_visible_message(event_id="$victim", body="Earlier message", thread_id="$thread")],
+        )
 
 
 @pytest.mark.asyncio
