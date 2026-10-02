@@ -983,6 +983,31 @@ def test_matrix_tls_trusts_certifi_roots_when_system_paths_are_missing(
     assert context.cert_store_stats()["x509_ca"] > 0
 
 
+@pytest.mark.parametrize(
+    ("homeserver", "verify_mode"),
+    [
+        ("https://matrix.dev.test", ssl.CERT_NONE),
+        ("https://matrix.dev.test/", ssl.CERT_NONE),
+        ("https://mindroom.chat", ssl.CERT_REQUIRED),
+    ],
+)
+def test_matrix_ssl_verify_opt_out_covers_only_the_configured_homeserver(
+    tmp_path: Path,
+    homeserver: str,
+    verify_mode: ssl.VerifyMode,
+) -> None:
+    """MATRIX_SSL_VERIFY=false set for a dev homeserver never turns off checks for another one, such as the desktop's."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MATRIX_HOMESERVER": "https://matrix.dev.test", "MATRIX_SSL_VERIFY": "false"},
+    )
+
+    context = client_session.maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
+
+    assert context is not None
+    assert context.verify_mode == verify_mode
+
+
 def test_matrix_tls_respects_explicit_trust_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """An operator's SSL_CERT_FILE or SSL_CERT_DIR choice is left to OpenSSL without adding certifi."""
     monkeypatch.setattr(client_session.ssl_module, "create_default_context", _bare_tls_context)
