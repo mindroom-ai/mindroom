@@ -21024,7 +21024,7 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 |----------|---------|-------------|
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it applies only to the `MATRIX_HOMESERVER` URL, not to the provisioning service or another homeserver such as the desktop bridge's |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it covers `MATRIX_HOMESERVER` and the MatrixRTC discovery and authorization requests made for it, but not the provisioning service or any other homeserver, such as the desktop bridge's |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
