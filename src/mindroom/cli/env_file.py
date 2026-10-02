@@ -65,7 +65,9 @@ def _env_assignment(key: str, value: str) -> str:
     if "${" not in value:
         quoted = value.replace("\\", "\\\\").replace("'", "\\'")
         for assignment in (f"{key}={value}", f"{key}='{quoted}'"):
-            if [(binding.key, binding.value) for binding in parse_stream(io.StringIO(assignment))] == [(key, value)]:
+            # Parse it before a line holding a quote, as later lines may: a quoted value ending in `\` then runs past its line.
+            binding = next(parse_stream(io.StringIO(f"{assignment}\n_='")))
+            if (binding.key, binding.value) == (key, value):
                 return assignment
     msg = f"Refusing to write {key} to the env file: python-dotenv would not read its value back unchanged"
     raise ValueError(msg)
