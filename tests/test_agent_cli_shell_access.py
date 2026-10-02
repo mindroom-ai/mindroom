@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import socket
+import stat
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,7 +113,8 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     # Only `mindroom-agent` is added, from a private directory, not MindRoom's whole environment.
     bin_dir = Path(output.split("path=", 1)[1].splitlines()[0].split(os.pathsep)[0])
     assert [path.name for path in bin_dir.iterdir()] == ["mindroom-agent"]
-    assert not bin_dir.is_relative_to(tmp_path)
+    # Outside every agent directory that worker code could write.
+    assert not bin_dir.is_relative_to(runtime.runtime_paths.storage_root / "agents")
     # The grant dies with the response.
     assert not running_api._owners
 
@@ -190,8 +192,27 @@ def test_minimal_bash_needs_the_running_api(tmp_path: Path, *, worker: bool) -> 
 
 
 @pytest.mark.usefixtures("api_address")
+def test_local_launcher_directory_is_private_to_mindroom(tmp_path: Path) -> None:
+    """The directory first on the shell's PATH is in MindRoom's storage, not shared temp another local user could refill."""
+    runtime = _runtime_context(tmp_path)
+    storage_root = runtime.runtime_paths.storage_root
+    first = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
+    assert first is not None
+    bin_dir = Path(first)
+    assert bin_dir.parent == storage_root
+    assert stat.S_IMODE(bin_dir.stat().st_mode) == 0o700
+    # A launcher an earlier installation left there runs that installation's interpreter.
+    launcher = bin_dir / "mindroom-agent"
+    launcher.write_text("#!/bin/sh\nexec /old/venv/bin/python\n")
+
+    assert agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir == first
+    assert "/old/venv" not in launcher.read_text()
+    assert os.access(launcher, os.X_OK)
+
+
+@pytest.mark.usefixtures("api_address")
 def test_local_launcher_survives_temp_cleaners(tmp_path: Path) -> None:
-    """A long-running MindRoom makes the launcher again after a temp cleaner removes it."""
+    """A long-running MindRoom makes the launcher again after something removes it."""
     runtime = _runtime_context(tmp_path)
     first = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir
     assert first is not None
