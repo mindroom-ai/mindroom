@@ -50,7 +50,12 @@ def test_safe_load_accepts_bytes_and_binary_streams() -> None:
     [
         pytest.param("x: 1" + ":1" * 32, id="base-60-int"),
         pytest.param("x: !!int '1" + ":1" * 32 + "'", id="tagged-base-60-int"),
+        pytest.param("x: !!int {=: '1" + ":1" * 32 + "'}", id="mapping-base-60-int"),
         pytest.param("{" + "<<: {}, " * 65 + "a: 1}", id="merge-keys"),
+        pytest.param("{" + "".join(f"{k}: 0, " for k in range(1025)) + "}", id="int-keys"),
+        pytest.param("{" + "".join(f"{k}.5: 0, " for k in range(1025)) + "}", id="float-keys"),
+        pytest.param("{<<: {0: 0}, " + "".join(f"{k}: 0, " for k in range(1, 1025)) + "}", id="merged-int-keys"),
+        pytest.param("!!set {" + "".join(f"{k}, " for k in range(1025)) + "}", id="int-set"),
         pytest.param("x: 0000-01-01", id="year-0-date"),
         pytest.param("x: !!bool maybe", id="mistagged-bool"),
     ],
@@ -62,8 +67,9 @@ def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document
 
 
 def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
-    """Short base-60 integers and a few merge keys still load exactly like ``safe_load``."""
-    document = "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\n"
+    """Short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
+    numeric_keys = "".join(f"{k}: 0, " for k in range(1024))
+    document = "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
     assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
 
 

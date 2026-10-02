@@ -32,7 +32,9 @@ else:
 _MAX_UNTRUSTED_DEPTH = 64
 _MAX_UNTRUSTED_NODES = 250_000
 _MAX_UNTRUSTED_MERGE_KEYS = 64
+_MAX_UNTRUSTED_NUMERIC_KEYS = 1024
 _MAX_UNTRUSTED_BASE_60_LENGTH = 64
+_NUMERIC_TAGS = frozenset({"tag:yaml.org,2002:int", "tag:yaml.org,2002:float"})
 
 
 class _DumpOptions(TypedDict, total=False):
@@ -59,15 +61,24 @@ class _UntrustedLoader(SafeLoader):  # ty: ignore[unsupported-base] - both safe 
     """``SafeLoader`` that refuses values whose construction time grows faster than their length."""
 
     def flatten_mapping(self, node: yaml.MappingNode) -> None:
-        """Refuse mappings with many merge keys, because each one is deleted from the middle of the mapping's entries."""
+        """Refuse mappings with many merge keys or many integer and float keys, which build in quadratic time.
+
+        Each merge key is deleted from the middle of the mapping's entries, and numeric keys can share one hash.
+        Sets are mappings too, so this also bounds ``!!set`` members.
+        """
         if sum(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value) > _MAX_UNTRUSTED_MERGE_KEYS:
             msg = f"YAML mappings may hold {_MAX_UNTRUSTED_MERGE_KEYS} merge keys at most"
             raise ConstructorError(None, None, msg, node.start_mark)
         super().flatten_mapping(node)
+        if sum(key.tag in _NUMERIC_TAGS for key, _ in node.value) > _MAX_UNTRUSTED_NUMERIC_KEYS:
+            msg = f"YAML mappings may hold {_MAX_UNTRUSTED_NUMERIC_KEYS} integer or float keys at most"
+            raise ConstructorError(None, None, msg, node.start_mark)
 
-    def construct_yaml_int(self, node: yaml.ScalarNode) -> int:
+    def construct_yaml_int(self, node: yaml.Node) -> int:
         """Refuse long base-60 integers, which convert in time quadratic in their length; base-60 floats overflow first."""
-        if ":" in node.value and len(node.value) > _MAX_UNTRUSTED_BASE_60_LENGTH:
+        # SafeConstructor also builds an int from the ``=`` entry of a mapping node, so check the scalar it reads.
+        value = self.construct_scalar(node)
+        if ":" in value and len(value) > _MAX_UNTRUSTED_BASE_60_LENGTH:
             msg = f"YAML base-60 integers may hold {_MAX_UNTRUSTED_BASE_60_LENGTH} characters at most"
             raise ConstructorError(None, None, msg, node.start_mark)
         return super().construct_yaml_int(node)
