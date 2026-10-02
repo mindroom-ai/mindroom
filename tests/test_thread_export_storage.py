@@ -511,6 +511,30 @@ def test_thread_export_yaml_with_aliases_is_refused(tmp_path: Path) -> None:
     assert "*id" not in planted.read_text(encoding="utf-8")
 
 
+def test_thread_export_yaml_with_too_many_nodes_is_refused(tmp_path: Path) -> None:
+    """A planted file is refused before its node graph, hundreds of bytes per node, fills the primary's memory."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload: dict[str, object] = {
+        "version": 1,
+        "thread": {"id": "$planted:localhost", "source": "matrix"},
+        "messages": [],
+    }
+    write_thread_payload(output_dir, room, "$planted:localhost", payload)
+    planted = output_dir / "lobby" / _thread_filename("$planted:localhost")
+    planted.write_text(
+        'version: 1\nthread:\n  id: "$planted:localhost"\n  source: matrix\nmessages: []\n'
+        f"padding: [{'a,' * 250_000}a]\n",
+        encoding="utf-8",
+    )
+
+    write_room_index(output_dir, room)
+    assert json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"] == []
+
+    assert write_thread_payload(output_dir, room, "$planted:localhost", payload) is True
+    assert "padding" not in planted.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("filename", ["marker", "index"])
 def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
     """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""

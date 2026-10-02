@@ -992,6 +992,24 @@ def test_workspace_skill_frontmatter_with_yaml_aliases_is_refused(tmp_path: Path
     assert any("aliases" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
 
 
+def test_workspace_skill_frontmatter_nested_too_deep_is_refused(tmp_path: Path) -> None:
+    """The C composer recurses once per nesting level, so deep frontmatter is refused before it overflows the stack."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "plain", "Plain skill")
+    nested_dir = workspace_skills / "nested"
+    nested_dir.mkdir()
+    (nested_dir / "SKILL.md").write_text(
+        f"---\nname: nested\ndescription: Nested skill\nmetadata: {'[' * 100_000}{']' * 100_000}\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == ["plain"]
+    assert any("nest" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
+
+
 @pytest.mark.parametrize("oversized", ["names", "scripts"])
 def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Path, oversized: str) -> None:
     """Names and script or reference listings reach every system prompt, so they are capped with a warning."""
