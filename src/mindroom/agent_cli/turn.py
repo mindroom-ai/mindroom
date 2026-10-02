@@ -172,6 +172,8 @@ class LiveTurnTools(TurnToolBridge):
         self._active: set[asyncio.Task[None]] = set()
         self._parent: str | None = None
         self._window_context: Context | None = None
+        # Standard-mode shell calls can overlap; admission stays open while any of them runs.
+        self._open_parents: list[str] = []
         self._closed = False
         self._binding_retired = False
         self.control_executions: list[ToolExecution] = []
@@ -321,6 +323,7 @@ class LiveTurnTools(TurnToolBridge):
     async def _window(self, parent: str) -> AsyncIterator[None]:
         async with self._admission:
             self._check_live()
+            self._open_parents.append(parent)
             self._parent = parent
             self._window_context = copy_context()
         try:
@@ -330,7 +333,7 @@ class LiveTurnTools(TurnToolBridge):
             raise
         finally:
             await wait_for_future_until_complete(
-                asyncio.create_task(self._drain_window(), name="agent-cli-window-drain"),
+                asyncio.create_task(self._drain_window(parent), name="agent-cli-window-drain"),
                 on_cancel=self._cancel_active,
             )
 
@@ -340,20 +343,27 @@ class LiveTurnTools(TurnToolBridge):
         for task in self._active:
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-    async def _drain_window(self) -> None:
+    async def _drain_window(self, parent: str) -> None:
         failures: list[Exception] = []
+        settled = False
         while True:
             async with self._admission:
                 tasks = tuple(self._active)
-                if not tasks:
-                    # Recursive children may join while their admitted shell
-                    # settles. Only quiescence closes admission for this Bash.
-                    self._parent = None
-                    self._window_context = None
+                # Another open shell keeps admission open and drains the calls that arrive after this one.
+                if not tasks or (settled and len(self._open_parents) > 1):
+                    self._open_parents.remove(parent)
+                    if not self._open_parents:
+                        # Recursive children may join while their admitted shell
+                        # settles. Only quiescence closes admission for the last Bash.
+                        self._parent = None
+                        self._window_context = None
+                    elif self._parent is not None:
+                        self._parent = self._open_parents[-1]
                     break
             results = await asyncio.gather(*tasks, return_exceptions=True)
             self._active.difference_update(tasks)
             failures.extend(result for result in results if isinstance(result, Exception))
+            settled = True
         if failures:
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
@@ -446,18 +456,20 @@ class LiveTurnTools(TurnToolBridge):
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
-        """Run one standard-mode native shell call inside this response's CLI window and environment."""
-        async with self._outer:
-            self._check_live()
-            if self.shell_env is None:
-                msg = "Native shell has no CLI environment"
-                raise RuntimeError(msg)
-            self._media = []
-            async with self._window(f"native-{uuid4().hex}"):
-                with bound_agent_cli_shell_env(self.shell_env):
-                    result = await run()
-            # Media returned by CLI calls reaches the model with the shell result, as in minimal Bash.
-            return _with_media(result, self._media) if self._media else result
+        """Run one standard-mode native shell call inside this response's CLI window and environment.
+
+        Native shell calls may overlap, so a CLI call is attributed to the most recently started one.
+        """
+        self._check_live()
+        if self.shell_env is None:
+            msg = "Native shell has no CLI environment"
+            raise RuntimeError(msg)
+        async with self._window(f"native-{uuid4().hex}"):
+            with bound_agent_cli_shell_env(self.shell_env):
+                result = await run()
+        # Media returned by CLI calls reaches the model with the shell result, as in minimal Bash.
+        media, self._media = self._media, []
+        return _with_media(result, media) if media else result
 
     async def _invoke_shell(self, binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> object:
         """Run the agent's own shell function, wherever it runs, with this response's CLI environment."""

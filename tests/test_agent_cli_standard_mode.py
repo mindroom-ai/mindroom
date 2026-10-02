@@ -134,7 +134,7 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
 ) -> None:
-    """Shell calls in one provider batch take turns at the response's CLI window."""
+    """Overlapping shell calls in one provider batch each reach the CLI, even after the other finished."""
     runtime = _helper_runtime(tmp_path, running_api)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
@@ -143,7 +143,7 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
             (
                 "run_shell_command",
                 {
-                    # The slow command still calls after the fast one finished, so they must not share a window.
+                    # The slow command still calls after the fast one finished, so admission must stay open for it.
                     "args": ("sleep 1; " if index == 1 else "")
                     + _call_and_wait(
                         f"00000000-0000-4000-8000-00000000001{index}",
@@ -166,6 +166,39 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
     assert all('"status":"completed"' in output.replace(" ", "") for output in outputs), outputs
     assert any("11" in output for output in outputs), outputs
     assert any("12" in output for output in outputs), outputs
+
+
+def _wait_for_peer(own: str, peer: str) -> str:
+    return (
+        f"touch {own}.ready; for i in $(seq 200); do test -f {peer}.ready && echo overlapped && exit 0; sleep 0.05; done; "
+        "echo alone; exit 1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_shell_calls_in_one_batch_run_at_the_same_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """The CLI never makes parallel shell commands wait for each other: each one sees the other running."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    provider.steps = [
+        [
+            ("run_shell_command", {"args": _wait_for_peer("first", "second")}),
+            ("run_shell_command", {"args": _wait_for_peer("second", "first")}),
+        ],
+        "done",
+    ]
+
+    async with asyncio.timeout(60):
+        assert "done" in await _respond(runtime)
+
+    outputs = [str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool"]
+    assert len(outputs) == 2
+    assert all("overlapped" in output for output in outputs), outputs
 
 
 @pytest.mark.asyncio
