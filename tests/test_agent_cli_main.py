@@ -10,6 +10,7 @@ from io import BytesIO, TextIOWrapper
 
 import pytest
 
+from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 
 
@@ -105,6 +106,21 @@ def test_file_stdin_and_exclusive_inputs(tmp_path, monkeypatch) -> None:
         parse_arguments(["tools", "call", "a", "b", "--json", "{}", "--json-stdin"])
     with pytest.raises(SystemExit):
         parse_arguments(["tools", "unknown"])
+
+
+def test_failed_poll_keeps_the_admitted_receipt(capsys, monkeypatch) -> None:
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            return {"call_id": payload["call_id"], "toolkit": "a", "function": "b", "status": "queued"}
+
+        def receipt(self, _call_id) -> dict[str, object]:
+            msg = "Agent CLI transport outcome is unknown"
+            raise AgentCliUnavailableError(msg)
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert main(["tools", "call", "a.b", "--timeout", "1"]) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "queued"
 
 
 def test_unknown_transport_preserves_exact_call_id(capsys, monkeypatch) -> None:

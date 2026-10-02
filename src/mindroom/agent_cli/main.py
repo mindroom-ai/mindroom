@@ -7,6 +7,7 @@ __all__ = ["main", "parse_arguments", "read_call_arguments"]
 import argparse
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -167,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
             client = AgentCliClient()
             result = client.operation(payload)
             if args.action == "call" and call_id is not None:
-                result = _wait(client, call_id, result, args.timeout)
+                # The call is admitted; if polling fails, print its last known receipt so `calls wait` can resume.
+                with suppress(AgentCliUnavailableError):
+                    result = _wait(client, call_id, result, args.timeout)
         print(canonical_json(result))
         return _exit_code(result)
     except (AgentCliUnavailableError, ValueError, OSError) as exc:
