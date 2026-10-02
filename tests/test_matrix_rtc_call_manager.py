@@ -43,12 +43,14 @@ from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
     RTC_NOTIFICATION_EVENT_TYPE,
+    CallMember,
     ReceivedFrameKey,
     build_key_to_device_content,
     build_membership_content,
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import SfuGrant
+from mindroom.matrix_rtc.frame_keys import _SharedWith
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
@@ -74,7 +76,6 @@ if TYPE_CHECKING:
     from agno.models.openai.chat import OpenAIChat
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix_rtc.events import CallMember
 
 BOT_USER = "@helper:example.org"
 BOT_DEVICE = "BOTDEV"
@@ -2329,8 +2330,6 @@ def _member(
     created_ts: int = 0,
     livekit_service_url: str | None = SERVICE_URL,
 ) -> CallMember:
-    from mindroom.matrix_rtc.events import CallMember  # noqa: PLC0415
-
     return CallMember(
         user_id=user,
         device_id=device,
@@ -2359,6 +2358,37 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             clock_ms=lambda: clock[0],
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_key_distribution_bookkeeping_stays_linear_in_roster_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Planted call devices cost each key distribution a bounded number of comparisons per roster entry."""
+    comparisons = 0
+
+    def count_equality(cls: type) -> None:
+        original = cls.__eq__
+
+        def counting_eq(self: object, other: object) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            return original(self, other)
+
+        monkeypatch.setattr(cls, "__eq__", counting_eq)
+
+    count_equality(_SharedWith)
+    count_equality(CallMember)
+    roster = [_member("@alice:example.org", f"PLANTED{index}") for index in range(300)]
+    clock = [1_000]
+    transport = FakeKeyTransport()
+    session = _session(_client(), FakeBridge(), transport, clock)
+
+    await session.start(roster)
+    clock[0] += 1
+    await session.on_members_changed([*roster, _member("@alice:example.org", "JOINER")])
+
+    assert [len(sent["targets"]) for sent in transport.sent] == [len(roster), 1]
+    assert comparisons < 10 * len(roster)
+    await session.stop()
 
 
 @pytest.mark.asyncio
@@ -3488,8 +3518,7 @@ async def test_staggered_call_member_expiries_share_the_reconcile_interval(
     manager = _manager(client, FakeBridge(), tmp_path)
 
     await manager.on_room_event(_room(), _member_unknown_event())
-    while time.time() * 1000 < now_ms + 100:
-        await asyncio.sleep(0.005)
+    await asyncio.sleep(max(0, now_ms + 100 - time.time() * 1000) / 1000)
 
     # Every planted entry has expired, and the expiry waits for the coalescer's next interval.
     assert client.room_get_state.await_count == 1
