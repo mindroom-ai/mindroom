@@ -42,6 +42,7 @@ from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
     DEFAULT_MEMBERSHIP_EXPIRES_MS,
+    RTC_NOTIFICATION_EVENT_TYPE,
     ReceivedFrameKey,
     build_key_to_device_content,
     build_membership_content,
@@ -422,6 +423,13 @@ def _member_unknown_event() -> nio.UnknownEvent:
     )
 
 
+async def _deliver(manager: CallManager, delivery: Awaitable[None]) -> None:
+    """Deliver one call or membership event, then wait for the background reconcile it requested."""
+    await delivery
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+
 def _frame_key_event(
     *,
     room_id: str = ROOM_ID,
@@ -448,6 +456,11 @@ def _frame_key_event(
         type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
         authenticated_sender=AuthenticatedDevice(user_id, device_id, "curve", "signing"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _immediate_reconcile_reruns(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_MIN_INTERVAL_S", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -482,7 +495,7 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant == GRANT
     assert bridge.participant_rosters == [frozenset({"@alice:example.org:ALICEDEV"})]
@@ -514,7 +527,7 @@ async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Pa
         invited_rooms_by_agent={"helper": {ROOM_ID}},
     )
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant == GRANT
 
@@ -562,7 +575,7 @@ async def test_manager_joins_requester_private_agent_in_owned_rooms(
         invited_rooms_by_agent={"helper": {ROOM_ID}} if invited_room else None,
     )
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant == GRANT
     assert seen_requesters == ["@alice:example.org"]
@@ -577,7 +590,7 @@ async def test_manager_stops_call_when_agent_is_kicked_from_ephemeral_room(tmp_p
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
     room = _room()
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
     await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
 
@@ -607,7 +620,7 @@ async def test_manager_ignores_own_departure_from_unmanaged_room(tmp_path: Path)
     )
     assert isinstance(event, nio.RoomMemberEvent)
 
-    await manager.on_room_membership_event(room, event)
+    await _deliver(manager, manager.on_room_membership_event(room, event))
 
     assert manager._departed_rooms == set()
     assert dict(manager._locks) == {}
@@ -642,7 +655,7 @@ async def test_manager_does_not_retain_departed_ad_hoc_room(tmp_path: Path) -> N
     )
     assert isinstance(event, nio.RoomMemberEvent)
 
-    await manager.on_room_membership_event(room, event)
+    await _deliver(manager, manager.on_room_membership_event(room, event))
 
     assert manager._observed_rooms == {}
     assert manager._departed_rooms == set()
@@ -666,7 +679,7 @@ async def test_manager_ignores_frame_keys_after_departing_configured_room(tmp_pa
         },
     )
     assert isinstance(event, nio.RoomMemberEvent)
-    await manager.on_room_membership_event(client.rooms[ROOM_ID], event)
+    await _deliver(manager, manager.on_room_membership_event(client.rooms[ROOM_ID], event))
 
     await manager.on_to_device_event(_frame_key_event())
 
@@ -719,7 +732,7 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, _cascaded_config(call_model="call_fast"))
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     options = bridge.agent_options
     assert isinstance(options, CascadedVoiceAgentOptions)
@@ -802,7 +815,7 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(  # noqa:
     config.agents["helper"].display_name = "Helper 🌿"
     manager = _manager(client, bridge, tmp_path, config)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     options = bridge.agent_options
     assert isinstance(options, LiveVoiceAgentOptions)
@@ -909,7 +922,7 @@ async def test_cascaded_agent_start_failure_tears_down_and_retries(
     bridge.start_agent = fail_start  # type: ignore[method-assign]
     manager = _manager(client, bridge, tmp_path, _cascaded_config(local=True))
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
     assert bridge.closed
@@ -1221,7 +1234,7 @@ async def test_manager_requires_current_room_membership_for_call_roster(tmp_path
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
     assert manager._retry_tasks == {}
@@ -1237,7 +1250,7 @@ async def test_room_membership_event_removes_stale_call_participant(tmp_path: Pa
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
     room = _room()
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
     client.room_get_state.return_value = nio.RoomGetStateResponse(
         [call_event, _room_member_event(membership="leave")],
@@ -1255,9 +1268,61 @@ async def test_room_membership_event_removes_stale_call_participant(tmp_path: Pa
     )
     assert isinstance(member_event, nio.RoomMemberEvent)
 
-    await manager.on_room_membership_event(room, member_event)
+    await _deliver(manager, manager.on_room_membership_event(room, member_event))
 
     assert bridge.closed
+
+
+@pytest.mark.asyncio
+async def test_call_event_floods_share_one_background_state_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cheap call and profile events from a room member cannot hold the room lane or multiply state reads."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_MIN_INTERVAL_S", 60)
+    client = _client()
+    release_state = asyncio.Event()
+
+    async def slow_state(_room_id: str) -> nio.RoomGetStateResponse:
+        await release_state.wait()
+        return _state_response()
+
+    client.room_get_state.side_effect = slow_state
+    manager = _manager(client, FakeBridge(), tmp_path)
+    room = _room()
+    notification = nio.UnknownEvent(
+        {"event_id": "$ring", "sender": "@mallory:example.org", "origin_server_ts": 1_000},
+        RTC_NOTIFICATION_EVENT_TYPE,
+    )
+    profile_edit = nio.RoomMemberEvent.from_dict(
+        {
+            "event_id": "$rename",
+            "sender": "@mallory:example.org",
+            "state_key": "@mallory:example.org",
+            "type": "m.room.member",
+            "origin_server_ts": 1_000,
+            "content": {"membership": "join", "displayname": "Mallory"},
+            "unsigned": {"prev_content": {"membership": "join"}},
+        },
+    )
+    assert isinstance(profile_edit, nio.RoomMemberEvent)
+
+    async with asyncio.timeout(1):
+        for _ in range(20):
+            await manager.on_room_membership_event(room, profile_edit)
+            await asyncio.sleep(0)
+        client.room_get_state.assert_not_awaited()
+        for _ in range(20):
+            await manager.on_room_event(room, notification)
+            await asyncio.sleep(0)
+    assert client.room_get_state.await_count == 1
+
+    release_state.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert client.room_get_state.await_count == 1
+    await manager.shutdown()
+    assert manager._reconcile_tasks == {}
 
 
 @pytest.mark.asyncio
@@ -1271,7 +1336,7 @@ async def test_manager_ignores_unrelated_event_types(tmp_path: Path) -> None:
         "io.mindroom.tool_approval_response",
     )
 
-    await manager.on_room_event(_room(), event)
+    await _deliver(manager, manager.on_room_event(_room(), event))
 
     client.room_get_state.assert_not_awaited()
     assert bridge.connected_grant is None
@@ -1284,7 +1349,7 @@ async def test_manager_ignores_calls_outside_agent_rooms(tmp_path: Path) -> None
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(room_id="!other:example.org"), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(room_id="!other:example.org"), _member_unknown_event()))
 
     client.room_get_state.assert_not_awaited()
     assert bridge.connected_grant is None
@@ -1302,7 +1367,7 @@ async def test_manager_rejects_unauthorized_call_members(tmp_path: Path, backend
     _set_helper_access(config)
     manager = _manager(client, bridge, tmp_path, config)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
 
@@ -1318,7 +1383,7 @@ async def test_manager_rejects_members_denied_by_agent_access(tmp_path: Path) ->
     _set_helper_access(config, users=["@other:example.org"])
     manager = _manager(client, bridge, tmp_path, config)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
 
@@ -1351,7 +1416,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
         agent_reply_memberships=memberships,
     )
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is not None
 
@@ -1386,7 +1451,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
         config,
         agent_reply_memberships=memberships,
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is not None
 
     memberships.apply_member_event(
@@ -1438,7 +1503,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
         config,
         agent_reply_memberships=memberships,
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is None
 
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
@@ -1479,7 +1544,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
         config,
         agent_reply_memberships=memberships,
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is None
 
     memberships.apply_member_event(
@@ -1568,7 +1633,7 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
         response_admission_gate=gate,
     )
 
-    reconcile = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     assert not gate.close_if_idle()
     bridge.release_connect.set()
@@ -1609,7 +1674,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(tmp_path: P
         agent_reply_memberships=memberships,
         response_admission_gate=gate,
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is GRANT
     assert gate.close_if_idle()
 
@@ -1679,7 +1744,7 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
         agent_reply_memberships=memberships,
     )
 
-    join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    join_task = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
     memberships.apply_member_event(
         config,
@@ -1723,7 +1788,7 @@ async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
     reloaded_config = _config()
 
     manager.update_config(reloaded_config)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is not None
 
@@ -1737,7 +1802,7 @@ async def test_manager_rechecks_active_call_after_reply_policy_reload(tmp_path: 
     bridge = FakeBridge()
     initial_config = _config()
     manager = _manager(client, bridge, tmp_path, initial_config)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is not None
 
     reloaded_config = _config()
@@ -1774,7 +1839,7 @@ async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> Non
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is not None
 
     empty_leave_event = {
@@ -1785,7 +1850,7 @@ async def test_manager_leaves_call_when_room_call_empties(tmp_path: Path) -> Non
         "content": {},
     }
     client.room_get_state.return_value = _state_response(empty_leave_event)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
     # The bot cleared its own membership state event on leave.
@@ -1801,13 +1866,13 @@ async def test_manager_leaves_when_a_denied_member_joins(tmp_path: Path) -> None
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     client.room_get_state.return_value = _state_response(
         _remote_member_event(),
         _remote_member_event(user="@mallory:example.org", device="MALLORYDEV"),
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
 
@@ -1823,13 +1888,13 @@ async def test_manager_leaves_when_second_authorized_user_joins(tmp_path: Path) 
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, config)
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     client.room_get_state.return_value = _state_response(
         _remote_member_event(),
         _remote_member_event(user="@bob:example.org", device="BOBDEV"),
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
     assert manager._sessions == {}
@@ -1874,12 +1939,12 @@ async def test_manager_restarts_when_sole_requester_changes(
         wait_for_admission_or_shutdown=_admission_available,
     )
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     client.room_get_state.return_value = _state_response(
         _remote_member_event(user="@bob:example.org", device="BOBDEV"),
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert requesters == ["@alice:example.org", "@bob:example.org"]
     assert alice_bridge.closed
@@ -1996,7 +2061,7 @@ async def test_manager_skips_join_without_openai_key(monkeypatch: pytest.MonkeyP
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
     assert manager._retry_tasks == {}
@@ -2021,7 +2086,7 @@ async def test_manager_reads_key_from_configured_credentials_service(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert requested_services == ["openai"]
     assert bridge.agent_options is not None
@@ -2037,7 +2102,7 @@ async def test_manager_handles_missing_device_id_as_a_join_failure(tmp_path: Pat
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
     assert manager._retry_tasks == {}
@@ -2051,13 +2116,13 @@ async def test_manager_shutdown_stops_sessions(tmp_path: Path) -> None:
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     await manager.shutdown()
 
     assert bridge.closed
     # Events after shutdown must not start new sessions.
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.frame_keys == []
 
 
@@ -2099,7 +2164,7 @@ async def test_manager_reconcile_contains_session_stop_failure(tmp_path: Path) -
     manager = _manager(client, FakeBridge(), tmp_path)
     manager._sessions[ROOM_ID] = session
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.closed
     assert manager._sessions == {}
@@ -2754,7 +2819,7 @@ async def test_manager_passes_same_agent_tools_and_prompt(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, tool_support=object())
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     options = bridge.agent_options
     assert options is not None
@@ -2782,7 +2847,7 @@ async def test_manager_skips_call_when_same_agent_materialization_fails(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert bridge.connected_grant is None
     assert bridge.agent_options is None
@@ -2877,7 +2942,7 @@ async def test_manager_replays_a_key_received_before_active_roster_update(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
     await manager.on_to_device_event(
         _frame_key_event(user_id="@alice:example.org", device_id="ALICESECOND"),
@@ -2890,7 +2955,7 @@ async def test_manager_replays_a_key_received_before_active_roster_update(
         _remote_member_event(),
         _remote_member_event(user="@alice:example.org", device="ALICESECOND"),
     )
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
     assert ("@alice:example.org:ALICESECOND", b"A" * 16, 2) in bridge.frame_keys
     assert manager._pending_keys == {}
@@ -2958,7 +3023,7 @@ async def test_manager_expires_pending_key_from_device_outside_roster(
     assert manager._retry_tasks == {}
 
     clock[0] += _PENDING_KEY_TTL_MS + 1
-    await manager.on_room_event(_room(encrypted=True), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(encrypted=True), _member_unknown_event()))
 
     assert manager._pending_keys == {}
     await manager.shutdown()
@@ -3022,7 +3087,9 @@ async def test_manager_replays_a_key_received_while_starting(
         await release_agent.wait()
 
     bridge.start_agent = blocked_start_agent  # type: ignore[method-assign]
-    join_task = asyncio.create_task(manager.on_room_event(_room(encrypted=True), _member_unknown_event()))
+    join_task = asyncio.create_task(
+        _deliver(manager, manager.on_room_event(_room(encrypted=True), _member_unknown_event())),
+    )
     await asyncio.wait_for(agent_starting.wait(), timeout=1)
 
     key_task = asyncio.create_task(manager.on_to_device_event(_frame_key_event()))
@@ -3121,7 +3188,7 @@ async def test_manager_does_not_poll_untrusted_focus(tmp_path: Path) -> None:
     )
     manager = _manager(client, FakeBridge(), tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert manager._sessions == {}
     assert manager._retry_tasks == {}
@@ -3146,7 +3213,7 @@ async def test_manager_retries_transient_focus_discovery_failure(
     client.room_get_state.return_value = _state_response(_remote_member_event())
     manager = _manager(client, FakeBridge(), tmp_path, config)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert ROOM_ID in manager._retry_tasks
     await manager.shutdown()
@@ -3168,7 +3235,7 @@ async def test_manager_does_not_retry_invalid_sfu_grant(
     client.room_get_state.return_value = _state_response(_remote_member_event())
     manager = _manager(client, FakeBridge(), tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert manager._sessions == {}
     assert manager._retry_tasks == {}
@@ -3207,7 +3274,7 @@ async def test_active_session_keeps_pinned_focus_after_founder_leaves(tmp_path: 
     manager = _manager(client, bridge, tmp_path)
     room = _room()
 
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
     client.room_get_state.return_value = _state_response(
         _remote_member_event(
             device="FOLLOWER",
@@ -3215,7 +3282,7 @@ async def test_active_session_keeps_pinned_focus_after_founder_leaves(tmp_path: 
             livekit_service_url="https://rtc.remote.example",
         ),
     )
-    await manager.on_room_event(room, _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
     assert ROOM_ID in manager._sessions
     assert not bridge.closed
@@ -3269,16 +3336,16 @@ async def test_transient_state_fetch_error_keeps_active_session(tmp_path: Path) 
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is GRANT
 
     client.room_get_state.return_value = nio.RoomGetStateError("503 upstream sad")
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert not bridge.closed
 
     # A genuinely empty call still ends the session.
     client.room_get_state.return_value = nio.RoomGetStateResponse([], ROOM_ID)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.closed
 
 
@@ -3296,7 +3363,7 @@ async def test_state_fetch_failure_retries_without_another_call_event(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     for _ in range(20):
         if bridge.connected_grant is not None:
             break
@@ -3333,7 +3400,7 @@ async def test_shutdown_drains_retry_during_reconciliation(
     client.room_get_state.side_effect = fetch_state
     manager = _manager(client, FakeBridge(), tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     await entered_retry.wait()
     assert ROOM_ID not in manager._retry_tasks
     assert manager._background_tasks
@@ -3355,7 +3422,7 @@ async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path)
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, clock_ms=lambda: next(clock_values))
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     for _ in range(20):
         if bridge.closed:
             break
@@ -3381,7 +3448,7 @@ async def test_shutdown_during_join_stops_the_new_session(tmp_path: Path) -> Non
 
     bridge.connect = blocking_connect  # type: ignore[method-assign]
 
-    join_task = asyncio.create_task(manager.on_room_event(_room(), _member_unknown_event()))
+    join_task = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     for _ in range(20):
         await asyncio.sleep(0)
     shutdown_task = asyncio.create_task(manager.shutdown())
@@ -3407,7 +3474,7 @@ async def test_bridge_connect_failure_is_a_clean_join_failure(tmp_path: Path) ->
     bridge.connect = exploding_connect  # type: ignore[method-assign]
     manager = _manager(client, bridge, tmp_path)
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.agent_options is None
     assert bridge.closed
     assert ROOM_ID in manager._retry_tasks
@@ -3423,14 +3490,14 @@ async def test_call_events_cannot_bypass_pending_join_backoff(tmp_path: Path) ->
     join = AsyncMock(return_value="retry")
     manager._join = join  # type: ignore[method-assign]
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert join.await_count == 1
     assert ROOM_ID in manager._retry_tasks
 
     retry_task = manager._retry_tasks.pop(ROOM_ID)
     retry_task.cancel()
     await asyncio.gather(retry_task, return_exceptions=True)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert join.await_count == 1
     await manager.shutdown()
@@ -3468,7 +3535,7 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
 
     manager._join = fake_join  # type: ignore[method-assign]
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     for _ in range(20):
         if len(session_ids) == 2:
             break
@@ -3478,9 +3545,9 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
     assert session_ids[0] == session_ids[1]
 
     client.room_get_state.return_value = _state_response()
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert session_ids[2] != session_ids[0]
     await manager.shutdown()
@@ -3497,7 +3564,7 @@ async def test_terminal_voice_close_stops_session_and_retries_only_when_allowed(
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.agent_options is not None
     assert bridge.agent_options.on_session_terminated is not None
 
@@ -3519,7 +3586,7 @@ async def test_voice_runtime_error_is_posted_as_actionable_room_notice(tmp_path:
     client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.agent_options is not None
     assert bridge.agent_options.on_session_error is not None
 
@@ -3561,7 +3628,7 @@ async def test_voice_runtime_error_waits_for_reload_and_rechecks_authorization(t
         config,
         response_admission_gate=gate,
     )
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.agent_options is not None
     assert bridge.agent_options.on_session_error is not None
     assert gate.close_if_idle()
@@ -3601,21 +3668,21 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.agent_options is not None
     assert bridge.agent_options.on_session_terminated is not None
 
     bridge.agent_options.on_session_terminated(False)
     await asyncio.gather(*list(manager._background_tasks))
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert manager._sessions == {}
     assert manager._logical_calls[ROOM_ID].join_blocked
 
     client.room_get_state.return_value = _state_response()
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert ROOM_ID in manager._sessions
     await manager.shutdown()
@@ -3636,7 +3703,7 @@ async def test_terminal_close_during_agent_start_cannot_leave_ghost_session(tmp_
     bridge = ClosingBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_room_event(_room(), _member_unknown_event())
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     await asyncio.gather(*list(manager._background_tasks))
 
     assert bridge.closed
@@ -4521,7 +4588,7 @@ async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Pat
         if signal == "sync":
             await manager.reconcile_joined_rooms()
         else:
-            await manager.on_room_event(room, event)
+            await _deliver(manager, manager.on_room_event(room, event))
 
     diagnostics = [row for row in logs if row["event"] == "call_room_ownership_ambiguous"]
     assert len(diagnostics) == 1

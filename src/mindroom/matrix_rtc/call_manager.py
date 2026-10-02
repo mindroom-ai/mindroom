@@ -5,6 +5,9 @@ decrypted to-device events), reconciles the room's call membership state,
 and starts or stops one ``CallSession`` per room. Reconciliation always
 re-reads the room state from the homeserver, both on call events and after
 each sync-loop start, so a bot recovers calls already active at startup.
+Call and membership events only request a background reconcile, coalesced
+per room, so floods of them neither hold the room's event lane nor
+multiply full state reads.
 """
 
 from __future__ import annotations
@@ -103,6 +106,7 @@ _CALL_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TY
 _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
+_RECONCILE_MIN_INTERVAL_S = 1.0
 _OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
@@ -285,6 +289,8 @@ class CallManager:
         self._departed_rooms: set[str] = set()
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._reconcile_requests: dict[str, nio.MatrixRoom] = {}
+        self._reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._retry_attempts: dict[str, int] = {}
         self._logical_calls: dict[str, _LogicalCallState] = {}
         self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
@@ -312,8 +318,7 @@ class CallManager:
             or not self._is_configured_call_room(room, call_event=event)
         ):
             return
-        self._observed_rooms[room.room_id] = room
-        await self._reconcile(room)
+        self._request_reconcile(room)
 
     async def on_room_membership_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Reconcile calls when a user's underlying room membership changes."""
@@ -327,10 +332,10 @@ class CallManager:
             return
         if event.state_key == self._client.user_id and event.membership == "join":
             self._departed_rooms.discard(room.room_id)
-        if not self._is_configured_call_room(room):
+        # Display name and avatar edits keep the membership, so the call roster cannot change.
+        if event.membership == event.prev_membership or not self._is_configured_call_room(room):
             return
-        self._observed_rooms[room.room_id] = room
-        await self._reconcile(room)
+        self._request_reconcile(room)
 
     async def on_sync_room_membership(
         self,
@@ -500,6 +505,8 @@ class CallManager:
         self._starting_calls.clear()
         background_tasks = [*self._retry_tasks.values(), *self._background_tasks]
         self._retry_tasks.clear()
+        self._reconcile_requests.clear()
+        self._reconcile_tasks.clear()
         self._background_tasks.clear()
         self._retry_attempts.clear()
         self._logical_calls.clear()
@@ -522,6 +529,31 @@ class CallManager:
         self._sessions.clear()
         for session in sessions:
             await self._stop_session(session, event="call_session_shutdown_failed")
+
+    def _request_reconcile(self, room: nio.MatrixRoom) -> None:
+        """Run at most one background reconcile per room, with the latest requested room snapshot.
+
+        The event that requests it settles at once, and requests arriving while a reconcile runs or
+        within the minimum interval after it share one more state read.
+        """
+        room_id = room.room_id
+        self._observed_rooms[room_id] = room
+        self._reconcile_requests[room_id] = room
+        if room_id in self._reconcile_tasks:
+            return
+        task = asyncio.create_task(self._run_reconcile_requests(room_id), name=f"matrix_rtc_reconcile_{room_id}")
+        self._reconcile_tasks[room_id] = task
+        self._track_background_task(task, event="call_reconcile_failed", room_id=room_id)
+
+    async def _run_reconcile_requests(self, room_id: str) -> None:
+        try:
+            while (room := self._reconcile_requests.pop(room_id, None)) is not None:
+                await self._reconcile(room)
+                if self._shutting_down:
+                    return
+                await asyncio.sleep(_RECONCILE_MIN_INTERVAL_S)
+        finally:
+            self._reconcile_tasks.pop(room_id, None)
 
     async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
         if room.room_id in self._departed_rooms or not self._is_configured_call_room(room):
