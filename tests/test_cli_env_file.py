@@ -111,3 +111,28 @@ def test_upsert_env_values_refuses_values_that_would_become_extra_lines(tmp_path
 
     assert "secret" not in str(exc_info.value).replace("MINDROOM_LOCAL_CLIENT_SECRET", "")
     assert env_path.read_text(encoding="utf-8") == "EXISTING=value\n"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["sk$ecret", "it's", 'say "hi"', "a #b", "#start", " padded ", "back\\slash\\", "'", "\\'"],
+)
+def test_upsert_env_values_reads_back_unchanged(tmp_path: Path, value: str) -> None:
+    """Values that unquoted `.env` lines would change are quoted, while plain values stay unquoted."""
+    env_path = tmp_path / ".env"
+
+    upsert_env_values(env_path, {"KEY": value, "PLAIN": "value"})
+
+    assert dotenv_values(env_path) == {"KEY": value, "PLAIN": "value"}
+    assert env_path.read_text(encoding="utf-8").endswith("\nPLAIN=value\n")
+
+
+def test_upsert_env_values_refuses_values_dotenv_would_expand(tmp_path: Path) -> None:
+    """python-dotenv expands `${NAME}` even in quoted values, so such a value is refused before anything is written."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXISTING=value\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Refusing to write MINDROOM_API_KEY to the env file"):
+        upsert_env_values(env_path, {"MINDROOM_NAMESPACE": "a1b2c3d4", "MINDROOM_API_KEY": "secret-${HOME}"})
+
+    assert env_path.read_text(encoding="utf-8") == "EXISTING=value\n"
