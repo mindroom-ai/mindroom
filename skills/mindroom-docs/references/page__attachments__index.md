@@ -133,8 +133,8 @@ Encrypted media is decrypted transparently using the key material from the Matri
 MindRoom automatically prunes attachment metadata and eligible managed `incoming_media/` files older than 30 days.
 Pruning runs opportunistically during new attachment registration, with a one-hour cleanup throttle.
 Managed files with active attachment references are retained, and filesystem failures can delay deletion.
-Downloaded Matrix media is stored once per content, so events that share one file keep their own attachment records but a single copy of its bytes.
 This is not an exact deletion deadline and does not delete unmanaged source or workspace files or Matrix homeserver copies.
+Downloaded Matrix media is stored once per content, so events that share one file keep their own attachment records but a single copy of its bytes.
 
 ## Limitations
 
