@@ -17,7 +17,6 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock, patch
-from uuid import UUID
 
 import pytest
 from structlog.testing import capture_logs
@@ -63,7 +62,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
-from mindroom.workers.models import WorkerReadyProgress, WorkerSpec, process_worker_key
+from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     primary_worker_backend_available,
     primary_worker_backend_name,
@@ -1959,15 +1958,10 @@ def test_kubernetes_worker_user_resources_apply_only_to_that_requesters_workers(
     alice_user_agent_key = "v1:tenant-123:user_agent:~@alice:example.org:code"
     alice_resources = {"requests": {"memory": "1Gi", "cpu": "100m"}, "limits": {"memory": "4Gi", "cpu": "500m"}}
     global_resources = {"requests": {"memory": "256Mi", "cpu": "100m"}, "limits": {"memory": "1Gi", "cpu": "500m"}}
-    cli_turn_key = process_worker_key(alice_user_agent_key, purpose="agent-turn", process_id=UUID(int=1))
     script_key = script_worker_key_for_run(alice_user_agent_key, f"script-{'a' * 32}")
     cases = [
         (WorkerSpec("v1:tenant-123:user:~@alice:example.org"), alice_resources),
         (WorkerSpec(alice_user_agent_key, private_agent_names=frozenset()), alice_resources),
-        (
-            WorkerSpec(cli_turn_key, private_agent_names=frozenset(), state_scope_worker_key=alice_user_agent_key),
-            alice_resources,
-        ),
         (WorkerSpec("v1:tenant-123:user:~@bob:example.org"), global_resources),
         (WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), global_resources),
         (

@@ -39,6 +39,7 @@ from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator
+    from concurrent.futures import Executor
 
     from agno.tools import Toolkit
     from agno.tools.function import Function
@@ -91,8 +92,12 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class SyncToolCompletionTracker:
-    """Expose one context-bound synchronous leaf task to its resource owner."""
+    """Expose one context-bound synchronous leaf task to its resource owner.
 
+    ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
+    """
+
+    executor: Executor | None = None
     task: asyncio.Task[_ToolHookResult] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
@@ -429,10 +434,11 @@ async def _run_sync_tool_entrypoint(
             raise asyncio.CancelledError
         return entrypoint(**arguments)
 
-    task = asyncio.create_task(
-        asyncio.to_thread(invoke),
-        name="sync-tool-entrypoint",
-    )
+    async def offload() -> _ToolHookResult:
+        executor = tracker.executor if tracker is not None else None
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, invoke)
+
+    task = asyncio.create_task(offload(), name="sync-tool-entrypoint")
     if tracker is None:
         return await task
     tracker.track(task)

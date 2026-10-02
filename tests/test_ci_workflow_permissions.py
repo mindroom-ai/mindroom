@@ -1,7 +1,8 @@
-"""Check CI workflow policies: least-privilege job tokens and cancellation of superseded pull request runs."""
+"""Check CI workflow policies: least-privilege tokens, pinned actions, and cancelling superseded pull request runs."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,16 @@ def test_generated_docs_are_checked_rather_than_pushed_from_ci() -> None:
     assert not any("git push" in step.get("run", "") or "git commit" in step.get("run", "") for step in steps)
     assert not any("push-action" in step.get("uses", "") or "artifact" in step.get("uses", "") for step in steps)
     assert "exit 1" in steps[-1]["run"]
+
+
+@pytest.mark.parametrize("name", ["release.yml", "markdown-code-runner.yml"])
+def test_release_and_docs_workflows_pin_actions_to_commits(name: str) -> None:
+    """A moved upstream tag or branch must not change the action code these workflows run, signing steps included."""
+    workflow = _load_workflow(name)
+    actions = [step["uses"] for job in workflow["jobs"].values() for step in job["steps"] if "uses" in step]
+
+    assert actions
+    assert all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", action) for action in actions), actions
 
 
 def test_security_scan_pins_the_tools_it_installs() -> None:

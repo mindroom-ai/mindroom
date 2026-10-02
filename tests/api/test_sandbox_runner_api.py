@@ -5246,6 +5246,45 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
     assert not (worker_root / "workspace" / "note.txt").exists()
 
 
+def test_dedicated_worker_shell_receives_the_minimal_cli_environment(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A minimal response's CLI address and grant reach the command in the agent's own dedicated worker."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", 'printf "%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN"']],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "execution_env": {
+                "PATH": os.environ["PATH"],
+                "MINDROOM_AGENT_CLI_URL": "http://host.docker.internal:8765",
+                "MINDROOM_AGENT_CLI_TOKEN": "response-grant",
+            },
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True, data
+    assert data["result"].endswith("http://host.docker.internal:8765|response-grant")
+
+
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
 def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     runner_client: TestClient,

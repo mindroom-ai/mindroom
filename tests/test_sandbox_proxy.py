@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import contextvars
 import functools
 import hashlib
 import json
@@ -36,6 +37,7 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
@@ -5526,7 +5528,9 @@ def _forward_proxy_to_seeded_runner(
 
     def forward_to_runner(url: str, payload: dict[str, Any]) -> object:
         sent_payloads.append(payload)
-        response = runner.post(
+        # The runner is another process, so it sees nothing of the primary's context.
+        response = contextvars.Context().run(
+            runner.post,
             url.removeprefix("http://sandbox-runner:8766"),
             json=payload,
             headers={"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN},
@@ -5577,6 +5581,38 @@ async def test_static_runner_runs_shell_for_agent_added_after_seeding(
     assert isinstance(result, str)
     assert result.endswith("from-mind-workspace")
     _assert_no_live_config_secrets(sent_payloads)
+
+
+@pytest.mark.asyncio
+async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A minimal response's CLI environment travels with each command into the agent's ordinary worker shell."""
+    primary_paths, workspace, sent_payloads = _forward_proxy_to_seeded_runner(monkeypatch, tmp_path)
+    live_config = _live_primary_config(primary_paths)
+    workspace.mkdir(parents=True)
+    tool = get_tool_by_name(
+        "shell",
+        primary_paths,
+        runtime_config=live_config,
+        tool_init_overrides={"base_dir": str(workspace)},
+        worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    command = ["bash", "-c", 'printf "%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN"']
+
+    with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
+        with bound_agent_cli_shell_env(AgentCliShellEnv("http://host.docker.internal:8765", "response-grant")):
+            minimal = await entrypoint(command)
+        ordinary = await entrypoint(command)
+
+    assert isinstance(minimal, str)
+    assert minimal.endswith("http://host.docker.internal:8765|response-grant")
+    assert isinstance(ordinary, str)
+    assert ordinary.endswith("|")
+    assert "response-grant" not in json.dumps(sent_payloads[-1])
 
 
 def test_static_runner_saves_attachment_for_agent_added_after_seeding(

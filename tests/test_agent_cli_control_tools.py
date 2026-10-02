@@ -1,6 +1,6 @@
 """Hidden control outcomes stop real Bash without inventing provider calls."""
 
-# ruff: noqa: ANN001, ANN003, ANN202, ARG001, ARG002, D103, PLR0915
+# ruff: noqa: ANN001, ANN003, ANN202, ARG001, D103, PLR0915
 from __future__ import annotations
 
 import asyncio
@@ -24,6 +24,7 @@ from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliTurnOwner
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
@@ -86,7 +87,20 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         return "done"
 
     async def run_shell_command(args: str) -> str:
-        pytest.fail("ordinary shell")
+        effects.append(args)
+        if control:
+            for function in ("switch_thread_model", "mutate"):
+                receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
+                    await owner.operation(
+                        ToolCallOperation(
+                            operation="tools.call",
+                            call_id=uuid4(),
+                            toolkit="control",
+                            function=function,
+                        ),
+                    ),
+                )
+        return payload
 
     switch = Function.from_callable(switch_thread_model)
     switch.stop_after_tool_call = True
@@ -101,29 +115,12 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
     async def authorize(key, arguments):
         return None
 
-    class Worker:
-        async def invoke_shell(self, name, arguments):
-            effects.append(arguments["args"])
-            if control:
-                for function in ("switch_thread_model", "mutate"):
-                    receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
-                        await owner.operation(
-                            ToolCallOperation(
-                                operation="tools.call",
-                                call_id=uuid4(),
-                                toolkit="control",
-                                function=function,
-                            ),
-                        ),
-                    )
-            return payload
-
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=Worker(),
         authorize=authorize,
     )
+    owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
 
     async def bash(command: str, fc: FunctionCall) -> str:
         return await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": command}, fc)
@@ -253,9 +250,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run", "worker"),
+        CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         run_child=child_response,
         delegation_depth=depth,
@@ -382,9 +378,8 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run", "worker"),
+        CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         run_child=child_response,
     )
@@ -541,9 +536,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run", "worker"),
+        CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         run_child=child_response,
     )
@@ -756,9 +750,8 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) ->
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     with pytest.raises(ExceptionGroup) as error:
@@ -833,9 +826,8 @@ async def test_interactive_context_renders_native_question_and_keeps_session(tmp
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
         context={"interactive": INTERACTIVE_QUESTION_PROMPT},
     )
@@ -893,9 +885,8 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     async with owner._window("bash-parent"):

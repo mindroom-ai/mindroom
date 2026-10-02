@@ -451,6 +451,7 @@ MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `go
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
+Downloads and exports larger than `max_download_size` are refused before they are saved, and a stream that grows past the limit is discarded without leaving a file.
 `google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting for which local files it may read.
 `google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
 Native Google Workspace files require their respective Workspace APIs for content updates.
@@ -470,6 +471,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
 | `write` | `boolean` | `no` | `true` | Enable uploads, binary content replacement, folder creation, file moves or renames, and trashing. |
 | `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
+| `max_download_size` | `number` | `no` | `104857600` | Maximum file or export size to download into the agent workspace in bytes. |
 
 ### Example
 

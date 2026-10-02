@@ -1,18 +1,21 @@
 # Internal turn CLI
 
-`mindroom-agent` is installed by the existing worker package.
-Its stdlib client reads `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_TOKEN_PATH` from trusted worker setup.
+`mindroom-agent` is installed with MindRoom, including in worker images.
+Its stdlib client reads `MINDROOM_AGENT_CLI_URL` and `MINDROOM_AGENT_CLI_TOKEN` from the environment its response gives each Bash command.
+Bash is the agent's own shell: it runs in the primary for agents without a worker, or in the agent's ordinary worker through the sandbox proxy.
 The token identifies one response turn; arguments cannot select another requester, agent, worker, or credential owner.
 Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shell-permission preflight.
 
 Discover tool names and schemas with `tools list`, `tools search`, and `tools describe`.
 Listing accepts `--cursor` and `--limit`; schemas are loaded only when described.
-Call input is one JSON object supplied with `--json`, `--json-file`, or `--json-stdin`.
+Call input is one JSON object supplied as a final argument or with `--json`, `--json-file`, or `--json-stdin`.
 These options are exclusive.
 Omission means `{}`.
 
-A call returns a live receipt immediately.
-Exit 3 means it is pending; shell scripts must preserve that receipt and explicitly wait.
+A call waits up to `--timeout` seconds (default 30) for its result, then prints the live receipt.
+`TOOLKIT.FUNCTION` selects the same function as `TOOLKIT FUNCTION`.
+Exit 3 means it is still pending; shell scripts must preserve that receipt and explicitly wait.
+`--timeout 0` returns the receipt at once, so one command can submit several calls before waiting on them.
 Do not chain the wait with success-only `&&`:
 
 ```bash
@@ -47,16 +50,15 @@ Approval suspension uses the actual provider-batch checkpoint.
 Exit codes: 0 completed/read success; 1 tool failure/denial/cancellation; 2 invalid input; 3 queued/running/waiting; 4 unavailable authority or unknown transport/dispatch outcome.
 `--help` needs no runtime configuration.
 
-The existing API exposes only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/{call_id}` for this capability.
-The deployment gateway must restrict forwarding to those routes.
+The existing API exposes only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/{call_id}` for this capability; only a response grant authenticates them.
 Authentication precedes body parsing; invalid authority and another owner's receipt both return the same 401 response.
 The orchestrator owns the registry.
-The response owns the worker, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
-A response lease keeps its worker alive across worker-manager replacement.
-Normal completion retires that exact worker.
-After a primary crash, old grants are invalid immediately; the existing heartbeat and idle-timeout cleanup stop abandoned workers.
+The response owns its shell, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
+Each command of the response's Bash receives the grant in its environment, directly in the primary or with its proxied worker request.
+A primary shell also gets a private directory on its `PATH` that holds only a `mindroom-agent` launcher.
+The response revokes its grant when it ends, and after a primary crash old grants are invalid immediately.
 
-A Bash window stays open while its admitted calls settle, so an admitted nested shell can still submit its child calls after the outer worker returns.
+A Bash window stays open while its admitted calls settle, so an admitted nested shell can still submit its child calls after the outer command returns.
 Admission closes atomically when that work is quiescent, before hooks or model control resume.
 Calls arriving during drainage may join that Bash; new calls and describe requests after closure are rejected until a later Bash call opens a window.
 Revocation and explicit control cancellation fence admission immediately.

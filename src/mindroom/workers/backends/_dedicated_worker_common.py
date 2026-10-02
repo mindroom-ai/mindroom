@@ -23,7 +23,6 @@ from mindroom.tool_system.worker_routing import (
     worker_key_agent_name,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import is_cli_worker_key
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -82,14 +81,6 @@ def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str 
         len(worker_parts) == len(state_scope_parts) + 1
         and worker_parts[:-2] == state_scope_parts[:-1]
         and worker_parts[-1] == state_scope_parts[-1]
-    ):
-        return state_scope_worker_key
-    # A CLI turn of a `worker_scope: user` agent runs in its own requester's per-user scope.
-    if (
-        is_cli_worker_key(worker_key)
-        and state_scope_parts[2:3] == ["user"]
-        and worker_parts[:2] == state_scope_parts[:2]
-        and worker_parts[3:-2] == state_scope_parts[3:]
     ):
         return state_scope_worker_key
     msg = f"Worker state scope does not own the requested worker key: {worker_key}"

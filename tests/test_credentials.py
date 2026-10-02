@@ -2136,3 +2136,31 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
     worker_manager.save_credentials("google_bigquery", {"project": "planted"})
     assert load_credentials_for_target("google_bigquery", target) is None
     assert "google_bigquery" not in access.list_services()
+
+
+def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path: Path) -> None:
+    """Deleting a scoped tool's settings also deletes the worker copy an older dashboard saved, which it no longer lists."""
+    runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8765", "MINDROOM_SANDBOX_PROXY_TOKEN": "token"},
+    )
+    manager = CredentialsManager(tmp_path / "credentials")
+    worker_target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert worker_target.worker_key is not None
+    worker_manager = manager.for_worker(worker_target.worker_key)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=worker_manager,
+        worker_scope="shared",
+        agent_name="alpha",
+        execution_identity=None,
+    )
+    worker_manager.save_credentials("openweather", {"api_key": "old-worker-key"})
+    save_credentials_for_target("openweather", {"api_key": "new-key"}, target)
+
+    delete_credentials_for_target("openweather", target)
+
+    assert manager.for_primary_runtime_agent_scope("alpha").load_credentials("openweather") is None
+    assert worker_manager.load_credentials("openweather") is None
