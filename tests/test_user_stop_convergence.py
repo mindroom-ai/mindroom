@@ -112,6 +112,7 @@ async def _store(journal_store: EventJournalStore) -> TurnStore:
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
             redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
+            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),

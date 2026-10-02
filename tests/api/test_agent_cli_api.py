@@ -37,9 +37,8 @@ async def test_real_api_auth_precedes_validation_and_hides_wrong_owner(
         return None
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     registry = TurnToolRegistry()
@@ -102,9 +101,8 @@ async def test_internal_factory_key_error_is_not_client_validation(tmp_path: Pat
 
     catalog.add_deferred(DeferredAgentToolkit("broken", "Broken integration", broken_factory))
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     registry = TurnToolRegistry()
@@ -150,9 +148,8 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
     async def make_owner(name: str) -> tuple[LiveTurnTools, dict[str, str]]:
         catalog = await _catalog(tmp_path / name, [Toolkit(name="state", tools=[change])])
         owner = LiveTurnTools(
-            CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run", name),
+            CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
-            worker=None,
             authorize=authorize,
         )
         registry.register(owner)

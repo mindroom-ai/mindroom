@@ -626,8 +626,10 @@ async def main() -> int:  # noqa: C901, PLR0915
                 {"event_id": "$evt", "sender": caller.user_id, "origin_server_ts": 1},
                 CALL_MEMBER_EVENT_TYPE,
             )
-            await asyncio.wait_for(manager.on_room_event(room_obj, event), timeout=120)
-            log("  [bot] call join path completed (agent session started)")
+            await manager.on_room_event(room_obj, event)
+            # The manager joins in a background reconcile, so wait for the session it starts.
+            if await wait_for(lambda: room_id in manager._sessions, 120, "agent call session"):
+                log("  [bot] call join path completed (agent session started)")
 
             log("== leg 1: greeting audio from the agent ==")
             results["greeting_audio"] = await wait_for(lambda: meter.voiced >= 20, 45, "greeting audio")

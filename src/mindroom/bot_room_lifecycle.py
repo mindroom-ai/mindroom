@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -39,6 +40,30 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.sync_continuity import SyncContinuityRecord, SyncContinuityStore
     from mindroom.matrix.users import AgentMatrixUser
+
+
+# Ledger rewrites run in worker threads, so one lock keeps two updates from
+# replacing each other's fresh read.
+_PENDING_ROOM_INVITES_LOCK = threading.Lock()
+# An invitation whose join keeps failing stays pending for retry, so keep only
+# the newest entries and inviters cannot grow the ledger without bound.
+_MAX_PENDING_ROOM_INVITES = 1000
+
+
+def _update_pending_room_invites(
+    path: Path,
+    change: Callable[[dict[str, str]], bool],
+    failure_message: str,
+) -> dict[str, str]:
+    """Apply one change to fresh durable state, evicting the oldest invites past the cap."""
+    with _PENDING_ROOM_INVITES_LOCK:
+        pending_invites = load_pending_room_invites(path)
+        if change(pending_invites):
+            for room_id in tuple(pending_invites)[: max(0, len(pending_invites) - _MAX_PENDING_ROOM_INVITES)]:
+                del pending_invites[room_id]
+            if not save_pending_room_invites(path, pending_invites):
+                raise OSError(failure_message)
+        return pending_invites
 
 
 class _SendRoomResponse(Protocol):
@@ -243,9 +268,9 @@ class BotRoomLifecycle:
             ):
                 self._remember_invited_room(room_id)
 
-    def forget_invited_room(self, room_id: str) -> None:
+    async def forget_invited_room(self, room_id: str) -> None:
         """Stop preserving an ad-hoc room after this bot leaves it."""
-        self._forget_pending_room_invite(room_id)
+        await self._forget_pending_room_invite(room_id)
         if not self._should_persist_invited_rooms():
             self.invited_rooms.discard(room_id)
         elif not self._update_invited_room(room_id, remember=False):
@@ -253,33 +278,48 @@ class BotRoomLifecycle:
             raise OSError(msg)
         self._welcomed_room_ids.discard(room_id)
 
-    def record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
+    async def record_pending_room_invite(self, room_id: str, sender_id: str) -> None:
         """Persist an outstanding invite before its network work runs."""
-        if not self._should_persist_invited_rooms():
-            return
-        pending_invites = load_pending_room_invites(self._pending_room_invites_file_path())
-        if pending_invites.get(room_id) == sender_id:
-            self._pending_room_invites = pending_invites
-            return
-        pending_invites[room_id] = sender_id
-        if not save_pending_room_invites(self._pending_room_invites_file_path(), pending_invites):
-            msg = f"Failed to persist pending room invite {room_id}"
-            raise OSError(msg)
-        self._pending_room_invites = pending_invites
+        if self._should_persist_invited_rooms():
+            await self._record_pending_room_invites({room_id: sender_id})
 
-    def _forget_pending_room_invite(self, room_id: str, *, expected_sender: str | None = None) -> None:
+    async def _record_pending_room_invites(self, invites: Mapping[str, str]) -> None:
+        """Merge outstanding invites into fresh durable state off the event loop."""
+
+        def record(pending_invites: dict[str, str]) -> bool:
+            changed = False
+            for room_id, sender_id in invites.items():
+                if pending_invites.get(room_id) != sender_id:
+                    # Reinsert so the cap evicts the oldest invitations first.
+                    pending_invites.pop(room_id, None)
+                    pending_invites[room_id] = sender_id
+                    changed = True
+            return changed
+
+        self._pending_room_invites = await asyncio.to_thread(
+            _update_pending_room_invites,
+            self._pending_room_invites_file_path(),
+            record,
+            "Failed to persist pending room invites",
+        )
+
+    async def _forget_pending_room_invite(self, room_id: str, *, expected_sender: str | None = None) -> None:
         """Forget a resolved outstanding invite without losing concurrent state."""
-        pending_invites = load_pending_room_invites(self._pending_room_invites_file_path())
-        if room_id not in pending_invites or (
-            expected_sender is not None and pending_invites[room_id] != expected_sender
-        ):
-            self._pending_room_invites = pending_invites
-            return
-        pending_invites.pop(room_id)
-        if not save_pending_room_invites(self._pending_room_invites_file_path(), pending_invites):
-            msg = f"Failed to forget pending room invite {room_id}"
-            raise OSError(msg)
-        self._pending_room_invites = pending_invites
+
+        def forget(pending_invites: dict[str, str]) -> bool:
+            if room_id not in pending_invites or (
+                expected_sender is not None and pending_invites[room_id] != expected_sender
+            ):
+                return False
+            del pending_invites[room_id]
+            return True
+
+        self._pending_room_invites = await asyncio.to_thread(
+            _update_pending_room_invites,
+            self._pending_room_invites_file_path(),
+            forget,
+            f"Failed to forget pending room invite {room_id}",
+        )
 
     def _update_invited_room(self, room_id: str, *, remember: bool) -> bool:
         """Merge one update with durable and in-memory state before saving."""
@@ -503,15 +543,19 @@ class BotRoomLifecycle:
         logged and stays pending without stopping the rest of the pass.
         """
         client = self._client()
-        self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
-        for room in tuple(client.invited_rooms.values()):
-            if room.inviter is not None and is_inviter_allowed(
-                self._config(),
-                self.deps.runtime_paths,
-                self.deps.agent_name,
-                room.inviter,
-            ):
-                self.record_pending_room_invite(room.room_id, room.inviter)
+        await self._record_pending_room_invites(
+            {
+                room.room_id: room.inviter
+                for room in tuple(client.invited_rooms.values())
+                if room.inviter is not None
+                and is_inviter_allowed(
+                    self._config(),
+                    self.deps.runtime_paths,
+                    self.deps.agent_name,
+                    room.inviter,
+                )
+            },
+        )
         for room_id, sender in tuple(self._pending_room_invites.items()):
             room = client.invited_rooms.get(room_id)
             if room is None:
@@ -570,21 +614,23 @@ class BotRoomLifecycle:
                     user_id=sender,
                     room_id=room.room_id,
                 )
-                current_invite = self._client().invited_rooms.get(room.room_id)
-                if not joined and current_invite is not None and current_invite.inviter is not None:
-                    # The policy refuses the current inviter, and keeping its
-                    # entry would only let refused inviters grow the ledger.
-                    self._forget_pending_room_invite(room.room_id)
+                if not joined:
+                    # A refused or withdrawn invitation can never be joined, and
+                    # keeping its entry would only let inviters grow the ledger.
+                    await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
                 return
             sender = allowed_sender
 
             if not joined and not await self._join_current_invitation(room.room_id, sender):
+                # The invitation was withdrawn or replaced before the join; a
+                # replacement keeps its own entry for its own handler.
+                await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
                 return
 
             self._logger().info("Joined room", room_id=room.room_id)
             self._remember_invited_room(room.room_id)
             await self._send_invite_welcome(room.room_id, sender)
-            self._forget_pending_room_invite(room.room_id, expected_sender=sender)
+            await self._forget_pending_room_invite(room.room_id, expected_sender=sender)
 
     async def _join_current_invitation(self, room_id: str, sender: str) -> bool:
         """Authorize a new join at the point Nio takes command ownership."""

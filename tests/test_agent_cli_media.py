@@ -1,6 +1,6 @@
 """Actual Bash results retain hidden tool media and bounded, truthful receipts."""
 
-# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, ARG002, D103, PLR0915
+# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +23,7 @@ from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliTurnOwner
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import create_state_storage
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
@@ -49,7 +50,16 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         return value
 
     async def run_shell_command(args: str, timeout: int = 30, tail: int = 100) -> str:  # noqa: ASYNC109
-        pytest.fail("ordinary worker")
+        # HTTP arrives in a separate task without the provider stream's context.
+        receipts.append(
+            await asyncio.create_task(
+                owner.operation(
+                    ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
+                ),
+                context=Context(),
+            ),
+        )
+        return "shell done"
 
     media = Toolkit(name="media", tools=[produce])
     media.get_async_functions()["produce"].tool_hooks = [hook]
@@ -64,27 +74,14 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     async def authorize(key, arguments):
         pass
 
-    class Worker:
-        async def invoke_shell(self, name, arguments):
-            # HTTP arrives in a separate task without the provider stream's context.
-            receipts.append(
-                await asyncio.create_task(
-                    owner.operation(
-                        ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
-                    ),
-                    context=Context(),
-                ),
-            )
-            return "worker done"
-
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=Worker(),
         authorize=authorize,
         output_file_policy=policy or ToolOutputFilePolicy(tmp_path / "workspace"),
     )
+    owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
     facade = MinimalBashTools(execute=owner.execute_bash)
     function = prepare_agent_tools(
         catalog.agent,
@@ -270,9 +267,8 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         pass
 
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
     try:
@@ -333,9 +329,8 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
 
     catalog = await catalog_for_window()
     owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run", "worker"),
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
-        worker=None,
         authorize=authorize,
     )
 

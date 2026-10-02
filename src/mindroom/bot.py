@@ -693,6 +693,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
                 redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
+                relations=self._journal_store.principal(self._journal_principal_id),
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
@@ -1694,7 +1695,7 @@ class AgentBot:
             if joined:
                 self._request_call_reconciliation(room_id)
         if not joined and admission.previous_membership == "join":
-            self._room_lifecycle.forget_invited_room(room_id)
+            await self._room_lifecycle.forget_invited_room(room_id)
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -2546,7 +2547,7 @@ class AgentBot:
             or event.membership != "invite"
         ):
             return
-        self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        await self._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         create_background_task(
             self._room_lifecycle.handle_recorded_invite(room, event.sender),
             owner=self._runtime_view,

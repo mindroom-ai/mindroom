@@ -172,6 +172,8 @@ Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted l
 An unauthenticated dashboard only serves its pages and dashboard API to requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
 It also refuses browser requests whose `Origin` is not the requested host, a loopback page, or an allowed host name, and refuses changes marked `Sec-Fetch-Site: cross-site`.
 Opening an unauthenticated dashboard by any other host name, such as `myserver.local`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+These checks read the `Host` header the browser sent, so a reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass it through unchanged, for example with nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
+A proxy that replaces `Host` with its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to that IP address and disables the DNS-rebinding protection, so configure `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`, when the proxy cannot preserve `Host`.
 Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin, and neither are routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 

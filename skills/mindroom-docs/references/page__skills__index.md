@@ -37,7 +37,7 @@ Notes:
 - `metadata` can be a JSON5 string (shown above) or a YAML mapping.
 - If `name` is omitted, MindRoom falls back to the skill directory name.
 - If `description` is omitted or blank, MindRoom falls back to the resolved skill name.
-- Frontmatter must not use YAML aliases; a workspace skill whose frontmatter does is skipped with a warning.
+- Frontmatter must not use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes; a workspace skill whose frontmatter does is skipped with a warning.
 - If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and metadata.
 
 ## Frontmatter fields

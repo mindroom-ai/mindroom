@@ -310,6 +310,7 @@ def _prepare_matrix_config(
                 redis_password=env_values["REDIS_PASSWORD"],
                 registration_shared_secret=env_values["MATRIX_REGISTRATION_SHARED_SECRET"],
                 macaroon_secret_key=secrets.token_hex(32),
+                local_development=instance.domain.rsplit(".", 1)[-1] == "localhost",
             )
         else:
             # For Tuwunel or other matrix types

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -15,7 +14,7 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
-from mindroom import ai, minimal_agent
+from mindroom import ai
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_storage import create_session_storage
@@ -30,8 +29,14 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.response_turn import ResponseTurnContext
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    agent_cli_api,
+    install_scripted_shell,
+    shell_cli_owner,
+)
 from tests.test_delegate_tools import _delegate_runtime_context
 from tests.test_delegation_direct_audit import _identity
 from tests.test_delegation_execution import DelegationModel, _call
@@ -41,6 +46,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _LONG_ROLE = "optional long role " * 200
 
@@ -75,8 +81,8 @@ def _paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
 
 
-def _live_context(config: Config, paths: RuntimePaths) -> object:
-    """Bind the managed Matrix response owner a minimal child's CLI worker requires."""
+def _live_context(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
+    """Bind the managed Matrix response owner a minimal child's CLI requires."""
     context = _delegate_runtime_context(config, paths, execution_identity=_identity())
     return replace(
         context,
@@ -133,35 +139,54 @@ async def _delegate(
 
 
 def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path) -> None:
-    """The description recommends minimal mode only where this deployment can run it."""
+    """The description recommends minimal mode, and the schema offers it, only where a subagent can run it."""
     config = _config(helper_tools=["shell"])
-    ready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), config)
-    description = ready.async_functions["run_subagent"].description or ""
-    assert "Subagents that support minimal mode: helper." in description
-    assert "not important in its system prompt" in description
 
+    def offered(toolkit: DelegateTools) -> bool:
+        function = toolkit.async_functions["run_subagent"]
+        function.process_entrypoint()  # Agno derives the schema the model sees on first use.
+        has_option = "minimal" in function.parameters["properties"]
+        assert has_option == ("minimal mode" in (function.description or ""))
+        return has_option
+
+    # A local shell calls back through the running API, which this test starts only below.
     unready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, {}), config)
-    assert "minimal mode" not in (unready.async_functions["run_subagent"].description or "")
+    assert not offered(unready)
+    set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
+    try:
+        ready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), config)
+        description = ready.async_functions["run_subagent"].description or ""
+        assert "Subagents that support minimal mode: helper." in description
+        assert "not important in its system prompt" in description
+        # Hiding the option must not change the schema other callers receive.
+        assert offered(ready)
+        # A local shell needs only the running API.
+        assert offered(DelegateTools("leader", ["helper"], _paths(tmp_path, {}), config))
 
-    openai_caller = replace(_identity(), channel="openai_compat")
-    detached = DelegateTools(
-        "leader",
-        ["helper"],
-        _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
-        config,
-        execution_identity=openai_caller,
-    )
-    assert "minimal mode" not in (detached.async_functions["run_subagent"].description or "")
+        openai_caller = replace(_identity(), channel="openai_compat")
+        detached = DelegateTools(
+            "leader",
+            ["helper"],
+            _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
+            config,
+            execution_identity=openai_caller,
+        )
+        assert not offered(detached)
 
-    gated = _config(
-        helper_tools=["shell"],
-        approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")]),
-    )
-    gated_tools = DelegateTools("leader", ["helper"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), gated)
-    assert "minimal mode" not in (gated_tools.async_functions["run_subagent"].description or "")
+        gated = _config(
+            helper_tools=["shell"],
+            approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+            ),
+        )
+        gated_tools = DelegateTools("leader", ["helper"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), gated)
+        assert not offered(gated_tools)
+    finally:
+        clear_api_server_address()
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
 @pytest.mark.parametrize(
     ("target", "approval"),
@@ -202,6 +227,7 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
 async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     tmp_path: Path,
@@ -216,27 +242,16 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     identity = _identity()
+    live = _live_context(config, paths)
     listings: list[str] = []
 
-    class Worker:
-        handle = SimpleNamespace(worker_id="worker")
-        owner = None
-
-        async def install_grant(self, owner: object, _grant: object, *, shell: object) -> None:
-            del shell
-            self.owner = owner
-
-        async def invoke_shell(self, name: str, arguments: dict[str, object]) -> str:
-            assert name == "run_shell_command"
-            assert arguments["args"] == "mindroom-agent tools list"
-            assert self.owner is not None
-            listing = await self.owner.operation(ToolListOperation(operation="tools.list"))  # type: ignore[attr-defined]
-            listings.append(str(listing))
-            return str(listing)
-
-    @asynccontextmanager
-    async def worker(_runtime: object):  # noqa: ANN202
-        yield Worker()
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        assert args == "mindroom-agent tools list"
+        listing = await shell_cli_owner(live.orchestrator.agent_cli_registry).operation(
+            ToolListOperation(operation="tools.list"),
+        )
+        listings.append(str(listing))
+        return str(listing)
 
     child_models: list[_ToolRecordingModel] = []
 
@@ -253,11 +268,11 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         child_models.append(model)
         return model
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    install_scripted_shell(monkeypatch, run_shell_command)
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=identity)
 
-    with tool_runtime_context(_live_context(config, paths)):
+    with tool_runtime_context(live):
         result = await _delegate(
             toolkit,
             config,
@@ -297,6 +312,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -314,45 +330,31 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     identity = _identity()
+    live = _live_context(config, paths)
     child_listings: list[str] = []
 
-    class Worker:
-        handle = SimpleNamespace(worker_id="worker")
-        owner = None
-
-        def __init__(self, agent_name: str) -> None:
-            self.agent_name = agent_name
-
-        async def install_grant(self, owner: object, _grant: object, *, shell: object) -> None:
-            del shell
-            self.owner = owner
-
-        async def invoke_shell(self, name: str, _arguments: dict[str, object]) -> str:
-            assert name == "run_shell_command"
-            owner = self.owner
-            assert owner is not None
-            if self.agent_name == "helper":
-                listing = str(await owner.operation(ToolListOperation(operation="tools.list")))  # type: ignore[attr-defined]
-                child_listings.append(listing)
-                return listing
-            call_id = uuid4()
-            await owner.operation(  # type: ignore[attr-defined]
-                ToolCallOperation(
-                    operation="tools.call",
-                    toolkit="delegate",
-                    function="run_subagent",
-                    arguments={"agent_name": "helper", "task": "List your tools", "minimal": True},
-                    call_id=call_id,
-                ),
-            )
-            while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # type: ignore[attr-defined]  # noqa: ASYNC110 - actual CLI receipt protocol
-                await asyncio.sleep(0.01)
-            assert receipt["status"] == "completed", json.dumps(receipt, default=str)
-            return str(receipt["outcome"])
-
-    @asynccontextmanager
-    async def worker(runtime: object):  # noqa: ANN202
-        yield Worker(runtime.agent_name)  # type: ignore[attr-defined]
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        # Each Bash call reaches only its own response, the parent's or its minimal child's.
+        owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
+        if owner.owner.execution_identity.agent_name == "helper":
+            assert args == "mindroom-agent tools list"
+            listing = str(await owner.operation(ToolListOperation(operation="tools.list")))
+            child_listings.append(listing)
+            return listing
+        call_id = uuid4()
+        await owner.operation(
+            ToolCallOperation(
+                operation="tools.call",
+                toolkit="delegate",
+                function="run_subagent",
+                arguments={"agent_name": "helper", "task": "List your tools", "minimal": True},
+                call_id=call_id,
+            ),
+        )
+        while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110 - actual CLI receipt protocol
+            await asyncio.sleep(0.01)
+        assert receipt["status"] == "completed", json.dumps(receipt, default=str)
+        return str(receipt["outcome"])
 
     models = {
         "lead": DelegationModel(
@@ -370,7 +372,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
             ],
         ),
     }
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    install_scripted_shell(monkeypatch, run_shell_command)
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda _c, _p, name, *_a: models[name])
     turn = ResponseTurnContext(
         agent_mode="minimal",
@@ -385,7 +387,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
         matrix_run_metadata=None,
     )
 
-    with tool_runtime_context(_live_context(config, paths)):
+    with tool_runtime_context(live):
         result = await ai.ai_response(
             turn,
             prompt="Delegate",

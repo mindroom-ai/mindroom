@@ -1,18 +1,55 @@
-"""Shared scripted provider and fake integration for minimal-agent tests."""
+"""Shared scripted provider, shell, and fake integration for minimal-agent tests."""
 
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import pytest
 from agno.models.openai import OpenAIChat
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+from mindroom import agents
+from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
+from mindroom.agent_cli.turn import LiveTurnTools
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 
-    import pytest
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+
+    from mindroom.agent_cli.session import TurnToolRegistry
+
+
+@pytest.fixture
+def agent_cli_api() -> Iterator[None]:
+    """Run like `mindroom run`, whose API server minimal Bash's CLI calls back."""
+    set_api_server_address("127.0.0.1", 8765)
+    yield
+    clear_api_server_address()
+
+
+def install_scripted_shell(monkeypatch: pytest.MonkeyPatch, run_shell_command: Callable[..., Awaitable[str]]) -> None:
+    """Keep each agent's real shell toolkit, but run ``run_shell_command`` in place of its subprocess."""
+    original = agents.get_tool_by_name
+
+    def build(name: str, *args: object, **kwargs: object) -> object:
+        toolkit = original(name, *args, **kwargs)
+        if name == "shell" and "run_shell_command" in toolkit.async_functions:
+            toolkit.async_functions["run_shell_command"].entrypoint = run_shell_command
+        return toolkit
+
+    monkeypatch.setattr(agents, "get_tool_by_name", build)
+
+
+def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:
+    """Resolve the response owner from the grant Bash exports, as the API does for `mindroom-agent`."""
+    shell_env = current_agent_cli_shell_env()
+    assert shell_env is not None
+    owner = registry.resolve("Bearer " + shell_env.token, now_ns=time.time_ns())
+    assert isinstance(owner, LiveTurnTools)
+    return owner
 
 
 PLUGIN = """from hashlib import sha256

@@ -1,9 +1,9 @@
 """Minimal presentation must not prepare a hidden catalog during prompt sizing."""
 
-# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, ARG002, D103, PLR0915
+# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 
 import asyncio
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,13 +17,14 @@ from agno.session import AgentSession
 from agno.tools.function import FunctionCall
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents, ai, minimal_agent
+from mindroom import agents, ai
 from mindroom import minimal_agent as module
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
@@ -38,12 +39,16 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.minimal_agent import MinimalAgent
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import ScriptedProvider
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    ScriptedProvider,
+    agent_cli_api,
+    install_scripted_shell,
+    shell_cli_owner,
+)
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 
@@ -239,34 +244,12 @@ async def test_minimal_async_preparation_requires_managed_owner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: Path) -> None:
 
     context = _runtime_context(tmp_path)
     context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
     context = replace(context, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
-    events = []
-
-    class Worker:
-        handle = SimpleNamespace(worker_id="worker-1")
-
-        async def install_grant(self, owner, grant, *, shell):
-            assert owner.authenticate(grant.raw_token, now_ns=module.time.time_ns()) is owner.owner
-            assert 0 < grant.expires_at_ns - module.time.time_ns() <= module.MAX_CLI_GRANT_LIFETIME_NS
-            events.append((owner, grant, shell))
-
-        async def invoke_shell(self, name, arguments):
-            return "done"
-
-    @asynccontextmanager
-    async def open_worker(runtime):
-        events.append("opened")
-        yield Worker()
-        events.append("closed")
-
-    monkeypatch.setattr(module, "open_configured_cli_worker", open_worker)
     agent = agents.create_agent(
         "helper",
         context.config,
@@ -290,6 +273,12 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(
             assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
             owner = lifetime.owner
             assert owner is not None
+            shell_env = owner.shell_env
+            assert shell_env is not None
+            # This agent's shell runs in MindRoom, so its commands call the local API.
+            assert shell_env.api_url == "http://127.0.0.1:8765"
+            assert owner.authenticate(shell_env.token, now_ns=module.time.time_ns()) is owner.owner
+            assert 0 < lifetime.grant_expires_at_ns - module.time.time_ns() <= module.MAX_CLI_GRANT_LIFETIME_NS
             assert any(item.get("function") == "run_shell_command" for item in owner.catalog.metadata())
             catalog = owner.catalog
             agent.get_tools(
@@ -299,11 +288,13 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(
             )
             assert owner.catalog is catalog
             assert lifetime.owner is owner
-            assert len(events) == 2
-    assert events[-1] == "closed"
+            assert owner.shell_env is shell_env
+    with pytest.raises(CliAuthenticationError):
+        owner.authenticate(shell_env.token, now_ns=module.time.time_ns())
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("rebuild", [False, True])
 @pytest.mark.parametrize("deferred", [False, True])
 @pytest.mark.parametrize(
@@ -343,25 +334,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     notes.write_text("Keep this workspace note.")
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    events = []
-    grants = []
-
-    class Worker:
-        handle = SimpleNamespace(worker_id="eligibility-worker")
-
-        async def install_grant(self, owner, grant, *, shell):
-            events.append("installed")
-            grants.append(grant)
-
-    @asynccontextmanager
-    async def worker(_runtime):
-        events.append("opened")
-        try:
-            yield Worker()
-        finally:
-            events.append("closed")
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    tokens = []
 
     def create():
         agent = agents.create_agent(
@@ -389,7 +362,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                 history = [run.to_dict() for run in initial.db.get_session(runtime.session_id).runs]
                 await lifetime.retire_attempt()
             previous_owner = lifetime.owner
-            prior_events = list(events)
+            previous_shell_env = previous_owner.shell_env if previous_owner is not None else None
             prior_requests = list(provider.requests)
             settings = {"defer": deferred}
             if include_tools is not None:
@@ -405,7 +378,6 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                 assert result.status == "ERROR"
                 assert "run, check, and kill shell permissions" in result.content
                 assert "!mode helper standard" in result.content
-                assert events == prior_events
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
                 if rebuild:
@@ -421,24 +393,28 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
                 assert result.content == "done"
                 assert [tool["function"]["name"] for tool in provider.requests[-1]["tools"]] == ["bash"]
                 assert len(provider.requests) == len(prior_requests) + 1
-                assert events == ["opened", "installed"]
+                assert lifetime.owner.shell_env is not None
                 if rebuild:
                     assert lifetime.owner is previous_owner
+                    # The rebuilt request keeps the response's one grant.
+                    assert lifetime.owner.shell_env is previous_shell_env
                     assert lifetime.owner.catalog.agent is agent
-    assert events == (["opened", "installed", "closed"] if rebuild or include_tools is None else [])
-    for grant in grants:
+            if lifetime.owner is not None:
+                tokens.append(lifetime.owner.shell_env.token)
+    assert len(tokens) == (1 if rebuild or include_tools is None else 0)
+    for token in tokens:
         with pytest.raises(CliAuthenticationError):
-            registry.resolve("Bearer " + grant.raw_token, now_ns=0)
+            registry.resolve("Bearer " + token, now_ns=0)
     assert (primary_records_dir(root, runtime.runtime_paths) / "agent_modes.json").read_bytes() == saved_choice
     assert notes.read_text() == "Keep this workspace note."
 
 
 @pytest.mark.asyncio
-async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
+async def test_unreachable_cli_offers_standard_mode_without_downgrading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A broken deployment leaves the saved mode intact and shows the recovery command."""
+    """A deployment without the API server leaves the saved mode intact and shows the recovery command."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
@@ -447,12 +423,6 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
     set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-
-    def unavailable_worker(_runtime):
-        message = "Docker worker is unavailable"
-        raise RuntimeError(message)
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", unavailable_worker)
     agent = agents.create_agent(
         "helper",
         runtime.config,
@@ -467,8 +437,9 @@ async def test_minimal_worker_failure_offers_standard_mode_without_downgrading(
             async with response_cli_lifetime() as lifetime:
                 result = await agent.arun("Hello", user_id=runtime.requester_id, session_id=runtime.session_id)
                 assert result.status == "ERROR"
-                assert "Docker worker is unavailable" in result.content
+                assert "Run MindRoom with its API server" in result.content
                 assert "!mode helper standard" in result.content
+                # No grant is issued for a shell that cannot reach MindRoom.
                 assert lifetime.owner is None
         assert provider.requests == []
         assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "minimal"
@@ -591,9 +562,10 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("switch_model", [False, True])
-async def test_real_response_requests_only_bash_after_deferred_call_and_history(  # noqa: C901 - real response across continuations
+async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streamed: bool,
@@ -611,57 +583,47 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         memory_backend="file",
         learning=False,
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+    registry = TurnToolRegistry()
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     runtime.config.models["other"] = runtime.config.models["default"].model_copy(update={"id": "other-model"})
     requests = []
-    workers = []
+    owners = []
 
-    class Worker:
-        handle = SimpleNamespace(worker_id="worker")
-        owner = None
-
-        async def install_grant(self, owner, grant, *, shell):
-            self.owner = owner
-            workers.append(self)
-
-        async def invoke_shell(self, name, arguments):
-            assert name == "run_shell_command"
-            assert arguments["args"] == "discover"
-            listing = await self.owner.operation(ToolListOperation(operation="tools.list"))
-            assert "calculator" in str(listing)
-            call_id = uuid4()
-            await self.owner.operation(
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
+        assert args == "discover"
+        owner = shell_cli_owner(registry)
+        owners.append(owner)
+        listing = await owner.operation(ToolListOperation(operation="tools.list"))
+        assert "calculator" in str(listing)
+        call_id = uuid4()
+        await owner.operation(
+            ToolCallOperation(
+                operation="tools.call",
+                toolkit="calculator",
+                function="add",
+                arguments={"a": 2, "b": 3},
+                call_id=call_id,
+            ),
+        )
+        while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - poll actual CLI receipt protocol
+            await asyncio.sleep(0)
+        assert receipt["status"] == "completed", receipt
+        if switch_model:
+            switch_id = uuid4()
+            await owner.operation(
                 ToolCallOperation(
                     operation="tools.call",
-                    toolkit="calculator",
-                    function="add",
-                    arguments={"a": 2, "b": 3},
-                    call_id=call_id,
+                    toolkit="thread_model",
+                    function="switch_thread_model",
+                    arguments={"model_name": "other", "when": "after-toolcall"},
+                    call_id=switch_id,
                 ),
             )
-            while (receipt := await self.owner.get_call(str(call_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - poll actual CLI receipt protocol
+            while (switch_receipt := await owner.get_call(str(switch_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - actual receipt protocol
                 await asyncio.sleep(0)
-            assert receipt["status"] == "completed", receipt
-            if switch_model:
-                switch_id = uuid4()
-                await self.owner.operation(
-                    ToolCallOperation(
-                        operation="tools.call",
-                        toolkit="thread_model",
-                        function="switch_thread_model",
-                        arguments={"model_name": "other", "when": "after-toolcall"},
-                        call_id=switch_id,
-                    ),
-                )
-                while (switch_receipt := await self.owner.get_call(str(switch_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - actual receipt protocol
-                    await asyncio.sleep(0)
-                assert switch_receipt["status"] == "completed", switch_receipt
-            return "discovered result: " + str(receipt["outcome"])
-
-    @asynccontextmanager
-    async def worker(_runtime):
-        yield Worker()
+            assert switch_receipt["status"] == "completed", switch_receipt
+        return "discovered result: " + str(receipt["outcome"])
 
     async def send(**request):
         requests.append(request)
@@ -713,7 +675,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
         return chunks()
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    install_scripted_shell(monkeypatch, run_shell_command)
     monkeypatch.setattr(
         OpenAIChat,
         "get_async_client",
@@ -743,7 +705,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert "done" in str(result)
         assert len(requests) == 2
         assert requests[1]["model"] == ("other-model" if switch_model else "test-model")
-        saved = workers[0].owner.catalog.agent.db.get_session(ctx.session_id)
+        saved = owners[0].catalog.agent.db.get_session(ctx.session_id)
         assert saved is not None
         assert saved.runs
         assert saved.runs[-1].status == "COMPLETED", [(run.status, len(run.messages or [])) for run in saved.runs or []]
@@ -762,7 +724,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             result = await respond()
         assert "done" in str(result)
     assert len(requests) == 3
-    assert len(workers) == 2
+    assert len(owners) == 1
     replay = requests[-1]["messages"]
     replayed_ids = {call["id"] for message in replay for call in message.get("tool_calls", [])}
     assert any(message.get("tool_call_id") in replayed_ids for message in replay), replay
@@ -770,40 +732,28 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [False, True])
-async def test_routed_shell_reuses_effective_global_and_agent_path_settings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    override: bool,
-) -> None:
-
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pure(tmp_path: Path) -> None:
+    """A worker shell gets the API origin it can reach, and prompt sizing never prepares or grants."""
     runtime = _runtime_context(tmp_path)
-    runtime.config.defaults.tools = [{"shell": {"shell_path_prepend": "/global/bin"}}]
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         memory_backend="file",
-        include_default_tools=True,
-        tools=[{"shell": {"shell_path_prepend": "/agent/bin"}}] if override else [],
+        tools=["shell"],
         worker_tools=["shell"],
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
-    monkeypatch.setattr(sandbox_proxy, "sandbox_proxy_enabled_for_tool", lambda *_args, **_kwargs: True)
-    captured = []
-
-    class Worker:
-        handle = SimpleNamespace(worker_id="worker")
-
-        async def install_grant(self, owner, grant, *, shell):
-            captured.append(shell)
-
-        async def invoke_shell(self, name, arguments):
-            pytest.fail("sizing must not execute")
-
-    @asynccontextmanager
-    async def worker(_runtime):
-        yield Worker()
-
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    runtime = replace(
+        runtime,
+        orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()),
+        runtime_paths=replace(
+            runtime.runtime_paths,
+            process_env={
+                **runtime.runtime_paths.process_env,
+                "MINDROOM_API_KEY": "fake-admin-key",
+                "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary.test:8765",
+            },
+        ),
+    )
     agent = agents.create_agent(
         "helper",
         runtime.config,
@@ -814,7 +764,6 @@ async def test_routed_shell_reuses_effective_global_and_agent_path_settings(
     )
     agent.response_context = _turn_context()
     assert estimate_agent_static_tokens(agent, "budget input") > 0
-    assert not captured
     assert [item["name"] for item in agent_tool_definition_payloads_for_logging(agent)] == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
@@ -830,10 +779,12 @@ async def test_routed_shell_reuses_effective_global_and_agent_path_settings(
                 user_id=runtime.requester_id,
             )
             catalog = lifetime.owner.catalog
+            shell_env = lifetime.owner.shell_env
+            # The worker reaches MindRoom over the network and already has its own `mindroom-agent`.
+            assert shell_env == AgentCliShellEnv("http://primary.test:8765", shell_env.token)
             assert estimate_agent_static_tokens(agent, "budget input") > 0
             assert lifetime.owner.catalog is catalog
-            assert len(captured) == 1
-    assert captured[0].shell_path_prepend == ("/agent/bin" if override else "/global/bin")
+            assert lifetime.owner.shell_env is shell_env
 
 
 @pytest.mark.asyncio
