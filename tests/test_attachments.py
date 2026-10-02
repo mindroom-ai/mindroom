@@ -195,8 +195,10 @@ async def test_register_media_attachment_offloads_registration_work(tmp_path: Pa
         sender: str | None = None,
         event_timestamp: int | None = None,
         cleanup_loop: asyncio.AbstractEventLoop | None = None,
+        retained_name: str | None = None,
     ) -> AttachmentRecord:
         assert cleanup_loop is not None
+        assert retained_name == local_path.name
         registration_thread_ids.append(threading.get_ident())
         return AttachmentRecord(
             attachment_id=attachment_id or "att_generated",
@@ -295,6 +297,74 @@ async def test_register_matrix_media_attachment_stops_reading_an_oversized_downl
     assert response.streamed_bytes <= limit + 64 * 1024
     assert response.released
     assert not (tmp_path / "incoming_media").exists()
+
+
+@pytest.mark.asyncio
+async def test_thread_history_media_that_failed_is_not_downloaded_again_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed registration leaves no record, so each turn used to download the media again.
+
+    Anyone who can post can name media that always fails, such as a file over
+    the size cap, and every turn in that conversation fetched each one in full.
+    """
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
+    history = [
+        make_visible_message(
+            event_id=f"$huge{index}",
+            content={"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        )
+        for index in range(3)
+    ]
+
+    for _turn in range(2):
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        assert attachment_ids == []
+
+    assert client.send.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) -> None:
+    """Each event keeps its own record, but events naming one upload share its single copy."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"%PDF-1.7 shared"))
+    records = []
+    for index in range(3):
+        event = nio.Event.parse_event(
+            {
+                "event_id": f"$copy{index}",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1780736400000,
+                "type": "m.room.message",
+                "content": {"msgtype": "m.file", "body": "report.pdf", "url": "mxc://localhost/shared"},
+            },
+        )
+        assert isinstance(event, nio.RoomMessageFile)
+        records.append(
+            await register_matrix_media_attachment(
+                client,
+                tmp_path,
+                room_id="!room:localhost",
+                thread_id=None,
+                event=event,
+            ),
+        )
+    assert await attachments_module.wait_for_attachment_cleanup_tasks()
+
+    stored = [record for record in records if record is not None]
+    assert [record.attachment_id for record in stored] == [_attachment_id_for_event(f"$copy{index}") for index in range(3)]
+    assert {record.local_path for record in stored} == {stored[0].local_path}
+    assert [path.read_bytes() for path in (tmp_path / "incoming_media").iterdir()] == [b"%PDF-1.7 shared"]
 
 
 def test_register_bytes_attachment_retains_any_file_type_under_a_generated_name(tmp_path: Path) -> None:

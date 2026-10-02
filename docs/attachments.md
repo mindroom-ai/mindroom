@@ -137,6 +137,7 @@ Encrypted media is decrypted transparently using the key material from the Matri
 MindRoom automatically prunes attachment metadata and eligible managed `incoming_media/` files older than 30 days.
 Pruning runs opportunistically during new attachment registration, with a one-hour cleanup throttle.
 Managed files with active attachment references are retained, and filesystem failures can delay deletion.
+Downloaded Matrix media is stored once per content, so events that share one file keep their own attachment records but a single copy of its bytes.
 This is not an exact deletion deadline and does not delete unmanaged source or workspace files or Matrix homeserver copies.
 
 ## Limitations
@@ -145,5 +146,6 @@ This is not an exact deletion deadline and does not delete unmanaged source or w
   MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
   This is a post-download check, so use a smaller file when it is rejected.
   Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
+- **Earlier media that fails** -- a file, image, or video earlier in the conversation that cannot be downloaded, decrypted, or stored is not tried again for an hour, so later turns do not fetch it each time.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.
