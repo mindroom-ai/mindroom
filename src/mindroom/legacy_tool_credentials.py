@@ -1,4 +1,4 @@
-"""One-time cleanup of tool settings the dashboard saved with a former insecure default."""
+"""One-time cleanups of tool settings the dashboard saved with former insecure defaults or placements."""
 
 # LEGACY_COMPAT: Daytona settings saved with the former `verify_ssl: false` default.
 # Legacy format: a `daytona` credential document whose `verify_ssl` is false; the dashboard pre-fills every boolean with its declared default and saves all fields, so every Daytona setup saved through it stored false.
@@ -15,22 +15,63 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.credentials import get_runtime_credentials_manager, update_stored_service_credentials
+from mindroom.credentials import (
+    get_runtime_credentials_manager,
+    remove_worker_service_credentials,
+    update_stored_service_credentials,
+)
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _RECEIPT_NAME = ".daytona-verify-ssl-default-dropped.json"
 _LOCK_NAME = ".daytona-verify-ssl-default.lock"
+_WORKER_COPIES_RECEIPT_NAME = ".primary-tool-settings-removed-from-workers.json"
 logger = get_logger(__name__)
 
 
 async def migrate_tool_credential_defaults(runtime_paths: RuntimePaths) -> None:
-    """Finish the one-time cleanup before any tool is built from stored settings."""
+    """Finish the one-time cleanups before any tool is built from stored settings."""
+    # Deleting first spares the Daytona cleanup from rewriting, or waiting to read, worker copies that are about to go.
+    await run_blocking_until_complete(_remove_worker_copies_of_primary_tool_settings, runtime_paths)
     await run_blocking_until_complete(_migrate_daytona_verify_ssl, runtime_paths)
+
+
+# LEGACY_COMPAT: Worker-store copies of settings for tools that never run in a worker.
+# Legacy format: `<tool>_credentials.json` in a worker's own store, `workers/<worker>/credentials/`, for a built-in tool that requires the primary runtime or room context; the dashboard saved a scoped agent's tool settings there, where worker code can read them.
+# Last legacy release: v2026.9.399 for tools that require the primary runtime and v2026.9.404 for tools that only require room context; replacement: v2026.9.400 and v2026.9.405 save them in the primary's agent- or requester-scoped stores and never read worker copies.
+# Handling: before serving, once per storage root, delete those documents from every existing worker's own store without reading them; shared-credential mirrors are left to their per-call sync, and the receipt waits while any worker store cannot be cleaned.
+# Concurrent starts may both delete; removal is idempotent, so no lock is needed.
+# Coverage: tests/test_legacy_tool_credentials.py::test_startup_deletes_worker_copies_of_primary_only_tool_settings_once,
+# tests/test_legacy_tool_credentials.py::test_a_worker_store_that_cannot_be_cleaned_keeps_the_cleanup_pending,
+# tests/test_legacy_tool_credentials.py::test_both_entry_points_clean_up_before_credentials_are_used.
+def _remove_worker_copies_of_primary_tool_settings(runtime_paths: RuntimePaths) -> None:
+    receipt = get_runtime_credentials_manager(runtime_paths).base_path / _WORKER_COPIES_RECEIPT_NAME
+    if receipt.exists():
+        return
+    ensure_tool_registry_loaded(runtime_paths)
+    services = frozenset(
+        name
+        for name, metadata in TOOL_METADATA.items()
+        if metadata.requires_primary_runtime or metadata.requires_room_context
+    )
+    removal = remove_worker_service_credentials(runtime_paths, services)
+    if removal.removed:
+        logger.warning(
+            "Deleted worker copies of settings for tools that only run in the primary",
+            documents=removal.removed,
+        )
+    if removal.failed:
+        logger.warning(
+            "Keeping the worker copy cleanup pending until every worker credential store can be cleaned",
+            stores=removal.failed,
+        )
+        return
+    write_json_file_durable(receipt, {"version": 1})
 
 
 def _migrate_daytona_verify_ssl(runtime_paths: RuntimePaths) -> None:

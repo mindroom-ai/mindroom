@@ -6602,6 +6602,7 @@ depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.logging_config",
+    "mindroom.tool_system.catalog",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 

@@ -503,6 +503,7 @@ Scoped tool settings live in primary stores, never the worker credential store, 
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard.
+Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
 Worker-executed tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).

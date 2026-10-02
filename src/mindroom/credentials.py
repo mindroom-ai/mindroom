@@ -76,6 +76,7 @@ __all__ = [
     "list_worker_grantable_shared_services",
     "load_scoped_credentials",
     "load_worker_grantable_shared_credentials",
+    "remove_worker_service_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
     "scoped_credentials_path",
@@ -804,6 +805,46 @@ def update_stored_service_credentials(
             manager._save_credentials_file(normalized_service, credentials_path, updated)
             rewritten += 1
     return StoredCredentialsUpdate(rewritten=rewritten, unreadable=unreadable)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerCredentialsRemoval:
+    """How removing services from every worker's own credential store went."""
+
+    removed: int
+    failed: int
+
+
+def remove_worker_service_credentials(
+    runtime_paths: RuntimePaths,
+    services: frozenset[str],
+) -> _WorkerCredentialsRemoval:
+    """Delete these services' documents from every existing worker's own store without reading them.
+
+    Shared-credential mirrors are left alone, because every worker sync rewrites them from the granted services.
+    A store that cannot be opened or cleaned, for example one worker code made unsearchable, is counted, not skipped silently.
+    """
+    manager = get_runtime_credentials_manager(runtime_paths)
+    file_names = {f"{validate_service_name(service)}{_CREDENTIALS_FILE_SUFFIX}" for service in services}
+    removed = 0
+    failed = 0
+    for directory in _existing_worker_credential_paths(manager.storage_root):
+        if directory.name != WORKER_CREDENTIALS_DIRNAME:
+            continue
+        try:
+            with open_directory_within_root(directory) as directory_fd:
+                for name, _entry_stat in _credentials_file_entries(directory_fd):
+                    if name in file_names:
+                        os.unlink(name, dir_fd=directory_fd)
+                        removed += 1
+        except OSError as exc:
+            logger.warning(
+                "A worker credential store could not be cleaned",
+                path=str(directory),
+                error_type=type(exc).__name__,
+            )
+            failed += 1
+    return _WorkerCredentialsRemoval(removed=removed, failed=failed)
 
 
 def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
