@@ -1216,8 +1216,8 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates a `default` model with `provider: codex`, `id: gpt-6.1-sol`, `context_window: 258000`, and `extra_kwargs.reasoning_effort: medium`.
-It also generates an `astra` model for `gpt-6-astra` at `medium` effort and a `luna` model for `gpt-6-luna` at `low` effort, and sets `router.model` and `defaults.thread_summary_model` to `luna`.
+The `--provider codex` preset generates a `default` model with `provider: codex`, `id: gpt-6.1-sol`, `display_name: Sol`, `context_window: 258000`, and `extra_kwargs.reasoning_effort: medium`.
+It also generates an `astra` model (`Astra`) for `gpt-6-astra` at `medium` effort and a `luna` model (`Luna`) for `gpt-6-luna` at `low` effort, and sets `router.model` and `defaults.thread_summary_model` to `luna`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 

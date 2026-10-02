@@ -79,10 +79,13 @@ class ModelPreset:
     id: str
     context_window: int | None = None
     reasoning_effort: str | None = None
+    display_name: str | None = None
 
     def to_config_dict(self) -> dict[str, int | str | dict[str, str]]:
         """Return the minimal YAML-safe model config mapping."""
         config: dict[str, int | str | dict[str, str]] = {"provider": self.provider, "id": self.id}
+        if self.display_name is not None:
+            config["display_name"] = self.display_name
         if self.context_window is not None:
             config["context_window"] = self.context_window
         if self.reasoning_effort is not None:
@@ -240,7 +243,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
-        "codex": ModelPreset("codex", CODEX_GPT, _CODEX_CONTEXT_WINDOW, "medium"),
+        "codex": ModelPreset("codex", CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", KIMI_K3, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
@@ -293,8 +296,26 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
     {
         "codex": (
-            ("astra", ModelPreset("codex", _OPENAI_GPT, _CODEX_CONTEXT_WINDOW, "medium")),
-            ("luna", ModelPreset("codex", OPENAI_GPT_LUNA, _CODEX_CONTEXT_WINDOW, "low")),
+            (
+                "astra",
+                ModelPreset(
+                    "codex",
+                    _OPENAI_GPT,
+                    _CODEX_CONTEXT_WINDOW,
+                    reasoning_effort="medium",
+                    display_name="Astra",
+                ),
+            ),
+            (
+                "luna",
+                ModelPreset(
+                    "codex",
+                    OPENAI_GPT_LUNA,
+                    _CODEX_CONTEXT_WINDOW,
+                    reasoning_effort="low",
+                    display_name="Luna",
+                ),
+            ),
         ),
         "llama_cpp": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("llama_cpp", LLAMA_CPP_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),
         "ollama": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("ollama", OLLAMA_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),

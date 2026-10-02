@@ -1461,18 +1461,21 @@ class TestConfigInit:
             "default": {
                 "provider": "codex",
                 "id": "gpt-6.1-sol",
+                "display_name": "Sol",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "astra": {
                 "provider": "codex",
                 "id": "gpt-6-astra",
+                "display_name": "Astra",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "luna": {
                 "provider": "codex",
                 "id": "gpt-6-luna",
+                "display_name": "Luna",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "low"},
             },

@@ -1041,6 +1041,8 @@ def _model_settings_block(model_preset: ModelPreset) -> str:
         f"provider: {model_preset.provider}",
         f"id: {model_preset.id}",
     ]
+    if model_preset.display_name is not None:
+        lines.append(f"display_name: {model_preset.display_name}")
     if model_preset.context_window is not None:
         lines.append(f"context_window: {model_preset.context_window}")
     if model_preset.provider == "ollama":
