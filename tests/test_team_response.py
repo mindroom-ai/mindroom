@@ -7,6 +7,7 @@ import inspect
 import tempfile
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
