@@ -32,6 +32,10 @@ def test_dotted_name_selects_toolkit_and_function() -> None:
     [
         ["tools", "call", "matrix_room", "matrix_room", '{"action":"threads"}'],
         ["tools", "call", "matrix_room.matrix_room", '{"action":"threads"}'],
+        *(
+            ["tools", "call", "matrix_room.matrix_room", f'{space}{{"action":"threads"}}']
+            for space in (" ", "\t", "\n")
+        ),
     ],
 )
 def test_trailing_json_object_supplies_call_arguments(argv: list[str]) -> None:

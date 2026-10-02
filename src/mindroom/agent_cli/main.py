@@ -88,7 +88,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 def _select_tool(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Accept TOOLKIT.FUNCTION and, for calls, a trailing JSON object in place of --json."""
     call = args.action == "call"
-    if call and args.json_argument is None and args.function is not None and args.function.startswith("{"):
+    if call and args.json_argument is None and args.function is not None and args.function.lstrip().startswith("{"):
         args.function, args.json_argument = None, args.function
     if args.function is None:
         toolkit, _, function = args.toolkit.rpartition(".")
