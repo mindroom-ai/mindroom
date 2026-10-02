@@ -5,8 +5,8 @@ decrypted to-device events), reconciles the room's call membership state,
 and starts or stops one ``CallSession`` per room. Reconciliation always
 re-reads the room state from the homeserver, both on call events and after
 each sync-loop start, so a bot recovers calls already active at startup.
-Call and membership events only request a background reconcile, coalesced
-per room, so floods of them neither hold the room's event lane nor
+Call, membership, and frame-key events only request a background reconcile,
+coalesced per room, so floods of them neither hold the room's event lane nor
 multiply full state reads.
 """
 
@@ -427,7 +427,7 @@ class CallManager:
         self._queue_pending_key(room_id, received, event)
         room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
         if room is not None:
-            await self._reconcile(room)
+            self._request_reconcile(room)
 
     async def reconcile_joined_rooms(self, room_ids: AbstractSet[str] | None = None) -> None:
         """Reconcile all configured calls, or only the requested joined rooms."""

@@ -424,7 +424,7 @@ def _member_unknown_event() -> nio.UnknownEvent:
 
 
 async def _deliver(manager: CallManager, delivery: Awaitable[None]) -> None:
-    """Deliver one call or membership event, then wait for the background reconcile it requested."""
+    """Deliver one call, membership, or frame-key event, then wait for the background reconcile it requested."""
     await delivery
     while tasks := tuple(manager._reconcile_tasks.values()):
         await asyncio.gather(*tasks)
@@ -2873,7 +2873,7 @@ async def test_manager_replays_a_key_received_before_startup_reconciliation(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_to_device_event(_frame_key_event())
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
     await manager.reconcile_joined_rooms()
 
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
@@ -2900,7 +2900,7 @@ async def test_manager_replays_key_after_transient_admission_fetch_failure(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
 
-    await manager.on_to_device_event(_frame_key_event())
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
     assert ROOM_ID in manager._pending_keys
     await manager.reconcile_joined_rooms()
 
@@ -2944,8 +2944,9 @@ async def test_manager_replays_a_key_received_before_active_roster_update(
 
     await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
 
-    await manager.on_to_device_event(
-        _frame_key_event(user_id="@alice:example.org", device_id="ALICESECOND"),
+    await _deliver(
+        manager,
+        manager.on_to_device_event(_frame_key_event(user_id="@alice:example.org", device_id="ALICESECOND")),
     )
 
     assert ROOM_ID in manager._pending_keys
@@ -2991,7 +2992,7 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, config)
 
-    await manager.on_to_device_event(_frame_key_event())
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
 
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
     assert manager._pending_keys == {}
@@ -3016,7 +3017,7 @@ async def test_manager_expires_pending_key_from_device_outside_roster(
     clock = [1_000]
     manager = _manager(client, bridge, tmp_path, clock_ms=lambda: clock[0])
 
-    await manager.on_to_device_event(_frame_key_event())
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
 
     assert ROOM_ID in manager._pending_keys
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) not in bridge.frame_keys
@@ -3092,7 +3093,7 @@ async def test_manager_replays_a_key_received_while_starting(
     )
     await asyncio.wait_for(agent_starting.wait(), timeout=1)
 
-    key_task = asyncio.create_task(manager.on_to_device_event(_frame_key_event()))
+    key_task = asyncio.create_task(_deliver(manager, manager.on_to_device_event(_frame_key_event())))
     for _ in range(20):
         if ROOM_ID in manager._pending_keys:
             break
@@ -3127,9 +3128,48 @@ async def test_manager_key_admission_uses_one_authoritative_state_fetch(
     manager = _manager(client, bridge, tmp_path)
     client.room_get_state.return_value = _state_response(_remote_member_event())
 
-    await manager.on_to_device_event(_frame_key_event())
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
 
     client.room_get_state.assert_awaited_once_with(ROOM_ID)
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert manager._pending_keys == {}
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_frame_key_floods_share_background_state_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Frame keys arriving before a session settle at once and coalesce their state reads."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    client = _client()
+    client.rooms = {ROOM_ID: _room(encrypted=True)}
+    release_state = asyncio.Event()
+
+    async def slow_state(_room_id: str) -> nio.RoomGetStateResponse:
+        await release_state.wait()
+        return _state_response(_remote_member_event())
+
+    client.room_get_state.side_effect = slow_state
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    async with asyncio.timeout(1):
+        for _ in range(20):
+            await manager.on_to_device_event(_frame_key_event())
+            await asyncio.sleep(0)
+    assert client.room_get_state.await_count == 1
+
+    release_state.set()
+    await _deliver(manager, asyncio.sleep(0))
+
+    # The flood shares the in-flight read and one follow-up read.
+    assert client.room_get_state.await_count == 2
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
     assert manager._pending_keys == {}
     await manager.shutdown()
