@@ -632,8 +632,8 @@ Selected services follow the call's scoped credential policy and, where applicab
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
-Scoped calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, because the primary owns scoped tool settings; values in the worker's own credential store apply only where the lease sets nothing.
-Unscoped dedicated workers keep reading tool settings from their own worker credential stores, which they can read only while credential encryption is disabled.
+Calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, because the primary owns tool settings; values in the worker's own credential store apply only where the lease sets nothing.
+Scoped calls lease the settings saved for their scope, and unscoped calls lease the settings saved in the primary credential store, so neither needs the credential encryption key in the worker.
 Settings saved in a worker credential store before the primary owned them stay there and still apply where a lease sets nothing, so clear worker credential stores after upgrading if those values should stop applying.
 Services selected by the policy override those values.
 

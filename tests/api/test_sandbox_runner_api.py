@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,7 @@ from mindroom.credentials import (
     _reset_credentials_manager_cache,
     get_runtime_credentials_manager,
     save_scoped_credentials,
+    sync_shared_credentials_to_worker,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
@@ -77,10 +79,12 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
     private_instance_scope_root_path,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
     resolve_worker_target,
     visible_workspace_roots,
     worker_dir_name,
+    worker_root_path,
 )
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
@@ -7486,13 +7490,9 @@ def test_workspace_env_hook_rejects_symlink_escape(
     assert "resolves outside" in payload["error"]
 
 
-def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
-    runner_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A scoped call leases the primary-owned tool settings, and the runner builds the tool with them."""
-    _set_sandbox_token(monkeypatch)
+@contextmanager
+def _lease_settings_echo_tool() -> Iterator[str]:
+    """Register a test-only tool whose result is its configured greeting."""
     tool_name = "lease_settings_echo"
 
     class _EchoToolkit(Toolkit):
@@ -7502,19 +7502,6 @@ def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
 
         def echo(self) -> str:
             return self.greeting
-
-    class _RunnerClient:
-        def __init__(self, *, timeout: float) -> None:
-            self.timeout = timeout
-
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, *_exc: object) -> None:
-            return
-
-        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
-            return runner_client.post(url, json=json, headers=headers)
 
     original_registry = metadata_module.TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
@@ -7532,6 +7519,46 @@ def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
         ),
     )
     try:
+        yield tool_name
+    finally:
+        metadata_module.TOOL_REGISTRY.clear()
+        metadata_module.TOOL_REGISTRY.update(original_registry)
+        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
+        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        metadata_module.BUILTIN_TOOL_METADATA.clear()
+        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        _refresh_runner_app_from_env()
+
+
+def _forwarding_client_factory(runner_client: TestClient) -> type[Any]:
+    """Return a proxy client class that sends the primary's requests to the in-process runner."""
+
+    class _RunnerClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> object:
+            return runner_client.post(url, json=json, headers=headers)
+
+    return _RunnerClient
+
+
+def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A scoped call leases the primary-owned tool settings, and the runner builds the tool with them."""
+    _set_sandbox_token(monkeypatch)
+    with _lease_settings_echo_tool() as tool_name:
         primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
         manager = CredentialsManager(tmp_path / "primary-credentials")
         manager.for_primary_runtime_agent_scope("alpha").save_credentials(tool_name, {"greeting": "primary"})
@@ -7558,18 +7585,86 @@ def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
             worker_target=resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant"),
             worker_handle=None,
             worker_manager=MagicMock(),
-            client_factory=_RunnerClient,
+            client_factory=_forwarding_client_factory(runner_client),
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
         )
 
-        assert result == "primary"
-    finally:
-        metadata_module.TOOL_REGISTRY.clear()
-        metadata_module.TOOL_REGISTRY.update(original_registry)
-        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        metadata_module.BUILTIN_TOOL_METADATA.clear()
-        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
-        _refresh_runner_app_from_env()
+    assert result == "primary"
+
+
+def test_unscoped_dedicated_worker_receives_encrypted_primary_settings_by_lease(
+    runner_client: TestClient,
+    tmp_path: Path,
+) -> None:
+    """A keyless unscoped worker cannot read the encrypted mirror, so the call leases the tool's primary settings.
+
+    The runner serves the worker's own stores in process, because a pinned worker runs each call in a child
+    that would not see this test-only tool.
+    """
+    encryption_key = base64.urlsafe_b64encode(b"3" * 32).decode("ascii")
+    with _lease_settings_echo_tool() as tool_name:
+        primary_root = tmp_path / "primary"
+        primary_paths = resolve_runtime_paths(config_path=tmp_path / "primary.yaml", process_env={})
+        manager = CredentialsManager(primary_root / "credentials", encryption_key=encryption_key)
+        manager.save_credentials(tool_name, {"greeting": "primary", "_source": "ui"})
+        worker_key = resolve_unscoped_worker_key("alpha", tenant_id="test-tenant")
+        # The worker is authorized for the service, but the mirror the primary writes is encrypted with its key.
+        sync_shared_credentials_to_worker(
+            worker_key,
+            allowed_services=frozenset({tool_name}),
+            credentials_manager=manager,
+        )
+        worker_root = worker_root_path(primary_root, worker_key)
+        worker_paths = resolve_primary_runtime_paths(
+            config_path=Path(os.environ["MINDROOM_CONFIG_PATH"]),
+            storage_path=worker_root,
+            process_env={
+                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_root / ".shared_credentials"),
+            },
+        )
+        assert get_runtime_credentials_manager(worker_paths).shared_manager().list_services() == [tool_name]
+        assert get_runtime_credentials_manager(worker_paths).shared_manager().load_credentials(tool_name) is None
+        sandbox_runner_module.initialize_sandbox_runner_app(
+            sandbox_runner_app,
+            worker_paths,
+            config=sandbox_runner_module._runtime_config_or_empty(worker_paths),
+            runner_token=SANDBOX_TOKEN,
+        )
+
+        result = execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=30.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={
+                "tool_name": tool_name,
+                "function_name": "echo",
+                "args": [],
+                "kwargs": {},
+                "routing_agent_name": "alpha",
+            },
+            credentials_manager=manager,
+            tool_name=tool_name,
+            function_name="echo",
+            worker_target=resolve_worker_target(None, "alpha", None, tenant_id="test-tenant"),
+            worker_handle=WorkerHandle(
+                worker_id="worker-1",
+                worker_key=worker_key,
+                endpoint="http://testserver/api/sandbox-runner/execute",
+                auth_token=SANDBOX_TOKEN,
+                status="ready",
+                backend_name="kubernetes",
+                last_used_at=0.0,
+                created_at=0.0,
+            ),
+            worker_manager=MagicMock(),
+            client_factory=_forwarding_client_factory(runner_client),
+            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+        )
+
+    assert result == "primary"

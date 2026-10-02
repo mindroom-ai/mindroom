@@ -1403,7 +1403,7 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
     worker_backend: str | None,
     expected: bool,
 ) -> None:
-    """Dedicated workers keep reading their own credential stores instead of receiving the primary's."""
+    """Only the static runner leases every tool's saved settings; dedicated workers lease only primary-owned ones."""
     if worker_backend is None:
         monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
     else:
@@ -1421,7 +1421,7 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
 @pytest.mark.parametrize(
     ("worker_scope", "requester_id", "expected_key"),
     [
-        (None, "@alice:example.org", None),
+        (None, "@alice:example.org", "global-key"),
         ("shared", "@alice:example.org", "alpha-key"),
         ("user", "@alice:example.org", "alice-key"),
         ("user_agent", "@alice:example.org", "alice-alpha-key"),
@@ -1434,7 +1434,7 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
     requester_id: str,
     expected_key: str | None,
 ) -> None:
-    """Scoped dedicated-worker calls lease only their own scope's primary settings; unscoped calls lease nothing."""
+    """Dedicated-worker calls lease only their own scope's primary settings; unscoped calls lease the global ones."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     handle = WorkerHandle(
         worker_id="worker-1",
@@ -1459,11 +1459,7 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
         {"api_key": "alice-alpha-key"},
     )
     identity = ToolExecutionIdentity("matrix", "alpha", requester_id, None, None, None, None)
-    target = (
-        resolve_worker_target(worker_scope, "alpha", identity, tenant_id="test-tenant")
-        if worker_scope is not None
-        else None
-    )
+    target = resolve_worker_target(worker_scope, "alpha", identity, tenant_id="test-tenant")
 
     result = execute_worker_proxy_request(
         config=WorkerProxyClientConfig(

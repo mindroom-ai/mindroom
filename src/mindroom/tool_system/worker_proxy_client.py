@@ -60,7 +60,7 @@ class WorkerProxyClientConfig:
     credential_lease_ttl_seconds: int
     credential_policy: Mapping[str, tuple[str, ...]]
     # The shared static runner has no credential store, so every call leases the tool's own saved settings.
-    # Scoped calls always lease them too, because the primary owns scoped tool settings.
+    # Dedicated-worker calls lease registered tools' settings too, because the primary owns tool settings.
     lease_tool_credentials: bool
 
 
@@ -356,13 +356,9 @@ def _collect_credential_overrides(
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
-    # Scoped calls lease the called tool's settings, which the primary owns.
-    lease_tool_settings = (
-        worker_target is not None
-        and worker_target.worker_scope is not None
-        and primary_built_service is not None
-        and primary_built_service(tool_name)
-    )
+    # Scoped and unscoped calls lease the called tool's settings, which the primary owns,
+    # so dedicated workers never need the credential encryption key to read them.
+    lease_tool_settings = primary_built_service is not None and primary_built_service(tool_name)
     services = _credential_services_for_call(
         tool_name,
         function_name,
