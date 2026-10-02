@@ -44,10 +44,11 @@ async def migrate_tool_credential_defaults(runtime_paths: RuntimePaths) -> None:
 # LEGACY_COMPAT: Worker-store copies of settings for tools that never run in a worker.
 # Legacy format: `<tool>_credentials.json` in a worker's own store, `workers/<worker>/credentials/`, for a built-in tool that requires the primary runtime or room context; the dashboard saved a scoped agent's tool settings there, where worker code can read them.
 # Last legacy release: v2026.9.399 for tools that require the primary runtime and v2026.9.404 for tools that only require room context; replacement: v2026.9.400 and v2026.9.405 save them in the primary's agent- or requester-scoped stores and never read worker copies.
-# Handling: before serving, once per storage root, delete those documents from every existing worker's own store without reading them; shared-credential mirrors are left to their per-call sync, and the receipt waits while any worker store cannot be cleaned.
+# Handling: before serving, once per storage root, delete those documents from every existing worker's own store without reading them; shared-credential mirrors are left to their per-call sync, and the receipt waits while any worker store cannot be inspected or cleaned.
 # Concurrent starts may both delete; removal is idempotent, so no lock is needed.
 # Coverage: tests/test_legacy_tool_credentials.py::test_startup_deletes_worker_copies_of_primary_only_tool_settings_once,
 # tests/test_legacy_tool_credentials.py::test_a_worker_store_that_cannot_be_cleaned_keeps_the_cleanup_pending,
+# tests/test_legacy_tool_credentials.py::test_a_worker_store_hidden_from_discovery_keeps_the_cleanup_pending,
 # tests/test_legacy_tool_credentials.py::test_both_entry_points_clean_up_before_credentials_are_used.
 def _remove_worker_copies_of_primary_tool_settings(runtime_paths: RuntimePaths) -> None:
     receipt = get_runtime_credentials_manager(runtime_paths).base_path / _WORKER_COPIES_RECEIPT_NAME

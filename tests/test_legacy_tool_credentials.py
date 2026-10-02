@@ -126,6 +126,25 @@ async def test_a_worker_store_that_cannot_be_cleaned_keeps_the_cleanup_pending(
     assert worker.load_credentials("slack") is None
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+@pytest.mark.asyncio
+async def test_a_worker_store_hidden_from_discovery_keeps_the_cleanup_pending(tmp_path: Path) -> None:
+    """A worker root that worker code made unsearchable hides its store only until the next start."""
+    runtime_paths = _runtime(tmp_path)
+    worker = get_runtime_credentials_manager(runtime_paths).for_worker("v1:default:shared:general")
+    worker.save_credentials("slack", {"token": "xoxb-secret"})
+    worker_root = worker.base_path.parent
+    worker_root.chmod(0)
+    try:
+        await migrate_tool_credential_defaults(runtime_paths)
+    finally:
+        worker_root.chmod(0o700)
+    assert worker.load_credentials("slack") == {"token": "xoxb-secret"}
+
+    await migrate_tool_credential_defaults(runtime_paths)
+    assert worker.load_credentials("slack") is None
+
+
 @pytest.mark.asyncio
 async def test_startup_keeps_daytona_settings_that_already_verify(tmp_path: Path) -> None:
     """Settings that verify, or never saved the field, are left byte-for-byte alone."""
