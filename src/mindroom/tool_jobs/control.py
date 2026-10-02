@@ -44,6 +44,11 @@ class HumanMessageSignal:
         """Consume queued input so later waits can remain attached."""
         self._pending = False
 
+    def pulse(self) -> None:
+        """Release current waits for input no reply will queue, so later waits stay attached."""
+        self.notify()
+        self.clear()
+
 
 @dataclass
 class JobControl:

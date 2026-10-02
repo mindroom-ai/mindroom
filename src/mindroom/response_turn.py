@@ -707,7 +707,7 @@ def _reset_turn_state_for_dynamic_continuation(
     turn_recorder: TurnRecorder | None,
     run_metadata: dict[str, Any] | None,
     completed_tools_for_turn: list[ToolTraceEntry],
-    prior_assistant_text: str = "",
+    prior_assistant_text: str,
 ) -> AITurnState:
     turn_state = AITurnState(
         prior_completed_tools=completed_tools_for_turn,

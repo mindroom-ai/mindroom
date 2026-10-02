@@ -40,7 +40,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -148,7 +147,6 @@ from mindroom.tool_jobs.completion import (
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime, parse_completion_event_id
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.events import StructuredStreamChunk, deserialize_tool_trace, serialize_tool_trace
@@ -234,6 +232,7 @@ if TYPE_CHECKING:
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1865,7 +1864,6 @@ class ResponseRunner:
                 continuation,
                 cancel_failure_reason("user_stop"),
                 visible_text=await self._approval_interruption_update(continuation, cancel_source="user_stop"),
-                stream_status=STREAM_STATUS_CANCELLED,
             )
         else:
             await self._approval_responses.settle_failure(continuation, reason)
@@ -2676,23 +2674,18 @@ class ResponseRunner:
 
     async def stop_user_jobs(self, stopped: TurnRecord, stop_receipt_order: int) -> None:
         """Apply the saved human intent even when the visible Stop has already settled."""
-        if not background_tool_jobs_enabled(self.deps.runtime.config, self.deps.runtime_paths):
-            return
+        # A disabled instance never registers a job runtime.
         runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is not None:
-            await stop_conversation_jobs(
-                runtime,
-                self.deps.approval_store,
-                stopped,
-                stop_receipt_order=stop_receipt_order,
-            )
-            for task, ownership in tuple(self._inbox_response_tasks.items()):
-                if task.done() or task.cancelling():
-                    continue
-                for source in ownership.source_event_ids:
-                    if await response_was_stopped(source, self.deps.runtime_paths, self.deps.agent_name):
-                        self.deps.stop_manager.request_task_stop(task)
-                        break
+        if runtime is None:
+            return
+        await stop_conversation_jobs(runtime, self.deps.approval_store, stopped, stop_receipt_order=stop_receipt_order)
+        for task, ownership in tuple(self._inbox_response_tasks.items()):
+            if task.done() or task.cancelling():
+                continue
+            for source in ownership.source_event_ids:
+                if await response_was_stopped(source, self.deps.runtime_paths, self.deps.agent_name):
+                    self.deps.stop_manager.request_task_stop(task)
+                    break
 
     async def finalize_user_stop(
         self,
@@ -3121,22 +3114,11 @@ class ResponseRunner:
         if job is None:
             await self._settle_completion_source(event.event_id)
             return
+        if await self._original_source_owns_completion(event, job):
+            # The original source still owns recovery or turn recording.
+            # Keep this wake pending until it settles; it may leave the job unconsumed.
+            return
         envelope = completion_envelope(job, sender_id=self.deps.matrix_full_id)
-        original_source_id = job.source_event_id
-        if original_source_id is not None and original_source_id != event.event_id:
-            original = await self.deps.approval_store.load_event(original_source_id)
-            if (
-                original is not None
-                and original.room_id == event.room_id
-                and (
-                    original.thread_id == event.thread_id
-                    or (original.thread_id is None and original.event_id == event.thread_id)
-                )
-                and await self.deps.approval_store.is_pending(original_source_id)
-            ):
-                # The original source still owns recovery or turn recording.
-                # Keep this wake pending until it settles; it may leave the job unconsumed.
-                return
         initial = await self.deps.approval_store.load_matrix_delivery(
             delivery_id=event.event_id,
             stage=DeliveryStage.INITIAL,
@@ -3160,9 +3142,41 @@ class ResponseRunner:
             await self.deps.approval_store.settle(event.event_id)
             return
         request = self._completion_request(event, envelope, turn, placeholder_event_id)
+        response_event_id = await self._generate_completion_reply(request, runtime, job, event)
+        if response_event_id is not None:
+            await self.deps.turn_store.record_responded_turn(
+                canonicalize_turn_record(turn, response_event_id=response_event_id),
+            )
+
+    async def _original_source_owns_completion(self, event: JournalEvent, job: BackgroundJob) -> bool:
+        """Whether the turn that started the job is still pending in this conversation."""
+        source_id = job.source_event_id
+        if source_id is None or source_id == event.event_id:
+            return False
+        original = await self.deps.approval_store.load_event(source_id)
+        return (
+            original is not None
+            and original.room_id == event.room_id
+            and (
+                original.thread_id == event.thread_id
+                or (original.thread_id is None and original.event_id == event.thread_id)
+            )
+            and await self.deps.approval_store.is_pending(source_id)
+        )
+
+    async def _generate_completion_reply(
+        self,
+        request: ResponseRequest,
+        runtime: ToolJobRuntime,
+        job: BackgroundJob,
+        event: JournalEvent,
+    ) -> str | None:
+        """Reply as this agent, or as the team whose members own the conversation's outstanding work."""
         team = self.deps.runtime.config.teams.get(self.deps.agent_name)
-        member_names = team.agents if team is not None else []
-        if team is None:
+        if team is not None:
+            member_names, team_mode = team.agents, team.mode
+        else:
+            envelope = request.response_envelope
             jobs = await runtime.conversation_jobs(
                 transport_agent_name=self.deps.agent_name,
                 room_id=event.room_id,
@@ -3173,19 +3187,15 @@ class ResponseRunner:
             # Ad hoc teams have no configured roster. Reconstruct the actors
             # that own outstanding work so each result keeps its exact owner.
             member_names = sorted({job.owner.agent_name, *(pending.owner.agent_name for pending in jobs)})
-        if team is None and member_names == [self.deps.agent_name]:
-            response_event_id = await self.generate_response(request)
-        else:
-            registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-            response_event_id = await self.generate_team_response_helper(
-                request,
-                team_agents=[registry.current_ids[name] for name in member_names],
-                team_mode=team.mode if team is not None else "coordinate",
-            )
-        if response_event_id is not None:
-            await self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(turn, response_event_id=response_event_id),
-            )
+            if member_names == [self.deps.agent_name]:
+                return await self.generate_response(request)
+            team_mode = "coordinate"
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return await self.generate_team_response_helper(
+            request,
+            team_agents=[registry.current_ids[name] for name in member_names],
+            team_mode=team_mode,
+        )
 
     async def _settle_completion_source(self, source_event_id: str) -> None:
         """Settle a completion that will not reply, completing any turn an interrupted attempt left pending."""

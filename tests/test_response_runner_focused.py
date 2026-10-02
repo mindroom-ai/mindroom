@@ -2236,13 +2236,8 @@ async def test_claimed_approval_stop_and_suppression_are_not_relabeled_as_interr
         await runner._settle_failed_approval_outcome(continuation, outcome)
 
     if failure_reason == "cancelled_by_user":
-        # A Stop keeps what the continuation last showed and ends cancelled, without claiming an interruption.
-        settle_failure.assert_awaited_once_with(
-            continuation,
-            failure_reason,
-            visible_text=latest,
-            stream_status=STREAM_STATUS_CANCELLED,
-        )
+        # A Stop keeps what the continuation last showed, without claiming an interruption; settlement ends it cancelled.
+        settle_failure.assert_awaited_once_with(continuation, failure_reason, visible_text=latest)
     else:
         settle_failure.assert_awaited_once_with(continuation, failure_reason)
     restart_recovery.assert_not_awaited()

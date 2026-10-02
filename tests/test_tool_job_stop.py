@@ -378,7 +378,9 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
     )
     runtime = tool_job_runtime(paths.storage_root)
     instance = pin_background_tool_jobs(config, paths)
-    register_background_runtime(paths, runtime)
+    if enabled:
+        # A disabled instance never publishes a runtime; the job only stands in for saved work.
+        register_background_runtime(paths, runtime)
     coordinator = None
 
     async def operation() -> BackgroundOutcome:

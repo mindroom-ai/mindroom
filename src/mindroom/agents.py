@@ -747,6 +747,15 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
+    # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
+    wrap_direct = partial(
+        _wrap_direct_agent_toolkit_for_output_files,
+        tool_name=tool_name,
+        tool_config_overrides=tool_config_overrides,
+        agent_runtime=agent_runtime,
+        runtime_paths=runtime_paths,
+        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+    )
 
     if tool_name == "memory":
         if config.resolve_entity(agent_name).memory_backend == "none":
@@ -756,7 +765,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         # MemoryTools resolves the canonical per-agent storage roots internally via the
         # shared memory facade, so it should receive the caller-visible runtime root here.
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             MemoryTools(
                 agent_name=agent_name,
                 storage_path=storage_path,
@@ -764,11 +773,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "delegate":
@@ -790,7 +794,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 max_delegation_depth=MAX_DELEGATION_DEPTH,
             )
             return None
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
                 delegate_to=agent_config.delegate_to,
@@ -800,23 +804,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
             ),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "self_config":
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "skill_manage":
@@ -836,42 +830,27 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             CompactContextTools(
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_workflow":
         from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             DynamicWorkflowTools(),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "report_publishing":
         from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             ReportPublishingTools(),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_tools":
@@ -896,7 +875,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name,
             )
             return None
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             DynamicToolsToolkit(
                 agent_name=agent_name,
                 config=config,
@@ -911,11 +890,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),
-            tool_name=tool_name,
-            tool_config_overrides=tool_config_overrides,
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     return _build_registered_agent_tool(

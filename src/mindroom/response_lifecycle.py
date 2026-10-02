@@ -372,12 +372,10 @@ class ResponseLifecycleCoordinator:
         self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
-        if not self._has_active_response_for_thread_key(target.lifecycle_key):
-            signal = self._get_or_create_queued_signal(target).human_signal
-            signal.notify()
-            signal.clear()
-            return None
         queued_signal = self._get_or_create_queued_signal(target)
+        if not self._has_active_response_for_thread_key(target.lifecycle_key):
+            queued_signal.human_signal.pulse()
+            return None
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
@@ -394,14 +392,10 @@ class ResponseLifecycleCoordinator:
         signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message:
+        if not signal_queued_message or not self._should_signal_queued_message(response_envelope):
             return None
         if not (existing_turn or lifecycle_lock.locked()):
-            if self._should_signal_queued_message(response_envelope):
-                queued_signal.human_signal.notify()
-                queued_signal.human_signal.clear()
-            return None
-        if not self._should_signal_queued_message(response_envelope):
+            queued_signal.human_signal.pulse()
             return None
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
