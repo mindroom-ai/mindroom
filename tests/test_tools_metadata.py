@@ -1930,21 +1930,16 @@ def test_code_execution_tools_declare_unconfined_file_access() -> None:
 
 
 _UNCONFINED_LOCAL_FILE_TOOLS = (
-    "airflow",
     "browserbase",
     "composio",
     "csv",
     "duckdb",
-    "groq",
-    "moviepy_video_tools",
-    "openai",
     "pandas",
     "postgres",
     "redshift",
     "slack",
     "sql",
     "visualization",
-    "web_browser_tools",
 )
 
 
@@ -1969,7 +1964,20 @@ def test_only_code_execution_tools_execute_code() -> None:
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
-    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser", "e2b"):
+    for name in (
+        "file",
+        "coding",
+        "attachments",
+        "matrix_message",
+        "gmail",
+        "google_drive",
+        "browser",
+        "e2b",
+        "airflow",
+        "groq",
+        "moviepy_video_tools",
+        "openai",
+    ):
         metadata = TOOL_METADATA[name]
         assert metadata.file_access is ToolFileAccess.AGENT, name
         assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name

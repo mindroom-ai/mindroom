@@ -40,8 +40,9 @@ def _clip(**kwargs: object) -> MagicMock:
 @pytest.fixture
 def caption_renderer(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]]:
-    """Patch captured factories only after real modules have finished importing."""
+    """Patch captured factories only after real modules have finished importing; ``tmp_path`` is the workspace."""
     from mindroom.custom_tools import agno_compat_moviepy as adapter  # noqa: PLC0415
 
     toolkit_class = moviepy_video_tools()
@@ -53,7 +54,8 @@ def caption_renderer(
     }
     for name, factory in factories.items():
         monkeypatch.setattr(adapter, name, factory)
-    return toolkit_class(), factories
+    (tmp_path / "input.mp4").write_bytes(b"input video")
+    return toolkit_class(tool_output_workspace_root=tmp_path), factories
 
 
 @pytest.mark.parametrize(
@@ -131,7 +133,7 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
         composites.append(clip)
         return clip
 
-    def reject_publication(_source: str, _destination: str) -> None:
+    def reject_publication(*_args: object, **_kwargs: object) -> None:
         message = "destination locked"
         raise OSError(message)
 
@@ -151,10 +153,9 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
         assert output_path.read_bytes() == b"existing video"
     assert output_during_render == [b"existing video"]
     assert len(rendered_paths) == 1
-    assert rendered_paths[0] != output_path
-    assert rendered_paths[0].parent == output_path.parent
-    assert not rendered_paths[0].exists()
-    assert set(tmp_path.iterdir()) == {srt_path, output_path}
+    assert rendered_paths[0].parent != output_path.parent
+    assert not rendered_paths[0].parent.exists()
+    assert set(tmp_path.iterdir()) == {tmp_path / "input.mp4", srt_path, output_path}
     assert composites
     for clip in [video, *composites]:
         clip.close.assert_called_once()
@@ -218,3 +219,31 @@ def test_create_caption_clips_preserves_explicit_font(
 
     font_loader.assert_called_once_with("custom-caption.ttf", 24)
     assert [call.kwargs["font"] for call in factories["TextClip"].call_args_list] == ["custom-caption.ttf"] * 3
+
+
+def test_media_paths_follow_file_access(
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model-chosen media paths stay in the workspace and never reach primary files or FFmpeg URLs."""
+    toolkit, factories = caption_renderer
+    primary = tmp_path_factory.mktemp("primary")
+    config = primary / "config.yaml"
+    config.write_text("administrators: []\n", encoding="utf-8")
+    monkeypatch.chdir(primary)
+    (tmp_path / "captions.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+    (tmp_path / "linked.srt").symlink_to(config)
+
+    assert toolkit.create_srt("administrators: [attacker]\n", "config.yaml") == "config.yaml"
+    assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == "administrators: [attacker]\n"
+    for output_path in (str(config), os.path.relpath(config, tmp_path), "linked.srt"):
+        assert toolkit.create_srt("x", output_path).startswith("Failed to create SRT file:"), output_path
+    assert toolkit.extract_audio(str(config), "audio.wav").startswith("Failed to extract audio:")
+    assert toolkit.embed_captions("http://127.0.0.1:8765/api/config", "captions.srt").startswith("Failed")
+    assert toolkit.embed_captions("input.mp4", str(config)).startswith("Failed to embed captions:")
+
+    assert config.read_text(encoding="utf-8") == "administrators: []\n"
+    assert [entry.name for entry in primary.iterdir()] == ["config.yaml"]
+    assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]

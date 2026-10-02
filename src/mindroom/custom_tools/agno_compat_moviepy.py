@@ -1,15 +1,25 @@
-"""Agno MoviePy caption rendering with explicit per-call styling."""
+"""Agno MoviePy caption rendering with explicit per-call styling and media paths that follow ``file_access``."""
 
 from __future__ import annotations
 
-from contextlib import suppress
+import shutil
+import tempfile
+from contextlib import closing, suppress
 from math import ceil
 from pathlib import Path
-from typing import Any, cast, override
+from typing import TYPE_CHECKING, Any, cast, override
 
 from agno.tools import moviepy_video as agno_moviepy
 from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
 from PIL import ImageFont
+
+from mindroom.file_access import resolve_agent_file
+from mindroom.tools.path_safety import write_agent_file
+
+if TYPE_CHECKING:
+    from mindroom.config.models import FileAccess
+
+_STAGING_PREFIX = "mindroom-moviepy-"
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
@@ -50,9 +60,108 @@ from PIL import ImageFont
 # Remove when: MoviePy cleans temporary audio on every encoding exit.
 # Coverage: tests/test_moviepy_caption_output.py.
 
+# AGNO_COMPAT: MoviePyVideoTools reads and writes model-chosen media paths by name.
+# Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
+# in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
+# create_srt, read any file, or point FFmpeg at a URL, whatever the agent's file_access.
+# Upstream issue: Tracking gap; upstream tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: the toolkit accepts caller-supplied input readers and output writers;
+# retain resolution under file_access, private FFmpeg staging, and no-follow publication.
+# Coverage: tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access and
+# tests/test_file_access_contract.py::test_outside_files_follow_file_access.
+
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
-    """Apply advertised caption styles without shared rendering state."""
+    """Apply advertised caption styles without shared rendering state, with media paths that follow ``file_access``.
+
+    Inputs are copied through no-follow descriptors into a private staging directory, MoviePy and
+    FFmpeg read and write only there, and outputs below the workspace are published by atomic replacement.
+    """
+
+    def __init__(
+        self,
+        enable_process_video: bool = True,
+        enable_generate_captions: bool = True,
+        enable_embed_captions: bool = True,
+        all: bool = False,  # noqa: A002 - upstream option name
+        *,
+        tool_output_workspace_root: Path | None = None,
+        file_access: FileAccess = "workspace",
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        self._workspace_root = tool_output_workspace_root
+        self._file_access = file_access
+        super().__init__(
+            enable_process_video=enable_process_video,
+            enable_generate_captions=enable_generate_captions,
+            enable_embed_captions=enable_embed_captions,
+            all=all,
+            **kwargs,
+        )
+
+    def _stage_input(self, raw_path: str, field_name: str, staging: Path) -> str:
+        """Copy one authorized input into the staging directory, keeping its suffix for format detection."""
+        authorized = resolve_agent_file(
+            raw_path,
+            workspace_root=self._workspace_root,
+            file_access=self._file_access,
+            field_name=field_name,
+        )
+        staged = staging / f"{field_name}{Path(authorized.name).suffix}"
+        with authorized.open() as source, staged.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        return str(staged)
+
+    def _publish(self, raw_path: str, payload: bytes) -> None:
+        """Atomically write one output where the agent's file_access allows, without following links below the workspace."""
+        write_agent_file(raw_path, payload, workspace_root=self._workspace_root, file_access=self._file_access)
+
+    @override
+    def extract_audio(self, video_path: str, output_path: str) -> str:
+        """Converts video to audio using MoviePy.
+
+        Args:
+            video_path: Path to the video file; with ``file_access: workspace`` it must be inside the agent workspace
+            output_path: Path where the audio will be saved; with ``file_access: workspace`` it must be inside the agent workspace
+
+        Returns:
+            str: Path to the extracted audio file
+
+        """
+        try:
+            with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX) as staging_dir:
+                staging = Path(staging_dir)
+                staged_output = staging / f"output{Path(output_path).suffix}"
+                with closing(VideoFileClip(self._stage_input(video_path, "video_path", staging))) as video:
+                    if video.audio is None:
+                        message = "Video has no audio track."
+                        raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
+                    video.audio.write_audiofile(str(staged_output))
+                self._publish(output_path, staged_output.read_bytes())
+        except Exception as exc:
+            agno_moviepy.logger.exception("Failed to extract audio")
+            return f"Failed to extract audio: {exc}"
+        return output_path
+
+    @override
+    def create_srt(self, transcription: str, output_path: str) -> str:
+        """Save transcription text to SRT formatted file.
+
+        Args:
+            transcription: Text transcription in SRT format
+            output_path: Path where the SRT file will be saved; with ``file_access: workspace`` it must be inside the agent workspace
+
+        Returns:
+            str: Path to the created SRT file, or error message if failed
+
+        """
+        try:
+            self._publish(output_path, transcription.encode("utf-8"))
+        except Exception as exc:
+            agno_moviepy.logger.exception("Failed to create SRT file")
+            return f"Failed to create SRT file: {exc}"
+        return output_path
 
     @override
     def create_caption_clips(
@@ -212,9 +321,9 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         """Create a new video with embedded captions and word-level highlighting.
 
         Args:
-            video_path: Path to the input video file
-            srt_path: Path to the SRT caption file
-            output_path: Path for the output video (optional)
+            video_path: Path to the input video file; with ``file_access: workspace`` it must be inside the agent workspace
+            srt_path: Path to the SRT caption file; with ``file_access: workspace`` it must be inside the agent workspace
+            output_path: Path for the output video (optional); with ``file_access: workspace`` it must be inside the agent workspace
             font_size: Size of caption text
             font_color: Color of caption text
             stroke_color: Color of text outline
@@ -227,18 +336,17 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         video = None
         final_video = None
         all_caption_clips = []
-        temp_output_path: str | None = None
-        temp_audio_path: str | None = None
+        staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX))
         try:
             # If no output path provided, create one based on input video
             if output_path is None:
                 output_path = video_path.rsplit(".", 1)[0] + "_captioned.mp4"
 
             # Load video
-            video = VideoFileClip(video_path)
+            video = VideoFileClip(self._stage_input(video_path, "video_path", staging))
 
             # Read caption file and parse SRT
-            srt_content = Path(srt_path).read_text(encoding="utf-8")
+            srt_content = Path(self._stage_input(srt_path, "srt_path", staging)).read_text(encoding="utf-8")
 
             # Parse SRT and get word timing
             words = self.parse_srt(srt_content)
@@ -282,25 +390,21 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             # Combine video with all captions
             final_video = CompositeVideoClip([video, *all_caption_clips], size=video.size)
 
-            # Write output with optimized settings
-            temp_output_path = agno_moviepy._make_temp_output_path(output_path)
-            if final_video.audio is not None:
-                temp_audio_path = agno_moviepy._make_temp_output_path(str(Path(output_path).with_suffix(".m4a")))
+            # Write output with optimized settings inside the staging directory, then publish it complete
+            staged_output = staging / f"output{Path(output_path).suffix}"
             final_video.write_videofile(
-                temp_output_path,
+                str(staged_output),
                 codec="libx264",
                 audio_codec="aac",
-                temp_audiofile=temp_audio_path,
+                temp_audiofile=str(staging / "audio.m4a") if final_video.audio is not None else None,
                 fps=video.fps,
                 preset="medium",
                 threads=4,
                 # Disable default progress bar
             )
-            Path(temp_output_path).replace(output_path)
-            temp_output_path = None
+            self._publish(output_path, staged_output.read_bytes())
 
         except Exception as exc:
-            agno_moviepy._remove_file_if_exists(temp_output_path)
             agno_moviepy.logger.exception("Failed to embed captions")
             return f"Failed to embed captions: {exc}"
         else:
@@ -315,4 +419,4 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             if video is not None:
                 with suppress(Exception):
                     video.close()
-            agno_moviepy._remove_file_if_exists(temp_audio_path)
+            shutil.rmtree(staging, ignore_errors=True)

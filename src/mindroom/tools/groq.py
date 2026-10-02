@@ -5,16 +5,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import GROQ_TRANSCRIPTION, GROQ_TTS
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.models.groq import GroqTools
+    from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 
 
 @register_tool_with_metadata(
     name="groq",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.AGENT,
     worker_inert_agent_functions=("generate_speech",),
     display_name="Groq",
     description="Fast AI inference for audio transcription, translation, and text-to-speech",
@@ -88,12 +95,13 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["groq"],
     docs_url="https://docs.agno.com/tools/toolkits/models/groq",
     function_names=("generate_speech", "transcribe_audio", "translate_audio"),
 )
-def groq_tools() -> type[GroqTools]:
-    """Return Groq AI tools for fast audio transcription, translation, and text-to-speech."""
-    from agno.tools.models.groq import GroqTools
+def groq_tools() -> type[MindRoomGroqTools]:
+    """Return Groq audio tools whose local audio sources follow the agent's file_access."""
+    from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 
-    return GroqTools
+    return MindRoomGroqTools

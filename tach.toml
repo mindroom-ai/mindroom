@@ -7713,12 +7713,64 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.agno_compat_moviepy"
-depends_on = []
+depends_on = ["mindroom.file_access"]
 visibility = ["mindroom.tools.moviepy_video_tools"]
 
 [[interfaces]]
 from = ["mindroom.custom_tools.agno_compat_moviepy"]
 expose = ["MindRoomMoviePyVideoTools"]
+
+[[modules]]
+path = "mindroom.tools.openai"
+depends_on = ["mindroom.model_defaults", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_openai"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_openai"
+depends_on = ["mindroom.file_access"]
+visibility = ["mindroom.tools.openai"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_openai"]
+expose = ["MindRoomOpenAITools"]
+
+[[modules]]
+path = "mindroom.tools.groq"
+depends_on = ["mindroom.model_defaults", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_groq"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_groq"
+depends_on = ["mindroom.file_access"]
+visibility = ["mindroom.tools.groq"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_groq"]
+expose = ["MindRoomGroqTools"]
+
+[[modules]]
+path = "mindroom.tools.airflow"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_airflow"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_airflow"
+depends_on = ["mindroom.file_access"]
+visibility = ["mindroom.tools.airflow"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_airflow"]
+expose = ["MindRoomAirflowTools"]
+
+[[modules]]
+path = "mindroom.tools.web_browser_tools"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_webbrowser"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_webbrowser"
+depends_on = []
+visibility = ["mindroom.tools.web_browser_tools"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_webbrowser"]
+expose = ["MindRoomWebBrowserTools"]
 
 [[modules]]
 path = "mindroom.cli_approval_waits"

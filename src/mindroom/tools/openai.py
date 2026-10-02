@@ -5,16 +5,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import OPENAI_IMAGE, OPENAI_TRANSCRIPTION, OPENAI_TTS
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.openai import OpenAITools
+    from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 
 
 @register_tool_with_metadata(
     name="openai",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.AGENT,
     worker_inert_agent_functions=("generate_speech",),
     display_name="OpenAI",
     description="AI-powered tools for transcription, image generation, and speech synthesis",
@@ -116,12 +123,13 @@ if TYPE_CHECKING:
             default=None,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["openai"],
     docs_url="https://docs.agno.com/tools/toolkits/models/openai",
     function_names=("generate_image", "generate_speech", "transcribe_audio"),
 )
-def openai_tools() -> type[OpenAITools]:
-    """Return OpenAI tools for AI-powered transcription, image generation, and speech synthesis."""
-    from agno.tools.openai import OpenAITools
+def openai_tools() -> type[MindRoomOpenAITools]:
+    """Return OpenAI tools whose transcription input follows the agent's file_access."""
+    from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 
-    return OpenAITools
+    return MindRoomOpenAITools

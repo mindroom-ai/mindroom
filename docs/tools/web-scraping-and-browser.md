@@ -774,6 +774,7 @@ browser_control(action="screenshot", target="desktop", fullPage=True, returnAtta
 
 `web_browser_tools` exposes `open_page(url, new_window=False)`.
 It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system.
+It opens only `http` and `https` URLs and refuses `file:` paths, other URI schemes, and scheme-less strings, so the host never hands local files or application links to their operating-system handlers.
 It does not return page content, DOM state, screenshots, or automation handles.
 This makes it useful for human handoff or local desktop workflows, but not for scraping.
 

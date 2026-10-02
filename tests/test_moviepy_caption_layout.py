@@ -181,8 +181,9 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
         Path(path).write_bytes(b"rendered frame")
 
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", inspect_frame)
+    (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools().embed_captions(
+    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -306,8 +307,9 @@ def test_oversized_captions_preserve_existing_output(
         pytest.fail("Invalid caption geometry reached video encoding")
 
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", unexpected_render)
+    (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MindRoomMoviePyVideoTools().embed_captions(
+    result = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -317,4 +319,4 @@ def test_oversized_captions_preserve_existing_output(
     assert result.startswith("Failed to embed captions:")
     assert dimension in result
     assert output.read_bytes() == b"existing video"
-    assert set(tmp_path.iterdir()) == {srt_path, output}
+    assert set(tmp_path.iterdir()) == {tmp_path / "input.mp4", srt_path, output}

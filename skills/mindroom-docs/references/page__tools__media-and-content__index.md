@@ -42,6 +42,8 @@ Despite the `enable_process_video` config name, the current upstream method it e
 `stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
 Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
+Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
+MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output replaces its target only once it is complete.
 
 ### Configuration
 

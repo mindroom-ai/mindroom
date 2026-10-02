@@ -132,7 +132,8 @@ send_email(
 ### What It Does
 
 `airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
-If `dags_dir` is a string, the upstream toolkit resolves it relative to the current working directory at tool initialization time.
+A relative `dags_dir` resolves from the agent workspace, which is also the default DAG directory.
+DAG paths follow the agent's `file_access`: with the default `workspace`, `read_dag_file()` and `save_dag_file()` refuse files outside the agent workspace, so a DAG folder elsewhere needs `file_access: unrestricted`.
 `save_dag_file()` creates missing parent directories before writing the target DAG file.
 This tool manages DAG source files only.
 It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
@@ -141,7 +142,7 @@ It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state,
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the current working directory when given as a string. |
+| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the agent workspace when relative. |
 | `enable_save_dag_file` | `boolean` | `no` | `true` | Enable `save_dag_file()`. |
 | `enable_read_dag_file` | `boolean` | `no` | `true` | Enable `read_dag_file()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream Airflow toolkit surface. |
@@ -164,7 +165,7 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 ### Notes
 
 - Use `airflow` when the job is editing DAG source files, not when you need live Airflow control-plane access.
-- `dags_dir` is not a MindRoom-managed workspace root like `base_dir` on some local execution tools.
+- `dags_dir` only sets where relative DAG paths start; the agent's `file_access` decides which files the tool may reach.
 - Keep the configured directory aligned with the filesystem path your Airflow deployment actually watches.
 
 ## [`e2b`]

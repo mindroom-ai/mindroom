@@ -91,15 +91,15 @@ Every tool declares how its own file access relates to this setting.
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
-| Other tools | Everything else | Take no local file paths |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `web_browser_tools`).
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -108,7 +108,7 @@ The model sees the effective file access and the unconfined tools in its tool ex
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `visualization`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
   This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search.
   They run in a worker by default, where they see only what the worker already mounts.

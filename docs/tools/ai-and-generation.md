@@ -61,6 +61,7 @@ Use the `image_*` options in the configuration table below for supported overrid
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
 `transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
+The path follows the agent's `file_access`: with the default `workspace` it must name a regular file inside the agent workspace, and relative paths resolve from there.
 `generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -184,7 +185,8 @@ generate_video("A slow cinematic flythrough of a neon data center.")
 ### What It Does
 
 `groq` exposes `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`.
-`transcribe_audio()` and `translate_audio()` accept either a local file path or a public URL.
+`transcribe_audio()` and `translate_audio()` accept either a local file path or a public `http` or `https` URL, which Groq downloads itself.
+A local path follows the agent's `file_access`: with the default `workspace` it must name a regular file inside the agent workspace, and relative paths resolve from there.
 `translate_audio()` translates the source audio to English using the configured translation model.
 `generate_speech()` uses the configured Groq TTS model and voice and returns an attached WAV artifact.
 All three functions use the Groq SDK directly and require a Groq API key.

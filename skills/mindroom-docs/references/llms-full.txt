@@ -7715,6 +7715,7 @@ browser_control(action="screenshot", target="desktop", fullPage=True, returnAtta
 
 `web_browser_tools` exposes `open_page(url, new_window=False)`.
 It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system.
+It opens only `http` and `https` URLs and refuses `file:` paths, other URI schemes, and scheme-less strings, so the host never hands local files or application links to their operating-system handlers.
 It does not return page content, DOM state, screenshots, or automation handles.
 This makes it useful for human handoff or local desktop workflows, but not for scraping.
 
@@ -8429,6 +8430,7 @@ Use the `image_*` options in the configuration table below for supported overrid
 
 `openai` exposes `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
 `transcribe_audio()` expects a local file path and sends it to the configured transcription model, which defaults to `gpt-transcribe`.
+The path follows the agent's `file_access`: with the default `workspace` it must name a regular file inside the agent workspace, and relative paths resolve from there.
 `generate_image()` uses the configured `image_model`, defaults to `gpt-image-2.5-sunburst`, and returns attached image bytes rather than only a remote URL.
 `generate_speech()` uses the configured OpenAI TTS model, voice, and output format and returns an attached audio artifact.
 
@@ -8552,7 +8554,8 @@ generate_video("A slow cinematic flythrough of a neon data center.")
 ### What It Does
 
 `groq` exposes `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`.
-`transcribe_audio()` and `translate_audio()` accept either a local file path or a public URL.
+`transcribe_audio()` and `translate_audio()` accept either a local file path or a public `http` or `https` URL, which Groq downloads itself.
+A local path follows the agent's `file_access`: with the default `workspace` it must name a regular file inside the agent workspace, and relative paths resolve from there.
 `translate_audio()` translates the source audio to English using the configured translation model.
 `generate_speech()` uses the configured Groq TTS model and voice and returns an attached WAV artifact.
 All three functions use the Groq SDK directly and require a Groq API key.
@@ -8950,6 +8953,8 @@ Despite the `enable_process_video` config name, the current upstream method it e
 `stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
 Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
+Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
+MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output replaces its target only once it is complete.
 
 ### Configuration
 
@@ -13965,7 +13970,8 @@ send_email(
 ### What It Does
 
 `airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
-If `dags_dir` is a string, the upstream toolkit resolves it relative to the current working directory at tool initialization time.
+A relative `dags_dir` resolves from the agent workspace, which is also the default DAG directory.
+DAG paths follow the agent's `file_access`: with the default `workspace`, `read_dag_file()` and `save_dag_file()` refuse files outside the agent workspace, so a DAG folder elsewhere needs `file_access: unrestricted`.
 `save_dag_file()` creates missing parent directories before writing the target DAG file.
 This tool manages DAG source files only.
 It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
@@ -13974,7 +13980,7 @@ It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state,
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the current working directory when given as a string. |
+| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the agent workspace when relative. |
 | `enable_save_dag_file` | `boolean` | `no` | `true` | Enable `save_dag_file()`. |
 | `enable_read_dag_file` | `boolean` | `no` | `true` | Enable `read_dag_file()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream Airflow toolkit surface. |
@@ -13997,7 +14003,7 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 ### Notes
 
 - Use `airflow` when the job is editing DAG source files, not when you need live Airflow control-plane access.
-- `dags_dir` is not a MindRoom-managed workspace root like `base_dir` on some local execution tools.
+- `dags_dir` only sets where relative DAG paths start; the agent's `file_access` decides which files the tool may reach.
 - Keep the configured directory aligned with the filesystem path your Airflow deployment actually watches.
 
 ## [`e2b`]
@@ -22191,6 +22197,10 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Tool preparation does not expose the per-run Function copy the provider calls. | Expose the bound per-run Function from public preparation; no issue or PR identified. | `agno_compat_prepared_tools.py`; BashPresentationFunction reports its prepared copy so the CLI checkpoint can match provider calls exactly. |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
+| MoviePyVideoTools hands model-chosen video, caption, and output paths to `open()`, `os.replace`, and FFmpeg by name. | Tracking gap: accept caller-supplied input readers and output writers; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; `tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access` and the probes in `tests/test_file_access_contract.py`. |
+| OpenAITools and GroqTools open model-chosen audio paths by name, and GroqTools reads any existing path before treating a source as a URL. | Tracking gap: accept a caller-supplied file opener for local audio; upstream tracking remains unverified. | `tools/agno_compat_openai.py` and `tools/agno_compat_groq.py`; the probes in `tests/test_file_access_contract.py`. |
+| AirflowTools defaults its DAG directory to the process working directory and reads and writes DAG files by path. | Tracking gap: accept a caller-supplied base directory descriptor or file reader and writer; upstream tracking remains unverified. | `tools/agno_compat_airflow.py`; `tests/test_airflow_tools.py` and the probes in `tests/test_file_access_contract.py`. |
+| WebBrowserTools hands any URI scheme, including `file:` paths and application links, to the host's URL handlers. | Tracking gap: open only `http` and `https` URLs; upstream tracking remains unverified. | `tools/agno_compat_webbrowser.py`; `tests/test_web_browser_tools.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | The Skills tool entrypoints are private methods with no hook for when an agent loads a skill, so the skill learner cannot count workspace skill loads without overriding `_get_skill_instructions`. | Tracking gap: call a hook when a skill's instructions or files are loaded; no matching issue or PR identified. | `_MindroomSkills` in `tool_system/skills.py`; usage coverage in `tests/test_skills.py`. |
@@ -22254,7 +22264,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
 | `tools/agno_compat_modelslabs.py` | Generation orchestration polls provider job identities, accepts numeric ETAs, retains completed outputs, and distinguishes retryable status failures from terminal rejection while reusing SDK payload and media helpers. | `tools/modelslabs.py` retains tool registration, optional imports, and authored file-type normalization; nonwaiting generation stays upstream. |
-| `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, and owned temporary audio cleanup; SDK parsing and temporary-file helpers remain shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings and atomic output publication are preserved. |
+| `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, owned temporary audio cleanup, and media paths resolved under `file_access`, with inputs copied through no-follow descriptors into a private staging directory and outputs published by atomic no-follow replacement; SDK parsing remains shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings are preserved, and `file_access.py` and `tools/path_safety.py` own path authorization. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, private run-table access, monotonic run insertion inside owner transactions with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy; `history/archive.py` shares the deletion and insertion transactions to move runs into and out of the compaction archive. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
@@ -22277,6 +22287,10 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tools/agno_compat_trafilatura.py` | Replaces the Agno and Trafilatura spider download bindings with fetchers that request uncompressed bodies and validate every URL, redirect hop, and dialed address within Trafilatura's timeout, redirect, and size limits. | `tools/trafilatura.py` installs the guard before returning the toolkit; upstream extraction, crawling, and result formats are unchanged. |
 | `tools/agno_compat_newspaper4k.py` | Replaces newspaper4k's article helper with one that downloads an uncompressed, size-limited body after validating every URL, redirect hop, and dialed address, then parses it without image extraction. | `tools/newspaper4k.py` installs the guard before returning the toolkit; upstream text extraction and result format are unchanged. |
 | `tools/agno_compat_file_generation.py` | Replaces the saved-file writer with an atomic, no-follow write into a workspace-relative output directory and keeps saves off without a workspace. | `tools/file_generation.py` returns the adapter; upstream generation, sanitized file names, and result artifacts are unchanged. |
+| `tools/agno_compat_openai.py` | Copied transcription call that opens the audio file under `file_access` through a no-follow, non-blocking descriptor. | `tools/openai.py` returns the adapter; image and speech generation stay upstream, and `file_access.py` owns path authorization. |
+| `tools/agno_compat_groq.py` | Copied transcription and translation calls that send only `http` and `https` sources as URLs and open other sources under `file_access` through no-follow, non-blocking descriptors. | `tools/groq.py` returns the adapter; speech generation stays upstream, and `file_access.py` owns path authorization. |
+| `tools/agno_compat_airflow.py` | Replaces DAG reads and writes with resolution from a workspace-relative DAG directory under `file_access`, no-follow reads, and atomic no-follow writes. | `tools/airflow.py` returns the adapter; `file_access.py` and `tools/path_safety.py` own path authorization. |
+| `tools/agno_compat_webbrowser.py` | Refuses every `open_page()` URL that is not `http` or `https` before the upstream opener runs. | `tools/web_browser_tools.py` returns the adapter; the upstream opener and its tab or window choice are unchanged. |
 | `custom_tools/agno_compat_github_errors.py` | Capture of typed failures across serialized Agno results and prefix/logger binding. | `custom_tools/github.py` retains credential ownership and refresh, PyGithub requester policy, OAuth recovery, and sanitized output/log messages. |
 | `custom_tools/agno_compat_replicate.py` | Copied media-call boundary with a credential-bound Replicate client, inherited output parsing, and private SDK transport cleanup. | `tool_system/metadata.py` retains scoped credential resolution; `tools/replicate.py` retains lazy registration, and the adapter closes each request client after consuming outputs. |
 | `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, lossless Agno custom-result formatting, and a browser launched only after URL validation, through a destination relay that validates every connection at dial time. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
@@ -22418,15 +22432,15 @@ Every tool declares how its own file access relates to this setting.
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `browserbase`, `slack`, `web_browser_tools`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
-| Other tools | Everything else | Take no local file paths |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`, `moviepy_video_tools`, `groq`, `openai`, `airflow`, `web_browser_tools`).
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -22435,7 +22449,7 @@ The model sees the effective file access and the unconfined tools in its tool ex
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The unconfined non-code tools listed above do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `visualization`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
   This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search.
   They run in a worker by default, where they see only what the worker already mounts.

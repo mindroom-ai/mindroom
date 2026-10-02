@@ -402,6 +402,12 @@ _.image_to_image  # FalTools registers this override as an image-editing tool (s
 _.generate_media  # FalTools registers this override as a media-generation tool (src/mindroom/custom_tools/fal.py)
 _.download_file_from_sandbox  # E2BTools registers this override as a file-transfer tool (src/mindroom/custom_tools/e2b.py)
 _.download_chart_data  # E2BTools registers this override as a chart-export tool (src/mindroom/custom_tools/e2b.py)
+_.transcribe_audio  # OpenAITools and GroqTools register these file_access overrides (src/mindroom/tools/agno_compat_openai.py, src/mindroom/tools/agno_compat_groq.py)
+_.translate_audio  # GroqTools registers this file_access override (src/mindroom/tools/agno_compat_groq.py)
+_.extract_audio  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
+_.create_srt  # MoviePyVideoTools registers this file_access override (src/mindroom/custom_tools/agno_compat_moviepy.py)
+_.save_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
+_.read_dag_file  # AirflowTools registers this file_access override (src/mindroom/tools/agno_compat_airflow.py)
 
 _collections_to_query  # Agno calls this hook to resolve the exact published read collection.
 

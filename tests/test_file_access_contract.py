@@ -11,10 +11,12 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 
+import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
 import mindroom.custom_tools.coding as coding_module
@@ -22,11 +24,15 @@ import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
 import mindroom.custom_tools.google_drive as google_drive_module
 import mindroom.media_delivery as media_delivery_module
+import mindroom.tools.agno_compat_airflow as airflow_module
+import mindroom.tools.agno_compat_groq as groq_module
+import mindroom.tools.agno_compat_openai as openai_module
 import mindroom.tools.file as file_tool_module
 import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments import load_attachment
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
+from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
@@ -34,6 +40,9 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
+from mindroom.tools.agno_compat_groq import MindRoomGroqTools
+from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 from mindroom.tools.file import file_tools
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
@@ -188,6 +197,77 @@ async def _upload_to_e2b(
     return tool.sandbox.files.stored.get("upload.bin") == _PNG
 
 
+class _AudioEndpoint:
+    """Record the bytes of every file an OpenAI or Groq audio request uploads."""
+
+    def __init__(self) -> None:
+        self.uploads: list[bytes] = []
+
+    def create(self, *, file: tuple[str, BinaryIO], **_kwargs: object) -> str:
+        self.uploads.append(file[1].read())
+        return "transcript"
+
+
+async def _transcribe_with_openai(
+    _tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    endpoint = _AudioEndpoint()
+    client = SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint))
+    monkeypatch.setattr(openai_module, "OpenAIClient", lambda **_kwargs: client)
+    tool = MindRoomOpenAITools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    tool.transcribe_audio(raw_path)
+    return endpoint.uploads == [_PNG]
+
+
+async def _transcribe_with_groq(
+    _tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    endpoint = _AudioEndpoint()
+    tool = MindRoomGroqTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
+    monkeypatch.setattr(tool, "client", SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint)))
+    tool.transcribe_audio(raw_path)
+    return endpoint.uploads == [_PNG]
+
+
+async def _extract_audio_with_moviepy(
+    _tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    videos: list[bytes] = []
+
+    def open_video(path: str) -> SimpleNamespace:
+        videos.append(Path(path).read_bytes())
+        audio = SimpleNamespace(write_audiofile=lambda output: Path(output).write_bytes(b"audio"))
+        return SimpleNamespace(audio=audio, close=lambda: None)
+
+    monkeypatch.setattr(moviepy_module, "VideoFileClip", open_video)
+    tool = MindRoomMoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
+    tool.extract_audio(raw_path, "audio.wav")
+    return videos == [_PNG]
+
+
+async def _read_dag_file(
+    _tmp_path: Path,
+    _monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    tool = MindRoomAirflowTools(tool_output_workspace_root=workspace, file_access=file_access)
+    return tool.read_dag_file(raw_path) == _TEXT
+
+
 async def _read_with_file_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
@@ -218,6 +298,10 @@ _PROBES = (
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
+    _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),
+    _ToolProbe("groq", "transcribe_audio", _transcribe_with_groq, groq_module),
+    _ToolProbe("moviepy_video_tools", "extract_audio", _extract_audio_with_moviepy, moviepy_module),
+    _ToolProbe("airflow", "read_dag_file", _read_dag_file, airflow_module, "doc.txt"),
     # `file` and `coding` resolve paths themselves and read through descriptors pinned
     # from their base directory; their own link-swap test is below.
     _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),
