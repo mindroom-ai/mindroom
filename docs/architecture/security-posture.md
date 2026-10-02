@@ -56,6 +56,7 @@ Reads through those descriptors are capped per surface.
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
 A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.
+The thread exporter decides whether a file changed by comparing its text rather than parsing it, and indexes a thread file too large to parse whole from the thread header before its messages.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.

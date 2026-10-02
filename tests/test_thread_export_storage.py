@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from mindroom import yaml_io
 from mindroom.thread_export import clear_thread_export_root
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.models import ThreadExportRoom
@@ -523,16 +524,50 @@ def test_thread_export_yaml_with_too_many_nodes_is_refused(tmp_path: Path) -> No
     write_thread_payload(output_dir, room, "$planted:localhost", payload)
     planted = output_dir / "lobby" / _thread_filename("$planted:localhost")
     planted.write_text(
-        'version: 1\nthread:\n  id: "$planted:localhost"\n  source: matrix\nmessages: []\n'
-        f"padding: [{'a,' * 250_000}a]\n",
+        'version: 1\nthread:\n  id: "$planted:localhost"\n  source: matrix\n'
+        f"messages:\n- sender: '@planted:localhost'\n  padding: [{'a,' * 250_000}a]\n",
         encoding="utf-8",
     )
 
     write_room_index(output_dir, room)
-    assert json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"] == []
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["thread_id"] == "$planted:localhost"
+    assert entry["participants"] == []
 
     assert write_thread_payload(output_dir, room, "$planted:localhost", payload) is True
     assert "padding" not in planted.read_text(encoding="utf-8")
+
+
+def test_thread_too_long_to_parse_whole_stays_indexed_and_is_not_rewritten(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The primary's own export of a thread above the YAML node limit is indexed and left alone while unchanged."""
+    monkeypatch.setattr(yaml_io, "_MAX_UNTRUSTED_NODES", 500)
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    messages = [
+        {"event_id": f"$event-{index}:localhost", "sender": "@user:localhost", "timestamp": index + 1, "body": "hi"}
+        for index in range(100)
+    ]
+
+    def payload(exported_at: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "room": {"key": "lobby", "id": "!lobby:localhost", "name": "Lobby", "alias": "#lobby:localhost"},
+            "thread": {"id": "$long:localhost", "source": "matrix", "exported_at": exported_at, "message_count": 100},
+            "messages": messages,
+        }
+
+    assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00+00:00")) is True
+    write_room_index(output_dir, room)
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["thread_id"] == "$long:localhost"
+    assert entry["message_count"] == 100
+
+    with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
+        assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
+        write_room_index(output_dir, room)
 
 
 @pytest.mark.parametrize("filename", ["marker", "index"])
