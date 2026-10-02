@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
 
-# Agno searches only text files below this size.
+# Agno searches only text files up to this size.
 _SEARCH_CONTENT_MAX_BYTES = 500 * 1024
 
 
