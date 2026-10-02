@@ -3,6 +3,7 @@
 # ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 
 import asyncio
+import time
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
@@ -18,12 +19,11 @@ from agno.tools.function import FunctionCall
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
-from mindroom import minimal_agent as module
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
-from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
@@ -277,8 +277,8 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
             assert shell_env is not None
             # This agent's shell runs in MindRoom, so its commands call the local API.
             assert shell_env.api_url == "http://127.0.0.1:8765"
-            assert owner.authenticate(shell_env.token, now_ns=module.time.time_ns()) is owner.owner
-            assert 0 < lifetime.grant_expires_at_ns - module.time.time_ns() <= module.MAX_CLI_GRANT_LIFETIME_NS
+            assert owner.authenticate(shell_env.token, now_ns=time.time_ns()) is owner.owner
+            assert 0 < lifetime.grant_expires_at_ns - time.time_ns() <= MAX_CLI_GRANT_LIFETIME_NS
             assert any(item.get("function") == "run_shell_command" for item in owner.catalog.metadata())
             catalog = owner.catalog
             agent.get_tools(
@@ -290,7 +290,7 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
             assert lifetime.owner is owner
             assert owner.shell_env is shell_env
     with pytest.raises(CliAuthenticationError):
-        owner.authenticate(shell_env.token, now_ns=module.time.time_ns())
+        owner.authenticate(shell_env.token, now_ns=time.time_ns())
 
 
 @pytest.mark.asyncio

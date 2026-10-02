@@ -344,6 +344,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
 ]
 visibility = [
+    "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.turn",
     "mindroom.api.agent_cli",
     "mindroom.minimal_agent",
@@ -385,6 +386,7 @@ depends_on = [
     "mindroom.tool_system.tool_access",
 ]
 visibility = [
+    "mindroom.agent_cli.response_owner",
     "mindroom.minimal_agent",
 ]
 
@@ -395,6 +397,25 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.agent_cli.response_owner"
+depends_on = [
+    "mindroom.agent_cli.session",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.turn",
+    "mindroom.approval_tools",
+]
+visibility = [
+    "mindroom.cli_shell_agent",
+    "mindroom.minimal_agent",
+]
+
+[[interfaces]]
+from = ["mindroom.agent_cli.response_owner"]
+expose = [
+    "bind_response_owner",
+]
+
+[[modules]]
 path = "mindroom.agent_cli.shell_access"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
@@ -402,6 +423,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
 ]
 visibility = [
+    "mindroom.agent_cli.response_owner",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
 ]
@@ -1188,12 +1210,12 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
-    "mindroom.minimal_agent",
     "mindroom.cli_approval_recovery",
     "mindroom.delegation.execution",
     "mindroom.ai",
     "mindroom.approval_execution",
     "mindroom.teams",
+    "mindroom.agent_cli.response_owner",
 ]
 
 [[modules]]
@@ -7553,12 +7575,9 @@ depends_on = [
     "mindroom.agent_cli.bash",
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
-    "mindroom.agent_cli.session",
-    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_cli.turn",
     "mindroom.agent_knowledge_descriptions",
-    "mindroom.approval_tools",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",

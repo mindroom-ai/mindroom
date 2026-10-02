@@ -28,6 +28,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, approval_execution, approval_tools, cli_approval_recovery, minimal_agent
+from mindroom.agent_cli import response_owner
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
@@ -135,7 +136,7 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         resumed_counts.append(current_cli_lifetime().continuation_count)
         return AgentCliShellEnv("http://127.0.0.1:8765", token)
 
-    monkeypatch.setattr(minimal_agent, "agent_cli_shell_env", shell_env)
+    monkeypatch.setattr(response_owner, "agent_cli_shell_env", shell_env)
     monkeypatch.setattr(agents, "_initialize_agent_instance", build)
     monkeypatch.setattr(
         agents,
