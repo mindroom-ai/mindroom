@@ -25703,6 +25703,7 @@ If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner f
 Keep this source stable because changing it changes future derived credential encryption keys.
 New provisioned instances receive a derived credential encryption key by default.
 When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
+An existing instance whose MindRoom storage PVC no longer exists, such as one torn down after its grace period, starts on an empty volume and also receives the derived key.
 To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
 Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.

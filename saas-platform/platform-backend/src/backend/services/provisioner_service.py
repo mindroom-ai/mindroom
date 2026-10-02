@@ -393,15 +393,19 @@ async def _existing_instance_credentials_encryption_key(instance_id: str, namesp
 
 
 async def _provision_credentials_encryption_key(
-    *, customer_id: str, existing_instance_id: Any, data: dict, namespace: str
+    *, customer_id: str, existing_instance_id: Any, existing_storage: bool, data: dict, namespace: str
 ) -> str:
-    """Return the instance chart credential encryption key value for this provision run."""
+    """Return the instance chart credential encryption key value for this provision run.
+
+    Only an existing MindRoom storage volume can hold plaintext credential files, so an instance without one, new or
+    torn down, always gets the derived key.
+    """
     existing_key = (
         await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
     )
     if existing_key is not None:
         return existing_key
-    if not existing_instance_id or data.get("enable_credentials_encryption") is True:
+    if not existing_storage or data.get("enable_credentials_encryption") is True:
         return _instance_credentials_encryption_key(customer_id)
     return ""
 
@@ -412,6 +416,7 @@ class _ExistingVolumes:
 
     storage_class_name: str | None = None
     storage: str | None = None  # Largest requested size; a bound PVC can grow but never shrink.
+    mindroom_storage: bool = False  # Whether the MindRoom storage PVC, which holds the credential store, exists.
 
 
 def _quantity_bytes(quantity: str) -> float:
@@ -434,7 +439,8 @@ async def _existing_instance_volumes(instance_id: str, namespace: str) -> _Exist
     if not out.strip():
         return _ExistingVolumes()
 
-    specs = [item.get("spec", {}) for item in json.loads(out).get("items", [])]
+    items = json.loads(out).get("items", [])
+    specs = [item.get("spec", {}) for item in items]
     storage_classes = {spec.get("storageClassName", "").strip() for spec in specs} - {""}
     if len(storage_classes) > 1:
         msg = f"Instance {instance_id} has PVCs with different storage classes: {', '.join(sorted(storage_classes))}"
@@ -443,6 +449,9 @@ async def _existing_instance_volumes(instance_id: str, namespace: str) -> _Exist
     return _ExistingVolumes(
         storage_class_name=next(iter(storage_classes), None),
         storage=max(sizes, key=_quantity_bytes, default=None),
+        mindroom_storage=any(
+            item.get("metadata", {}).get("name") == f"mindroom-storage-{instance_id}" for item in items
+        ),
     )
 
 
@@ -807,12 +816,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     sandbox_proxy_token = secrets.token_hex(32)
     try:
         await _enforce_pod_security_baseline(namespace)
-        # Existing instances may have plaintext credential files; preserve their current encryption state.
-        credentials_encryption_key = await _provision_credentials_encryption_key(
-            customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
-        )
         existing_volumes = (
             await _existing_instance_volumes(customer_id, namespace) if existing_instance_id else _ExistingVolumes()
+        )
+        # Existing volumes may have plaintext credential files; preserve their current encryption state.
+        credentials_encryption_key = await _provision_credentials_encryption_key(
+            customer_id=customer_id,
+            existing_instance_id=existing_instance_id,
+            existing_storage=existing_volumes.mindroom_storage,
+            data=data,
+            namespace=namespace,
         )
         storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
