@@ -2194,8 +2194,17 @@ class TestEncryptedRelations:
             events={"$m": raw("$m", "first")},
             relations={
                 "$m": [
-                    encrypted("$foreign-edit", sender=BOB, ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"}),
-                    encrypted("$reaction", ts=5_000, relates_to={"rel_type": "m.annotation", "event_id": "$m", "key": "x"}),
+                    encrypted(
+                        "$foreign-edit",
+                        sender=BOB,
+                        ts=4_000,
+                        relates_to={"rel_type": "m.replace", "event_id": "$m"},
+                    ),
+                    encrypted(
+                        "$reaction",
+                        ts=5_000,
+                        relates_to={"rel_type": "m.annotation", "event_id": "$m", "key": "x"},
+                    ),
                 ],
             },
             olm=object(),

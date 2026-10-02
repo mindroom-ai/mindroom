@@ -362,7 +362,9 @@ async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) 
     assert await attachments_module.wait_for_attachment_cleanup_tasks()
 
     stored = [record for record in records if record is not None]
-    assert [record.attachment_id for record in stored] == [_attachment_id_for_event(f"$copy{index}") for index in range(3)]
+    assert [record.attachment_id for record in stored] == [
+        _attachment_id_for_event(f"$copy{index}") for index in range(3)
+    ]
     assert {record.local_path for record in stored} == {stored[0].local_path}
     assert [path.read_bytes() for path in (tmp_path / "incoming_media").iterdir()] == [b"%PDF-1.7 shared"]
 
