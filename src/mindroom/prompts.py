@@ -18,6 +18,7 @@ __all__ = [
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
     "DEFAULT_UNSEEN_MESSAGES_HEADER",
+    "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
     "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
     "DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS",
@@ -604,6 +605,16 @@ Each follow-up has its own audit record and does not add nesting depth.
 A running child or one awaiting approval must finish its current turn before accepting a follow-up.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
+
+
+DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept wait_timeout like other managed calls, so a child can keep working as a job.
+A human follow-up releases the wait while the child continues working.
+Once the wait is released, a child tool that requires approval pauses only the child.
+Waiting neither restarts the child nor grants tool approval.
+To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
+Direct API calls and nested delegation wait within their existing execution owner.
+If a background child needs approval, call job(action="wait", job_id=...) with its Job ID to present its exact pending approvals.
+The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation."""
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(

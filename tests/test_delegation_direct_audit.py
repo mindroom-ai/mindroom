@@ -23,8 +23,9 @@ from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.history_helpers import RecordingModel
-from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
+from tests.test_delegate_tools import _make_config
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable

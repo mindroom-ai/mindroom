@@ -137,7 +137,17 @@ def describe_event_journal(
     a password. Host, port, and database name survive, because a refusal an
     operator cannot act on is not worth printing.
     """
-    backend, database_url = _opened_database(journal_config, runtime_paths)
+    return _describe_database(*_opened_database(journal_config, runtime_paths))
+
+
+def describe_in_force_event_journal(runtime_paths: RuntimePaths) -> str | None:
+    """Describe the database already open for this config path, which a saved edit does not change."""
+    with _OPENED_DATABASES_LOCK:
+        opened = _OPENED_DATABASES.get(runtime_paths.config_path)
+    return _describe_database(*opened) if opened is not None else None
+
+
+def _describe_database(backend: str, database_url: str | None) -> str:
     if backend != "postgres":
         return "sqlite tracking/event_journal.db"
     if database_url is None:
@@ -508,6 +518,7 @@ __all__ = [
     "bind_event_journal",
     "current_binding_description",
     "describe_event_journal",
+    "describe_in_force_event_journal",
     "event_journal_binding_lock_path",
     "event_journal_binding_path",
     "event_journal_in_use_lock_path",

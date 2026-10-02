@@ -68,8 +68,7 @@ class InviteRouterTools(Toolkit):
         membership = _membership(membership_response)
         if membership == "join":
             return "Router already joined."
-        transport_agent_name = context.transport_agent_name or context.agent_name
-        transport_agent_id = identities.current_id(transport_agent_name).full_id
+        transport_agent_id = identities.current_id(context.recipient).full_id
         if not is_inviter_allowed(config, context.runtime_paths, ROUTER_AGENT_NAME, transport_agent_id):
             return "Error: Router auto-accept does not allow this Matrix transport account."
         if membership == "invite":

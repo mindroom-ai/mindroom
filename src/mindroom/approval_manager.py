@@ -30,7 +30,7 @@ from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperatio
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
     from pathlib import Path
 
     from mindroom.approval_recovery import ApprovalRecovery
@@ -800,6 +800,17 @@ class ApprovalManager:
 
     async def expire_continuation_cards(self, continuation_id: str) -> bool:
         """Enqueue and flush expiry for every card owned by one failed continuation."""
+        return await self._expire_pending_cards(lambda continuation, _tool_call_id: continuation == continuation_id)
+
+    async def expire_job_cards(self, job_ids: Collection[str]) -> bool:
+        """Expire cards presenting the approval pause of background jobs that can never resume it."""
+        # A job-owned child's call is projected as `<job_id>:<child call id>`.
+        return await self._expire_pending_cards(
+            lambda _continuation, tool_call_id: tool_call_id is not None and tool_call_id.partition(":")[0] in job_ids,
+        )
+
+    async def _expire_pending_cards(self, matches: Callable[[str, str | None], bool]) -> bool:
+        """Expire pending continuation cards matching a continuation ID and call ID; unreadable matches stay owed."""
         if self.cards is None:
             return False
         complete = True
@@ -816,10 +827,10 @@ class ApprovalManager:
                 cursor = (page[-1].created_at_ns, page[-1].delivery_id)
                 for stored in page:
                     if isinstance(stored, UnreadableApprovalCard):
-                        if stored.continuation_id == continuation_id:
+                        if matches(stored.continuation_id, None):
                             complete = False
                         continue
-                    if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
+                    if stored.target_kind == "continuation" and matches(stored.continuation_id, stored.tool_call_id):
                         complete = await self._expire_stored(room_id, stored) and complete
                 if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
                     break
@@ -877,6 +888,8 @@ class ApprovalManager:
         stored: StoredApprovalCard | UnreadableApprovalCard,
     ) -> bool | None:
         """Settle due recovery work, or return None when none is currently due."""
+        if self.recovery is not None and self.recovery.approval_is_parked(stored.continuation_id):
+            return None
         if isinstance(stored, UnreadableApprovalCard):
             return False
         if stored.resolution is not None:

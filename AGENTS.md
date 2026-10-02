@@ -278,6 +278,28 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `custom_tools/sleep.py` | Agno sleep toolkit with pauses capped at 300 seconds |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
+| `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting, published runtime, and parked work |
+| `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
+| `tool_jobs/disabled.py` | Passive preservation of saved sources and approvals while the feature is off |
+| `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
+| `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
+| `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
+| `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
+| `tool_jobs/execution_scope.py` | Response execution envelopes |
+| `tool_jobs/resources.py` | Retained resource cleanup ownership |
+| `tool_jobs/authorization.py` | Current local grants using shared construction policy |
+| `tool_jobs/execution_authority.py` | Application-entry authority checks |
+| `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
+| `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
+| `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
+| `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/completion.py` | Internal completion admission and transient waiting presentation |
+| `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
+| `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
+| `tool_system/filters.py` | Shared include/exclude function policy |
+| `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle and retrying internal completion wakeups |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
@@ -341,6 +363,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 - `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
+- `tool_jobs/` – Background tool job snapshots, outcomes, and result claims when `background_tool_jobs.enabled` is set
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences

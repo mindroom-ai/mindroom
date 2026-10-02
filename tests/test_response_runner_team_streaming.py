@@ -39,7 +39,8 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
+from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -68,6 +69,8 @@ from tests.identity_helpers import fixture_entity_matrix_id
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+    from mindroom.delivery_gateway import EditTextRequest
 
 
 def _assert_interrupted_messages(
@@ -903,6 +906,65 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     assistant_text = cast("str", persisted_run.messages[1].content)
     assert "🔧 `run_shell_command` [1]" not in assistant_text
     assert assistant_text.count("run_shell_command") == 1
+
+
+@pytest.mark.asyncio
+async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_path: Path) -> None:
+    """Stopping a team during a job wait keeps the prose and tool markers the wait published."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    config.background_tool_jobs.enabled = True
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        team_history_storage=_SessionStorage(),
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+        enable_streaming=False,
+    )
+    _install_inert_post_response_effects(coordinator)
+    edits: list[EditTextRequest] = []
+
+    async def capture_edit(request: EditTextRequest) -> bool:
+        edits.append(request)
+        return True
+
+    _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", capture_edit)
+    prior_trace = ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command", result_preview="/app")
+    prior_text = "The team checked the workspace.\n\n🔧 `run_shell_command` [1]"
+    latest_trace = [prior_trace, ToolTraceEntry(type="tool_call_started", tool_name="job")]
+    latest_text = f"{prior_text}\n\nThe team is waiting for results.\n\n🔧 `job` [2]"
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        existing_event_id="$existing",
+        existing_event_is_placeholder=False,
+    )
+
+    async def wait_then_stop(*_args: object, **_kwargs: object) -> str:
+        # The published wait is what makes Matrix newer than this response's known body.
+        await report_background_wait(
+            StreamingPresentation(latest_text, tool_trace=tuple(latest_trace)),
+            "⏳ Waiting for background work…",
+        )
+        stop = "user_stop"
+        raise asyncio.CancelledError(stop)
+
+    with patch("mindroom.response_runner.team_response", new=wait_then_stop):
+        resolution = await coordinator.generate_team_response_helper(
+            request,
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert resolution == "$existing"
+    assert len(edits) == 2
+    assert all(edit.event_id == "$existing" for edit in edits)
+    assert edits[-1].new_text == f"{latest_text}\n\n**[Response cancelled by user]**"
+    assert edits[-1].tool_trace == latest_trace
 
 
 @pytest.mark.asyncio

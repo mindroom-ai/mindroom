@@ -1,0 +1,581 @@
+"""Shared job controls preserve exact ownership and stored results."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
+
+import pytest
+from agno.agent import Agent
+from agno.models.response import ModelResponse
+from agno.team import Team
+from agno.tools.function import ToolResult
+
+from mindroom.agent_storage import create_session_storage
+from mindroom.agents import create_agent
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
+from mindroom.delegation.background import delegation_outcome
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.consumption import set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.conftest import bind_runtime_paths
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_job_helpers import start_job, tool_job_runtime
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
+
+    from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload
+
+
+@pytest.mark.asyncio
+async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
+    """Job wait waits and restores rich result."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    gate = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await gate.wait()
+        return BackgroundOutcome(
+            "completed",
+            "answer",
+            result_payload=encode_result_payload(
+                ToolResultPayload(value=ToolResult(content="answer", metadata={"proof": 1})),
+            ),
+        )
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context):
+            pending = asyncio.create_task(tools.job("wait", "ordinary"))
+            await asyncio.sleep(0)
+            assert not pending.done()
+            gate.set()
+            result = await pending
+            assert isinstance(result, ToolResult)
+            assert result.metadata == {"proof": 1}
+            assert result.content == "answer"
+            assert json.loads(await tools.job("list"))[0]["job_id"] == "ordinary"
+            assert set(tools.get_async_functions()) == {"job"}
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delegate", [False, True])
+async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) -> None:
+    """Managed agent has one job schema."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"] if delegate else [])},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        memory={"backend": "none"},
+        defaults={"tools": []},
+    )
+    bind_runtime_paths(config, runtime_paths=paths)
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+        names = [name for toolkit in agent.tools for name in toolkit.get_async_functions()]
+        assert names.count("job") == 1
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -> None:
+    """Only native job wait projects external approval."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    try:
+        await start_job(
+            runtime,
+            "native",
+            tool_name="delegate",
+            depth=0,
+            kind="delegation",
+            adapter={},
+            owner=owner,
+            operation=operation,
+        )
+        waited = await runtime.wait("native", owner=owner, depth=0)
+        await runtime.release_wait("native", waited.claim)
+        model = DelegationModel(
+            id="test",
+            responses=[ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="native")])],
+        )
+        install_tool_job_execution(model)
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)])
+        with tool_runtime_context(context):
+            response = await agent.arun("wait", session_id=context.session_id)
+        assert response.requirements
+        assert response.requirements[0].needs_external_execution
+        assert response.requirements[0].tool_execution.approval_type == "mindroom_job_wait"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path: Path, *, native: bool) -> None:
+    """A new turn rediscovers saved results while foreign requesters cannot list them."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved " * 1000)
+
+    await start_job(
+        runtime,
+        "durable",
+        tool_name="tool",
+        depth=0,
+        kind="delegation" if native else "tool",
+        adapter={"child": {"subagent_id": "reusable-child", "result": None}} if native else {},
+        owner=owner,
+        operation=operation,
+    )
+    waited = await runtime.wait("durable", owner=owner, depth=0)
+    await runtime.acknowledge_wait("durable", waited.claim)
+    await runtime.shutdown()
+    allowed = True
+    runtime = tool_job_runtime(tmp_path, authorize=lambda _: allowed)
+    await runtime.recover()
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    tools = JobTools(paths, owner)
+    try:
+        with tool_runtime_context(context):
+            summary = json.loads(await tools.job("list"))[0]
+            assert summary["job_id"] == "durable"
+            assert summary["summary_truncated"]
+            assert summary.get("subagent_id") == ("reusable-child" if native else None)
+        for foreign in (
+            replace(context, requester_id="@foreign:example.org"),
+            replace(context, agent_name="other"),
+            replace(context, target=replace(context.target, room_id="!other:example.org")),
+        ):
+            with tool_runtime_context(foreign):
+                assert json.loads(await tools.job("list")) == []
+        allowed = False
+        with tool_runtime_context(context):
+            assert json.loads(await tools.job("list")) == []
+            assert "not available" in await tools.job("wait", "durable")
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path: Path) -> None:
+    """A real Team driver routes list and wait back through the job's owning member."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = replace(_delegate_runtime_context(config, paths), agent_name="squad", transport_agent_name="squad")
+    owner = replace(build_execution_identity_from_runtime_context(context), agent_name="leader")
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved member answer")
+
+    storage = storage_factory()
+    try:
+        await start_job(runtime, "member-job", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait("member-job", owner=owner, depth=0)
+        await runtime.release_wait("member-job", waited.claim)
+        member_model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "list", action="list")]),
+                ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="member-job")]),
+                ModelResponse(content="Member consumed result"),
+            ],
+        )
+        team_model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        _call(
+                            "delegate_task_to_member",
+                            "route",
+                            member_id="leader",
+                            task="Find jobs and retrieve result",
+                        ),
+                    ],
+                ),
+                ModelResponse(content="Team done"),
+            ],
+        )
+        install_tool_job_execution(member_model)
+        install_tool_job_execution(team_model)
+        member = Agent(id="leader", model=member_model, tools=[JobTools(paths, owner)], db=storage)
+        team = Team(id="squad", model=team_model, members=[member], db=storage)
+
+        @owned_tool_execution
+        async def run() -> TeamRunOutput:
+            set_consumption_storage(storage_factory)
+            return await team.arun("Follow up", session_id=context.session_id, user_id=context.requester_id)
+
+        with tool_runtime_context(context):
+            response = await run()
+        results = response.member_responses[0].tools
+        assert json.loads(results[0].result)[0]["job_id"] == "member-job"
+        assert results[1].result == "saved member answer"
+        assert (await runtime.lookup("member-job", owner=owner, depth=0)).consumed
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "value", "stored_error", "expected_result"),
+    [
+        ("failed", None, "controlled HTTP 500 failure", "controlled HTTP 500 failure"),
+        ("failed", ToolResult(content="rich failure"), None, "rich failure"),
+        ("completed", None, None, "None"),
+    ],
+)
+async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
+    tmp_path: Path,
+    status: Literal["completed", "failed"],
+    value: ToolResult | None,
+    stored_error: str | None,
+    expected_result: str,
+) -> None:
+    """The reserved Agno control retains failure state while consuming exact saved evidence."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            status,
+            "None",
+            result_payload=encode_result_payload(ToolResultPayload(value=value, error=stored_error, elapsed=0.1)),
+        )
+
+    storage = storage_factory()
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        waited = await runtime.wait("ordinary", owner=owner, depth=0)
+        await runtime.release_wait("ordinary", waited.claim)
+        model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="ordinary")]),
+                ModelResponse(content="done"),
+            ],
+        )
+        install_tool_job_execution(model)
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
+
+        @owned_tool_execution
+        async def run() -> RunOutput:
+            set_consumption_storage(storage_factory)
+            return await agent.arun("wait", session_id=context.session_id, user_id=context.requester_id)
+
+        with tool_runtime_context(context):
+            response = await run()
+
+        tool = response.tools[0]
+        assert tool.tool_call_error is (status == "failed")
+        assert tool.result == expected_result
+        assert (await runtime.lookup("ordinary", owner=owner, depth=0)).consumed
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool", "delegation"])
+async def test_discovery_bounds_large_results_without_truncating_wait(
+    tmp_path: Path,
+    kind: Literal["tool", "delegation"],
+) -> None:
+    """Discovering large ordinary and native outcomes cannot flood context or discard their saved result."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    result = "large result " * 100_000
+
+    async def operation() -> BackgroundOutcome:
+        if kind == "delegation":
+            return delegation_outcome("completed", result)
+        return BackgroundOutcome("completed", result, result_payload=encode_result_payload(ToolResultPayload(result)))
+
+    try:
+        adapter = {"child": {"result": None}} if kind == "delegation" else {}
+        await start_job(
+            runtime,
+            "large",
+            tool_name="large_tool",
+            depth=0,
+            kind=kind,
+            adapter=adapter,
+            owner=owner,
+            operation=operation,
+        )
+        waited = await runtime.wait("large", owner=owner, depth=0)
+        await runtime.release_wait("large", waited.claim)
+        with tool_runtime_context(context):
+            tools = JobTools(paths, owner)
+            discovery = await tools.job("list")
+            assert len(discovery) < 2_000
+            summary = json.loads(discovery)[0]
+            assert summary["job_id"] == "large"
+            assert summary["summary_truncated"] is True
+            assert result.startswith(summary["summary"])
+            assert await tools.job("wait", "large") == result
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path) -> None:
+    """Management waits share the timeout contract, while work remains discoverable."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    gate = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await gate.wait()
+        return BackgroundOutcome("completed", "answer")
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context):
+            result = await tools.job("wait", "ordinary", wait_timeout=0)
+            assert json.loads(result)["status"] == "running"
+            gate.set()
+            assert await tools.job("wait", "ordinary", wait_timeout=None) == "answer"
+    finally:
+        gate.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["cancelled", "deleted"])
+async def test_interrupted_payload_read_releases_the_wait_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    """A job wait whose payload read is cancelled or finds the file gone leaves the result claimable."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    reading, release = asyncio.Event(), asyncio.Event()
+    read_payload = runtime.read_payload
+
+    async def gated_read(job: BackgroundJob) -> EncodedResultPayload:
+        reading.set()
+        await release.wait()
+        return await read_payload(job)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved", result_payload=encode_result_payload(ToolResultPayload("saved")))
+
+    tools = JobTools(paths, owner)
+    try:
+        await start_job(runtime, "read", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        monkeypatch.setattr(runtime, "read_payload", gated_read)
+        with tool_runtime_context(context):
+            waiting = asyncio.create_task(tools.job("wait", "read"))
+            await reading.wait()
+            if interruption == "cancelled":
+                waiting.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiting
+            else:
+                (tmp_path / "tool_jobs" / "read.g0.result.json").unlink()
+                release.set()
+                assert await waiting == "Tool job is not available in this conversation."
+        retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
+        assert retried.claim is not None
+        await runtime.release_wait("read", retried.claim)
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_cancel_acknowledges_only_saved_management_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    save_fails: bool,
+) -> None:
+    """A saved cancellation receipt suppresses completion; failed parent saves remain discoverable."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        return BackgroundOutcome("completed", "unreachable")
+
+    storage = storage_factory()
+    if save_fails:
+
+        def fail_save(*_args: object, **_kwargs: object) -> None:
+            msg = "storage unavailable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(type(storage), "upsert_run", fail_save)
+    try:
+        await start_job(runtime, "cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
+        model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "cancel", action="cancel", job_id="cancelled")]),
+                ModelResponse(content="stopped"),
+            ],
+        )
+        install_tool_job_execution(model)
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
+
+        @owned_tool_execution
+        async def run() -> RunOutput:
+            set_consumption_storage(storage_factory)
+            return await agent.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
+
+        with tool_runtime_context(context):
+            response = await run()
+        assert json.loads(response.tools[0].result)["status"] == "cancelled"
+        job = await runtime.lookup("cancelled", owner=owner, depth=0)
+        assert job.consumed is not save_fails
+    finally:
+        storage.close()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_generic_wait_keeps_a_paused_child_approval(tmp_path: Path) -> None:
+    """Without the native projection, waiting on a paused child reports it and leaves its approval unconsumed."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    await start_job(
+        runtime,
+        "paused",
+        tool_name="delegate",
+        depth=0,
+        kind="delegation",
+        adapter={},
+        owner=owner,
+        operation=operation,
+    )
+    try:
+        with tool_runtime_context(context):
+            assert json.loads(await JobTools(paths, owner).job("wait", "paused"))["status"] == "awaiting_approval"
+        job = await runtime.lookup("paused", owner=owner, depth=0)
+        assert job.status == "awaiting_approval"
+        assert not job.consumed
+        assert await runtime.pending_outcomes() != []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "arguments", "message"),
+    [
+        ("wait", {}, "job_id is required"),
+        ("list", {"limit": 0}, "limit"),
+        ("wait", {"job_id": "missing", "wait_timeout": -1}, "wait_timeout"),
+        ("cancel", {"job_id": "missing"}, "not available"),
+    ],
+)
+async def test_job_errors_return_as_tool_results(
+    tmp_path: Path,
+    action: str,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """Every expected mistake comes back as a message the model can act on, never a traceback."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        with tool_runtime_context(context):
+            result = await JobTools(paths, build_execution_identity_from_runtime_context(context)).job(
+                action,
+                **arguments,
+            )
+        assert message in result
+    finally:
+        await runtime.shutdown()

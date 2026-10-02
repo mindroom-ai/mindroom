@@ -134,6 +134,7 @@ class ToolRuntimeContext:
     tool_function_filter: Callable[[Function], bool] | None = None
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
+    source_kind: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
 
@@ -141,6 +142,11 @@ class ToolRuntimeContext:
     def current_config(self) -> Config:
         """Return the managed runtime's current config or this detached snapshot."""
         return self.config_provider() if self.config_provider is not None else self.config
+
+    @property
+    def recipient(self) -> str:
+        """The entity whose Matrix account answers this turn: its team transport, or the agent itself."""
+        return self.transport_agent_name or self.agent_name
 
     def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
         """Return the injected index or reject membership-aware extension work."""
@@ -388,6 +394,7 @@ class ToolRuntimeSupport(ToolRuntimeModelBinding):
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
+            source_kind=source_envelope.source_kind if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,
         )
@@ -534,7 +541,7 @@ def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=context.agent_name,
-        transport_agent_name=context.transport_agent_name or context.agent_name,
+        transport_agent_name=context.recipient,
         runtime_paths=context.runtime_paths,
         requester_id=context.requester_id,
         room_id=target.room_id,
@@ -561,8 +568,7 @@ def execution_identity_matches_tool_runtime_context(
         and execution_identity.session_id == target.session_id
         and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
         and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
-        and (execution_identity.transport_agent_name or execution_identity.agent_name)
-        == (context.transport_agent_name or context.agent_name)
+        and execution_identity.recipient == context.recipient
     )
 
 

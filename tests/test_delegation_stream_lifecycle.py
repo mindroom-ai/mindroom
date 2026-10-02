@@ -21,9 +21,8 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable

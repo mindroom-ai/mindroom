@@ -772,6 +772,31 @@
       "title": "AuthorizationConfig",
       "type": "object"
     },
+    "BackgroundToolJobsConfig": {
+      "additionalProperties": false,
+      "description": "Startup-pinned generic execution policy for registered toolkits.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable managed tool waits and durable jobs; requires restart.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "exclude_toolkits": {
+          "default": [
+            "shell"
+          ],
+          "description": "Registered toolkit names that keep their own waiting behavior; requires restart.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Toolkits",
+          "type": "array"
+        }
+      },
+      "title": "BackgroundToolJobsConfig",
+      "type": "object"
+    },
     "CallsConfig": {
       "additionalProperties": false,
       "description": "MatrixRTC settings, named call profiles, and agent assignments.",
@@ -4407,6 +4432,16 @@
         "livekit_service_url": null
       },
       "description": "Voice call (MatrixRTC) configuration"
+    },
+    "background_tool_jobs": {
+      "$ref": "#/$defs/BackgroundToolJobsConfig",
+      "default": {
+        "enabled": false,
+        "exclude_toolkits": [
+          "shell"
+        ]
+      },
+      "description": "Opt-in managed background tool execution, fixed at process startup."
     },
     "event_journal": {
       "$ref": "#/$defs/EventJournalConfig",

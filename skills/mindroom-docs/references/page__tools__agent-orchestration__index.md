@@ -246,7 +246,10 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Both return the child's response inline.
+Calls wait for the child's response by default.
+With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below, unless `delegate` is excluded.
+In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
+OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
@@ -263,7 +266,7 @@ The override takes precedence over thread and room model choices; omitting `mode
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 Set `minimal` to `True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
 The tool description recommends this for self-contained tasks whose child does not need that context and, when the deployment supports minimal mode, lists the allowed subagents that have the `shell` tool.
-The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
+When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
 Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
@@ -280,10 +283,131 @@ The stable ID remains usable across parent turns and restarts, within the same c
 Follow-ups preserve the child session, selected model and mode, and nesting depth, recheck current permissions, and require the original storage scope.
 The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
-Calls wait for a result and do not queue messages into a running child or one awaiting approval.
+Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
 After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
+
+### Background jobs
+
+This experimental feature is disabled by default and requires the root option `background_tool_jobs.enabled: true` and a restart; see [Background Tool Jobs](https://docs.mindroom.chat/configuration/#background-tool-jobs).
+When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function, and shell tools keep their own background commands.
+
+Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
+Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
+This waiting budget is separate from a tool's own execution or network timeout.
+The name `wait_timeout` is reserved on managed tools.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
+Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
+Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
+Only functions of toolkits that MindRoom assembles for an agent can become jobs.
+Functions the SDK generates itself, including knowledge search, skill access, learning, and team delegation, always run inline without `wait_timeout`.
+Toolkits whose SDK connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, also run inline without `wait_timeout`.
+Waiting policy is decided when a call executes, so an approved call that resumes after a restart follows the exclusions configured at that point.
+If its toolkit became excluded meanwhile and the call carried a wait budget, it fails instead of running without the budget it asked for.
+
+Exclude complete toolkits in YAML when they should retain native execution:
+
+```yaml
+background_tool_jobs:
+  enabled: true
+  exclude_toolkits: [shell, my_plugin_toolkit]
+```
+
+The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
+Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
+The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls on human input.
+A tool's own argument named `wait_timeout` remains its native argument.
+Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
+
+With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
+Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and cannot be controlled with `job`.
+
+| `wait_timeout` | Behavior |
+| --- | --- |
+| Omitted or `null` | Wait until completion or a human follow-up. |
+| `0` | Return a job handle immediately while execution continues. |
+| Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
+
+Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
+A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
+The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
+
+Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
+It also stops automatic replies and further managed work originating from those jobs; a restart does not resume them.
+Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
+An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
+Saved results remain available for explicit retrieval.
+Toolkits excluded from managed jobs, including shell by default, retain their own cancellation controls.
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None, mindroom_output_path=None)` function manages ordinary tools and native delegation.
+The management function never backgrounds itself.
+Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
+
+| Action | Behavior |
+| --- | --- |
+| `list` | Discover accessible jobs, active first, with their status, saved summaries, bounded pagination, and retained terminal outcomes. |
+| `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
+
+Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+Cleanup exceptions reported to the job runtime are retained as failures.
+
+For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
+Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
+Non-MCP constructor settings are part of the accepted tool identity, stored as a digest: changing those authored settings cancels the tool's still-running jobs and blocks access to saved results until the settings match again.
+Include/exclude filters remain checked per function.
+Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and completion delivery.
+Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
+The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
+Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
+For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+Large supported results use the same configured automatic file-saving policy as other tools.
+Redirecting a stored result does not rerun the original tool or change its saved output.
+A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
+Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
+Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
+Remote service availability alone does not revoke access to a saved result.
+
+Native child approvals retain the existing persisted parent-child continuation and approval cards.
+After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
+Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
+Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
+Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
+Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
+
+After the agent finishes independent work, the runtime waits for outstanding jobs without repeated model polling.
+Streaming and non-streaming responses show waiting progress, and a human message can release the wait immediately.
+Resuming an approved tool follows the same waiting behavior.
+Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
+A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+Result continuations retain previously delivered prose and tool traces in the final response.
+Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
+Runtime updates retain requester authorization but are identified separately from human input.
+Silent scheduled work retains its quiet delivery policy and run receipts across later completions and restarts.
+Automatic joins keep quiet and ordinary results separate.
+As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
+
+A result is consumed only after exact persisted parent tool-result evidence is verified.
+Listing jobs or scheduling internal completion work does not consume it.
+Consumed results, errors, and acknowledged cancellation do not cause another completion response.
+If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
+Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+Reading an already consumed result returns its original output without reapplying session-state changes.
+Consumed results remain available for 30 days after their last acknowledged read.
+Hourly cleanup then removes the whole job, only after the originating turn has finished and the conversation has no pending approval continuation.
+Active jobs, unread results, and approval-owned results remain available; missing source-completion evidence also prevents expiry.
+An expired job is unavailable like any unknown job; its originating turn is complete, so the original tool call cannot run again.
+Retained plugin jobs require the same plugin installation path and current grants; moving the plugin directory invalidates that recorded callable provenance.
+
+A job stores its full result once, together with its session-state updates and stream replay, in one durable envelope with a 64 MiB encoded JSON limit, including base64 expansion and artifacts.
+That envelope is a file of its own, read only when the result is retrieved.
+Job metadata keeps only a summary of at most 500 characters, and tool arguments are stored separately, so this is not a limit on total job storage.
+A result that exceeds this limit becomes a failed job with a size-limit error.
+Artifact files are read within the result's remaining budget, so a file that cannot fit is rejected before it is read; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 `run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
@@ -356,8 +480,9 @@ continue_subagent(
 - `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
 - Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
+- With background jobs enabled, children that continue in the background can overlap with later delegated jobs.
 - Use `continue_subagent` for another answer from an existing child; use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) for a conversation visible in Matrix.
-- Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+- Use [`delegate`] for a specialist task that returns its answer inline or through a managed background job.
 
 ## [`dynamic_workflow`]
 

@@ -76,6 +76,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -98,6 +99,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
     FakeModel,
@@ -113,12 +115,53 @@ from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from mindroom.tool_system.events import StructuredStreamChunk
-
 
 _TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+def test_team_joined_prefix_survives_tool_reordering_and_approval_restore() -> None:
+    """A joined reply's published trace stays frozen while new approval calls retain exact slots."""
+    prefix = StreamingPresentation(
+        response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+        tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+    )
+    presentation = _TeamStreamPresentation.new(
+        ["first", "second"],
+        ["First", "Second"],
+        show_tool_calls=True,
+        prefix=prefix,
+    )
+    presentation.append_member("second", "Recovered member work.")
+    presentation.start_member_tool("second", ToolExecution(tool_call_id="second-call", tool_name="inspect_second"))
+    presentation.start_member_tool("first", ToolExecution(tool_call_id="first-call", tool_name="inspect_first"))
+
+    assert presentation.render_body().startswith(prefix.response_text + "\n\n")
+    assert [entry.tool_name for entry in presentation.tool_trace] == ["inspect", "inspect_first", "inspect_second"]
+    assert "🔧 `inspect_first` [2] ⏳" in presentation.render_body()
+    assert "🔧 `inspect_second` [3] ⏳" in presentation.render_body()
+    assert [tool.tool_call_id for tool in presentation.tool_tracker.pending_tools] == ["second-call", "first-call"]
+
+    restored = _TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=True,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+        prior_response_text=presentation.render_body(),
+    )
+    restored.complete_member_tool(
+        "second",
+        ToolExecution(tool_call_id="second-call", tool_name="inspect_second", result="done"),
+    )
+    restored.append_consensus("Recovered consensus.")
+
+    assert restored.render_body().startswith(prefix.response_text + "\n\n")
+    assert "🔧 `inspect_second` [3]\n" in restored.render_body()
+    assert [tool.tool_call_id for tool in restored.tool_tracker.pending_tools] == ["first-call"]
+    assert restored.tool_trace[0].type == "tool_call_started"
+    assert restored.tool_trace[2].type == "tool_call_completed"
+    assert prefix.tool_trace[0].type == "tool_call_started"
 
 
 def test_team_stream_presentation_keeps_duplicate_labels_in_distinct_member_slots() -> None:
@@ -479,7 +522,8 @@ async def test_team_continuation_completes_terminal_only_member_tool_in_its_slot
     assert "🔧 `inspect` [1]" in presentation.per_member["general"]
 
 
-def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
+@pytest.mark.parametrize("recovered", [False, True])
+def test_blocking_team_pause_uses_the_structured_member_slot(recovered: bool) -> None:
     """A blocking pause must reach approval with its pending marker already anchored."""
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
     requirement = RunRequirement(tool_execution=tool)
@@ -490,6 +534,14 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         tools=[tool],
         member_responses=[RunOutput(agent_id="general", agent_name="GeneralAgent", content="Member answer.")],
         status=RunStatus.paused,
+    )
+    prefix = (
+        StreamingPresentation(
+            response_text="Before restart.\n\n🔧 `inspect` [1] ⏳",
+            tool_trace=(ToolTraceEntry(type="tool_call_started", tool_name="inspect"),),
+        )
+        if recovered
+        else None
     )
 
     paused = _attach_team_pause_presentation(
@@ -504,8 +556,10 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         config_names=["general"],
         display_names=["GeneralAgent"],
         show_tool_calls=True,
+        prefix=prefix,
     )
 
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
     restored = _TeamStreamPresentation.restore(
         config_names=["general"],
         show_tool_calls=True,
@@ -514,9 +568,12 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
         prior_response_text=paused.response_text,
     )
     assert "Member answer." in restored.per_member["general"]
-    assert "🔧 `inspect` [1] ⏳" in restored.per_member["general"]
+    assert f"🔧 `inspect` [{2 if recovered else 1}] ⏳" in restored.per_member["general"]
     assert restored.consensus == "Consensus before approval."
-    assert restored.tool_trace[0].tool_call_id == "call-1"
+    assert restored.tool_trace[-1].tool_call_id == "call-1"
+    assert [tool.tool_call_id for tool in restored.tool_tracker.pending_tools] == ["call-1"]
+    if prefix is not None:
+        assert restored.render_body().startswith(prefix.response_text + "\n\n")
 
 
 def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line() -> None:

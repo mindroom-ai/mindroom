@@ -23,7 +23,7 @@ from mindroom.delegation.sessions import (
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
-from tests.test_delegate_tools import _runtime_paths
+from tests.delegation_helpers import _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 
 if TYPE_CHECKING:

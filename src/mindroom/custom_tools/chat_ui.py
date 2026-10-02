@@ -50,8 +50,7 @@ class ChatUITools(Toolkit):
                 action=action,
                 message="Chat UI actions require a configured agent identity; team and router contexts are unsupported.",
             )
-        transport_agent_name = context.transport_agent_name or context.agent_name
-        if transport_agent_name != context.agent_name:
+        if context.recipient != context.agent_name:
             return cls._payload(
                 "error",
                 action=action,

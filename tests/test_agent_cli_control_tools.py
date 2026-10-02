@@ -52,6 +52,7 @@ from mindroom.response_turn import (
     apply_exact_approval_decisions,
     paused_attempt_from_response,
 )
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
 from mindroom.tool_system.events import CollectedStreamPresentation, serialize_tool_trace
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -556,7 +557,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     arguments = {"agent_name": "code", "task": "work"}
     if mode in {"recover", "recover_again"}:
         shell_toolkit = shell_tools()(runtime_paths=runtime.runtime_paths)
-        agents._set_toolkit_approval_origin(shell_toolkit, "shell")
+        bind_toolkit_authority(shell_toolkit, authored_name="shell")
         catalog.agent = MinimalAgent(
             id="helper",
             model=catalog.agent.model,

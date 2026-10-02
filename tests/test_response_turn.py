@@ -8,7 +8,7 @@ import json
 import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from agno.db.base import BaseDb
@@ -42,7 +42,8 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_jobs.completion import _ReadyJobContinuation
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -203,7 +204,7 @@ def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager
     def _open() -> AbstractContextManager[ScopeSessionContext]:
         log.scope = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
-            storage=Mock(spec=BaseDb),
+            storage=MagicMock(spec=BaseDb),
             session=None,
         )
         return contextlib.nullcontext(log.scope)
@@ -799,6 +800,27 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     ]
 
 
+@pytest.mark.parametrize("background_jobs", [False, True])
+def test_quiet_recording_preserves_disabled_driver_behavior(*, background_jobs: bool) -> None:
+    """A quiet attempt without a job join records its replay text as a disabled turn does."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        return CompletedAttempt(response_text="", replayable_text="  ")
+
+    result = asyncio.run(
+        run_blocking_response_turn(
+            _ctx(allow_no_report_response=True, background_tool_jobs=background_jobs),
+            _blocking_adapter(log, attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        ),
+    )
+    assert result == ""
+    assert recorder.completed_calls[-1]["assistant_text"] == "  "
+
+
 def test_blocking_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
@@ -1028,7 +1050,8 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert log.released == 1
     assert log.finalized == 2
     # The continuation reset synced empty partial state carrying the prior tools.
-    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[0]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
     # The final recording carries the first attempt's tools plus the second's.
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 
@@ -2168,3 +2191,41 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
         assert recorder.outcome == "skipped"
         assert recorder.interrupted_calls == []
         assert log.persisted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("joins", [0, 1])
+async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_reply(
+    monkeypatch: pytest.MonkeyPatch,
+    joins: int,
+) -> None:
+    """Without a job join a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        nonlocal attempts
+        attempts += 1
+        yield AttemptResolved(
+            CompletedAttempt(
+                response_text=f"Terminal {attempts}",
+                replayable_text=f"Terminal {attempts}",
+                has_visible_content=True,
+                join_document=StructuredStreamChunk(content=f"Document {attempts}", tool_trace=[]),
+            ),
+        )
+
+    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        if len(attempted) < joins:
+            attempted.add(("job", len(attempted)))
+            yield _ReadyJobContinuation("Retrieve the result")
+
+    monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
+    chunks = await _collect(
+        stream_response_turn(_ctx(), _streaming_adapter(log, attempt), TurnSinks(), continuation=_continuation()),
+    )
+    published = [chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk for chunk in chunks]
+    assert published == (["Document 1", "Document 2"] if joins else ["notice:Terminal 1"])

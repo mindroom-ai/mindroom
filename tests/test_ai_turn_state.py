@@ -44,8 +44,10 @@ def test_ai_turn_state_marks_existing_recorder_state_without_reprefixing() -> No
     )
 
     state = AITurnState(prior_completed_tools=(_tool("load_tool"),))
+    state.prior_assistant_text = "partial"
     state.record_interrupted_from_recorder(recorder, run_metadata={"run": "2"})
 
+    assert recorder.assistant_text == "partial"
     assert recorder.run_metadata == {"run": "2"}
     assert [tool.tool_name for tool in recorder.completed_tools] == ["load_tool", "run_shell_command"]
     assert [tool.tool_name for tool in recorder.interrupted_tools] == ["save_file"]

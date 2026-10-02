@@ -19,9 +19,10 @@ from mindroom.config.main import (
     redact_authored_config,
 )
 from mindroom.config.schema_hints import redaction_marker_location
-from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
+from mindroom.event_journal_open import describe_in_force_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.redaction import REDACTED
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -350,16 +351,19 @@ async def apply_config_change(
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
-        # The event journal is opened once, at startup, and every bot shares
-        # that one store; saying the change affects new interactions would be
-        # untrue for this one field.
-        if pending_event_journal_restart(saved, runtime_paths):
-            return (
-                f"✅ **Configuration updated successfully!**\n\n"
-                f"Changes saved to {path}.\n\n"
-                f"⚠️ The event journal in force is still "
-                f"{describe_event_journal(config.event_journal, runtime_paths)}; the new value applies "
-                f"after MindRoom restarts."
+        # Startup-pinned settings (the shared event journal store, background tool jobs) keep their in-force
+        # value until restart; saying the change affects new interactions would be untrue for them.
+        restart_notices = []
+        if pending_background_tool_jobs_restart(saved, runtime_paths):
+            restart_notices.append("⚠️ Background tool jobs keep their startup setting until MindRoom restarts.")
+        in_force_journal = describe_in_force_event_journal(runtime_paths)
+        if in_force_journal is not None and pending_event_journal_restart(saved, runtime_paths):
+            restart_notices.append(
+                f"⚠️ The event journal in force is still {in_force_journal}; the new value applies after MindRoom restarts.",
+            )
+        if restart_notices:
+            return f"✅ **Configuration updated successfully!**\n\nChanges saved to {path}.\n\n" + "\n\n".join(
+                restart_notices,
             )
         return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"

@@ -13,6 +13,7 @@ from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -30,7 +31,10 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
+from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace, tool_markers_match_trace
+from mindroom.turn_origin import TurnIntent
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
@@ -181,6 +185,12 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
+    if (
+        continuation.origin is not None
+        and continuation.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
+        and reply_to_event_id in continuation.source_event_ids
+    ):
+        reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,
@@ -323,6 +333,10 @@ class ApprovalResponseCoordinator:
                 cards=tuple(cards),
             ):
                 raise RuntimeError(failure_reason)
+            # The job coordinator expires cards recorded before a job's cancellation; these may postdate it.
+            withdrawn = self._cancelled_job_ids(plan.calls)
+            if withdrawn:
+                await manager.expire_job_cards(withdrawn)
         elif (
             await self.store.activate_approval_continuation(
                 continuation.approval_id,
@@ -355,6 +369,31 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
+    def _cancelled_job_ids(self, calls: tuple[ApprovalCall, ...]) -> set[str]:
+        """Name the jobs whose presented approval pause ended before its cards were recorded."""
+        runtime = get_background_runtime(self.runtime_paths)
+        if runtime is None:
+            return set()
+        # A job-owned child's call is projected as `<job_id>:<child call id>`.
+        job_ids = {call.tool_call_id.partition(":")[0] for call in calls if call.decision is None}
+        return {job_id for job_id in job_ids if runtime.has_job(job_id) and not runtime.awaits_approval(job_id)}
+
+    def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
+        """Recognize a paused call that can resume only through the job runtime."""
+        if paused.job_owned_child or any(call.toolkit_name == "job" for call in calls):
+            return True
+        config = self.config()
+        if not background_tool_jobs_enabled(config, self.runtime_paths):
+            return False
+        budgeted = {tool.tool_call_id for tool in paused.tools if "wait_timeout" in (tool.tool_args or {})}
+        # A budget on a managed toolkit is framework metadata; on an excluded toolkit it is the tool's own argument.
+        return any(
+            call.tool_call_id in budgeted
+            and call.toolkit_name is not None
+            and not toolkit_is_background_excluded(call.toolkit_name, config, self.runtime_paths)
+            for call in calls
+        )
+
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -381,6 +420,7 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            requires_background_tool_jobs=self.requires_background_jobs(paused, plan.calls),
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
             response_text=paused.response_text,
@@ -472,16 +512,27 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        visible_reason = visible_text or (
-            _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else redact_sensitive_text(reason)
-        )
+        tool_trace = None
+        if reason == _USER_STOP_FAILURE_REASON:
+            # A stopped approval keeps the answer and tool trace it was showing, like any stopped reply.
+            if visible_text is None:
+                stopped_text = current.response_text.rstrip()
+                visible_text = (
+                    f"{stopped_text}\n\n{_USER_STOP_VISIBLE_NOTE}" if stopped_text else _USER_STOP_VISIBLE_NOTE
+                )
+            stream_status = STREAM_STATUS_CANCELLED
+            saved_trace = deserialize_tool_trace(current.response_tool_trace)
+            # A continuation that streamed further tools has outgrown the saved trace, which is then left out.
+            if current.show_tool_calls and tool_markers_match_trace(visible_text, saved_trace):
+                tool_trace = saved_trace
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
-                new_text=visible_reason,
+                new_text=visible_text or redact_sensitive_text(reason),
                 extra_content={STREAM_STATUS_KEY: stream_status},
+                tool_trace=tool_trace,
                 delivery_turn_id=current.source_event_ids[0],
                 response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,

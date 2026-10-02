@@ -21,6 +21,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.job import JobTools
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -39,12 +40,16 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -668,6 +673,8 @@ def _agent_tool_output_file_policy(
 def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
+    tool_name: str,
+    tool_config_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
     tool_output_auto_save_threshold_bytes: int,
@@ -678,7 +685,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
         runtime_paths,
         tool_output_auto_save_threshold_bytes,
     )
-    return wrap_toolkit_for_output_files(toolkit, policy)
+    return bind_toolkit_construction(
+        wrap_toolkit_for_output_files(toolkit, policy),
+        ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+    )
 
 
 @timed("system_prompt_assembly.agent_create.model_instance")
@@ -737,6 +747,15 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
+    # Every MindRoom-owned direct toolkit gets the same output-file wrapping and construction identity.
+    wrap_direct = partial(
+        _wrap_direct_agent_toolkit_for_output_files,
+        tool_name=tool_name,
+        tool_config_overrides=tool_config_overrides,
+        agent_runtime=agent_runtime,
+        runtime_paths=runtime_paths,
+        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+    )
 
     if tool_name == "memory":
         if config.resolve_entity(agent_name).memory_backend == "none":
@@ -746,7 +765,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
         # MemoryTools resolves the canonical per-agent storage roots internally via the
         # shared memory facade, so it should receive the caller-visible runtime root here.
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             MemoryTools(
                 agent_name=agent_name,
                 storage_path=storage_path,
@@ -754,9 +773,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "delegate":
@@ -778,7 +794,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 max_delegation_depth=MAX_DELEGATION_DEPTH,
             )
             return None
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
                 delegate_to=agent_config.delegate_to,
@@ -788,19 +804,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "self_config":
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "skill_manage":
@@ -820,36 +830,27 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "compact_context":
         from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             CompactContextTools(
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_workflow":
         from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             DynamicWorkflowTools(),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "report_publishing":
         from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
 
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             ReportPublishingTools(),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     if tool_name == "dynamic_tools":
@@ -874,7 +875,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent_name,
             )
             return None
-        return _wrap_direct_agent_toolkit_for_output_files(
+        return wrap_direct(
             DynamicToolsToolkit(
                 agent_name=agent_name,
                 config=config,
@@ -889,9 +890,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 stop_after_tool_call=dynamic_tool_continuation,
                 hidden_tool_names=hidden_tool_names,
             ),
-            agent_runtime=agent_runtime,
-            runtime_paths=runtime_paths,
-            tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         )
 
     return _build_registered_agent_tool(
@@ -1300,11 +1298,16 @@ def _build_agent_tool_hook_bridge(
     )
 
 
-def _prune_toolkit_functions(
-    toolkit: Toolkit,
+def _prepare_toolkit_functions(
+    toolkit: Toolkit | None,
     tool_function_filter: Callable[[Function], bool] | None,
+    *,
+    tool_name: str,
 ) -> Toolkit | None:
-    """Apply the final function policy and discard toolkits with no callable surface."""
+    """Reject reserved collisions, apply channel policy, and drop empty toolkits."""
+    if toolkit is None:
+        return None
+    _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
     if tool_function_filter is not None:
         toolkit.functions = {
             name: function for name, function in toolkit.functions.items() if tool_function_filter(function)
@@ -1499,12 +1502,6 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
-    """Attach the configured toolkit identity to its executable functions."""
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = authored_name
-
-
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools share one construction path
     agent_name: str,
     config: Config,
@@ -1630,9 +1627,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 refresh_scheduler=refresh_scheduler,
                 dynamic_tool_continuation=dynamic_tool_continuation,
             )
-        if toolkit:
-            _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
-            toolkit = _prune_toolkit_functions(toolkit, tool_function_filter)
+        toolkit = _prepare_toolkit_functions(toolkit, tool_function_filter, tool_name=tool_name)
         toolkit = apply_tool_approval_capability(
             toolkit,
             config,
@@ -1641,7 +1636,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         )
         if toolkit:
             toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
-            _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+            bind_toolkit_authority(toolkit, authored_name=tool_entry.authored_name or tool_name)
         return toolkit
 
     cli_deferred = []
@@ -1697,6 +1692,26 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
+    controls = JobTools.build(
+        tools,
+        runtime_paths,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        depth=delegation_depth,
+        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
+        output_file_policy=_agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        ),
+    )
+    controls = apply_tool_approval_capability(
+        controls,
+        config,
+        supports_native_tool_approval=supports_native_tool_approval,
+        registered_tool_name="job",
+    )
+    if controls is not None:
+        tools.append(prepend_tool_hook_bridge(controls, tool_hook_bridge))
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -2178,6 +2193,9 @@ def create_agent(
         )
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
+    if background_tool_jobs_enabled(config, runtime_paths):
+        bind_actor_authority(agent, authority_snapshot(config, agent_name))
+        install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(
         "Created agent",

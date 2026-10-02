@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing, asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -41,6 +42,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -110,12 +112,18 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.skill_learning.capture import observe_final_request
+from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.completion import report_background_wait
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
+    BackgroundWaitChunk,
     CollectedStreamPresentation,
     StreamingToolTracker,
+    StructuredStreamChunk,
     complete_pending_tool_block,
     format_tool_combined,
 )
@@ -159,7 +167,15 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = (
+    str
+    | BackgroundWaitChunk
+    | StructuredStreamChunk
+    | RunContentEvent
+    | RunCompletedEvent
+    | ToolCallStartedEvent
+    | ToolCallCompletedEvent
+)
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -377,7 +393,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
@@ -512,30 +533,112 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
-async def collect_streamed_response_content(
+def _without_quiet_prose(attempt: Sequence[AIStreamChunk]) -> list[AIStreamChunk]:
+    """Keep one quiet attempt's tool events and completion without its prose."""
+    return [
+        replace(item, content=None) if isinstance(item, RunCompletedEvent) else item
+        for item in attempt
+        if not isinstance(item, (str, RunContentEvent))
+    ]
+
+
+async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partials and terminal-only echoes together.
+    response_stream: AsyncIterator[AIStreamChunk],
+) -> AsyncIterator[AIStreamChunk]:
+    """Suppress quiet attempts beside other reply output, retaining tool order and unfinished presentation."""
+    pending: list[AIStreamChunk] = []
+    # A sole quiet attempt stays deliverable; earlier or later output in the same reply suppresses its prose.
+    quiet_attempt: list[AIStreamChunk] = []
+    earlier_output = False
+    terminal_echo: str | None = None
+    try:
+        async for chunk in response_stream:
+            expected, terminal_echo = terminal_echo, None
+            if isinstance(chunk, RunContentEvent) and expected is not None and chunk.content == expected:
+                continue
+            for item in _without_quiet_prose(quiet_attempt):
+                yield item
+            quiet_attempt.clear()
+            if isinstance(chunk, BackgroundWaitChunk):
+                for item in pending:
+                    yield item
+                pending.clear()
+                yield chunk
+                continue
+            if not isinstance(chunk, RunCompletedEvent):
+                pending.append(chunk)
+                continue
+            prose = "".join(
+                item if isinstance(item, str) else str(item.content or "")
+                for item in pending
+                if isinstance(item, (str, RunContentEvent))
+            )
+            if not prose and chunk.content:
+                # The agent adapter emits terminal-only content after this event.
+                terminal_echo = str(chunk.content)
+                pending.append(RunContentEvent(content=terminal_echo))
+                prose = terminal_echo
+            if not is_silent_schedule_no_report_response(prose):
+                for item in (*pending, chunk):
+                    yield item
+            elif earlier_output:
+                for item in _without_quiet_prose((*pending, chunk)):
+                    yield item
+            else:
+                quiet_attempt.extend((*pending, chunk))
+            earlier_output = True
+            pending.clear()
+    except (Exception, asyncio.CancelledError):
+        # The reply continued past a held quiet attempt, so only its tools remain; approval and interruption still
+        # need the exact unfinished presentation.
+        for item in (*_without_quiet_prose(quiet_attempt), *pending):
+            yield item
+        raise
+    for item in (*quiet_attempt, *pending):
+        yield item
+
+
+async def collect_streamed_response_content(  # noqa: C901, PLR0912 - Explicit stream event variants.
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
     on_update: Callable[[], Awaitable[None]] | None = None,
+    suppress_quiet_attempts: bool = False,
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a stream into its presentation owner, retaining pending text and tool state.
 
     ``on_update`` runs after each chunk has been applied to ``presentation``.
     """
+    if suppress_quiet_attempts:
+        response_stream = _quiet_collected_chunks(response_stream)
     try:
         async for chunk in response_stream:
             if isinstance(chunk, str):
                 presentation.append_text(chunk)
+            elif isinstance(chunk, StructuredStreamChunk):
+                presentation.append_text(chunk.content)
+                presentation.tool_trace.extend(deepcopy(chunk.tool_trace or ()))
+            elif isinstance(chunk, BackgroundWaitChunk):
+                await report_background_wait(
+                    StreamingPresentation(
+                        response_text=presentation.final_text(),
+                        tool_trace=tuple(deepcopy(presentation.tool_trace)) if presentation.show_tool_calls else (),
+                    ),
+                    chunk.content,
+                )
             elif isinstance(chunk, RunContentEvent):
                 presentation.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):
                 if chunk.content is not None:
                     presentation.canonical_final_body_candidate = str(chunk.content)
+                if suppress_quiet_attempts:
+                    presentation.separate_next_text = bool(presentation.response_text)
             elif isinstance(chunk, ToolCallStartedEvent):
                 presentation.start_tool(chunk.tool)
             elif isinstance(chunk, ToolCallCompletedEvent):
                 presentation.complete_tool(chunk.tool)
-            if on_update is not None:
+            # A wait notice leaves the presentation unchanged; publishing it again would erase the notice.
+            if on_update is not None and not isinstance(chunk, BackgroundWaitChunk):
                 await on_update()
     except ResponsePausedForApproval as error:
         error.capture_collected_presentation(
@@ -552,18 +655,20 @@ async def _collect_response_body_with_trace(
     *,
     show_tool_calls: bool,
     tool_trace_collector: list[ToolTraceEntry] | None,
+    suppress_quiet_attempts: bool = False,
 ) -> str:
     """Collect a stream to one body, bridging the trace to an optional collector."""
     body, tool_trace = await collect_streamed_response_content(
         response_stream,
         presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls),
+        suppress_quiet_attempts=suppress_quiet_attempts,
     )
     if tool_trace_collector is not None:
         tool_trace_collector.extend(tool_trace)
     return body
 
 
-def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
+def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True, tool_index_offset: int = 0) -> str:
     response_parts = []
 
     # Add main content if present
@@ -573,7 +678,7 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     # Add formatted tool call sections when present (and enabled).
     if show_tool_calls and response.tools:
         tool_sections: list[str] = []
-        for tool_index, tool in enumerate(response.tools, start=1):
+        for tool_index, tool in enumerate(response.tools, start=tool_index_offset + 1):
             tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
             combined, _ = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
@@ -608,12 +713,16 @@ def _attach_blocking_pause_presentation(
     response: RunOutput,
     *,
     show_tool_calls: bool,
+    prior_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
-    """Render a blocking pause once, before it crosses the approval boundary."""
+    """Render a blocking pause once, before it crosses the approval boundary, after any joined prior output."""
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
+        response_text=prior_presentation.response_text if prior_presentation is not None else "",
+        tool_trace=list(deepcopy(prior_presentation.tool_trace)) if prior_presentation is not None else [],
     )
+    presentation.separate_next_text = bool(presentation.response_text)
     presentation.append_text(_extract_replayable_response_text(response))
     pending_by_id: dict[str, ToolExecution] = {}
     for tool in paused.tools:
@@ -1509,6 +1618,7 @@ async def ai_response(  # noqa: C901, PLR0915
         Agent response string
 
     """
+    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.agent_mode == "minimal":
@@ -1543,6 +1653,7 @@ async def ai_response(  # noqa: C901, PLR0915
             ),
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
+            suppress_quiet_attempts=(ctx.allow_no_report_response and ctx.background_tool_jobs),
         )
 
     session_id = _require_turn_session_id(ctx)
@@ -1709,6 +1820,10 @@ async def ai_response(  # noqa: C901, PLR0915
                         paused_attempt,
                         response,
                         show_tool_calls=show_tool_calls,
+                        prior_presentation=StreamingPresentation(
+                            response_text=run.prior_response_text,
+                            tool_trace=run.prior_response_tools,
+                        ),
                     ),
                     runtime_model_name=prepared_run.runtime_model_name,
                 )
@@ -1739,7 +1854,11 @@ async def ai_response(  # noqa: C901, PLR0915
             )
         return CompletedAttempt(
             status=response.status,
-            response_text=_extract_response_content(response, show_tool_calls=show_tool_calls),
+            response_text=_extract_response_content(
+                response,
+                show_tool_calls=show_tool_calls,
+                tool_index_offset=len(run.prior_response_tools),
+            ),
             replayable_text=_extract_replayable_response_text(response),
             has_visible_content=bool(response.content),
             is_empty=ai_runtime.is_empty_completed_run(response),
@@ -2045,6 +2164,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         Streaming chunks/events as they become available
 
     """
+    ctx = replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths))
     agent_name = ctx.entity_label
     logger.info("AI streaming request", agent=agent_name, room_id=ctx.room_id)
     session_id = _require_turn_session_id(ctx)
@@ -2091,11 +2211,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
+        if run.turn_state.prior_assistant_text:
+            # Joined attempts append to the same visible agent response.
+            yield RunContentEvent(content="\n\n")
         try:
             run_context = await _prepare_agent_run_context(
                 (
@@ -2342,6 +2465,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 ),
             )
             return
+
+        # Only the owning attempt can supply terminal-only text. Nested tool
+        # completions must not reset this attempt's record of streamed content.
+        if ctx.background_tool_jobs and not state.assistant_text and state.canonical_final_body_candidate:
+            yield RunContentEvent(content=state.canonical_final_body_candidate)
 
         metadata_content: dict[str, Any] | None = None
         final_status = RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed

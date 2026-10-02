@@ -53,6 +53,7 @@ from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -142,6 +143,8 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -177,6 +180,7 @@ from tests.test_response_turn import (
     _dynamic_tool_execution,
     _streaming_adapter,
 )
+from tests.tool_job_helpers import job_child, job_owner, start_delegation_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -2206,7 +2210,7 @@ async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
-async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
+async def test_claimed_approval_stop_and_suppression_are_not_relabeled_as_interruptions(
     tmp_path: Path,
     failure_reason: str,
 ) -> None:
@@ -2222,13 +2226,20 @@ async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
         is_visible_response=True,
     )
 
+    latest = "Streamed after approval.\n\n**[Response cancelled by user]**"
+
     with (
         patch.object(runner._approval_responses, "settle_failure", new=settle_failure),
         patch.object(runner, "_settle_interrupted_approval_recovery", new=restart_recovery),
+        patch.object(runner, "_approval_interruption_update", new=AsyncMock(return_value=latest)),
     ):
         await runner._settle_failed_approval_outcome(continuation, outcome)
 
-    settle_failure.assert_awaited_once_with(continuation, failure_reason)
+    if failure_reason == "cancelled_by_user":
+        # A Stop keeps what the continuation last showed, without claiming an interruption; settlement ends it cancelled.
+        settle_failure.assert_awaited_once_with(continuation, failure_reason, visible_text=latest)
+    else:
+        settle_failure.assert_awaited_once_with(continuation, failure_reason)
     restart_recovery.assert_not_awaited()
 
 
@@ -3434,6 +3445,86 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     assert continuation.team_member_model_names == (("general", "large"),)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "toolkit_name", "completion_origin", "wait_argument", "feature_enabled", "job_child", "expected"),
+    [
+        ("job", "job", False, False, False, False, True),
+        ("job", "custom", False, False, False, False, False),
+        ("inspect", "test_toolkit", True, False, False, False, True),
+        ("inspect", "test_toolkit", False, False, False, False, False),
+        ("report", "reports", False, True, False, False, False),
+        ("report", "reports", False, True, True, False, True),
+        ("write_report", "file", False, False, True, True, True),
+    ],
+    ids=[
+        "native-job-toolkit",
+        "same-named-custom-tool",
+        "completion-or-recovery-source",
+        "ordinary",
+        "wait-argument-feature-disabled",
+        "wait-argument-feature-enabled",
+        "background-child-approval",
+    ],
+)
+@pytest.mark.asyncio
+async def test_pause_writer_persists_background_tool_job_ownership(
+    tmp_path: Path,
+    tool_name: str,
+    toolkit_name: str,
+    completion_origin: bool,
+    wait_argument: bool,
+    feature_enabled: bool,
+    job_child: bool,
+    expected: bool,
+) -> None:
+    """The suspension writer records whether a paused call can resume only through background jobs."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.background_tool_jobs.enabled = feature_enabled
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    if completion_origin:
+        origin = replace(request.response_envelope.origin, intent=TurnIntent.TOOL_JOB_COMPLETION)
+        request = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(
+                ToolExecution(
+                    tool_call_id="call-1",
+                    tool_name=tool_name,
+                    tool_args={"wait_timeout": 0} if wait_argument else {},
+                ),
+            ),
+            toolkit_owners={("general", tool_name): toolkit_name},
+            job_owned_child=job_child,
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.requires_background_tool_jobs is expected
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -3952,6 +4043,72 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store.prepare_detached_approval.assert_awaited_once()
     assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
     approval_store.reserve_and_publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cards_recorded_after_their_job_was_cancelled_expire_on_publication(tmp_path: Path) -> None:
+    """A job cancelled between its approval pause and card publication cannot resume, so only its card expires."""
+    bot = _bot(tmp_path)
+    bot.config.background_tool_jobs.enabled = True
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
+    register_background_runtime(bot.runtime_paths, runtime)
+
+    async def pause() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+
+    try:
+        cancelled = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=pause)
+        paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
+        for job in (cancelled, paused):
+            waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
+            await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0)
+        tools = tuple(
+            ToolExecution(tool_call_id=f"{job.job_id}:write", tool_name="write_file", tool_args={})
+            for job in (cancelled, paused)
+        )
+        with (
+            patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
+            patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+        ):
+            plan = await runner._approval_responses.plan_pause(
+                tuple((tool, tool.tool_call_id, "write_file", "child") for tool in tools),
+                requester_id="@user:localhost",
+                toolkit_owners={("child", "write_file"): "coding"},
+            )
+        continuation = ApprovalContinuation(
+            approval_id="approval-jobs",
+            run_id="run-1",
+            session_id="session-1",
+            entity_kind="agent",
+            entity_name="general",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            response_event_id="$thinking",
+            sources=ResponseSources(("$source",), ("$source",)),
+            calls=plan.calls,
+            state="waiting",
+        )
+        approval_store = MagicMock(
+            prepare_detached_approval=AsyncMock(return_value=object()),
+            reserve_and_publish=AsyncMock(return_value=True),
+            expire_job_cards=AsyncMock(return_value=True),
+        )
+        with patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=approval_store):
+            await runner._approval_responses._publish_cards(
+                continuation,
+                plan,
+                target=_target(thread_id="$thread"),
+                failure_reason="card failed",
+            )
+    finally:
+        await runtime.shutdown()
+
+    approval_store.reserve_and_publish.assert_awaited_once()
+    approval_store.expire_job_cards.assert_awaited_once_with({cancelled.job_id})
 
 
 @pytest.mark.asyncio
@@ -4812,6 +4969,11 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
             "mindroom.approval_response.approval_manager.get_approval_store",
             return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ),
+        # The reply's latest committed edit is the progress the continuation streamed.
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=AsyncMock(return_value="Checking the report."),
+        ),
     ):
         lifecycle = asyncio.create_task(
             runner._run_claimed_approval_lifecycle(
@@ -4825,9 +4987,10 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
         outcome = await lifecycle
 
     assert outcome.terminal_status == "cancelled"
+    # Stop keeps what the approved continuation streamed, not the text saved when the reply paused.
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**"),
+        (STREAM_STATUS_CANCELLED, "Checking the report.\n\n**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -4908,6 +5071,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 ) -> None:
     """Every chained generation must durably expose only its unresolved calls."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.background_tool_jobs.enabled = True
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(
@@ -4949,8 +5113,8 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         run_id="run-2",
         runtime_model_name="large",
         tools=(
-            ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={}),
-            ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={}),
+            ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={"wait_timeout": 0}),
+            ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={"wait_timeout": 0}),
         ),
         response_text=("Committed before pause.\n\n🔧 `conditional_read` [1] ⏳\n\n🔧 `conditional_write` [2] ⏳"),
         tool_trace=committed_trace,
@@ -4994,6 +5158,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
+    assert persisted.requires_background_tool_jobs is True
     assert persisted.runtime_model_name == "large"
     assert persisted.response_text == paused.response_text
     assert persisted.response_presentation_state == committed_state
@@ -9716,6 +9881,10 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
             "mindroom.approval_response.approval_manager.get_approval_store",
             return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
         ),
+        patch(
+            "mindroom.response_runner.fetch_latest_visible_body",
+            new=AsyncMock(return_value="Checking the report."),
+        ),
     ):
         lifecycle = asyncio.create_task(
             runner._run_claimed_approval_lifecycle(
@@ -9731,8 +9900,11 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         assert in_flight == []
 
     assert outcome.terminal_status == "cancelled"
-    assert landed == [STREAM_STATUS_COMPLETED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+    assert landed == [STREAM_STATUS_CANCELLED]
+    assert _approval_reply_edits(client)[-1] == (
+        STREAM_STATUS_CANCELLED,
+        "Checking the report.\n\n**[Response cancelled by user]**",
+    )
 
 
 @dataclass

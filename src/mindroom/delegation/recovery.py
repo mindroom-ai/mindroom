@@ -14,6 +14,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.delegation.background import cancel_retained_delegation
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
@@ -21,6 +22,8 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.types import HistoryScope
+from mindroom.tool_jobs.control import job_stopped_by_shutdown
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+_RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
 
 
 async def resolve_subagent(
@@ -95,9 +100,29 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason="Subagent turn was interrupted by a restart. Send a follow-up to continue its history.",
+        reason=_RESTART_INTERRUPTION_REASON,
         status="failed",
     )
+
+
+async def interrupt_stopped_child(
+    child: DelegationChild,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    cancel_reason: str = "Delegation cancelled.",
+) -> None:
+    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled."""
+    if job_stopped_by_shutdown():
+        await interrupt_child(
+            child,
+            config=config,
+            runtime_paths=runtime_paths,
+            reason=_RESTART_INTERRUPTION_REASON,
+            status="failed",
+        )
+    else:
+        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=cancel_reason)
 
 
 async def interrupt_child(
@@ -113,6 +138,11 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
+        if retained.status in {"completed", "failed", "cancelled", "denied"}:
+            # A settlement saved before a crash stands; only finish projecting it.
+            child.status, child.result = retained.status, retained.result
+            await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+            return
     config = delegation_storage_config(config, child.storage_bindings)
     response = await read_child_run(child, config, runtime_paths)
     if response is not None and response.status == RunStatus.completed:
@@ -156,8 +186,14 @@ async def _cancel_delegations(
 ) -> None:
     """Cancel retained descendants without running any of their pending tools."""
     state = DelegationState.from_metadata(response.metadata)
+    background = get_background_runtime(runtime_paths)
     for child in state.children:
         if child.status not in {"completed", "failed", "cancelled", "denied"}:
+            if background is not None and background.has_job(child.delegation_id):
+                # The job runtime owns this child; only the pending approval generation this run saved may end it.
+                if child.delegation_id == state.pending_child_id:
+                    await cancel_retained_delegation(background, child, generation=state.pending_job_generation)
+                continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for requirement_id, hook_state in state.hooks.items():
         child = next((item for item in state.children if item.parent_requirement_id == requirement_id), None)

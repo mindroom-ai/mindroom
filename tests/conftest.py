@@ -51,6 +51,7 @@ import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
@@ -121,6 +122,7 @@ from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix_delivery import TurnHandoff
+from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.provider_media_fallback import reset_model_media_capability_cache
@@ -2944,6 +2946,20 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mcp_server_manager() -> Generator[None, None, None]:
+    """An orchestrator test's configured manager must not validate another test's tool loads."""
+    bind_mcp_server_manager(None)
+    yield
+    bind_mcp_server_manager(None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Separate each test's pinned instances; tests still own shutdown of live resources."""
+    monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
 @pytest.fixture(autouse=True)
