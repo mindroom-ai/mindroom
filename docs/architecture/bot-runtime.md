@@ -173,6 +173,7 @@ Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
 Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
 These callbacks settle at once and only request a background reconcile: each room runs at most one, rereads state at most once per second however many events arrive, and ignores membership events that change only a display name or avatar.
+A call membership reaching its sender-chosen expiry requests the same background reconcile, so staggered planted expiries cannot replay back-to-back state reads.
 To-device call inputs and desktop pairing receivers remain best-effort because they do not share a stable replayable timeline-event identity, so their background failures are logged without semantic journal ownership.
 
 ## Turn Lifecycle Vocabulary
