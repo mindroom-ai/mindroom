@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, cast
@@ -726,6 +727,50 @@ def test_delivery_snapshot_read_runs_off_event_loop(
 
     assert response.status_code == 202
     assert "delivery_snapshot" in to_thread_calls
+
+
+def test_replay_store_calls_stay_off_the_default_executor(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay work queues on its own threads, never on the default executor that chat turns share."""
+    call_threads: dict[str, set[str]] = {}
+    replay_calls = (
+        "claim_nonce",
+        "claim_event_id",
+        "claim_thread_key",
+        "bind_thread_root",
+        "mark_event_delivered",
+        "release_event_id",
+        "release_thread_key",
+    )
+
+    def recording(name: str) -> Callable[..., object]:
+        original = getattr(ExternalTriggerReplayStore, name)
+
+        def record_thread(store: ExternalTriggerReplayStore, *args: object, **kwargs: object) -> object:
+            call_threads.setdefault(name, set()).add(threading.current_thread().name)
+            return original(store, *args, **kwargs)
+
+        return record_thread
+
+    for name in replay_calls:
+        monkeypatch.setattr(ExternalTriggerReplayStore, name, recording(name))
+    outcomes = iter([None, "$root-a"])
+
+    async def execute_external_trigger(**_kwargs: object) -> str | None:
+        return next(outcomes)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+    trigger_id = _create_new_thread_record(trigger_api)
+
+    failed = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+    delivered = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-2")
+
+    assert (failed.status_code, delivered.status_code) == (502, 202)
+    assert sorted(call_threads) == sorted(replay_calls)
+    thread_names = set().union(*call_threads.values())
+    assert all(thread_name.startswith("mindroom-external-trigger-replay") for thread_name in thread_names)
 
 
 def test_policy_caps_apply_at_request_time(

@@ -272,8 +272,9 @@ class ExternalTriggerReplayStore:
             return
         legacy_lock_path = legacy_path.with_name("replay.json.lock")
         with advisory_file_lock(legacy_lock_path):
-            raw_store = _read_json(legacy_path)
-            if raw_store is None:
+            try:
+                raw_store = _read_json(legacy_path)
+            except FileNotFoundError:
                 return
             scope_sections = split_shared_replay_store(raw_store)
             if scope_sections is None:
@@ -285,8 +286,11 @@ class ExternalTriggerReplayStore:
             legacy_lock_path.unlink(missing_ok=True)
 
     def _read_store(self, path: Path) -> _SerializedReplayStore:
-        raw_store = _read_json(path)
-        return _empty_store() if raw_store is None else _normalize_store(raw_store)
+        try:
+            raw_store = _read_json(path)
+        except FileNotFoundError:
+            return _empty_store()
+        return _normalize_store(raw_store)
 
     def _write_store(self, path: Path, store: _SerializedReplayStore) -> None:
         try:
@@ -300,11 +304,12 @@ def _scope_file_stem(replay_scope: str) -> str:
     return hashlib.sha256(replay_scope.encode()).hexdigest()
 
 
-def _read_json(path: Path) -> object | None:
+def _read_json(path: Path) -> object:
+    """Return the file's parsed JSON, raising FileNotFoundError so a missing file is never mistaken for JSON null."""
     try:
         raw_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
+        raise
     except OSError as exc:
         msg = "external trigger replay store is unavailable"
         raise ExternalTriggerReplayStoreError(msg) from exc

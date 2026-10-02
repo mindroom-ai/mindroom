@@ -414,6 +414,17 @@ def test_corrupt_json_store_fails_closed(tmp_path: Path) -> None:
         store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
 
 
+@pytest.mark.parametrize("replay_file", [_store_path, _scope_path], ids=["shared-file", "scope-file"])
+def test_null_json_store_fails_closed(tmp_path: Path, replay_file: Callable[[Path], Path]) -> None:
+    """A replay file holding JSON null is malformed, not absent, so it must not reset replay protection."""
+    replay_file(tmp_path).write_text("null", encoding="utf-8")
+
+    store = ExternalTriggerReplayStore(tmp_path)
+
+    with pytest.raises(ExternalTriggerReplayStoreError, match="invalid"):
+        store.claim_nonce("campground", "nonce-1", now=1_000, ttl_seconds=300)
+
+
 def test_replay_store_read_oserror_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -434,7 +434,8 @@ class ExternalTriggerStore:
                 msg = "single-use trigger changed before it could be consumed"
                 raise ExternalTriggerStoreError(msg)
             records.triggers.pop(trigger_id)
-            self._write_records(records)
+            # A concurrent duplicate of the consumed delivery must still find its delivered event record.
+            self._write_records(records, retained_scope=_replay_scope(record))
 
     def delivery_snapshot(
         self,
@@ -514,8 +515,11 @@ class ExternalTriggerStore:
             msg = "invalid external trigger store"
             raise ExternalTriggerStoreError(msg) from exc
 
-    def _write_records(self, records: _SerializedTriggerRecords) -> None:
-        """Publish ``records``, then drop replay records of scopes they no longer authenticate."""
+    def _write_records(self, records: _SerializedTriggerRecords, *, retained_scope: str | None = None) -> None:
+        """Publish ``records``, then drop the replay records of every scope but theirs and ``retained_scope``."""
+        live_scopes = {_replay_scope(record) for record in records.triggers.values()}
+        if retained_scope is not None:
+            live_scopes.add(retained_scope)
         try:
             write_json_file_durable(
                 self._store_path,
@@ -524,10 +528,10 @@ class ExternalTriggerStore:
                 indent=2,
                 sort_keys=True,
             )
+            self._replay_store.retain_scopes(live_scopes)
         except OSError as exc:
             msg = "external trigger store is unavailable"
             raise ExternalTriggerStoreError(msg) from exc
-        self._replay_store.retain_scopes(_replay_scope(record) for record in records.triggers.values())
 
 
 def _replay_scope(record: ExternalTriggerRecord) -> str:

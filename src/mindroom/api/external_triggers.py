@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from fastapi import APIRouter, HTTPException, Request
@@ -61,6 +63,9 @@ _THREAD_KEY_TTL_SECONDS = 7 * 86400
 # A reservation for a key whose first root is still being posted; short so a
 # crashed delivery cannot block a conversation for long.
 _PENDING_THREAD_KEY_TTL_SECONDS = 300
+# Replay calls can wait on a scope's file lock, so they queue on their own few threads
+# instead of occupying the default executor that chat turns share.
+_REPLAY_STORE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mindroom-external-trigger-replay")
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -411,9 +416,14 @@ def _parse_payload(body: bytes) -> ExternalTriggerPayload:
         raise HTTPException(status_code=422, detail=exc.errors(include_context=False)) from exc
 
 
+async def _in_replay_executor(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_REPLAY_STORE_EXECUTOR, functools.partial(call, *args, **kwargs))
+
+
 async def _run_replay_store_call(call: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
     try:
-        return await asyncio.to_thread(call, *args, **kwargs)
+        return await _in_replay_executor(call, *args, **kwargs)
     except ExternalTriggerReplayScopeFullError as exc:
         raise HTTPException(status_code=429, detail="External trigger replay limit reached") from exc
     except ExternalTriggerReplayStoreError as exc:
@@ -438,7 +448,7 @@ async def _rollback_failed_delivery(
     if thread_key is None or thread_reservation is None:
         return
     try:
-        await asyncio.to_thread(
+        await _in_replay_executor(
             replay_store.release_thread_key,
             snapshot.replay_scope,
             thread_key,
@@ -460,7 +470,7 @@ async def _release_event_id_best_effort(
 ) -> None:
     """Release an in-progress event claim without masking the delivery failure."""
     try:
-        await asyncio.to_thread(store.release_event_id, replay_scope, event_id)
+        await _in_replay_executor(store.release_event_id, replay_scope, event_id)
     except Exception:
         logger.warning(
             "Failed to release external trigger event claim after delivery failure",
