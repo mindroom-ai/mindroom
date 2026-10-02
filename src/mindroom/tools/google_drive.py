@@ -80,6 +80,14 @@ if TYPE_CHECKING:
             default=10485760,
             description="Maximum non-Google-Workspace file size to read in bytes.",
         ),
+        ConfigField(
+            name="max_download_size",
+            label="Max Download Size",
+            type="number",
+            required=False,
+            default=104857600,
+            description="Maximum file or export size to download into the agent workspace in bytes.",
+        ),
     ],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,

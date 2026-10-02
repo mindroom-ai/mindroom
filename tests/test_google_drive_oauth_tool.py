@@ -176,6 +176,7 @@ def _google_drive_download_tool(
     monkeypatch: pytest.MonkeyPatch,
     *,
     download_dir: Path | None = None,
+    **tool_kwargs: object,
 ) -> tuple[GoogleDriveTools, _FakeDriveService]:
     monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", _FakeMediaIoBaseDownload)
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
@@ -185,6 +186,7 @@ def _google_drive_download_tool(
         creds=_valid_credentials(),
         download_file=True,
         tool_output_workspace_root=download_dir or tmp_path,
+        **tool_kwargs,
     )
     service = _FakeDriveService()
     tool.service = service
@@ -1379,6 +1381,48 @@ def test_google_drive_download_failure_preserves_existing_file_and_cleans_partia
     assert "Download interrupted" in result["error"]
     assert existing_file.read_bytes() == b"original"
     assert list(download_root.iterdir()) == [existing_file]
+
+
+def test_google_drive_download_refuses_file_larger_than_max_download_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, max_download_size="4")
+    service.files_resource.file_metadata = {"name": "archive.bin", "mimeType": "application/zip", "size": "5"}
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["error"] == "File is 5 bytes, exceeds max_download_size (4)."
+    assert "size" in str(service.files_resource.get_kwargs["fields"]).split(",")
+    assert service.files_resource.get_media_kwargs is None
+    assert not (tmp_path / "google-drive-downloads").exists()
+
+
+@pytest.mark.parametrize("mime_type", ["text/plain", "application/vnd.google-apps.document"])
+def test_google_drive_download_stops_writing_past_max_download_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mime_type: str,
+) -> None:
+    """A stream longer than the limit is cut off and leaves no file, whatever the metadata said."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, max_download_size=8)
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
+    tool._download_bytes = lambda _request: b"exported-document"
+    chunks_written: list[bytes] = []
+
+    class OversizedDownload(_FakeMediaIoBaseDownload):
+        def next_chunk(self) -> tuple[None, bool]:
+            self._file_handle.write(b"hello")
+            chunks_written.append(b"hello")
+            return None, len(chunks_written) == 3
+
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", OversizedDownload)
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["error"] == "Google Drive download exceeds max_download_size (8 bytes)"
+    assert len(chunks_written) <= 1
+    assert list((tmp_path / "google-drive-downloads").iterdir()) == []
 
 
 def test_google_drive_download_adds_export_extension_inside_download_dir(
