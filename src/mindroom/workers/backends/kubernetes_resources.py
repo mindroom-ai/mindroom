@@ -1283,7 +1283,7 @@ class KubernetesResourceManager:
     # LEGACY_COMPAT: Worker auth Secrets that hold the primary's credential encryption key.
     # Legacy format: a per-worker Secret's MINDROOM_CREDENTIALS_ENCRYPTION_KEY entry, or a shared worker-auth Secret's
     #   <worker id>.credentials-encryption-key entry, written whenever the primary had credential encryption enabled.
-    # Last legacy release: v2026.10.29; replacement: the next release gives workers no key and writes neither entry.
+    # Last legacy release: v2026.10.34; replacement: the next release gives workers no key and writes neither entry.
     # Handling: every Secret apply and the worker cleanup that deletes a Secret entry patch the entry to null, so the
     #   key leaves each worker's Secret the next time the primary ensures or cleans up that worker.
     # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_worker_never_receives_credentials_encryption_key;
