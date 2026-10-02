@@ -356,7 +356,7 @@ def _collect_credential_overrides(
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
-    # Scoped calls lease the settings the primary owns; provider-key tools keep the worker's own store.
+    # Scoped calls lease the called tool's settings, which the primary owns.
     lease_tool_settings = (
         worker_target is not None
         and worker_target.worker_scope is not None

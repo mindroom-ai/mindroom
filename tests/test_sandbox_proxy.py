@@ -1292,8 +1292,10 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         ("calculator", "primary"),
         ("github", "primary"),
         ("google_bigquery", "primary"),
-        # Model provider keys stay where workers read them.
-        ("openai", "worker"),
+        # A model provider service is a tool too, so its settings are primary-owned.
+        ("openai", "primary"),
+        # A service that configures no tool stays in the worker store.
+        ("github_private", "worker"),
     ],
 )
 def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
@@ -1502,9 +1504,9 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
         assert captured_calls[0][1]["credential_overrides"] == {"api_key": expected_key}
 
 
-@pytest.mark.parametrize("tool_name", ["openai", "unregistered_tool"])
-def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: Path, tool_name: str) -> None:
-    """Provider-key tools and unknown names keep the worker's own store, so no lease is sent back to it."""
+def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: Path) -> None:
+    """Unknown names keep the worker's own store, so no lease is sent back to it."""
+    tool_name = "unregistered_tool"
     captured_calls: list[tuple[str, dict[str, Any]]] = []
     handle = WorkerHandle(
         worker_id="worker-1",
@@ -1974,12 +1976,36 @@ def test_primary_owns_settings_of_every_registered_tool(
     assert not sandbox_proxy_module.primary_owns_tool_settings("unregistered_test", runtime_paths=runtime_paths)
 
 
-def test_model_provider_services_keep_their_settings_placement(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provider services double as worker-read provider keys, so a same-named tool does not move them."""
+@pytest.mark.parametrize("tool_name", ["openai", "groq"])
+def test_primary_built_provider_tool_ignores_worker_written_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    """A tool named like a model provider is still built by the primary, so the worker store never configures it."""
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765")
+    manager = CredentialsManager(tmp_path / "credentials")
+    target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert target.worker_key is not None
+    manager.for_primary_runtime_agent_scope("alpha").save_credentials(tool_name, {"api_key": "operator-key"})
+    manager.for_worker(target.worker_key).save_credentials(tool_name, {"api_key": "worker-planted"})
+    captured: dict[str, object] = {}
 
-    assert "openai" in TOOL_METADATA
-    assert not sandbox_proxy_module.primary_owns_tool_settings("openai", runtime_paths=runtime_paths)
+    class _FakeProviderTools:
+        def __init__(self, *, api_key: str | None = None, **_: object) -> None:
+            captured["api_key"] = api_key
+
+    monkeypatch.setitem(TOOL_REGISTRY, tool_name, lambda: _FakeProviderTools)
+
+    get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        credentials_manager=manager,
+        worker_tools_override=[],
+        worker_target=target,
+    )
+
+    assert captured["api_key"] == "operator-key"
 
 
 def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3420,9 +3446,9 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
     worker_key = resolve_worker_key("user", execution_identity, agent_name="code")
     assert worker_key is not None
     fake_credentials = FakeCredentialsManager(
-        {"openai": {"api_key": "shared-key", "_source": "ui"}},
+        {"github_private": {"api_key": "shared-key", "_source": "ui"}},
         worker_managers={
-            worker_key: FakeCredentialsManager({"openai": {"api_key": "worker-key", "_source": "ui"}}),
+            worker_key: FakeCredentialsManager({"github_private": {"api_key": "worker-key", "_source": "ui"}}),
         },
     )
 
@@ -3431,7 +3457,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
-        credential_policy={"calculator.add": ("openai",)},
+        credential_policy={"calculator.add": ("github_private",)},
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 

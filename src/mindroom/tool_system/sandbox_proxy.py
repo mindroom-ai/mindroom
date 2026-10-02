@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 import httpx
 
 from mindroom.config.worker_projection import worker_config_data
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, PROVIDER_ENV_KEYS, build_execution_tool_env
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -917,13 +917,8 @@ def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -
 
     The primary builds every tool, including tools whose calls run in a worker, so a worker-writable store never
     configures it; routed calls receive the settings through a per-call lease instead.
-    Model provider services double as provider keys that workers read, so they keep their existing placement.
     """
-    return (
-        tool_name in TOOL_METADATA
-        and tool_name not in PROVIDER_ENV_KEYS
-        and not sandbox_proxy_config(runtime_paths).runner_mode
-    )
+    return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
 def _call_proxy_sync(
