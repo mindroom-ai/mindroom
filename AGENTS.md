@@ -26,7 +26,9 @@ Coding model training data often lags recent releases, so never trust memorized 
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
 | OpenAI | Balanced | GPT-6 Sol | `gpt-6-sol` |
 | OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
+| OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.1 Sol | `gpt-6.1-sol` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
+| OpenAI Codex ChatGPT login | Fast / cheap via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
 | DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
 | OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
@@ -40,7 +42,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against provider catalogs on September 28, 2026.
+Model IDs were checked against provider catalogs on September 28, 2026, and the Codex rows against the Codex model catalog on October 1, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.

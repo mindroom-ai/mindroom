@@ -160,7 +160,7 @@ models:
   # OpenAI via a Codex CLI ChatGPT login
   codex:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.1-sol
     context_window: 258000
 
   # Kimi K3 via a Kimi Code CLI login (1M requires Pro/Allegretto or higher)
@@ -333,32 +333,50 @@ MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
+| GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
-| GPT-6 Sol | `gpt-6-sol` | Strong reasoning on demanding tasks |
-| GPT-6 Luna | `gpt-6-luna` | Efficient, repeatable work at scale |
+| GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
-The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
+The LLM-plugin-style form `openai-codex/gpt-6.1-sol` is accepted as an alternative to the bare alias.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
+The starter defines GPT-6.1 Sol as `default`, GPT-6 Astra as `astra`, and GPT-6 Luna at low reasoning effort as `luna`, and runs the router and thread summaries (with their one-shot tags) on `luna`.
 
 ```yaml
 models:
   default:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.1-sol
     context_window: 258000
-    # Related agent conversations share a prompt-cache key automatically.
     extra_kwargs:
       reasoning_effort: medium
+  astra:
+    provider: codex
+    id: gpt-6-astra
+    context_window: 258000
+    extra_kwargs:
+      reasoning_effort: medium
+  luna:
+    provider: codex
+    id: gpt-6-luna
+    context_window: 258000
+    extra_kwargs:
+      reasoning_effort: low
+
+router:
+  model: luna
+
+defaults:
+  thread_summary_model: luna
 ```
 
-The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface, not the larger context window exposed by the separately billed OpenAI API.
+The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface (just under 95% of its 272000-token window), not the larger context window exposed by the separately billed OpenAI API.
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
-Supported GPT-6 Astra effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
-Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
-The starter Codex profile uses `medium`.
+GPT-6.1 Sol, GPT-6 Astra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex clients also show Ultra for GPT-6.1 Sol and GPT-6 Astra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
+The starter Codex profile uses `medium` for `default` and `astra`, and `low` for `luna`.
 
 The Codex provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 

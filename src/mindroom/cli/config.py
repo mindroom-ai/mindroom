@@ -24,14 +24,14 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.model_defaults import (
+    CONFIG_INIT_ADDITIONAL_MODELS,
+    CONFIG_INIT_HELPER_MODELS,
     CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
     LLAMA_CPP_BASE_URL_DEFAULT,
     LLAMA_CPP_GEMMA,
     LLAMA_CPP_QWEN,
     LOCAL_OPENAI_API_KEY_DEFAULT,
-    LOCAL_QWEN_CONTEXT_WINDOW,
-    LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
     OLLAMA_HOST_DEFAULT,
     OLLAMA_QWEN,
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.model_defaults import ModelPreset
 
 console = Console()
 # Warnings go to stderr so `config init --print` output stays valid YAML.
@@ -1034,57 +1035,38 @@ def _prompt_provider_preset() -> _ProviderPreset:
         console.print(f"[red]Invalid choice.[/red] Enter {_PROVIDER_CHOICES_TEXT}.")
 
 
-def _model_template_block(provider_preset: _ProviderPreset) -> str:
-    """Render the provider-specific YAML fragment for models.default."""
-    model_preset = CONFIG_INIT_MODEL_PRESETS[provider_preset]
+def _model_settings_block(model_preset: ModelPreset) -> str:
+    """Render the YAML settings of one generated model config."""
     lines = [
         f"provider: {model_preset.provider}",
         f"id: {model_preset.id}",
     ]
     if model_preset.context_window is not None:
         lines.append(f"context_window: {model_preset.context_window}")
-    if provider_preset == "codex":
-        lines.extend(
-            [
-                "# Prompt caching is enabled automatically per active agent session.",
-                "extra_kwargs:",
-                "  reasoning_effort: medium",
-            ],
-        )
-    if provider_preset == "ollama":
+    if model_preset.provider == "ollama":
         lines.append(f"host: {_OLLAMA_HOST}")
-    if provider_preset == "llama_cpp":
-        lines.extend(
-            [
-                "extra_kwargs:",
-                f"  api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}",
-                f"  base_url: {_LLAMA_CPP_BASE_URL}",
-            ],
-        )
+    extra_kwargs: list[str] = []
+    if model_preset.provider == "llama_cpp":
+        extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {_LLAMA_CPP_BASE_URL}"])
+    if model_preset.reasoning_effort is not None:
+        extra_kwargs.append(f"reasoning_effort: {model_preset.reasoning_effort}")
+    if extra_kwargs:
+        lines.append("extra_kwargs:")
+        lines.extend(f"  {line}" for line in extra_kwargs)
     return textwrap.indent("\n".join(lines), "    ")
+
+
+def _model_template_block(provider_preset: _ProviderPreset) -> str:
+    """Render the provider-specific YAML fragment for models.default."""
+    return _model_settings_block(CONFIG_INIT_MODEL_PRESETS[provider_preset])
 
 
 def _additional_models_template_block(provider_preset: _ProviderPreset) -> str:
     """Render optional additional named model presets under `models:`."""
-    if provider_preset == "ollama":
-        return (
-            f"\n  {LOCAL_QWEN_PRESET_NAME}:\n"
-            "    provider: ollama\n"
-            f"    id: {OLLAMA_QWEN}\n"
-            f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
-            f"    host: {_OLLAMA_HOST}"
-        )
-    if provider_preset == "llama_cpp":
-        return (
-            f"\n  {LOCAL_QWEN_PRESET_NAME}:\n"
-            "    provider: llama_cpp\n"
-            f"    id: {LLAMA_CPP_QWEN}\n"
-            f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
-            "    extra_kwargs:\n"
-            f"      api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}\n"
-            f"      base_url: {_LLAMA_CPP_BASE_URL}"
-        )
-    return ""
+    return "".join(
+        f"\n  {name}:\n{_model_settings_block(model_preset)}"
+        for name, model_preset in CONFIG_INIT_ADDITIONAL_MODELS.get(provider_preset, ())
+    )
 
 
 def _commented_model_options_template_block(provider_preset: _ProviderPreset) -> str:
@@ -1123,6 +1105,9 @@ def _full_template(
     model_block = _model_template_block(provider_preset)
     additional_models_block = _additional_models_template_block(provider_preset)
     commented_model_options_block = _commented_model_options_template_block(provider_preset)
+    helper_model = CONFIG_INIT_HELPER_MODELS.get(provider_preset)
+    router_model = helper_model or "default"
+    thread_summary_model_block = f"\n  thread_summary_model: {helper_model}" if helper_model else ""
 
     if matrix_server == "mindroom.chat":
         mindroom_user_block = ""
@@ -1197,7 +1182,7 @@ agents:
       - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless they ask.
 
 router:
-  model: default
+  model: {router_model}
   accept_invites: true
 {mindroom_user_block}
 administrators:
@@ -1245,7 +1230,7 @@ defaults:
   tools:
     - scheduler
     - update_awareness
-  markdown: true
+  markdown: true{thread_summary_model_block}
   compaction:
     enabled: true
 """

@@ -1180,7 +1180,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
+Create a starter `config.yaml` with the personal Mind agent, starter models, file-based memory, and sensible defaults.
 For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so `config init` is the explicit path for choosing presets up front, self-hosted Matrix, or creating files without starting.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
@@ -1216,8 +1216,8 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates `provider: codex` with `id: gpt-6-astra` and `context_window: 258000`.
-They set `extra_kwargs.reasoning_effort: medium`.
+The `--provider codex` preset generates a `default` model with `provider: codex`, `id: gpt-6.1-sol`, `context_window: 258000`, and `extra_kwargs.reasoning_effort: medium`.
+It also generates an `astra` model for `gpt-6-astra` at `medium` effort and a `luna` model for `gpt-6-luna` at `low` effort, and sets `router.model` and `defaults.thread_summary_model` to `luna`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 

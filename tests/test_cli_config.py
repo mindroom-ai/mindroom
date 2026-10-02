@@ -819,7 +819,6 @@ class TestConfigInit:
         assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
         assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
         assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
-        assert "Prompt caching is enabled automatically per active agent session." in target.read_text()
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -1458,11 +1457,30 @@ class TestConfigInit:
         assert result.exit_code == 0
 
         config = yaml.safe_load(target.read_text())
-        assert config["models"]["default"]["provider"] == "codex"
-        assert config["models"]["default"]["id"] == CONFIG_INIT_MODEL_PRESETS["codex"].id
-        assert config["models"]["default"]["context_window"] == CONFIG_INIT_MODEL_PRESETS["codex"].context_window
-        assert config["models"]["default"]["extra_kwargs"]["reasoning_effort"] == "medium"
-        assert "prompt_cache_key" not in config["models"]["default"]["extra_kwargs"]
+        assert config["models"] == {
+            "default": {
+                "provider": "codex",
+                "id": "gpt-6.1-sol",
+                "context_window": 258_000,
+                "extra_kwargs": {"reasoning_effort": "medium"},
+            },
+            "astra": {
+                "provider": "codex",
+                "id": "gpt-6-astra",
+                "context_window": 258_000,
+                "extra_kwargs": {"reasoning_effort": "medium"},
+            },
+            "luna": {
+                "provider": "codex",
+                "id": "gpt-6-luna",
+                "context_window": 258_000,
+                "extra_kwargs": {"reasoning_effort": "low"},
+            },
+        }
+        loaded_config = load_config_yaml(target)
+        assert loaded_config.router.model == "luna"
+        assert loaded_config.defaults.thread_summary_model == "luna"
+        assert loaded_config.agents["mind"].model == "default"
 
         env_content = (tmp_path / ".env").read_text()
         assert "Run `codex login` before starting MindRoom." in env_content
