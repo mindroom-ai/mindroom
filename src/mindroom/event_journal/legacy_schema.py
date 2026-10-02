@@ -115,7 +115,7 @@ def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozense
 # LEGACY_COMPAT: Approval calls without persisted argument digests.
 # Legacy format: approval_continuation_calls rows written before per-call argument digests, which have no
 # arguments_digest column or a NULL value there.
-# Last legacy release: v2026.10.23; replacement: unreleased, the first release containing this change stores
+# Last legacy release: v2026.10.24; replacement: unreleased, the first release containing this change stores
 # a SHA-256 digest of each paused call's canonical arguments.
 # Handling: Add the nullable column and keep historical rows; an approved call without a digest never executes,
 # because continuation refuses calls whose persisted arguments do not match their digest and fails normally.
