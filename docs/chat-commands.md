@@ -226,7 +226,7 @@ Private agents store the choice separately for each requester.
 Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
 
 You must be authorized to use the named agent.
-Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and MindRoom's API server, reachable from wherever the agent's shell runs.
 When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
 See [deployment requirements](tools/agent-cli.md#deployment-requirements).
 If shell permissions or deployment settings later change, minimal responses fail closed.

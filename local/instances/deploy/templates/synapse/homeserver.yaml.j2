@@ -45,11 +45,16 @@ log_config: "/data/log.config"
 enable_registration: false
 registration_shared_secret: {{ registration_shared_secret | tojson }}
 
-# Allow federation to private IPs for local development
-# By default Synapse blocks private IP ranges (10.x, 172.16.x, 192.168.x)
-# Setting this empty allows federation between Docker containers
-# WARNING: Do not use this in production!
+{% if local_development %}
+# Local .localhost instances federate over Docker networks, so private addresses stay reachable
+# WARNING: Do not use this for an instance reachable from the Internet!
 federation_ip_range_blacklist: []
+{% else %}
+# Synapse's default blocklist keeps federation, .well-known, and identity server requests off private networks
+# Peer instances on this host are reached through Docker's default host gateway, the only allowed private address
+ip_range_whitelist:
+  - "172.17.0.1"
+{% endif %}
 
 # ========================================
 # COMPLETE RATE LIMITING CONFIGURATION

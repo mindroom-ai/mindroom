@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import httpx
@@ -130,6 +131,45 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             close_release.set()
             await asyncio.gather(first, return_exceptions=True)
             await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_blocking_tool_bodies_leave_the_default_executor_free(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow synchronous gateway tools cannot hold the threads that other offloaded work needs."""
+    release = threading.Event()
+    bodies: list[str] = []
+
+    def work() -> str:
+        bodies.append(threading.current_thread().name)
+        assert release.wait(5)
+        return "done"
+
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
+    )
+    loop = asyncio.get_running_loop()
+    default_executor, replacement_executor = ThreadPoolExecutor(max_workers=2), ThreadPoolExecutor()
+    loop.set_default_executor(default_executor)
+    calls = [
+        asyncio.create_task(gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={}))
+        for _ in range(2)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            while len(bodies) < len(calls):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2) == "free"
+    finally:
+        release.set()
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        loop.set_default_executor(replacement_executor)
+        default_executor.shutdown(wait=True)
+        replacement_executor.shutdown(wait=True)
+    assert results == [{"result": "done"}, {"result": "done"}]
 
 
 @pytest.mark.parametrize("phase", ["metadata", "entry", "plugins"])

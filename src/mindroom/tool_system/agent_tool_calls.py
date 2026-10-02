@@ -19,7 +19,7 @@ from agno.run.requirement import RunRequirement
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.agno_compat_prepared_tools import OwnedAgentFunctionCall, prepare_agent_tools, temporary_tool_instructions
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -28,6 +28,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import (
     ToolDescriptor,
     ToolKey,
+    UnknownToolError,
     function_schema,
     validate_tool_arguments,
 )
@@ -238,8 +239,12 @@ class PreparedAgentToolCatalog:
                     del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:
-                msg = "Tool is unavailable"
-                raise ValueError(msg)
+                functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)
+                if functions:
+                    msg = f"Toolkit {key.toolkit!r} has no function {key.function!r}; its functions: {', '.join(functions)}"
+                else:
+                    msg = f"No toolkit {key.toolkit!r}"
+                raise UnknownToolError(msg)
             return binding
 
     async def describe(
@@ -342,23 +347,23 @@ async def execute_agent_shell_call(
     call_id: str,
     arguments: dict[str, object],
     *,
-    worker_leaf: Callable[[dict[str, object]], Awaitable[str]],
+    shell_leaf: Callable[[dict[str, object]], Awaitable[object]],
     authorize: Callable[[], Awaitable[None]] | None = None,
     requirement: RunRequirement | None = None,
 ) -> AsyncIterator[AgentToolCallEvent]:
-    """Keep canonical hooks and pauses; release mutation only around pinned IO.
+    """Keep canonical hooks and pauses; release mutation only around the shell's own IO.
 
-    Only the response owner supplies this leaf, after checking the effective
-    shell toolkit. Never use it for an arbitrary tool or ordinary worker.
+    Only the response owner supplies this leaf, which runs the binding's own shell
+    function, so CLI calls from inside the command can use the catalog meanwhile.
     """
     if binding.key.function not in SHELL_OPERATION_NAMES:
-        msg = "Worker leaf replacement requires a canonical shell operation"
+        msg = "Shell leaf replacement requires a canonical shell operation"
         raise ValueError(msg)
     stream = _execute_agent_tool_call(
         binding,
         call_id,
         arguments,
-        worker_leaf=worker_leaf,
+        shell_leaf=shell_leaf,
         authorize=authorize,
         requirement=requirement,
     )
@@ -372,7 +377,7 @@ async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and 
     call_id: str,
     arguments: dict[str, object],
     *,
-    worker_leaf: Callable[[dict[str, object]], Awaitable[str]] | None = None,
+    shell_leaf: Callable[[dict[str, object]], Awaitable[object]] | None = None,
     authorize: Callable[[], Awaitable[None]] | None = None,
     requirement: RunRequirement | None = None,
 ) -> AsyncIterator[AgentToolCallEvent]:
@@ -423,15 +428,15 @@ async def _execute_agent_tool_call(  # noqa: C901 - one canonical execution and 
         # calls cannot reuse Function caches or mutate the shared control flags.
         function = binding.function.model_copy(deep=False)
         function.cache_results = False
-        if worker_leaf is not None:
+        if shell_leaf is not None:
             original = function.entrypoint
             assert original is not None
 
             @wraps(original)
-            async def pinned_leaf(**kwargs: object) -> str:
+            async def pinned_leaf(**kwargs: object) -> object:
                 catalog._lock.release()
                 try:
-                    return await worker_leaf(kwargs)
+                    return await shell_leaf(kwargs)
                 finally:
                     # Hook unwinding must regain exclusive Agent ownership even
                     # under repeated cancellation of the response task.

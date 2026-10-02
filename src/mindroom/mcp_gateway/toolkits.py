@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 
@@ -26,6 +27,10 @@ if TYPE_CHECKING:
     from mindroom.mcp.manager import MCPServerManager
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+# Synchronous tool bodies hold their thread until they return, even after a timeout or cancel.
+# A separate pool keeps them off the default executor that authentication, OAuth storage, and the
+# Matrix runtime share; the default per-user call limit stays below its size.
+_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-mcp-gateway-tool")
 logger = get_logger(__name__)
 
 
@@ -192,7 +197,7 @@ async def run_toolkit_operation[T](
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""
     toolkit = await _build_selected(context, entry, manager, require_current_access)
-    tracker = SyncToolCompletionTracker()
+    tracker = SyncToolCompletionTracker(executor=_TOOL_EXECUTOR)
     pending: asyncio.Task[Any] | None = None
     cancelled = False
     try:

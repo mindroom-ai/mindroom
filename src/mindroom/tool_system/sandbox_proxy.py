@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
 
+from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, PROVIDER_ENV_KEYS, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -988,6 +989,9 @@ def _call_proxy_sync(
         )
         payload.update(worker_payload)
         payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
+        if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
+            # A minimal response's grant travels with each command to the agent's own worker.
+            execution_env = {**(execution_env or {}), **cli_env.env()}
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:

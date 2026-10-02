@@ -177,7 +177,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal requires a dedicated Docker worker), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal runs Bash where the agent's shell runs), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -218,7 +218,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal requires a dedicated Docker worker), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal runs Bash where the agent's shell runs), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms
@@ -3212,6 +3212,7 @@ Scoped tool settings live in primary stores, never the worker credential store, 
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard.
+Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
 Worker-executed tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
@@ -3358,6 +3359,7 @@ Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlenco
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
 Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
 Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
@@ -4905,7 +4907,7 @@ Loading or unloading a toolkit retains the existing session state and continuati
 # Minimal Agent Mode
 
 Minimal mode gives an existing agent a short prompt and one Bash tool.
-The agent uses `mindroom-agent` inside its shell worker to discover and call its other tools.
+The agent uses `mindroom-agent` in that Bash, where its shell normally runs, to discover and call its other tools.
 Its identity, model, workspace, memory, history, and tool permissions stay tied to the same agent.
 Standard mode is the default.
 
@@ -4935,11 +4937,11 @@ A caller with the [`delegate`](https://docs.mindroom.chat/tools/agent-orchestrat
 The child starts with the short prompt and Bash tool described here instead of its full system prompt and tool schemas, so each of its requests carries far fewer tokens.
 Use it for self-contained tasks whose child does not need its role, instructions, and tool guidance up front; the child can still read them with `mindroom-agent context`.
 `continue_subagent` keeps the child's mode.
-The tool description offers minimal mode only when the deployment meets the [deployment requirements](#deployment-requirements), and lists the allowed subagents that have the `shell` tool.
+The tool description and schema offer minimal mode only for allowed subagents that have the `shell` tool and whose shell location meets the [deployment requirements](#deployment-requirements); otherwise the option is hidden.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it, and minimal mode is not offered while shell commands require approval.
 Minimal subagents run only inside Matrix conversations.
-Each minimal child response gets its own dedicated Docker worker, which retires when that response ends.
+A minimal child runs Bash where its own shell runs.
 
 ## Instructions and context
 
@@ -4978,8 +4980,10 @@ mindroom-agent calls wait CALL_ID
 ```
 
 Tool names are qualified by toolkit.
+`TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
 Discovery and calls use the current agent's permissions and requester context.
-Calling a tool returns JSON containing its call ID and current status.
+Calling a tool waits up to 30 seconds for the result and prints its receipt: call ID, status, and the outcome once it has finished.
+Use `--timeout SECONDS` on the call to choose another budget, or `--timeout 0` to return at once.
 Top-level `--help` lists every command, including `calls wait CALL_ID` for queued, running, or waiting calls.
 Use command-specific `--help` for arguments and options.
 Use `calls wait` when the result is still queued, running, or waiting for a decision.
@@ -4989,8 +4993,8 @@ Waiting pauses that shell command and its owning response; other conversations c
 New tool calls and schema preparation require an active Bash call.
 Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
 
-Arguments can also come from `--json-file arguments.json` or `--json-stdin`.
-These three JSON input options are mutually exclusive and require a JSON object.
+Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
+These JSON inputs are mutually exclusive and require a JSON object.
 Omitting them supplies an empty object.
 Use `--call-id UUID` when the caller needs to retain a known ID before submission.
 Reusing an ID with the same tool and arguments joins the existing live call; different arguments are rejected.
@@ -5000,7 +5004,7 @@ Reusing an ID with the same tool and arguments joins the existing live call; dif
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
 | `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin` |
+| `tools call TOOLKIT FUNCTION [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |
@@ -5037,16 +5041,16 @@ Submitting a fresh ID may repeat a side effect.
 
 Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
-The isolated worker remains owned by the response across its live waits and continuations, then retires when the response ends.
+The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background command handles belong to that response's worker.
+Background commands behave like the agent's ordinary shell commands, but their `mindroom-agent` calls stop working when the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
 Ordinary call results and duplicate-call tracking live only as long as their response owner.
 They are unavailable after process restart.
 Pending approvals use existing durable approval recovery.
-If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh worker after the decision.
+If a pending approval outlasts the CLI grant's 24-hour limit, its grant expires and the approval resumes with a fresh grant after the decision.
 Recovery does not directly rerun a saved outer Bash script, and an already claimed interrupted approval is not dispatched again.
 When the recovered approval is for the outer Bash command itself, the agent is told that the command was not run and can issue it again.
 A recovered approval streams its progress into the paused reply through the same continuation driver as a standard approval.
@@ -5055,26 +5059,34 @@ Normal agent restart behavior still applies to subsequent model decisions; this 
 
 ## Deployment requirements
 
-The first supported profile requires a dedicated Docker worker with the `mindroom-agent` CLI installed and the agent's existing shell permission.
-Local and static shell runners are unsupported.
-Docker worker images from earlier releases lack the CLI routes; minimal mode reports that the image must be updated, while standard mode keeps using them.
-Configure the existing Docker worker backend and separate origins for `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_PRIMARY_URL`.
-The primary API must require `MINDROOM_API_KEY` authentication, because worker shells keep network access to it.
-`!mode <agent> minimal` lists every missing setting at once; set them in the runtime's `.env` and restart MindRoom.
+Minimal mode runs Bash where the agent's shell already runs, and needs the agent's existing run, check, and kill shell permissions, its workspace, and MindRoom's API server.
+`!mode <agent> minimal` lists every missing requirement at once; set environment settings in the runtime's `.env` and restart MindRoom.
+
+### Shell in MindRoom itself
+
+When the agent's shell runs in the MindRoom process, which is the default without a worker backend, minimal mode needs no setup.
+Bash runs in MindRoom like the agent's ordinary shell, and `mindroom-agent` calls the running API over its local address.
+Such an agent is already fully trusted, as described in [the security posture](https://docs.mindroom.chat/architecture/security-posture/), so no worker, key, or URL is required.
+
+### Shell in a worker
+
+When the agent's shell runs in a worker, minimal Bash runs in that same worker through the sandbox proxy, like the agent's ordinary shell commands.
+Each command receives the response's grant and MindRoom's API address in its environment, so the worker image must come from the same MindRoom release.
+Worker shells keep network access to MindRoom's API, so that API must require `MINDROOM_API_KEY`.
+`mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
 Unauthenticated OpenAI execution and spoofable trusted-upstream header authentication are unsupported.
 
-The CLI gateway forwards only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/<call-id>`.
-Other API and worker-control routes must not be forwarded by that gateway.
-Startup checks verify those routes and reject unsupported authentication setups.
-The Docker profile isolates processes, mounted state, and injected credentials; it is not a network sandbox.
-Outbound internet, LAN services, and cloud metadata endpoints remain reachable when the deployment's network allows them.
-Operators must block access to network-provided credentials, including cloud metadata, through their deployment's egress controls.
-The startup probes check MindRoom's protected routes; they do not certify isolation from arbitrary network services.
+Workers call MindRoom back at `MINDROOM_AGENT_CLI_PRIMARY_URL` when it is set.
+Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
+Kubernetes workers and shared static runners need `MINDROOM_AGENT_CLI_PRIMARY_URL` unless the API listens on a specific non-loopback address.
+An API that listens only on loopback cannot be reached from workers, and a host firewall may drop connections from Docker networks; a `mindroom-agent` call that cannot connect names the address it tried.
+With the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 Provider credentials stay at the tools' existing authorized execution locations.
 The shell receives a grant for its own active response, not provider or administrator credentials.
-That grant is readable by its authorized shell and cannot select another agent, requester, or conversation.
-The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach the gateway, until expiry or revocation.
+That grant cannot select another agent, requester, or conversation.
+Other code in the same worker can read it while the response runs; agents and requesters that share a worker already share its trust, as described in [the security posture](https://docs.mindroom.chat/architecture/security-posture/).
+The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach MindRoom's API, until expiry or revocation.
 The external MCP gateway keeps its separate authentication and compatible-tool restrictions; minimal mode does not widen its exposed tool set.
 
 ## Compare modes
@@ -6139,6 +6151,7 @@ MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `go
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
+Downloads and exports larger than `max_download_size` are refused before they are saved, and a stream that grows past the limit is discarded without leaving a file.
 `google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting for which local files it may read.
 `google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
 Native Google Workspace files require their respective Workspace APIs for content updates.
@@ -6158,6 +6171,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
 | `write` | `boolean` | `no` | `true` | Enable uploads, binary content replacement, folder creation, file moves or renames, and trashing. |
 | `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
+| `max_download_size` | `number` | `no` | `104857600` | Maximum file or export size to download into the agent workspace in bytes. |
 
 ### Example
 
@@ -11496,11 +11510,13 @@ Items written before requesters were recorded have no attribution until their ne
 Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
 State is stored under `mindroom_data/todo/` and survives restarts.
 Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
-Templates are YAML with inline Jinja inside values, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and filters like `{{ BRANCH | default('main') }}`; YAML aliases are refused.
+Templates are YAML with inline Jinja inside values, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and filters like `{{ BRANCH | default('main') }}`; YAML aliases and collections nested more than 64 levels deep are refused.
 Workspace templates render with Jinja's sandbox in a short-lived child process limited to 128 MiB of memory, while built-in templates render in MindRoom itself.
 Only one workspace template renders at a time, and a call that arrives while another renders is refused as busy.
 Outside Linux, which is the only platform that enforces that memory limit, workspace templates may only substitute `{{ NAME }}`.
 A workspace template file holds at most 64 KiB, and one `apply_template` call reads at most 64 KiB of template text, renders at most 65,536 characters within 5 seconds, and expands to at most 100 todos, sub-templates included.
+One `list_templates` call examines at most 1,024 entries of `todo/templates`, reads at most 1 MiB of workspace template files, and stops listing workspace templates with a warning when the next file would exceed that.
+Workspace templates the call skips once that budget is spent still hide the built-in template of the same name, as they do for `apply_template`.
 Each workspace template render starts a process, so one call fits roughly 80 workspace sub-template renders in those 5 seconds.
 
 ### Native Auto-Poke
@@ -12960,7 +12976,7 @@ Set `model` to an alias from `models:` to override the child's model without cha
 The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 Set `minimal` to `True` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
-The tool description recommends this for self-contained tasks whose child does not need that context and, when the deployment supports minimal mode, lists the allowed subagents that have the `shell` tool.
+The tool description recommends this for self-contained tasks whose child does not need that context and lists the allowed subagents whose shell can run minimal mode; when none can, the `minimal` parameter is not offered.
 The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
@@ -15235,7 +15251,7 @@ Notes:
 - `metadata` can be a JSON5 string (shown above) or a YAML mapping.
 - If `name` is omitted, MindRoom falls back to the skill directory name.
 - If `description` is omitted or blank, MindRoom falls back to the resolved skill name.
-- Frontmatter must not use YAML aliases; a workspace skill whose frontmatter does is skipped with a warning.
+- Frontmatter must not use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes; a workspace skill whose frontmatter does is skipped with a warning.
 - If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and metadata.
 
 ## Frontmatter fields
@@ -18801,7 +18817,8 @@ If that budget is exhausted, the error is surfaced without a new media-free retr
 Errors requesting a guided retry, incomplete Responses streams, and provider safeguard refusals do not trigger the media-free fallback.
 Non-streaming calls have separate eligibility rules: an eligible transient failure may receive the one media-free retry.
 
-When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+When the retry succeeds after exactly one previously unknown media kind was present, and the provider error says the model does not support that kind of input (for example `does not support image input` or `is not a multimodal model`), the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+Any other rejection, such as an image the provider could not decode or a file in a format it does not accept, removes the media from that one request only, so one participant's attachment cannot hide media from other requests on the same model.
 Eligible failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
@@ -19185,7 +19202,7 @@ Private agents store the choice separately for each requester.
 Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
 
 You must be authorized to use the named agent.
-Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and MindRoom's API server, reachable from wherever the agent's shell runs.
 When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
 See [deployment requirements](https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements).
 If shell permissions or deployment settings later change, minimal responses fail closed.
@@ -20113,6 +20130,7 @@ Opening a thread is atomic per key.
 While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
 A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
 Reservations are fenced: a delivery that outlives its reservation can neither bind its root over a newer reservation nor release it, so a slow first delivery cannot orphan the thread that replaced it.
+If the trigger's `thread_key` records reach their limit while such a slow delivery is posting, its message is still recorded as delivered but its key is not kept, so a later delivery with that key opens a new thread once there is room.
 
 A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
 
@@ -20128,9 +20146,9 @@ If delivery succeeds, a later signed request with the same `event_id` is treated
 
 Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
 
-Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 characters.
+Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 bytes as the JSON replay store writes them: printable ASCII characters other than `"` and `\` take one byte each, and every other character takes the 2 to 12 bytes of its JSON escape.
 
-Each trigger may hold at most 10,000 unexpired nonces and 10,000 unexpired `event_id` records, and a request that would add one more is answered with `429` until older records expire.
+Each trigger may hold at most 10,000 unexpired nonces, 10,000 unexpired `event_id` records, and 10,000 unexpired `thread_key` records, and a request that would add one more is answered with `429` until older records expire.
 
 Retries must create a fresh signed request with the same `--event-id`.
 
@@ -20437,6 +20455,8 @@ Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted l
 An unauthenticated dashboard only serves its pages and dashboard API to requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
 It also refuses browser requests whose `Origin` is not the requested host, a loopback page, or an allowed host name, and refuses changes marked `Sec-Fetch-Site: cross-site`.
 Opening an unauthenticated dashboard by any other host name, such as `myserver.local`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+These checks read the `Host` header the browser sent, so a reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass it through unchanged, for example with nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
+A proxy that replaces `Host` with its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to that IP address and disables the DNS-rebinding protection, so configure `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`, when the proxy cannot preserve `Host`.
 Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin, and neither are routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
@@ -20857,14 +20877,13 @@ MindRoom's architecture consists of several key components working together.
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
-| `agent_cli/` | Response-owned CLI grants, call admission, worker leases, discovery, and result projection |
+| `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
-| `api/sandbox_runner_cli.py` | Worker CLI grant installation, network verification, and pinned shell transport |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
@@ -21721,6 +21740,8 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | `src/mindroom/legacy_tool_credentials.py` | Primary or standalone API startup finds no receipt in the primary credential directory. | Only a `verify_ssl: false` in a `daytona` document is dropped, from the primary and every existing worker store, through the credential store's no-follow reads, encryption policy, and atomic writes; a lock beside the receipt serializes starting processes, the receipt keeps a later deliberate `false`, and it is withheld while any stored document is unreadable. |
+| `src/mindroom/legacy_tool_credentials.py` | Primary or standalone API startup finds no worker-copy receipt in the primary credential directory. | Documents of built-in tools that require the primary runtime or room context are deleted, unread, from every existing worker's own store through a no-follow directory descriptor; primary stores and worker shared-credential mirrors are kept, and the receipt is withheld while any worker store cannot be inspected or cleaned. |
+| `src/mindroom/api/credentials_target.py` | A dashboard delete of a scoped tool's settings, which the primary now owns. | The worker copy an older dashboard saved is deleted along with the primary copy, through the same credential store delete. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
 | [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds released approval/outbox tables without `response_attempts`. | One schema transaction adopts stable source identity, preserves pending approvals and frozen wire payloads, and aborts corrupt required live ownership; a second open does not repeat adoption. |
@@ -21759,7 +21780,8 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | --- | --- |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
-| `legacy_tool_credentials.py` | `tests/test_legacy_tool_credentials.py` covers plain and encrypted primary, worker, and worker-mirror stores, unrelated services, verifying settings left byte-for-byte, the receipt keeping a later deliberate `false`, the receipt waiting for a document readable only under the right key, a concurrent start rechecking the receipt under the lock, and both startup entry points. |
+| `legacy_tool_credentials.py` | `tests/test_legacy_tool_credentials.py` covers plain and encrypted primary, worker, and worker-mirror stores, unrelated services, verifying settings left byte-for-byte, the receipt keeping a later deliberate `false`, the receipt waiting for a document readable only under the right key, a concurrent start rechecking the receipt under the lock, worker copies of primary-only tool settings deleted once while other stores and services are kept, the worker-copy receipt waiting for a store that could not be inspected or cleaned, and both startup entry points. |
+| `api/credentials_target.py` | `tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings` covers a dashboard delete removing both the primary settings and the older worker copy. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
 | [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
@@ -21787,6 +21809,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load device pair sessions persisted without a requester address and inspect them with no address. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] register an older client's own agent password unchanged and return no password for it. |
+| [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] import a `state.json` written by earlier versions into the new SQLite state database on the first start that succeeds, import again after an interrupted first start, never read the file afterwards, and open the `.sqlite3` database beside a `.json` state path, importing that file the same way. |
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 | [Hosted instance lifecycle][instance-lifecycle] and [`legacy_instance_lifecycle.py`][legacy-instance-lifecycle] | [Lifecycle tests][instance-lifecycle-tests] mark an instance an older soft delete left `deprovisioned` while its deployment kept running as running again, then hold it or keep it running for an entitled subscription, leave one without a deployment alone, and look only during nightly runs and for accounts pending deletion. |
@@ -21822,6 +21845,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J13 | Current behavior | [`event_journal_open.py`][journal-open] owns binding, generation, adoption, and database ownership guards. |
 | J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
 | J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
+| J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.27 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
 
 ## Agent state, history, memory, and knowledge
 
@@ -21873,6 +21897,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | C15 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still resolves Matrix access tokens through whoami on browser-initiated pairing and connection endpoints when the deployed chat client sends no OpenID token. |
 | C16 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] loads device pair sessions persisted before requester addresses were recorded with no address, which the approval page shows as unknown. |
 | C17 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] still registers the agent password that released clients send to register-agent, instead of generating a one-time password, until no paired installs run a release older than the first release containing #2428. |
+| C18 | Tiny retained default | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] imports the single `state.json` that earlier versions rewrote on every change into its SQLite state database once, on the first start with a new database, and opens the database beside a state path that still names the `.json` file; the import stays in the script because the service deploys as one standalone file. |
 | A1 | Current behavior | [`credentials.py`][credentials] uses JSON, including its encrypted envelope, for generic services. |
 | A2 | Current behavior | [`credentials_sync.py`][credentials-sync] treats missing `_source` as manually owned instead of overwriting it from the environment. |
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
@@ -22207,6 +22232,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | The Skills tool entrypoints are private methods with no hook for when an agent loads a skill, so the skill learner cannot count workspace skill loads without overriding `_get_skill_instructions`. | Tracking gap: call a hook when a skill's instructions or files are loaded; no matching issue or PR identified. | `_MindroomSkills` in `tool_system/skills.py`; usage coverage in `tests/test_skills.py`. |
 | FileTools content search relativizes hits and exclusions against `base_dir`, so it cannot search other directories. | Tracking gap: accept an absolute search directory outside `base_dir` and report absolute hit paths; no matching issue or PR identified. | `tools/file.py`; unrestricted outside-directory coverage in `tests/test_coding_tools.py`. |
+| FileTools content search checks each walked file through a path sanitizer that strips trailing dots and spaces, then opens the unsanitized path by name and follows its links, so a file the check never saw is read. | Tracking gap: open exactly the validated path without following links out of `base_dir`, or accept a caller-supplied file reader; no matching issue or PR identified. | `tools/file.py`; `tests/test_file_access_contract.py::test_file_tool_content_search_never_reads_a_planted_link_target`. |
 | CalculatorTools computes `factorial` for any argument, although `json.dumps` refuses results above 4300 digits, so one call can hold the GIL for minutes. | Tracking gap: refuse factorial arguments whose result cannot be serialized; no matching issue or PR has been verified. | `CalculatorTools.factorial` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned`. |
 | CalculatorTools trial-divides `is_prime` up to the square root of any argument, so one large prime checks for hours. | Tracking gap: bound prime-check work; no matching issue or PR has been verified. | `CalculatorTools.is_prime` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division`. |
 | SleepTools blocks a thread in `time.sleep` for any requested duration, so parallel calls exhaust the primary's default executor. | Tracking gap: bound and await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
@@ -22304,7 +22330,7 @@ Small owner-adjacent boundaries use the same source records:
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
 | `tool_system/skills.py` | `_MindroomSkills` counts workspace skill loads for the learner's inactivity clock by overriding `_get_skill_instructions`. | Configured skills are not counted; the learner's archival policy lives in `skill_learning/library.py`. |
-| `tools/file.py` | Unrestricted outside-directory content search through a shallow copy rooted at the searched directory, with hits rewritten to absolute paths. | Workspace-mode refusal, blocked-path messages, and Agno's inside-workspace search remain unchanged. |
+| `tools/file.py` | Unrestricted outside-directory content search through a shallow copy rooted at the searched directory, with hits rewritten to absolute paths; workspace-mode content search through a copy of Agno's walk that reuses its private exclusion, extension, snippet, and size helpers. | Workspace-mode refusal, blocked-path messages, and Agno's unrestricted inside-workspace search remain unchanged; workspace-mode searches resolve each file like `read_file` and read it through no-follow descriptors. |
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
@@ -22393,11 +22419,14 @@ Reads through those descriptors are capped per surface.
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
-| Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file |
+| Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; 1 MiB of workspace template files read, from at most 1,024 entries of the template directory, per `list_templates` call; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file and stops listing workspace templates with a warning at the template that would exceed its read cap |
 | Scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
+| Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
 
-Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases are refused, because a few aliases can describe a tree far larger than the file.
+Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
+A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.
+The thread exporter decides whether a file changed by comparing its text rather than parsing it, and indexes a thread file too large to parse whole from the thread header before its messages.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
@@ -22435,7 +22464,7 @@ Every tool declares how its own file access relates to this setting.
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
-| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, and deletes walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and search check the resolved path and then walk it by path, as the known gap below describes |
+| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, deletes, and every file a `file` content search reads walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and the other searches check the resolved path and then walk it by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
@@ -22452,9 +22481,10 @@ The model sees the effective file access and the unconfined tools in its tool ex
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
 - The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `visualization`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `search_content`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
-  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a content search.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
+  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a `coding` content search.
   They run in a worker by default, where they see only what the worker already mounts.
+  The `file` tool's `search_content` also walks by path, but resolves each file it finds like `read_file` and reads it through no-follow descriptors, so under `file_access: workspace` it returns only workspace content.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
@@ -22480,6 +22510,7 @@ Do not report or "fix" these; they are deliberate.
   Every learner read and write goes through no-follow descriptors, and the primary takes no lock inside the workspace, so worker code cannot stall it through learned skills.
 - `skill_manage`, which agents that list it or learn skills use in chat and the review writes with, runs in the primary process and writes only below the agent's workspace `skills/` directory through the same no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
+- A minimal-mode response's CLI grant is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
@@ -23940,7 +23971,7 @@ Active MCP calls have three independently configurable concurrency limits:
 | Environment variable | Default | Scope |
 | --- | --- | --- |
 | `MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS` | `128` | All active calls in the API process |
-| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `32` | One user across all client grants |
+| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `16` | One user across all client grants |
 | `MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS` | `16` | One authorized client connection |
 
 Each setting accepts a positive integer and takes effect after restarting the API process.
@@ -23949,6 +23980,8 @@ All three limits apply to `search_tools`, `get_tool`, and `invoke_tool`; the fir
 Excess calls do not queue or retry automatically.
 Cancelled or timed-out calls retain their allowances until background work and cleanup finish.
 These defaults are conservative starting values, not measured capacity; tune them against available resources, tool latency, and upstream quotas.
+Synchronous tool bodies run on a dedicated pool of 32 threads, separate from the threads that authentication, OAuth storage, and the Matrix runtime use, and admitted calls beyond that pool wait for a free thread within their timeout.
+Keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` below 32 so that one user cannot occupy every gateway tool thread.
 
 Public registration and authorization starts share an aggregate admission limit of 60 requests per minute per API process and a per-source limit of 10 requests per minute.
 Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
@@ -24059,7 +24092,7 @@ They describe inbound `/mcp` traffic, separately from outbound MCP integration l
   This includes Matrix messaging, scheduling, conversation attachments, and other tools that require the live Matrix room runtime.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
-- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 32 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.
+- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 16 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.
 - Explicit MCP cancellation applies only to a matching request ID within the same client grant. Cancellation and timeout stop waiting, but a synchronous or remote action may already have taken effect. Do not automatically retry a potentially mutating call.
 
 Synchronous native tool work shares the API process and cannot be forcibly stopped by request cancellation.
@@ -24072,7 +24105,7 @@ Existing tool-specific authorization, provider scopes, worker isolation, and fil
 
 ## Agent CLI
 
-The [minimal-mode agent CLI](https://docs.mindroom.chat/tools/agent-cli/) belongs to an active agent response and uses a separate restricted gateway.
+The [minimal-mode agent CLI](https://docs.mindroom.chat/tools/agent-cli/) belongs to an active agent response and calls MindRoom's own CLI routes with that response's grant.
 It does not change external MCP authentication, saved selections, or compatible-tool restrictions.
 
 # Docker Deployment
@@ -24587,6 +24620,7 @@ MindRoom also masks config-adjacent `.env` inside the worker container, so the r
 Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
 Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
+Worker code keeps network access to the host, so `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
 If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
@@ -26629,6 +26663,7 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.

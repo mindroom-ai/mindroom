@@ -119,7 +119,7 @@ def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
     if _SCRIPT_RUN_ID_RE.fullmatch(run_id) is None:
         msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
         raise ValueError(msg)
-    return process_worker_key(base_worker_key, purpose="script", process_id=UUID(hex=run_id.removeprefix("script-")))
+    return process_worker_key(base_worker_key, process_id=UUID(hex=run_id.removeprefix("script-")))
 
 
 def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:

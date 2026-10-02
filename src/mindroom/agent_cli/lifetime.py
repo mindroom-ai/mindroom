@@ -5,7 +5,7 @@ from __future__ import annotations
 __all__ = ["CliTurnLifetime", "cli_control_executions", "current_cli_lifetime", "response_cli_lifetime"]
 
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
@@ -13,7 +13,6 @@ from mindroom.agno_compat_cli_checkpoint import checkpoint_resolver
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
-    from contextlib import AbstractAsyncContextManager
 
     from agno.agent import Agent
     from agno.models.response import ToolExecution
@@ -21,14 +20,13 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_cli.turn import LiveTurnTools
-    from mindroom.agent_cli.worker import CliWorkerLease
     from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 
 _CURRENT: ContextVar[CliTurnLifetime | None] = ContextVar("cli_turn_lifetime", default=None)
 
 
 class CliTurnLifetime:
-    """Keep worker/grants through continuations; retire only attempt catalogs."""
+    """Keep the grant through continuations; retire only attempt catalogs."""
 
     def __init__(self) -> None:
         self.owner: LiveTurnTools | None = None
@@ -37,7 +35,6 @@ class CliTurnLifetime:
         self._provider: tuple[ProviderBatchCheckpoint, Function] | None = None
         self._response_task = asyncio.current_task()
         self._registry: TurnToolRegistry | None = None
-        self._resources = AsyncExitStack()
 
     @contextmanager
     def bind(self) -> Iterator[None]:
@@ -59,10 +56,6 @@ class CliTurnLifetime:
             self._provider[0].clear()
             self._provider = None
 
-    async def enter_worker(self, worker: AbstractAsyncContextManager[CliWorkerLease]) -> CliWorkerLease:
-        """Acquire before constructing the trusted owner, retain until turn exit."""
-        return await self._resources.enter_async_context(worker)
-
     def register(self, owner: LiveTurnTools, registry: TurnToolRegistry) -> None:
         """Accept an explicit orchestrator registry, never an ambient authority."""
         owner.bind_response_task(self._response_task)
@@ -71,13 +64,13 @@ class CliTurnLifetime:
         self._registry = registry
 
     async def retire_attempt(self) -> None:
-        """Retain queue and worker while the response driver rebuilds its Agent."""
+        """Retain queue and grant while the response driver rebuilds its Agent."""
         self._clear_provider()
         if self.owner is not None:
             await self.owner.retire_binding()
 
     async def close(self) -> None:
-        """Finish hooks/catalog before retiring the acquired worker lease."""
+        """Finish hooks/catalog, then forget the response's owner."""
         try:
             if self.owner is not None:
                 try:
@@ -87,7 +80,6 @@ class CliTurnLifetime:
                         self._registry.unregister(self.owner)
         finally:
             self._clear_provider()
-            await self._resources.aclose()
 
 
 def current_cli_lifetime() -> CliTurnLifetime | None:

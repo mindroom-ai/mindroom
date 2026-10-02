@@ -9156,7 +9156,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     original_timeout = asyncio.timeout
     entered = asyncio.Event()
     stopped = asyncio.Event()
-    retired = asyncio.Event()
     observed = []
     real_read = store.approval_continuation_for_source
     raced = []
@@ -9182,13 +9181,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
             assert decision.continuation_ready
         return await real_read(source)
 
-    @asynccontextmanager
-    async def worker():  # noqa: ANN202
-        try:
-            yield SimpleNamespace()
-        finally:
-            retired.set()
-
     with (
         patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
         patch.object(asyncio, "timeout", observe_timeout),
@@ -9210,10 +9202,8 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     build_execution_identity_from_runtime_context(catalog.runtime_context),
                     "turn",
                     "run",
-                    "worker",
                 ),
                 catalog=catalog,
-                worker=await lifetime.enter_worker(worker()),
                 authorize=AsyncMock(),
             )
             registry = TurnToolRegistry()
@@ -9274,7 +9264,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     show_tool_calls=False,
                 )
                 assert outcome.terminal_status == "suspended"
-        assert retired.is_set()
         with pytest.raises(CliAuthenticationError):
             registry.resolve("Bearer " + grant.raw_token, now_ns=grant.expires_at_ns - 1)
         current = await store.approval_continuation_for_source("$source")
