@@ -120,26 +120,28 @@ def test_install_uv_failure(mock_run: MagicMock, error: Exception) -> None:
 
 
 @pytest.mark.parametrize(
-    ("installed_tools", "install_returncode", "installs", "expected"),
+    ("list_returncode", "installed_tools", "install_returncode", "installs", "expected"),
     [
-        ("", 0, True, True),
-        ("mindroom v2026.7.9\n- mindroom\n", 0, True, True),
-        ("mindroom v2026.8.1\n- mindroom\n", 0, False, True),
-        ("", 1, True, False),
+        (0, "", 0, True, True),
+        (0, "mindroom v2026.7.9\n- mindroom\n", 0, True, True),
+        (0, "mindroom v2026.8.1\n- mindroom\n", 0, False, True),
+        (0, "", 1, True, False),
+        (2, "", 0, False, False),
     ],
-    ids=["absent", "other-version", "same-version", "install-fails"],
+    ids=["absent", "other-version", "same-version", "install-fails", "list-fails"],
 )
 def test_install_service_runtime_installs_the_pinned_version_as_a_uv_tool(
+    list_returncode: int,
     installed_tools: str,
     install_returncode: int,
     installs: bool,
     expected: bool,
 ) -> None:
-    """The pinned version becomes a persistent uv tool, and an installed one is kept so its extras survive."""
+    """The pinned version becomes a persistent uv tool; an installed one, or one that cannot be listed, is left alone."""
     uv_path = Path("/usr/bin/uv")
     run = MagicMock(
         side_effect=[
-            subprocess.CompletedProcess(["uv"], 0, stdout=installed_tools),
+            subprocess.CompletedProcess(["uv"], list_returncode, stdout=installed_tools),
             subprocess.CompletedProcess(["uv"], install_returncode),
         ],
     )

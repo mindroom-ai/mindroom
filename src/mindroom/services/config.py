@@ -100,6 +100,9 @@ def install_service_runtime(uv_path: Path, *, package_version: str | None = None
     """
     version = _service_version(package_version)
     tools = subprocess.run([str(uv_path), "tool", "list"], capture_output=True, text=True, check=False)
+    if tools.returncode != 0:
+        # Without the list, an installed X cannot be told apart from a missing one, so leave the tools alone.
+        return False
     if f"{_PACKAGE_NAME} v{version}" in tools.stdout.splitlines():
         return True
     return subprocess.run([str(uv_path), "tool", "install", f"{_PACKAGE_NAME}=={version}"], check=False).returncode == 0
