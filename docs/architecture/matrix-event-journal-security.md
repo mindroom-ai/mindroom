@@ -121,9 +121,9 @@ A file that cannot be read settles the debt as a plain text message holding the 
 
 Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
 
-Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 2 MiB of stored content, newest messages first.
+Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
 
-The budget is small because decoding stored JSON can take about 45 times its size in memory, so 2 MiB of the costliest content still decodes to under 100 MiB.
+Decoding stored JSON can take about 45 times its size in memory when it is made of nested empty containers, so a page also stops once its estimated decoded size, its bytes plus 96 bytes per JSON object or array, passes 64 MiB.
 
 A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
 

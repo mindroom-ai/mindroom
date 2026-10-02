@@ -1666,6 +1666,27 @@ class TestBoundedReads:
 
         assert pages == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
 
+    async def test_a_page_of_containers_stops_at_its_decoded_budget_and_pages_on(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Rows that fit the byte budget still stop where their containers would decode too large."""
+        monkeypatch.setattr(reads, "_PAGE_DECODED_BUDGET_BYTES", 30_000)
+        for index in range(4):
+            await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x") | {"pad": [[]] * 100})
+
+        pages: list[list[str]] = []
+        cursor = None
+        while True:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
+            pages.insert(0, [m.logical_event_id for m in page.messages])
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+
+        assert pages == [["$m0", "$m1"], ["$m2", "$m3"]]
+
     async def test_a_sqlite_library_without_octet_length_still_sizes_pages(
         self,
         tmp_path: Path,

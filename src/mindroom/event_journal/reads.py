@@ -35,12 +35,15 @@ _PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) A
 # How much stored content one page loads, newest message first. A resolved
 # long-text sidecar can be megabytes, and anyone who can post can make every
 # message in a thread name one, so a row limit alone does not bound a read.
-#
-# The budget is set by what a page decodes to, not by what it stores: JSON of
-# nested empty containers decodes to about 45 times its size on CPython, so
-# 2 MiB of it takes about 90 MiB. One maximal sidecar costs that much by
-# itself, and a page keeps one message even when it alone is over the budget.
-_PAGE_CONTENT_BUDGET_BYTES = 2 * 1024 * 1024
+_PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
+
+# What the loaded rows of one page may decode to, estimated before decoding.
+# Text decodes to about its stored size, but every JSON object or array becomes
+# a Python container of about 88 bytes, so content of nested empty containers
+# decodes to over 40 times its size. Weighing each container keeps such a page
+# near this bound while ordinary long threads stay within the byte budget.
+_PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
+_DECODED_BYTES_PER_CONTAINER = 96
 
 # Everything older than one page's last row, spelled as a row value.
 #
@@ -122,6 +125,9 @@ def read_conversation(
         if kept
         else ()
     )
+    decoded = _rows_within_decoded_budget(rows)
+    trimmed = decoded < len(rows)
+    rows = rows[:decoded]
     messages: list[VisibleMessage] = []
     refresh_pending: list[RefreshRequest] = []
     for row in rows:
@@ -134,7 +140,7 @@ def read_conversation(
             created_ts=int(rows[-1]["created_ts"]),
             logical_event_id=rows[-1]["logical_event_id"],
         )
-        if rows and (kept < len(sizes) or len(sizes) == limit)
+        if rows and (trimmed or kept < len(sizes) or len(sizes) == limit)
         else None
     )
     return ConversationPage(
@@ -199,6 +205,18 @@ def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
     for index, row in enumerate(rows):
         total += int(row["content_bytes"] or 0)
         if total > _PAGE_CONTENT_BUDGET_BYTES:
+            return max(index, 1)
+    return len(rows)
+
+
+def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
+    """Return how many of one page's loaded rows fit what it may decode to, never fewer than one."""
+    total = 0
+    for index, row in enumerate(rows):
+        content_json = row["content_json"] or ""
+        containers = content_json.count("{") + content_json.count("[")
+        total += len(content_json) + _DECODED_BYTES_PER_CONTAINER * containers
+        if total > _PAGE_DECODED_BUDGET_BYTES:
             return max(index, 1)
     return len(rows)
 
