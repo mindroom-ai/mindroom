@@ -9552,7 +9552,7 @@ The other three functions require an active thread context and return an error o
 Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
 With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to all agents and teams in the thread and persists across restarts.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
 `get_thread_model` returns the active override and the available model names.
 When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
 `reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
@@ -9593,6 +9593,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
+An `m.room.message` that `send_event` sends for a human requester names that requester, so the agents and teams it mentions act for that human, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
@@ -19185,7 +19186,7 @@ Run `!mode helper standard` or `!mode helper reset` in the same conversation to 
 
 ### `!model`
 
-Show or switch the model that every agent, team, and the router uses in the current thread.
+Show or switch the model that the agents, teams, and router you may address use in the current thread.
 
 ```
 !model
@@ -19193,6 +19194,8 @@ Show or switch the model that every agent, team, and the router uses in the curr
 !model opus
 !model reset
 ```
+
+The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its room-level model.
 
 `!model` and `!model list` show the current override and the available model names.
 Model names come from the `models:` section of `config.yaml`.
@@ -19834,6 +19837,7 @@ Schedule state written by any other account, including a room admin or the inter
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
 When it reads one task, MindRoom takes the author from the event fetched by its ID, or from the task in current room state when history visibility hides that event, so a sender written inside state content is never trusted, even on a homeserver that ignores `format=event`.
+Each such read also compares the room's create event with and without `format=event`, so on a homeserver that ignores it, task reads fail instead of accepting state content that names an older bot-written version of the task.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 
@@ -20392,7 +20396,7 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
-An agent's or team's reply does not carry that bypass to the entities it mentions when a human requested the reply.
+An agent's or team's reply, including a raw `m.room.message` an agent sends with `matrix_api`, does not carry that bypass to the entities it mentions when a human requested the reply.
 A mentioned agent or team then acts for that human: it applies its own `access` to the human and does not respond when that excludes them, and it runs with the human as requester for credentials, requester-private instances, memory, learning, and approvals.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
