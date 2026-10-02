@@ -81,7 +81,9 @@ def resolve_thread_model_override(
         return _ThreadModelOverrideState(active=None, stale=None)
     override = record["model"]
     if override in configured_models:
-        return _ThreadModelOverrideState(active=override, stale=None, entity_names=frozenset(record["entities"].split()))
+        return _ThreadModelOverrideState(
+            active=override, stale=None, entity_names=frozenset(record["entities"].split())
+        )
     return _ThreadModelOverrideState(active=None, stale=override)
 
 
