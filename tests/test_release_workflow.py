@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -91,6 +92,19 @@ def test_locked_source_builds_were_reviewed_for_build_pins() -> None:
     source_only = {package["name"] for package in lock["package"] if "sdist" in package and not package.get("wheels")}
 
     assert source_only <= _REVIEWED_SOURCE_BUILDS
+
+
+def test_macos_helper_builds_before_signing_secrets_exist(release_workflow: str) -> None:
+    """Python build code for the helper runs before the signing keychain and without Apple credentials."""
+    steps = yaml.safe_load(release_workflow)["jobs"]["build_macos_app"]["steps"]
+    names = [step.get("name") for step in steps]
+    helper = steps[names.index("Build desktop helper")]
+    app = steps[names.index("Build notarized macOS DMG")]
+
+    assert names.index("Build desktop helper") < names.index("Import Developer ID certificate")
+    assert helper["run"] == "macos/build-desktop-helper.sh"
+    assert "env" not in helper
+    assert app["env"]["SKIP_DESKTOP_HELPER_BUILD"] == "1"
 
 
 @pytest.mark.parametrize("include_matching_pr", [False, True])

@@ -17,6 +17,7 @@ _CODE_RUNNING_JOBS = (
     ("macos-tests.yml", "swift-tests"),
     ("markdown-code-runner.yml", "markdown-code-runner"),
     ("pytest.yml", "test"),
+    ("release.yml", "build"),
     ("security-scan.yml", "scan"),
     ("smoke-stacks.yml", "smoke"),
     ("tach.yml", "check"),
@@ -87,6 +88,23 @@ def test_security_scan_pins_the_tools_it_installs() -> None:
     installs = [step["run"] for step in steps if step.get("run", "").startswith("pip install")]
 
     assert installs == ["pip install pip-audit==2.10.1"]
+
+
+def test_pypi_publish_job_only_downloads_and_publishes_the_built_wheel() -> None:
+    """Build code runs without the PyPI identity; the job that can mint an upload token runs no repository code."""
+    workflow = _load_workflow("release.yml")
+    build_steps = workflow["jobs"]["build"]["steps"]
+    deploy = workflow["jobs"]["deploy"]
+    upload = next(step for step in build_steps if str(step.get("uses", "")).startswith("actions/upload-artifact@"))
+
+    assert _job_permissions(workflow, "build") == {"contents": "read"}
+    assert _job_permissions(workflow, "deploy") == {"id-token": "write"}
+    assert deploy["needs"] == "build"
+    assert [step["uses"].split("@")[0] for step in deploy["steps"]] == [
+        "actions/download-artifact",
+        "pypa/gh-action-pypi-publish",
+    ]
+    assert deploy["steps"][0]["with"]["name"] == upload["with"]["name"]
 
 
 def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
