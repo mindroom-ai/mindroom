@@ -5,9 +5,9 @@ decrypted to-device events), reconciles the room's call membership state,
 and starts or stops one ``CallSession`` per room. Reconciliation always
 re-reads the room state from the homeserver, both on call events and after
 each sync-loop start, so a bot recovers calls already active at startup.
-Call, membership, and frame-key events only request a background reconcile,
-coalesced per room, so floods of them neither hold the room's event lane nor
-multiply full state reads.
+Call, membership, and frame-key events and membership expiries only request a
+background reconcile, coalesced per room, so floods of them neither hold the
+room's event lane nor multiply full state reads.
 """
 
 from __future__ import annotations
@@ -1023,8 +1023,8 @@ class CallManager:
         self._expiry_handles.pop(room.room_id, None)
         if self._shutting_down:
             return
-        task = asyncio.create_task(self._reconcile(room))
-        self._track_background_task(task, event="call_expiry_reconcile_failed", room_id=room.room_id)
+        # Staggered sender-chosen expiries share the coalescer's minimum interval.
+        self._request_reconcile(room)
 
     def _track_background_task(self, task: asyncio.Task[None], *, event: str, room_id: str) -> None:
         self._background_tasks.add(task)

@@ -3472,6 +3472,32 @@ async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_staggered_call_member_expiries_share_the_reconcile_interval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Planted call entries expiring one after another cannot replay back-to-back state reads."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._RECONCILE_MIN_INTERVAL_S", 60)
+    now_ms = int(time.time() * 1000)
+    planted = [
+        _remote_member_event("@mallory:example.org", f"PLANTED{index}", created_ts=now_ms, expires_ms=50 + index)
+        for index in range(40)
+    ]
+    client = _client()
+    client.room_get_state.return_value = _state_response(*planted)
+    manager = _manager(client, FakeBridge(), tmp_path)
+
+    await manager.on_room_event(_room(), _member_unknown_event())
+    while time.time() * 1000 < now_ms + 100:
+        await asyncio.sleep(0.005)
+
+    # Every planted entry has expired, and the expiry waits for the coalescer's next interval.
+    assert client.room_get_state.await_count == 1
+    assert ROOM_ID in manager._reconcile_requests
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_during_join_stops_the_new_session(tmp_path: Path) -> None:
     """A join that completes while shutdown runs must not leak a live session."""
     client = _client()
