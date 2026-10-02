@@ -18,6 +18,7 @@ from mindroom.services.config import (
     UninstallResult,
     build_service_command,
     find_uv,
+    install_service_runtime,
     install_uv,
 )
 from mindroom.services.runtime import ServiceConfigMissingError, resolve_service_environment
@@ -270,6 +271,7 @@ manager = ServiceManager(
     is_available=lambda: True,
     check_uv_installed=_check_uv_installed,
     install_uv=install_uv,
+    install_runtime=install_service_runtime,
     install_service=_install_service,
     uninstall_service=_uninstall_service,
     start_service=_start_service,

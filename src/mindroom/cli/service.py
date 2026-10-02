@@ -31,6 +31,7 @@ service_app = typer.Typer(
     help="""Install and manage MindRoom as a background user service.
 
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+That version is also installed as a uv tool, so the service runs from a persistent environment instead of uv's cache and `mindroom` is on your PATH.
 Rerun `mindroom service install` after upgrading MindRoom.
 
 Supported platforms:
@@ -116,6 +117,7 @@ def install_service(
             _console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(0)
 
+    _install_service_runtime(manager)
     result = manager.install_service()
     if not result.success:
         _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
@@ -153,6 +155,7 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
             _console.print(
                 f"Saved {', '.join(shell_keys)} from your shell to {runtime_paths.env_path} for the service.",
             )
+        _install_service_runtime(manager)
         result = manager.install_service()
         if result.success:
             _print_installed_service(manager, result)
@@ -165,6 +168,16 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
         raise typer.Exit(1)
     _console.print("Starting MindRoom in this terminal instead.")
     return False
+
+
+def _install_service_runtime(manager: ServiceManager) -> None:
+    """Install the service's MindRoom version as a persistent uv tool, warning instead of failing when uv cannot."""
+    _, uv_path = manager.check_uv_installed()
+    if uv_path is not None and not manager.install_runtime(uv_path):
+        _console.print(
+            "[yellow]Warning:[/yellow] Could not install this MindRoom version as a uv tool (see uv's output above), "
+            "so the service runs from uv's cache, where `uv cache clean` removes it and the extras MindRoom installs.",
+        )
 
 
 def _shell_provider_keys(runtime_paths: RuntimePaths) -> dict[str, str]:

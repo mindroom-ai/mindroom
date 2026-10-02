@@ -5,7 +5,7 @@ from __future__ import annotations
 import plistlib
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import typer
@@ -21,6 +21,7 @@ from mindroom.services.config import (
     ServiceStatus,
     build_service_command,
     find_uv,
+    install_service_runtime,
     install_uv,
 )
 from mindroom.services.launchd import _generate_plist
@@ -116,6 +117,41 @@ def test_install_uv_failure(mock_run: MagicMock, error: Exception) -> None:
 
     assert success is False
     assert "Failed to install uv" in message
+
+
+@pytest.mark.parametrize(
+    ("installed_tools", "install_returncode", "installs", "expected"),
+    [
+        ("", 0, True, True),
+        ("mindroom v2026.7.9\n- mindroom\n", 0, True, True),
+        ("mindroom v2026.8.1\n- mindroom\n", 0, False, True),
+        ("", 1, True, False),
+    ],
+    ids=["absent", "other-version", "same-version", "install-fails"],
+)
+def test_install_service_runtime_installs_the_pinned_version_as_a_uv_tool(
+    installed_tools: str,
+    install_returncode: int,
+    installs: bool,
+    expected: bool,
+) -> None:
+    """The pinned version becomes a persistent uv tool, and an installed one is kept so its extras survive."""
+    uv_path = Path("/usr/bin/uv")
+    run = MagicMock(
+        side_effect=[
+            subprocess.CompletedProcess(["uv"], 0, stdout=installed_tools),
+            subprocess.CompletedProcess(["uv"], install_returncode),
+        ],
+    )
+
+    with patch("mindroom.services.config.subprocess.run", run):
+        assert install_service_runtime(uv_path, package_version="2026.8.1") is expected
+
+    assert run.call_args_list[0].args[0] == [str(uv_path), "tool", "list"]
+    if installs:
+        assert run.call_args_list[1].args[0] == [str(uv_path), "tool", "install", "mindroom==2026.8.1"]
+    else:
+        assert run.call_count == 1
 
 
 @patch("mindroom.services.manager.platform.system", return_value="Darwin")
@@ -678,11 +714,13 @@ def test_launchd_service_environment_reads_the_installed_plist(tmp_path: Path) -
         assert _get_launchd_service_environment() == {}
 
 
+@pytest.mark.parametrize("runtime_installed", [True, False])
 @patch("mindroom.cli.service._get_service_manager")
-def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
-    """Service install -y installs without interactive prompts."""
+def test_service_install_no_confirm(mock_get_manager: MagicMock, runtime_installed: bool) -> None:
+    """Service install -y installs the pinned version as a uv tool, then the service, without interactive prompts."""
     mock_manager = MagicMock(spec=ServiceManager)
     mock_manager.check_uv_installed.return_value = (True, Path("/usr/bin/uv"))
+    mock_manager.install_runtime.return_value = runtime_installed
     mock_manager.install_service.return_value = InstallResult(success=True, message="Installed and started")
     mock_manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
     mock_get_manager.return_value = mock_manager
@@ -692,7 +730,13 @@ def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
     assert result.exit_code == 0
     assert "Installed and started" in result.output
     assert "After upgrading, rerun mindroom service install" in result.output
-    mock_manager.install_service.assert_called_once_with()
+    # A failed uv tool install only warns: the service still runs, from uv's cache.
+    assert ("Could not install this MindRoom version as a uv tool" in result.output) is not runtime_installed
+    assert mock_manager.method_calls[-3:] == [
+        call.install_runtime(Path("/usr/bin/uv")),
+        call.install_service(),
+        call.get_log_command(),
+    ]
 
 
 @patch("mindroom.cli.service._get_service_manager")
@@ -978,6 +1022,7 @@ def test_requested_login_service_saves_usable_shell_provider_keys(tmp_path: Path
     assert "GOOGLE_API_KEY_FILE=/run/secrets/google\n" in env_content
     assert "ANTHROPIC_API_KEY" not in env_content
     assert "GROQ_API_KEY" not in env_content
+    manager.install_runtime.assert_called_once_with(Path("/usr/bin/uv"))
     manager.install_service.assert_called_once_with()
 
 

@@ -955,6 +955,9 @@ mindroom journal adopt --storage-path mindroom_data --yes
 
 Install and manage MindRoom as a background user service.
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+The command also installs that version as a uv tool (`uv tool install mindroom==<version>`), because `uv tool run` then uses that persistent environment instead of one in uv's cache, which `uv cache clean` deletes along with the tool extras MindRoom installs at runtime.
+This also puts `mindroom` on your PATH, which a `uvx mindroom run` setup otherwise lacks.
+An already installed tool of that version is kept as is, and when uv cannot install it, for example because another `mindroom` executable is in the way, MindRoom warns and the service runs from uv's cache.
 Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
@@ -985,6 +988,8 @@ On a headless Linux machine, run `loginctl enable-linger` so the systemd user se
 
  MindRoom runs the version installed by this command through `uv tool run` and starts
  automatically at login.
+ That version is also installed as a uv tool, so the service runs from a persistent
+ environment instead of uv's cache and `mindroom` is on your PATH.
  Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
