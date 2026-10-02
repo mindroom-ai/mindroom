@@ -48,7 +48,9 @@ _PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 # of those peaks near 1.35 times this bound; a list of one-character non-ASCII
 # strings holds about 1.05 times it. Meanwhile 16 MiB of prose and tool traces,
 # including spaced JSON text inside their strings as tool previews write it,
-# stays under this bound.
+# stays under this bound. Strings holding a character outside the Basic
+# Multilingual Plane decode at 4 bytes per character, so a page of them can
+# reach about twice this bound before the byte budget stops it.
 _PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
 _DECODED_BYTES_PER_ARRAY = 96
 _DECODED_BYTES_PER_OBJECT = 192
