@@ -244,13 +244,15 @@ Because the replay store retains them, `event_id`, `thread_key`, and the signatu
 
 Each trigger may hold at most 10,000 unexpired nonces, 10,000 unexpired `event_id` records, and 10,000 unexpired `thread_key` records, and a request that would add one more is answered with `429` until older records expire.
 
+Rotating a trigger's key deletes the replay records kept for its previous key, and deleting a trigger deletes all of its replay records.
+
 Retries must create a fresh signed request with the same `--event-id`.
 
 Each nonce-bearing HTTP request is single-use.
 
 Do not reuse the same HTTP request body and headers as a retry strategy.
 
-Replay state lives at `<control-state>/external_triggers/replay.json` and uses an advisory file lock.
+Replay state lives in one file per trigger and signing key epoch under `<control-state>/external_triggers/replay/`, each with its own advisory file lock, so one trigger's records never slow another trigger's deliveries.
 
 Deploy trigger ingress with a single shared control-state filesystem, or keep one API writer until replay storage moves to a distributed atomic backend.
 

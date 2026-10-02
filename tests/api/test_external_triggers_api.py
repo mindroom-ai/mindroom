@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import time
 from dataclasses import dataclass, replace
@@ -526,7 +527,7 @@ def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
 
     assert response.status_code == 404
     assert response.json()["detail"] == "External trigger not found"
-    assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
 def test_oversized_nonce_or_event_id_is_refused_before_replay_claim(
@@ -560,7 +561,7 @@ def test_oversized_nonce_or_event_id_is_refused_before_replay_claim(
     long_event_id = _post_signed(trigger_api, body=_body(event_id="e" * 257))
 
     assert (long_nonce.status_code, long_event_id.status_code) == (401, 422)
-    assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
 def test_full_replay_scope_returns_429_and_still_refuses_replays(
@@ -777,7 +778,7 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
     response = _post_signed(trigger_api)
 
     assert response.status_code == 403
-    assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
 @pytest.mark.asyncio
@@ -845,7 +846,7 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
 
         assert response.status_code == 403
         execute.assert_not_awaited()
-        assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+        assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
     finally:
         gate.reopen()
         if request_task is not None:
@@ -931,7 +932,7 @@ def test_owner_not_joined_blocks_delivery_before_replay_claim(
     response = _post_signed(trigger_api)
 
     assert response.status_code == 403
-    assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    assert not (trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
 def test_private_owner_not_joined_blocks_delivery_before_replay_claim(
@@ -947,7 +948,7 @@ def test_private_owner_not_joined_blocks_delivery_before_replay_claim(
     response = _post_signed(private_trigger_api)
 
     assert response.status_code == 403
-    assert not (private_trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+    assert not (private_trigger_api.runtime_paths.control_state_root / "external_triggers" / "replay").exists()
 
 
 def test_duplicate_event_id_returns_duplicate_response(
@@ -1200,8 +1201,9 @@ def test_delivery_whose_expired_thread_key_no_longer_fits_is_still_marked_delive
     assert retried.json()["duplicate"] is True
     control_state_root = trigger_api.runtime_paths.control_state_root
     assert control_state_root is not None
-    stored = json.loads((control_state_root / "external_triggers" / "replay.json").read_text(encoding="utf-8"))
-    assert sorted(stored["threads"][snapshot.replay_scope]) == ["chat:C1:0", "chat:C1:1"]
+    scope_file = f"{hashlib.sha256(snapshot.replay_scope.encode()).hexdigest()}.json"
+    stored = json.loads((control_state_root / "external_triggers" / "replay" / scope_file).read_text(encoding="utf-8"))
+    assert sorted(stored["threads"]) == ["chat:C1:0", "chat:C1:1"]
 
 
 def test_exception_during_first_delivery_releases_thread_key_reservation(
@@ -1322,7 +1324,7 @@ def test_trigger_endpoint_requires_live_human_equivalent_membership(
     assert delivered_owners == ([_OWNER] if expected_status == 202 else [])
     if expected_status == 403:
         assert runtime_paths.control_state_root is not None
-        assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+        assert not (runtime_paths.control_state_root / "external_triggers" / "replay").exists()
         if capability:
             assert (
                 ExternalTriggerStore(runtime_paths).delivery_snapshot(

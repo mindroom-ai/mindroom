@@ -27,6 +27,7 @@ from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.external_triggers.policy import is_external_trigger_administrator
+from mindroom.external_triggers.replay_store import ExternalTriggerReplayStore
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
@@ -237,6 +238,7 @@ class ExternalTriggerStore:
         self._root = runtime_paths.control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
         self._store_path = self._root / _TRIGGER_RECORDS_FILENAME
         self._lock_path = self._root / f"{_TRIGGER_RECORDS_FILENAME}.lock"
+        self._replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
 
     @property
     def store_path(self) -> Path:
@@ -475,7 +477,7 @@ class ExternalTriggerStore:
             allowed_kinds=record.allowed_kinds,
             replay_window_seconds=min(record.replay_window_seconds, policy.max_replay_window_seconds),
             max_body_bytes=min(record.max_body_bytes, policy.max_body_bytes),
-            replay_scope=f"{record.uid}:{record.auth_epoch}",
+            replay_scope=_replay_scope(record),
         )
 
     def _require_owned_record(
@@ -513,6 +515,7 @@ class ExternalTriggerStore:
             raise ExternalTriggerStoreError(msg) from exc
 
     def _write_records(self, records: _SerializedTriggerRecords) -> None:
+        """Publish ``records``, then drop replay records of scopes they no longer authenticate."""
         try:
             write_json_file_durable(
                 self._store_path,
@@ -524,6 +527,12 @@ class ExternalTriggerStore:
         except OSError as exc:
             msg = "external trigger store is unavailable"
             raise ExternalTriggerStoreError(msg) from exc
+        self._replay_store.retain_scopes(_replay_scope(record) for record in records.triggers.values())
+
+
+def _replay_scope(record: ExternalTriggerRecord) -> str:
+    """Return the replay scope that one trigger's current signing key authenticates."""
+    return f"{record.uid}:{record.auth_epoch}"
 
 
 def _validate_trigger_id(trigger_id: str) -> str:

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.external_triggers.auth import mint_trigger_capability
+from mindroom.external_triggers.replay_store import ExternalTriggerReplayStore
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -204,6 +205,37 @@ def test_rotate_key_increments_auth_epoch(tmp_path: Path) -> None:
     assert rotated.version == record.version + 1
     assert rotated.auth_epoch == record.auth_epoch + 1
     assert rotated.key_id == "rotated"
+
+
+def test_rotate_and_delete_drop_replay_records_of_scopes_that_can_no_longer_authenticate(tmp_path: Path) -> None:
+    """A rotated or deleted trigger keeps no replay records outside its current scope's limits."""
+    config = _config()
+    runtime_paths = _runtime_paths(tmp_path)
+    assert runtime_paths.control_state_root is not None
+    store = ExternalTriggerStore(runtime_paths)
+    replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+    replay_dir = runtime_paths.control_state_root / "external_triggers" / "replay"
+    rotating = _create(store, config, trigger_id="rotating")
+    kept = _create(store, config, trigger_id="kept")
+    for record in (rotating, kept):
+        assert replay_store.claim_nonce(f"{record.uid}:1", "nonce-1", now=1_000, ttl_seconds=300)
+        assert replay_store.claim_event_id(f"{record.uid}:1", "event-1", now=1_000, ttl_seconds=300)
+
+    store.rotate_key(
+        rotating.trigger_id,
+        public_key="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        key_id="rotated",
+        actor_user_id=_OWNER,
+        config=config,
+    )
+
+    kept_stem = hashlib.sha256(f"{kept.uid}:1".encode()).hexdigest()
+    assert sorted(path.name for path in replay_dir.iterdir()) == [f"{kept_stem}.json", f"{kept_stem}.json.lock"]
+    assert not replay_store.claim_nonce(f"{kept.uid}:1", "nonce-1", now=1_001, ttl_seconds=300)
+
+    store.delete_record(kept.trigger_id, actor_user_id=_OWNER, config=config)
+
+    assert list(replay_dir.iterdir()) == []
 
 
 def test_metadata_update_increments_version_not_auth_epoch(tmp_path: Path) -> None:
