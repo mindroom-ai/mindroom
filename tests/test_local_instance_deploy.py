@@ -1486,6 +1486,33 @@ def test_created_synapse_instance_refuses_self_registration(tmp_path: Path, monk
     assert address_limit["burst_count"] >= 1000000
 
 
+@pytest.mark.parametrize(("domain", "public"), [("mindroom.example.com", True), ("prod.localhost", False)])
+def test_created_synapse_instance_federates_to_private_addresses_only_on_localhost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    domain: str,
+    public: bool,
+) -> None:
+    """A public instance keeps Synapse's private-address blocklist and allows only the host gateway its peers map to."""
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", tmp_path / "missing.env.template")
+    instance = _instance("prod", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+    instance.domain = domain
+
+    deploy._create_environment_file(instance, "prod", deploy.MatrixType.SYNAPSE)
+    deploy._setup_synapse_config(instance)
+
+    homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
+    if public:
+        # Leaving both blocklists unset applies Synapse's default private-address blocklist to federation requests.
+        assert "federation_ip_range_blacklist" not in homeserver
+        assert "ip_range_blacklist" not in homeserver
+        assert homeserver["ip_range_whitelist"] == ["172.17.0.1"]
+    else:
+        assert homeserver["federation_ip_range_blacklist"] == []
+        assert "ip_range_whitelist" not in homeserver
+
+
 def test_synapse_registration_secret_round_trips_yaml_metacharacters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
