@@ -346,16 +346,11 @@ def _request_refused(gates: dict[int, Callable[[], bool]], run_response: RunOutp
 # AGNO_COMPAT: Model invocation and streaming lack composable middleware.
 # Reason: Agno has no composable invocation/stream middleware, so owners must
 # capture and replace instance methods to retain installation order and context.
-# Stream owners also compose Agno's private _is_retryable_error so Model.retries
-# cannot restart a retry budget the owner already spent (the stream stall veto).
 # Upstream issue: No matching public model invocation middleware issue identified.
 # Upstream PR: None identified for this extension point.
 # Remove when: Public invocation hooks compose sync/async streams and request context
-# with the same ordering, and a public retry-classifier hook lets owners veto Agno
-# retries; logging, retry limits, and stream cleanup remain owners.
-# Coverage: tests/test_llm_request_logging.py, tests/test_claude_stream_retry.py,
-# tests/test_provider_stream_retry.py, and the stall veto in
-# tests/test_provider_stream_retry.py::test_configured_model_retries_do_not_restart_silent_attempts.
+# with the same ordering; logging, retry limits, and stream cleanup remain owners.
+# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py; tests/test_provider_stream_retry.py.
 def install_async_invocation_hooks(
     model: Model,
     *,
@@ -378,9 +373,8 @@ def install_stream_invocation_hooks(
     marker: str,
     wrap_sync: Callable[[_SyncStream], _SyncStream],
     wrap_async: Callable[[_AsyncStream], _AsyncStream],
-    wrap_predicate: Callable[[_RetryPredicate], _RetryPredicate],
 ) -> None:
-    """Bind an owner's sync and async stream wrappers and its outer retry predicate once."""
+    """Bind an owner's sync and async stream wrappers once."""
     model_dict = vars(model)
     if model_dict.get(marker) is True:
         return
@@ -389,7 +383,6 @@ def install_stream_invocation_hooks(
     model_dict[marker] = True
     model_dict["invoke_stream"] = wrap_sync(original_sync)
     model_dict["ainvoke_stream"] = wrap_async(original_async)
-    model_dict["_is_retryable_error"] = wrap_predicate(model._is_retryable_error)
 
 
 # AGNO_COMPAT: Final provider requests lack an attempt-scoped hook.

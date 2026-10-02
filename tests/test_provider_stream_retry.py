@@ -435,27 +435,6 @@ async def test_persistent_silence_fails_after_one_retry(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("warm_stream_path")
-async def test_configured_model_retries_do_not_restart_silent_attempts(tmp_path: Path) -> None:
-    """Agno's own retries must not turn one stall retry into several more silent waits."""
-    provider = _Provider([_event_stream(_silent_after()) for _ in range(4)])
-    model_config = ModelConfig(
-        provider="openai",
-        id="test-model",
-        api_key="test-key",
-        extra_kwargs={"retries": 1, "delay_between_retries": 0},
-        stream_idle_timeout_seconds=_IDLE_SECONDS,
-    )
-    async with _model(provider, tmp_path, model_config=model_config) as model:
-        agent = Agent(model=model)
-        events = [event async for event in agent.arun("Hello", stream=True, stream_events=True)]
-
-    assert any(isinstance(event, RunErrorEvent) for event in events)
-    assert len(provider.requests) == 2
-    assert all(response.is_closed for response in provider.responses)
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("warm_stream_path")
 async def test_silence_after_output_is_not_replayed(tmp_path: Path) -> None:
     """Partial text already reached the user, so a later stall fails without replay."""
     provider = _Provider([_event_stream(_silent_after(_chunk({"content": "Partial"}))), _answer("Must not run")])
