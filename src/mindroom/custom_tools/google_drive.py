@@ -96,6 +96,13 @@ class _BoundedDownloadWriter:
         return self._output.write(chunk)
 
 
+def _download_media(output: _BoundedDownloadWriter, request: object) -> None:
+    downloader = MediaIoBaseDownload(output, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+
+
 def _unsafe_drive_filename_error(filename: object) -> str | None:
     if filename is None:
         return "Google Drive file metadata is missing a filename"
@@ -109,6 +116,17 @@ def _unsafe_drive_filename_error(filename: object) -> str | None:
     windows_filename = PureWindowsPath(filename)
     if windows_filename.drive or windows_filename.root:
         return f"Unsafe Google Drive filename: {filename}"
+    return None
+
+
+def _download_metadata_error(metadata: dict[str, Any], max_download_size: float) -> str | None:
+    """Refuse a download whose filename is unsafe or whose Drive size exceeds the limit."""
+    unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
+    if unsafe_filename_error:
+        return unsafe_filename_error
+    file_size = int(metadata.get("size", 0))
+    if file_size > max_download_size:
+        return f"File is {file_size} bytes, exceeds max_download_size ({max_download_size})."
     return None
 
 
@@ -546,17 +564,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             metadata = self._get_file_metadata(file_id, "id,name,mimeType,size")
             mime_type = metadata.get("mimeType", "")
             filename = metadata.get("name")
-            unsafe_filename_error = _unsafe_drive_filename_error(filename)
-            if unsafe_filename_error:
-                return json.dumps({"error": unsafe_filename_error, "file": metadata})
-            file_size = int(metadata.get("size", 0))
-            if file_size > self.max_download_size:
-                return json.dumps(
-                    {
-                        "error": f"File is {file_size} bytes, exceeds max_download_size ({self.max_download_size}).",
-                        "file": metadata,
-                    },
-                )
+            metadata_error = _download_metadata_error(metadata, self.max_download_size)
+            if metadata_error:
+                return json.dumps({"error": metadata_error, "file": metadata})
 
             target_mime, ext = self.DOWNLOAD_EXPORT_TYPES.get(mime_type, (None, ""))
             if export_format:
@@ -587,11 +597,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                         "originalMimeType": mime_type,
                     }
                 else:
-                    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-                    downloader = MediaIoBaseDownload(output, request)
-                    done = False
-                    while not done:
-                        _, done = downloader.next_chunk()
+                    _download_media(output, service.files().get_media(fileId=file_id, supportsAllDrives=True))
                     result = {"fileId": file_id, "path": str(path), "status": "downloaded"}
             return json.dumps(result)
         except HttpError as exc:

@@ -208,26 +208,16 @@ async def _claim_and_execute_trigger(
     # Only per-fire targets group by thread key; a fixed target thread already
     # collects every delivery.
     thread_key = payload.thread_key if snapshot.target.new_thread else None
-    thread_claim = ExternalTriggerThreadKeyClaim.FRESH
     continue_thread_event_id: str | None = None
     thread_reservation: str | None = None
     if thread_key is not None:
-        try:
-            thread_claim, continue_thread_event_id, thread_reservation = await _run_replay_store_call(
-                replay_store.claim_thread_key,
-                snapshot.replay_scope,
-                thread_key,
-                room_id=snapshot.resolved_room_id,
-                now=now,
-                pending_ttl_seconds=_PENDING_THREAD_KEY_TTL_SECONDS,
-            )
-        except HTTPException:
-            # A refused thread claim must not leave the event id stuck in progress.
-            await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
-            raise
-        if thread_claim is ExternalTriggerThreadKeyClaim.PENDING:
-            await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
-            raise HTTPException(status_code=409, detail="External trigger thread is being opened by another delivery")
+        continue_thread_event_id, thread_reservation = await _claim_thread_key(
+            replay_store,
+            snapshot,
+            thread_key,
+            event_id,
+            now=now,
+        )
     try:
         matrix_event_id = await execute_external_trigger(
             client=cast("nio.AsyncClient", runtime.client),
@@ -282,6 +272,34 @@ async def _claim_and_execute_trigger(
         event_id=event_id,
         matrix_event_id=matrix_event_id,
     )
+
+
+async def _claim_thread_key(
+    replay_store: ExternalTriggerReplayStore,
+    snapshot: TriggerDeliverySnapshot,
+    thread_key: str,
+    event_id: str,
+    *,
+    now: int,
+) -> tuple[str | None, str | None]:
+    """Return the thread root to continue and the caller's reservation, releasing the event id when refused."""
+    try:
+        thread_claim, continue_thread_event_id, thread_reservation = await _run_replay_store_call(
+            replay_store.claim_thread_key,
+            snapshot.replay_scope,
+            thread_key,
+            room_id=snapshot.resolved_room_id,
+            now=now,
+            pending_ttl_seconds=_PENDING_THREAD_KEY_TTL_SECONDS,
+        )
+    except HTTPException:
+        # A refused thread claim must not leave the event id stuck in progress.
+        await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
+        raise
+    if thread_claim is ExternalTriggerThreadKeyClaim.PENDING:
+        await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
+        raise HTTPException(status_code=409, detail="External trigger thread is being opened by another delivery")
+    return continue_thread_event_id, thread_reservation
 
 
 def _trigger_store(runtime_paths: RuntimePaths) -> ExternalTriggerStore:
