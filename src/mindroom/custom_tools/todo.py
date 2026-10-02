@@ -33,9 +33,14 @@ from mindroom.custom_tools.todo_state import (
 )
 from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import read_regular_file_within_root, resolve_path_within_root
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    read_regular_file_within_root,
+    resolve_path_within_root,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.skills import workspace_entry_names
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -58,8 +63,8 @@ _TEMPLATE_RECURSION_LIMIT = 3
 _MAX_TEMPLATE_SIZE = 64 * 1024
 _MAX_TEMPLATE_TODOS = 100
 _MAX_TEMPLATE_RENDER_SECONDS = 5.0
-# One list_templates call stops reading workspace templates after this much text, however many worker code planted.
-_MAX_TEMPLATE_LISTING_CHARS = 1024 * 1024
+# One list_templates call stops reading workspace templates after this many bytes, however many worker code planted.
+_MAX_TEMPLATE_LISTING_BYTES = 1024 * 1024
 _WORKSPACE_TEMPLATE_RELATIVE_DIR = Path("todo/templates")
 
 
@@ -157,14 +162,28 @@ class _TemplateRoot:
     source: str
     workspace_root: Path | None = None
 
-    def read_text(self, path: Path) -> str:
-        """Return one template's text from this root."""
+    def template_paths(self, templates_dir: Path) -> list[Path]:
+        """Return this root's template files by name; a workspace scan examines only its first entries."""
         if self.workspace_root is None:
-            return path.read_text(encoding="utf-8")
+            return sorted(templates_dir.glob("*.yaml.j2"))
+        relative = templates_dir.relative_to(self.workspace_root.resolve())
+        with open_directory_within_root(self.workspace_root, relative) as directory_fd:
+            listing = workspace_entry_names(directory_fd, directories=False)
+        if not listing.complete:
+            logger.warning("Listing only the first workspace todo template entries", path=str(templates_dir))
+        return [templates_dir / name for name in listing.names if name.endswith(".yaml.j2")]
+
+    def read_bytes(self, path: Path) -> bytes:
+        """Return one template's bytes from this root."""
+        if self.workspace_root is None:
+            return path.read_bytes()
         # Template paths are canonical; open them below the workspace as spelled so a replaced workspace is refused.
         relative = path.relative_to(self.workspace_root.resolve())
-        payload = read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
-        return payload.decode("utf-8")
+        return read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
+
+    def read_text(self, path: Path) -> str:
+        """Return one template's text from this root."""
+        return self.read_bytes(path).decode("utf-8")
 
 
 @dataclass(slots=True)
@@ -1079,25 +1098,28 @@ class TodoTools(Toolkit):
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
         seen_names: set[str] = set()
-        remaining_workspace_chars = _MAX_TEMPLATE_LISTING_CHARS
+        remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
         for template_root in _visible_template_roots(agent):
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
                 continue
-            for path in sorted(templates_root.glob("*.yaml.j2")):
+            paths = template_root.template_paths(templates_root)
+            for index, path in enumerate(paths):
                 try:
                     resolve_path_within_root(templates_root, path, symlinks="internal")
                 except ValueError:
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
                     raise ValueError(msg) from None
                 try:
-                    text = template_root.read_text(path)
+                    payload = template_root.read_bytes(path)
                     if template_root.source == "workspace":
-                        remaining_workspace_chars -= len(text)
-                        if remaining_workspace_chars < 0:
+                        remaining_workspace_bytes -= len(payload)
+                        if remaining_workspace_bytes < 0:
                             logger.warning("Listing only the first workspace todo templates", template=path.name)
+                            # Unread workspace templates still shadow built-ins of the same name, as in apply_template.
+                            seen_names.update(unread.name.removesuffix(".yaml.j2") for unread in paths[index:])
                             break
-                    metadata = _load_template_metadata(path, text)
+                    metadata = _load_template_metadata(path, payload.decode("utf-8"))
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue
