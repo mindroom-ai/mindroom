@@ -172,18 +172,27 @@ async def _ainvoke_stream_with_retry(
             await stream.aclose()
 
 
+def _is_retryable_unless_stalled(
+    original_is_retryable_error: Callable[[ModelProviderError], bool],
+    error: ModelProviderError,
+) -> bool:
+    """Keep Agno's configured retries from restarting a spent stall budget."""
+    return not isinstance(error, _ProviderStreamStalledError) and original_is_retryable_error(error)
+
+
 def install_provider_stream_retry_hook(model: Model, *, idle_timeout_seconds: float | None = None) -> None:
     """Wrap a model's stream invocations with transient-error retries.
 
     Idempotent per model instance. Only attempts that have not yet yielded
     meaningful output are retried; anything else re-raises immediately so
     partially streamed responses are never duplicated. ``idle_timeout_seconds``
-    bounds the silence between provider events in async streams, which every
-    MindRoom turn uses; a blocking sync iteration cannot be interrupted.
+    bounds the silence between provider events in async streams; non-streaming
+    requests and blocking sync iteration are not covered.
     """
     install_stream_invocation_hooks(
         model,
         marker=_STREAM_RETRY_HOOK_ATTR,
         wrap_sync=lambda original: partial(_invoke_stream_with_retry, model, original),
         wrap_async=lambda original: partial(_ainvoke_stream_with_retry, model, original, idle_timeout_seconds),
+        wrap_predicate=lambda original: partial(_is_retryable_unless_stalled, original),
     )

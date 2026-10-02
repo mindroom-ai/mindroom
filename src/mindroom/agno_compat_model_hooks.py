@@ -373,8 +373,9 @@ def install_stream_invocation_hooks(
     marker: str,
     wrap_sync: Callable[[_SyncStream], _SyncStream],
     wrap_async: Callable[[_AsyncStream], _AsyncStream],
+    wrap_predicate: Callable[[_RetryPredicate], _RetryPredicate],
 ) -> None:
-    """Bind an owner's sync and async stream wrappers once."""
+    """Bind an owner's sync and async stream wrappers and its outer retry predicate once."""
     model_dict = vars(model)
     if model_dict.get(marker) is True:
         return
@@ -383,6 +384,7 @@ def install_stream_invocation_hooks(
     model_dict[marker] = True
     model_dict["invoke_stream"] = wrap_sync(original_sync)
     model_dict["ainvoke_stream"] = wrap_async(original_async)
+    model_dict["_is_retryable_error"] = wrap_predicate(model._is_retryable_error)
 
 
 # AGNO_COMPAT: Final provider requests lack an attempt-scoped hook.

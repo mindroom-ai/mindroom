@@ -63,7 +63,7 @@ Each model entry supports these fields:
 - **host** - Optional host URL for Ollama.
 - **extra_kwargs** - Additional provider-specific parameters; set `extra_kwargs.base_url` for an OpenAI-compatible server.
 - **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
-- **stream_idle_timeout_seconds** - Seconds a streamed request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset means 300 for hosted providers on their built-in endpoint and no limit for `ollama`, `llama_cpp`, or a custom endpoint; `0` disables the limit
+- **stream_idle_timeout_seconds** - Seconds a streamed request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset means 300 for hosted providers on their built-in endpoint and no limit for `ollama`, `llama_cpp`, or a configured endpoint; `0` disables the limit
 
 ### Supported Providers
 

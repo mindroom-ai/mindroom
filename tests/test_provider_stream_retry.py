@@ -435,6 +435,27 @@ async def test_persistent_silence_fails_after_one_retry(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("warm_stream_path")
+async def test_configured_model_retries_do_not_restart_silent_attempts(tmp_path: Path) -> None:
+    """Agno's own retries must not turn one stall retry into several more silent waits."""
+    provider = _Provider([_event_stream(_silent_after()) for _ in range(4)])
+    model_config = ModelConfig(
+        provider="openai",
+        id="test-model",
+        api_key="test-key",
+        extra_kwargs={"retries": 1, "delay_between_retries": 0},
+        stream_idle_timeout_seconds=_IDLE_SECONDS,
+    )
+    async with _model(provider, tmp_path, model_config=model_config) as model:
+        agent = Agent(model=model)
+        events = [event async for event in agent.arun("Hello", stream=True, stream_events=True)]
+
+    assert any(isinstance(event, RunErrorEvent) for event in events)
+    assert len(provider.requests) == 2
+    assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("warm_stream_path")
 async def test_silence_after_output_is_not_replayed(tmp_path: Path) -> None:
     """Partial text already reached the user, so a later stall fails without replay."""
     provider = _Provider([_event_stream(_silent_after(_chunk({"content": "Partial"}))), _answer("Must not run")])
@@ -523,6 +544,32 @@ async def test_stop_during_silence_cancels_without_retry(tmp_path: Path) -> None
             None,
             "Retried",
         ),
+        (
+            ModelConfig(provider="openai", id="test-model", api_key="test-key", host="http://localhost:11434"),
+            None,
+            "Retried",
+        ),
+        (ModelConfig(provider="zai", id="test-model", api_key="test-key"), None, "Retried"),
+        (
+            ModelConfig(
+                provider="zai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"base_url": "http://localhost:8080/v1"},
+            ),
+            None,
+            "Late",
+        ),
+        (
+            ModelConfig(
+                provider="openai",
+                id="test-model",
+                api_key="test-key",
+                extra_kwargs={"client_params": {"http_options": {"base_url": "http://gpu.lan:8080"}}},
+            ),
+            None,
+            "Late",
+        ),
     ],
     ids=[
         "hosted-default",
@@ -532,6 +579,10 @@ async def test_stop_during_silence_cancels_without_retry(tmp_path: Path) -> None
         "llama-cpp",
         "explicitly-disabled",
         "llama-cpp-opted-in",
+        "ignored-host",
+        "zai-built-in-endpoint",
+        "zai-custom-endpoint",
+        "nested-http-options-base-url",
     ],
 )
 async def test_local_servers_may_stay_silent_while_loading_a_model(

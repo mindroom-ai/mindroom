@@ -683,7 +683,7 @@ class ModelConfig(BaseModel):
         description=(
             "Seconds a streamed model request may go without a provider event before MindRoom treats it as "
             "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
-            "built-in endpoint and no limit for ollama, llama_cpp, or a custom endpoint; 0 disables the limit"
+            "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
         ),
     )
 
