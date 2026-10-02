@@ -42,8 +42,11 @@ _PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 # object: a string or number of a few bytes takes 35 to 55 bytes once decoded,
 # an array about 70 and an object about 190, so a list of short values decodes
 # to about 10 times its size and nested empty containers to over 40. Weighing
-# every array, object and separator keeps each such shape at 0.6 to 0.85 of
-# its estimate, while 16 MiB of prose and tool traces stays under this bound.
+# every structural array, object and separator keeps each such shape at 0.6 to
+# 0.85 of its estimate, while 16 MiB of prose and tool traces, including JSON
+# text inside their strings, stays under this bound. Strings holding a character
+# outside the Basic Multilingual Plane decode at 4 bytes per character, so a page
+# of them can reach about twice this bound before the byte budget stops it.
 _PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
 _DECODED_BYTES_PER_ARRAY = 96
 _DECODED_BYTES_PER_OBJECT = 192
@@ -220,9 +223,12 @@ def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
         content_json = row["content_json"] or ""
         total += (
             len(content_json)
-            + _DECODED_BYTES_PER_ARRAY * content_json.count("[")
-            + _DECODED_BYTES_PER_OBJECT * content_json.count("{")
-            + _DECODED_BYTES_PER_SEPARATOR * (content_json.count(",") + content_json.count(":"))
+            # Stored content is compact JSON: a structural object opens with an unescaped quote or closes at
+            # once, and a structural separator is never followed by a space, so JSON text inside strings is free.
+            + _DECODED_BYTES_PER_ARRAY * (content_json.count("[") - content_json.count('[\\"'))
+            + _DECODED_BYTES_PER_OBJECT * (content_json.count('{"') + content_json.count("{}"))
+            + _DECODED_BYTES_PER_SEPARATOR
+            * (content_json.count(",") - content_json.count(", ") + content_json.count(":") - content_json.count(": "))
         )
         if total > _PAGE_DECODED_BUDGET_BYTES:
             return max(index, 1)

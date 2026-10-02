@@ -1765,9 +1765,19 @@ class TestBoundedReads:
         assert peak <= _MOST_ONE_PAGE_MAY_DECODE_TO
         assert peak >= reads._PAGE_DECODED_BUDGET_BYTES // 2
 
-    async def test_a_page_of_ordinary_replies_fills_its_content_budget(self, alice: PrincipalStore) -> None:
-        """Prose, code and tool traces decode to about their stored size, so the decoded cap does not cut them short."""
+    @pytest.mark.parametrize("json_results", [False, True], ids=["text-results", "json-results"])
+    async def test_a_page_of_ordinary_replies_fills_its_content_budget(
+        self,
+        alice: PrincipalStore,
+        json_results: bool,
+    ) -> None:
+        """Prose, code and tool traces decode to about their stored size, so the decoded cap does not cut them short.
+
+        Tool results are often JSON text, whose separators sit inside strings and cost nothing extra to decode.
+        """
         sentence = "The agent read the file and reported back: 12 tests passed, none failed. "
+        if json_results:
+            sentence = json.dumps({"passed": 12, "failed": 0, "files": ["a.py", "b.py", "c.py"], "ok": True}) + " "
         code = "```python\ndef handle(event: dict[str, object], *, limit: int = 10) -> list[str]:\n    ...\n```\n"
         trace = [
             {
