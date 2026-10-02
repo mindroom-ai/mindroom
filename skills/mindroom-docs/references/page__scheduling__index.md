@@ -182,6 +182,7 @@ Schedule state written by any other account, including a room admin or the inter
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
 When it reads one task, MindRoom takes the author from the event fetched by its ID, or from the task in current room state when history visibility hides that event, so a sender written inside state content is never trusted, even on a homeserver that ignores `format=event`.
+Each such read also compares the room's create event with and without `format=event`, so on a homeserver that ignores it, task reads fail instead of accepting state content that names an older bot-written version of the task.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 

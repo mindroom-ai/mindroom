@@ -1253,7 +1253,7 @@ async def test_run_once_task_retries_transient_state_read_failure(tmp_path: Path
         )
 
     sleep.assert_awaited_once()
-    assert client._send.await_count == 3
+    assert sum(_SCHEDULED_TASK_EVENT_TYPE in call.args[2] for call in client._send.await_args_list) == 3
     execute.assert_awaited_once()
     failure_notice.assert_not_awaited()
 

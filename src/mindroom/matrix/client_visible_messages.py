@@ -722,7 +722,7 @@ class ThreadEditCandidates:
 
 
 async def apply_latest_edits_to_messages(
-    client: nio.AsyncClient,
+    client: nio.AsyncClient | None,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,

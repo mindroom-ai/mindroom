@@ -147,12 +147,15 @@ class _Receiver:
         )
 
     def _selection(self, request: _Request, config: Config, scope: ModelPickerScope) -> dict[str, object]:
+        thread_overrides = resolve_thread_model_override(
+            self.paths,
+            request.thread_id,
+            configured_models=config.models,
+        ).active
+        # One reported override must govern every entity in the picker, never only some of them.
+        shared_overrides = {thread_overrides.get(name) for name in scope.entity_names}
         return {
-            "override": resolve_thread_model_override(
-                self.paths,
-                request.thread_id,
-                configured_models=config.models,
-            ).active,
+            "override": shared_overrides.pop() if len(shared_overrides) == 1 else None,
             "inherited": [
                 {
                     "entity": name,

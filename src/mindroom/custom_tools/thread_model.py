@@ -6,6 +6,7 @@ from typing import Literal
 
 from agno.tools import Toolkit
 
+from mindroom.authorization import addressable_responder_names
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -18,7 +19,7 @@ _MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
 
 
 class ThreadModelTools(Toolkit):
-    """Tools for switching the model used by all agents in the current Matrix thread."""
+    """Tools for switching the model used by the requester's agents and teams in the current Matrix thread."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -42,6 +43,16 @@ class ThreadModelTools(Toolkit):
             return cls._payload("error", message="Thread model switching requires an active thread context.")
         return context, context.resolved_thread_id
 
+    @staticmethod
+    def _addressable_entities(context: ToolRuntimeContext) -> tuple[str, ...]:
+        return addressable_responder_names(
+            context.requester_id,
+            context.room_id,
+            context.config,
+            context.runtime_paths,
+            context.require_agent_reply_memberships(),
+        )
+
     async def list_models(self) -> str:
         """List the configured model aliases available for selection."""
         context = get_tool_runtime_context()
@@ -61,7 +72,7 @@ class ThreadModelTools(Toolkit):
         )
 
     async def get_thread_model(self) -> str:
-        """Return the current thread's model override and the available model names."""
+        """Return the current thread's model override for each entity it applies to and the available model names."""
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved
@@ -72,16 +83,17 @@ class ThreadModelTools(Toolkit):
             configured_models=context.config.models,
         )
         stale_fields: dict[str, object] = {}
-        if override.stale is not None:
-            stale_fields["stale_override"] = override.stale
+        if override.stale:
+            stale_fields["stale_overrides"] = override.stale
             stale_fields["note"] = (
-                "The stored override names a model that is no longer configured, so room-level model selection applies."
+                "Stale overrides name models that are no longer configured, so room-level model selection applies "
+                "to those entities."
             )
         return self._payload(
             "ok",
             action="get",
             thread_id=thread_id,
-            override=override.active,
+            overrides=override.active,
             available_models=sorted(context.config.models),
             **stale_fields,
         )
@@ -91,7 +103,7 @@ class ThreadModelTools(Toolkit):
         model_name: str,
         when: Literal["after-toolcall", "next-turn"] = "next-turn",
     ) -> str:
-        """Switch the model that all agents and teams use in the current thread.
+        """Switch the model that the agents and teams the requester may address use in the current thread.
 
         The override persists for this thread until reset. It can take effect
         after this tool call or from the next message in the thread.
@@ -127,6 +139,7 @@ class ThreadModelTools(Toolkit):
             model_name=model_name,
             room_id=context.room_id,
             set_by=context.requester_id,
+            entity_names=self._addressable_entities(context),
         )
         model = context.config.models[model_name]
         return self._payload(
@@ -145,12 +158,16 @@ class ThreadModelTools(Toolkit):
         )
 
     async def reset_thread_model(self) -> str:
-        """Remove the thread override, restoring room-level model selection."""
+        """Remove the thread override of the requester's agents and teams, restoring room-level model selection."""
         resolved = self._thread_context()
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        cleared = clear_thread_model_override(context.runtime_paths, thread_id)
+        cleared = clear_thread_model_override(
+            context.runtime_paths,
+            thread_id,
+            entity_names=self._addressable_entities(context),
+        )
         return self._payload(
             "ok",
             action="reset",

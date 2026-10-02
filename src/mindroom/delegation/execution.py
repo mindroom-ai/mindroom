@@ -25,6 +25,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
     approval_denial_context,
+    approved_executions_context,
     required_approval_tool_names,
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
@@ -309,6 +310,7 @@ async def _execute_child(
         validate_approval_tool_owners([agent], approved_calls, requirements)
         with (
             tool_runtime_context(child_context),
+            approved_executions_context(agent, {child.run_id: approved_calls}),
             approval_denial_context(
                 agent,
                 {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
@@ -813,7 +815,13 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         resolve_result = partial(resolve_result, output_request=output_request)
 
     # Approval and the before hook must settle before a child can start.
-    if tool_may_require_approval(config, tool.tool_name or "run_subagent") and requirement_key not in state.gates:
+    gated = tool_may_require_approval(config, tool.tool_name or "run_subagent")
+    approved_here = decisions is not None and decisions.get(requirement_key) is True
+    if gated and retained is None and not approved_here and state.gates.get(requirement_key) is not False:
+        # Saved gates live in session storage that worker code can write, so only an approval
+        # consumed by this continuation can start a fresh child; otherwise ask again.
+        state.gates.pop(requirement_key, None)
+    if gated and requirement_key not in state.gates:
         projected = deepcopy(tool)
         projected.external_execution_required = False
         projected.requires_confirmation = True
@@ -827,6 +835,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if state.gates.get(requirement_key) is False:
         resolve_result("Delegation denied by requester; child was not executed.")
         return False
+    if decisions is not None and requirement_key in decisions:
+        # The approved gate card shows the projected call; the child starts from this separate requirement.
+        call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
+        if call is None or not call.binds_arguments(tool.tool_args):
+            msg = "Saved delegation approval no longer matches its pending arguments; retry the request"
+            raise RuntimeError(msg)
     if requirement.id not in state.hooks:
         state.hooks[requirement.id] = await before_delegation(
             execution_identity=caller_identity,

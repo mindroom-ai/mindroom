@@ -2126,6 +2126,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_model"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.runtime_context",
 ]
@@ -4396,6 +4397,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.model_commands"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.model_selection_scope",
     "mindroom.model_selection",
     "mindroom.thread_models",
@@ -6566,7 +6568,7 @@ visibility = ["mindroom.api.main"]
 
 [[modules]]
 path = "mindroom.cli.thread_export"
-depends_on = ["mindroom.constants", "mindroom.thread_export.models"]
+depends_on = ["mindroom.cli.api", "mindroom.thread_export.models"]
 visibility = ["mindroom.cli.main"]
 
 
@@ -7268,7 +7270,7 @@ visibility = ["mindroom.approval_tools"]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_approval"]
-expose = ["append_denied_tool_result", "before_tool_lookup"]
+expose = ["append_denied_tool_result", "before_tool_lookup", "continuation_executes"]
 
 [[modules]]
 path = "mindroom.agno_compat_model_hooks"

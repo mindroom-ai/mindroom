@@ -6,6 +6,7 @@ and Stripe configuration so other modules can import from a single place.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from datetime import UTC
@@ -68,6 +69,10 @@ ENABLE_CLEANUP_SCHEDULER = os.getenv("ENABLE_CLEANUP_SCHEDULER", "false").lower(
 INSTANCE_TEARDOWN_GRACE_DAYS = max(1, int(os.getenv("INSTANCE_TEARDOWN_GRACE_DAYS", "30")))
 # Days an account pending deletion can still be restored; restore_account enforces the same 7 days.
 ACCOUNT_DELETION_GRACE_DAYS = 7
+# Peers, such as the ingress controller, whose X-Real-IP header names the client for rate limits and auth lockout.
+TRUSTED_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr.strip()) for cidr in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if cidr.strip()
+)
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
@@ -194,6 +199,7 @@ __all__ = [
     "STRIPE_WEBHOOK_SECRET",
     "SUPABASE_ANON_KEY",
     "SUPABASE_URL",
+    "TRUSTED_PROXY_NETWORKS",
     "UTC",
     "auth_client",
     "logger",

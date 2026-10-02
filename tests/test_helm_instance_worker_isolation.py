@@ -1185,6 +1185,17 @@ def test_platform_chart_exposes_the_instance_ingress_controller_namespace() -> N
     assert config["data"]["INSTANCE_INGRESS_CONTROLLER_NAMESPACE"] == "nginx"
 
 
+def test_platform_chart_trusts_forwarded_client_addresses_only_from_private_networks() -> None:
+    """The backend keys rate limits on X-Real-IP only from the in-cluster ingress, never from public callers."""
+    config = _resource(
+        _render_chart(Path("cluster/k8s/platform"), release_name="mindroom-platform"),
+        "ConfigMap",
+        "platform-config",
+    )
+
+    assert config["data"]["TRUSTED_PROXY_CIDRS"] == "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+
 def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:
     """Platform services should be deployable without forcing identical image tags."""
     docs = _render_chart(

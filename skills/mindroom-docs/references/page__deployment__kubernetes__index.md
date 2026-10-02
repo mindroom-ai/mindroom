@@ -391,6 +391,12 @@ Platform ingress hosts:
 - `api.{domain}` - Platform backend API
 - `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
+The backend keys its rate limits and its authentication-failure lockout on the client address.
+It takes that address from `X-Real-IP` only when the connection comes from a network in `trustedProxyCidrs` (`TRUSTED_PROXY_CIDRS`), and keys every other caller by its own connection address.
+The default lists the private IPv4 ranges, so an in-cluster ingress-nginx controller, which overwrites `X-Real-IP`, is trusted, while instance pods cannot reach the backend port to use that trust.
+Narrow the list to the controller's pod network when you know it, and include only proxies that overwrite `X-Real-IP`.
+Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is keyed by its connection address.
+
 ## Local Development with Kind
 
 ```bash
@@ -449,6 +455,7 @@ If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner f
 Keep this source stable because changing it changes future derived credential encryption keys.
 New provisioned instances receive a derived credential encryption key by default.
 When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
+An existing instance whose MindRoom storage PVC no longer exists, such as one torn down after its grace period, starts on an empty volume and also receives the derived key.
 To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
 Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
@@ -490,6 +497,8 @@ Checkout grants a plan's trial only to a Stripe customer who never had a trial, 
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
 Re-provisioning a `deprovisioned` instance claims the row only while it is still `deprovisioned`, whether a customer's provision request or a lifecycle resume after teardown does it, so concurrent runs on several replicas deploy it once and mint one OpenRouter key.
 A losing provision request gets `409`, and a losing lifecycle resume, including one a provision request started for a held instance, stops without enabling a key or clearing the hold.
+Every provision records a newly created OpenRouter key only while the instance records no key, and before it writes the key into the instance Secret, so when concurrent redeploys of one instance each create a key, the first recorded key is kept and the others are deleted before their run publishes them or deploys the instance; a key whose record fails to save is deleted too.
+If writing the instance Secret then fails, the provision deletes its key and, once OpenRouter confirms the key is gone, clears the recorded key, unless another run has recorded a different key in the meantime; a key whose deletion fails stays recorded, so revoking or disabling the instance's key still reaches it.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
 When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.

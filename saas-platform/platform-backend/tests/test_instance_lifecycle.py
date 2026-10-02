@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 import pytest
 import stripe
 from backend.deps import verify_admin, verify_user, verify_user_allow_deleted
-from backend.openrouter import CreatedOpenRouterKey, OpenRouterKeyNotFoundError
+from backend.openrouter import CreatedOpenRouterKey, OpenRouterError, OpenRouterKeyNotFoundError
 from backend.pricing import get_plan_details
 from backend.services.instance_lifecycle import (
     DELETION_BILLING_MARKER,
@@ -24,7 +24,11 @@ from backend.services.instance_lifecycle import (
     reconcile_all_subscriptions,
     reconcile_subscription_instances,
 )
-from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
+from backend.services.provisioner_service import (
+    InstanceClaimLostError,
+    provision_instance,
+    set_instance_openrouter_key_disabled,
+)
 from backend.tasks.cleanup import run_cleanup_job
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -1129,6 +1133,135 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
     assert published["openrouter_key"] == "key_A"
     assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
     assert alive == {"hash_A"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_redeploys_keep_only_the_first_recorded_key() -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    alive: set[str] = set()
+    published: dict[str, str] = {}
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        # A redeploy on another backend replica, which claimed the instance at the same time, records and publishes
+        # its key first.
+        alive.update({"hash_other", "hash_ours"})
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_other"
+        published["openrouter_key"] = "key_other"
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, secret_data: dict[str, str]) -> str:
+        published.update(secret_data)
+        return "hash"
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", apply_secret),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", helm),
+        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        pytest.raises(InstanceClaimLostError),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    assert alive == {"hash_other"}
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_other"
+    assert published["openrouter_key"] == "key_other"
+    assert db.row("instances", instance_id=7)["status"] == "provisioning"
+    helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recorded_during_publication", "expected_hash"),
+    [
+        pytest.param(None, None, id="still-ours"),
+        pytest.param("hash_other", "hash_other", id="replaced-by-another-run"),
+    ],
+)
+async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forgotten(
+    recorded_during_publication: str | None, expected_hash: str | None
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    alive: set[str] = set()
+    recorded_at_publication: list[str | None] = []
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        alive.add("hash_ours")
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    async def apply_secret(_instance_id: str, _namespace: str, _secret_data: dict[str, str]) -> str:
+        recorded_at_publication.append(db.row("instances", instance_id=7)["openrouter_key_hash"])
+        if recorded_during_publication is not None:
+            # Another run revoked this key and recorded its own replacement.
+            db.row("instances", instance_id=7)["openrouter_key_hash"] = recorded_during_publication
+        msg = "Failed to apply instance Secret mindroom-api-keys-7"
+        raise RuntimeError(msg)
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", apply_secret),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", helm),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    assert recorded_at_publication == ["hash_ours"]
+    assert alive == set()
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
+    helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delete_error", "expected_hash"),
+    [
+        pytest.param(OpenRouterError("OpenRouter key deletion failed with status 503"), "hash_ours", id="delete-fails"),
+        pytest.param(OpenRouterKeyNotFoundError("OpenRouter key deletion failed with status 404"), None, id="gone"),
+    ],
+)
+async def test_a_recorded_key_whose_secret_publication_fails_stays_recorded_until_it_is_gone(
+    delete_error: OpenRouterError, expected_hash: str | None
+) -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", Mock(side_effect=delete_error)),
+        patch(f"{service}._apply_instance_secret", AsyncMock(side_effect=RuntimeError("Secret apply failed"))),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
+        pytest.raises(HTTPException),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    # A key that may still be live keeps its record, so disabling or revoking the instance's key can reach it.
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:

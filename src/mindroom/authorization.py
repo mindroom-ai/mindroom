@@ -9,7 +9,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
@@ -331,6 +331,21 @@ def filter_responders_by_sender_permissions(
         ):
             result.append(responder)
     return result
+
+
+def addressable_responder_names(
+    sender_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> tuple[str, ...]:
+    """Return every configured agent, team, and the router that *sender_id* may converse with in *room_id*."""
+    return tuple(
+        entity_name
+        for entity_name in (*config.agents, *config.teams, ROUTER_AGENT_NAME)
+        if is_sender_allowed_for_responder(sender_id, entity_name, room_id, config, runtime_paths, membership_index)
+    )
 
 
 def _available_responders_from_member_ids(

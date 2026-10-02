@@ -11,6 +11,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from mindroom.api.auth import dashboard_requires_credential
 from mindroom.cli.main import app
 from mindroom.cli.service import require_login_service, start_login_service
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -718,8 +719,15 @@ def test_launchd_service_environment_reads_the_installed_plist(tmp_path: Path) -
 
 @pytest.mark.parametrize("runtime_installed", [True, False])
 @patch("mindroom.cli.service._get_service_manager")
-def test_service_install_no_confirm(mock_get_manager: MagicMock, runtime_installed: bool) -> None:
+def test_service_install_no_confirm(
+    mock_get_manager: MagicMock,
+    runtime_installed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Service install -y installs the pinned version as a uv tool, then the service, without interactive prompts."""
+    # Installing saves exported keys next to the active config, which must not be the developer's own.
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
     mock_manager = MagicMock(spec=ServiceManager)
     mock_manager.check_uv_installed.return_value = (True, Path("/usr/bin/uv"))
     mock_manager.install_runtime.return_value = runtime_installed
@@ -945,7 +953,10 @@ def _login_service_manager(
 
 
 def _shell_runtime(tmp_path: Path, **process_env: str) -> RuntimePaths:
-    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
+    # `mindroom run` offers the service only once it has loaded a config.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    return resolve_primary_runtime_paths(config_path=config_path, process_env=process_env)
 
 
 @pytest.mark.parametrize(
@@ -1026,6 +1037,69 @@ def test_requested_login_service_saves_usable_shell_provider_keys(tmp_path: Path
     assert "GROQ_API_KEY" not in env_content
     manager.install_runtime.assert_called_once_with(Path("/usr/bin/uv"))
     manager.install_service.assert_called_once_with()
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_keeps_the_shell_dashboard_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: str,
+) -> None:
+    """A dashboard key only exported in the shell is saved to `.env`, so the service never listens without it."""
+    # Quotes, ` #` and a trailing space would change or vanish in an unquoted `.env` line, and `$` must stay literal.
+    key = 'shell$key \'dash"board" #key '
+    runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
+    (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://mindroom.chat\n", encoding="utf-8")
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        monkeypatch.setenv("MINDROOM_API_KEY", key)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+
+    manager.install_service.assert_called_once_with()
+    # The service sees only its unit's paths and `.env`, never this shell.
+    service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
+    assert service_runtime.env_value("MINDROOM_API_KEY") == key
+    assert dashboard_requires_credential(service_runtime)
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_refuses_a_shell_key_env_cannot_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """A key that `.env` would expand on reading exits with an error, before anything is saved or installed."""
+    key = "shell-${HOME}-key"
+    runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
+    env_content = "MATRIX_HOMESERVER=https://mindroom.chat\n"
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        assert exit_info.value.exit_code == 1
+        output = capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        monkeypatch.setenv("MINDROOM_API_KEY", key)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 1
+        output = result.output
+
+    assert "Refusing to write MINDROOM_API_KEY to the env file" in output
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == env_content
+    manager.install_runtime.assert_not_called()
+    manager.install_service.assert_not_called()
+    manager.uninstall_service.assert_not_called()
 
 
 @pytest.mark.parametrize("installed", [False, True], ids=["new", "replacing"])

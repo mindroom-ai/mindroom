@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import time
+from collections import OrderedDict
 from contextvars import Context
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -61,6 +62,12 @@ _attachment_cleanup_lock = Lock()
 _attachment_cleanup_claim_tokens_by_storage_path: dict[Path, object] = {}
 _attachment_cleanup_scheduled_tokens_by_storage_path: dict[Path, object] = {}
 _ATTACHMENT_CLEANUP_TASK_OWNER = object()
+# Thread-history media that failed to register, by storage root and event, with when to try it again.
+# Nothing on disk records a failure, so without this every turn would download it again, and anyone
+# who can post can name media that always fails, such as a file over the size cap or with a wrong hash.
+_FAILED_HISTORY_MEDIA_RETRY_SECONDS = 3600.0
+_MAX_FAILED_HISTORY_MEDIA = 10_000
+_failed_history_media_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -281,29 +288,34 @@ def _extension_from_mime_type(mime_type: str | None) -> str:
 
 def _store_media_bytes_locally(
     storage_path: Path,
-    event_id: str,
     media_bytes: bytes | None,
     mime_type: str | None,
 ) -> Path | None:
-    """Persist media bytes to storage so agents can access them as files."""
+    """Persist media bytes to storage so agents can access them as files.
+
+    The file is named by its content, so any number of events naming one
+    upload keep one copy rather than one each. Reusing it refreshes its
+    modification time, which cleanup reads before deleting media whose records
+    expired, so a cleanup that saw only an old record keeps it for the new one.
+    """
     if media_bytes is None:
         return None
-    incoming_media_dir = _incoming_media_dir(storage_path)
-    safe_name = _attachment_id_for_event(event_id)
-    extension = _extension_from_mime_type(mime_type)
-    media_path = incoming_media_dir / f"{safe_name}{extension}"
+    media_name = f"sha256_{hashlib.sha256(media_bytes).hexdigest()}{_extension_from_mime_type(mime_type)}"
     try:
-        incoming_media_dir.mkdir(parents=True, exist_ok=True)
-        media_path.write_bytes(media_bytes)
+        media_dir = _prepare_retained_media_dir(storage_path)
+        with open_directory_within_root(media_dir) as media_fd:
+            try:
+                os.utime(media_name, dir_fd=media_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                atomic_write_bytes_at(media_fd, media_name, media_bytes, file_mode=0o600)
     except OSError:
         logger.exception("Failed to persist media payload")
         return None
-    return media_path
+    return media_dir / media_name
 
 
 async def _store_media_bytes_locally_async(
     storage_path: Path,
-    event_id: str,
     media_bytes: bytes | None,
     mime_type: str | None,
 ) -> Path | None:
@@ -311,7 +323,6 @@ async def _store_media_bytes_locally_async(
     return await asyncio.to_thread(
         _store_media_bytes_locally,
         storage_path,
-        event_id,
         media_bytes,
         mime_type,
     )
@@ -402,18 +413,28 @@ def _remove_paths(paths: list[Path]) -> int:
 def _prune_expired_records_and_collect_removable_media_paths(
     storage_path: Path,
     *,
+    cutoff: datetime,
     expired_records: list[tuple[AttachmentRecord, Path]],
     active_media_ref_counts: dict[Path, int],
 ) -> tuple[set[Path], int]:
-    """Delete expired metadata records and collect removable managed media files."""
+    """Delete expired metadata records and collect removable managed media files.
+
+    Media modified since the cutoff is kept, as the orphan pass keeps it,
+    because a record registered after this cleanup counted references may
+    already be reusing it.
+    """
     removable_media_paths: set[Path] = set()
     expired_records_deleted = _remove_paths([record_path for _record, record_path in expired_records])
     for record, _record_path in expired_records:
         resolved_media_path = record.local_path.resolve()
         if not _is_managed_media_path(storage_path, resolved_media_path):
             continue
-        if active_media_ref_counts.get(resolved_media_path, 0) == 0:
-            removable_media_paths.add(resolved_media_path)
+        if active_media_ref_counts.get(resolved_media_path, 0) != 0:
+            continue
+        media_mtime = _record_mtime(resolved_media_path)
+        if media_mtime is None or media_mtime >= cutoff:
+            continue
+        removable_media_paths.add(resolved_media_path)
     return removable_media_paths, expired_records_deleted
 
 
@@ -466,6 +487,7 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
 
     removable_media_paths, expired_records_deleted = _prune_expired_records_and_collect_removable_media_paths(
         storage_path,
+        cutoff=cutoff,
         expired_records=expired_records,
         active_media_ref_counts=active_media_ref_counts,
     )
@@ -689,12 +711,14 @@ def register_local_attachment(
     sender: str | None = None,
     event_timestamp: int | None = None,
     cleanup_loop: asyncio.AbstractEventLoop | None = None,
+    retained_name: str | None = None,
 ) -> AttachmentRecord | None:
     """Retain a local file in primary-owned media storage and persist its metadata.
 
     The file is opened below ``source_root`` (default: its parent) without following
     links. The record references only the retained copy, so later reads and sends
     never reopen a caller path that sandboxed code may be able to replace.
+    ``retained_name`` names that copy instead of the attachment ID.
     """
     resolved_attachment_id = attachment_id or f"att_{uuid4().hex[:16]}"
     normalized_attachment_id = normalize_attachment_id(resolved_attachment_id)
@@ -703,7 +727,7 @@ def register_local_attachment(
         return None
 
     source_directory = local_path.parent if source_root is None else source_root
-    media_name = _retained_media_name(normalized_attachment_id, mime_type)
+    media_name = retained_name or _retained_media_name(normalized_attachment_id, mime_type)
     try:
         media_dir = _prepare_retained_media_dir(storage_path)
         with (
@@ -858,7 +882,6 @@ async def _register_media_attachment(
         return None
     local_media_path = await _store_media_bytes_locally_async(
         storage_path,
-        event_id,
         media_bytes,
         mime_type,
     )
@@ -879,6 +902,7 @@ async def _register_media_attachment(
             sender=sender,
             event_timestamp=event_timestamp,
             cleanup_loop=asyncio.get_running_loop(),
+            retained_name=local_media_path.name,
         ),
     )
 
@@ -1208,13 +1232,25 @@ async def _register_thread_history_media_attachment(
     if existing_record is not None:
         return existing_record
 
-    return await register_matrix_media_attachment(
+    failure_key = (str(storage_path), event.event_id)
+    retry_at = _failed_history_media_retry_at.get(failure_key)
+    if retry_at is not None and retry_at > time.monotonic():
+        return None
+    record = await register_matrix_media_attachment(
         client,
         storage_path,
         room_id=room_id,
         thread_id=thread_id,
         event=event,
     )
+    if record is None:
+        _failed_history_media_retry_at[failure_key] = time.monotonic() + _FAILED_HISTORY_MEDIA_RETRY_SECONDS
+        _failed_history_media_retry_at.move_to_end(failure_key)
+        while len(_failed_history_media_retry_at) > _MAX_FAILED_HISTORY_MEDIA:
+            _failed_history_media_retry_at.popitem(last=False)
+    else:
+        _failed_history_media_retry_at.pop(failure_key, None)
+    return record
 
 
 async def register_thread_history_media_attachments(

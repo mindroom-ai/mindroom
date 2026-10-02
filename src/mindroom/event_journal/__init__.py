@@ -20,6 +20,7 @@ from .approval_continuations import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalMemoryTurn,
+    approval_arguments_digest,
 )
 from .approvals import (
     StoredApprovalCard,
@@ -137,6 +138,7 @@ __all__ = [
     "UnreadableApprovalCard",
     "UnreadableMatrixDelivery",
     "VisibleMessage",
+    "approval_arguments_digest",
     "decode_thread_id",
     "delivery_transaction_id",
     "encode_thread_id",

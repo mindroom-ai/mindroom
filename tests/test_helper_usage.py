@@ -27,7 +27,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
@@ -244,7 +244,16 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 )
             else:
                 close_agent_runtime_state_dbs(actor, shared_scope_storage=scope_context.storage)
-    calls = (ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),)
+    calls = (
+        ApprovalCall(
+            "approved",
+            "add",
+            "general",
+            2**62,
+            toolkit_name="calculator",
+            arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+        ),
+    )
     cli_call = None
     if is_cli:
         cli_call = CliApprovalCall(

@@ -373,6 +373,7 @@ The private reply type is `io.mindroom.models.response`:
 
 The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
+It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
 This explains what resetting the thread will use, including different defaults across agents and teams.
 

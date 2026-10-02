@@ -135,6 +135,7 @@ _HYDRATION_EPOCH_ATTEMPTS = 3
 _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
 
 _UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
+_UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 
 
 class _HydrationError(RuntimeError):
@@ -296,6 +297,11 @@ def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
     return end
 
 
+def _with_notice(content: Mapping[str, object], notice: str) -> dict[str, object]:
+    """Return one revision's content with a notice appended to its body."""
+    return {**content, "body": f"{content.get('body', '')}\n\n{notice}"}
+
+
 @dataclass
 class _UnreadableHistory:
     """Bounded diagnostics for fetched events, separate from live E2EE counters."""
@@ -304,12 +310,31 @@ class _UnreadableHistory:
     invalid_events: int = 0
     sessions: set[tuple[str, str]] = field(default_factory=set)
     sessions_limited: bool = False
+    # A point refetch's message and its sender, and the newest unreadable event
+    # that claims to be that sender's edit of it, as ``(origin_server_ts,
+    # event_id)``. An encrypted event's relation is cleartext, so this is known
+    # even when its content is not.
+    revision_of: tuple[str, str] | None = None
+    newest_hidden_revision: tuple[int, str] | None = None
 
     def __bool__(self) -> bool:
         return bool(self.encrypted_events or self.invalid_events)
 
     def add(self, event: nio.BaseEvent) -> None:
         """Count one unreadable event without retaining its payload."""
+        content = event.source.get("content")
+        timestamp = event.source.get("origin_server_ts")
+        event_id = event.source.get("event_id")
+        if (
+            self.revision_of is not None
+            and isinstance(content, dict)
+            and isinstance(timestamp, int)
+            and isinstance(event_id, str)
+            and (replacement_target(content), event.source.get("sender")) == self.revision_of
+        ):
+            revision = (timestamp, event_id)
+            if self.newest_hidden_revision is None or is_newer_revision(revision, self.newest_hidden_revision):
+                self.newest_hidden_revision = revision
         if not isinstance(event, nio.MegolmEvent) or event.sender_key is None or event.session_id is None:
             self.invalid_events += 1
             return
@@ -1148,23 +1173,29 @@ class ConversationHydrator:
             # and membership epoch this request was issued under, which
             # projecting the redaction would bypass.
             return await self.store.drop_refetched_message(request)
-        relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
-        if relations.unreadable:
-            # An empty relation list is a real answer -- it is how a server that
-            # already reclaimed the superseded edits reports the original as
-            # current -- so reducing over relations that were dropped unread
-            # cannot be told apart from it, and reinstalls the pre-edit body as
-            # though the server had said so. The walk's own ceiling is not this
-            # case: relations arrive newest first, so a ceiling drops older
-            # relations that could never have won.
+        unreadable = _UnreadableHistory(revision_of=(request.logical_event_id, projected.sender))
+        relations = await self._fetch_relations(
+            request.room_id,
+            request.logical_event_id,
+            window_messages=None,
+            unreadable=unreadable,
+        )
+        revision = _reduce_current_revision(projected, relations.events)
+        content = await self._resolved_content(revision.event_id, revision.content)
+        hidden = unreadable.newest_hidden_revision
+        if hidden is not None and is_newer_revision(hidden, (revision.origin_server_ts, revision.event_id)):
+            # Only the sender's own edit can replace what is on screen, so no
+            # other unreadable relation holds the refetch back. One that would
+            # be the newest edit is not passed over silently: the newest
+            # readable revision is installed with a notice. Keeping the debt
+            # instead would fail every strict read of this conversation for as
+            # long as the edit stays unreadable, which its sender alone decides.
             logger.info(
-                "conversation_refresh_unreadable",
+                "conversation_refresh_edit_unreadable",
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
-        revision = _reduce_current_revision(projected, relations.events)
-        content = await self._resolved_content(revision.event_id, revision.content)
+            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
@@ -1211,9 +1242,7 @@ class ConversationHydrator:
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
         )
-        unreadable = without_sidecar_reference(content)
-        unreadable["body"] = f"{unreadable.get('body', '')}\n\n{_UNREADABLE_SIDECAR_NOTICE}"
-        return unreadable
+        return _with_notice(without_sidecar_reference(content), _UNREADABLE_SIDECAR_NOTICE)
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.
