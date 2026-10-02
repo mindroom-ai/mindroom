@@ -31,7 +31,7 @@ service_app = typer.Typer(
     help="""Install and manage MindRoom as a background user service.
 
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
-That version is also installed as a uv tool, so the service runs from a persistent environment instead of uv's cache and `mindroom` is on your PATH.
+That version is also installed as a uv tool, so the service runs from a persistent environment instead of uv's cache.
 Rerun `mindroom service install` after upgrading MindRoom.
 
 Supported platforms:
