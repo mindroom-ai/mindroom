@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 _COMMAND = (
+    # A `mindroom` directory where the agent works, like a checkout, must not replace the installed CLI.
+    "mkdir -p checkout/mindroom && echo 'raise SystemExit(9)' > checkout/mindroom/__init__.py && cd checkout && "
     "mindroom-agent tools list && "
     'printf "path=%s\\n" "$PATH" && '
     'printf "pass=%s\\n" "$PASSTHROUGH_PROBE" && '

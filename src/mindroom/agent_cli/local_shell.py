@@ -8,6 +8,7 @@ API address. The response grant still scopes which tools the CLI can reach.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -44,19 +45,19 @@ def shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_nam
     )
 
 
-def _cli_executable() -> Path:
-    """Return the `mindroom-agent` installed beside the running MindRoom interpreter."""
-    return Path(sys.executable).parent / "mindroom-agent"
+# Run the CLI with this interpreter wherever the installer put console scripts; `-P` keeps a
+# `mindroom` directory in the shell's working directory from shadowing the installed package.
+_LAUNCHER = (
+    f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -P -c "
+    f'{shlex.quote("import sys; from mindroom.agent_cli.main import main; sys.exit(main())")} "$@"\n'
+)
 
 
 def local_cli_shell_problems() -> list[str]:
     """Return what keeps a local minimal shell from reaching this MindRoom, each phrased as its fix."""
-    problems = []
     if get_api_server_address() is None:
-        problems.append("Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it.")
-    if shutil.which("mindroom-agent", path=str(_cli_executable().parent)) is None:
-        problems.append("Install MindRoom with its `mindroom-agent` command beside the running Python interpreter.")
-    return problems
+        return ["Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it."]
+    return []
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,9 @@ class LocalCliShell:
             # configured prefixes still win, like in the agent's ordinary shell.
             bin_dir = self._private_dir / "bin"
             bin_dir.mkdir()
-            (bin_dir / "mindroom-agent").symlink_to(_cli_executable())
+            launcher = bin_dir / "mindroom-agent"
+            launcher.write_text(_LAUNCHER)
+            launcher.chmod(0o700)
             path_prepend = ",".join(part for part in (shell.shell_path_prepend, str(bin_dir)) if part)
             self._toolkit = build_agent_cli_shell(
                 shell.model_copy(update={"shell_path_prepend": path_prepend}),
