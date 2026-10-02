@@ -23924,7 +23924,7 @@ Active MCP calls have three independently configurable concurrency limits:
 | Environment variable | Default | Scope |
 | --- | --- | --- |
 | `MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS` | `128` | All active calls in the API process |
-| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `32` | One user across all client grants |
+| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `16` | One user across all client grants |
 | `MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS` | `16` | One authorized client connection |
 
 Each setting accepts a positive integer and takes effect after restarting the API process.
@@ -23933,6 +23933,8 @@ All three limits apply to `search_tools`, `get_tool`, and `invoke_tool`; the fir
 Excess calls do not queue or retry automatically.
 Cancelled or timed-out calls retain their allowances until background work and cleanup finish.
 These defaults are conservative starting values, not measured capacity; tune them against available resources, tool latency, and upstream quotas.
+Synchronous tool bodies run on a dedicated pool of 32 threads, separate from the threads that authentication, OAuth storage, and the Matrix runtime use, and admitted calls beyond that pool wait for a free thread within their timeout.
+Keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` below 32 so that one user cannot occupy every gateway tool thread.
 
 Public registration and authorization starts share an aggregate admission limit of 60 requests per minute per API process and a per-source limit of 10 requests per minute.
 Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
