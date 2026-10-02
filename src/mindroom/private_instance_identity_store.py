@@ -123,7 +123,8 @@ def ensure_private_instance_identity(
         return _matching_identity(existing_identity, requested_identity)
 
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=True)
-    with advisory_file_lock(trusted_scope_root / _LOCK_FILENAME):
+    # Sandbox runners can write private scopes and could hold a lock there forever, so it lives in the storage root.
+    with advisory_file_lock(trusted_base_path / _LOCK_FILENAME):
         existing_identity = load_private_instance_identity(trusted_base_path, trusted_scope_root)
         if existing_identity is not None:
             return _matching_identity(existing_identity, requested_identity)
@@ -153,7 +154,7 @@ def _matching_identity(
 def _scope_has_preexisting_data(scope_root: Path) -> bool:
     """Return whether a recordless scope contains data beyond identity bookkeeping."""
     for entry in scope_root.iterdir():
-        if entry.name in {_LOCK_FILENAME, _RECORD_FILENAME}:
+        if entry.name == _RECORD_FILENAME:
             continue
         if entry.name.startswith(f"{_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
             continue
