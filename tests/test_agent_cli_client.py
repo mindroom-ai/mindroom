@@ -47,6 +47,10 @@ def test_real_http_client_and_redirect_fence(tmp_path: Path, monkeypatch: pytest
     token.write_text("private-capability")
     monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
+    # Shells inherit proxy settings, but the grant must go straight to MindRoom, never to a proxy.
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
     payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
     try:
         if redirect:

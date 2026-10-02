@@ -4836,7 +4836,7 @@ Loading or unloading a toolkit retains the existing session state and continuati
 # Minimal Agent Mode
 
 Minimal mode gives an existing agent a short prompt and one Bash tool.
-The agent uses `mindroom-agent` inside its shell worker to discover and call its other tools.
+The agent uses `mindroom-agent` in that Bash, where its shell normally runs, to discover and call its other tools.
 Its identity, model, workspace, memory, history, and tool permissions stay tied to the same agent.
 Standard mode is the default.
 
@@ -4968,16 +4968,16 @@ Submitting a fresh ID may repeat a side effect.
 
 Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
-The isolated worker remains owned by the response across its live waits and continuations, then retires when the response ends.
+The response owns its shell across its live waits and continuations; a Docker worker retires and a local shell closes when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background command handles belong to that response and stop when it ends, with its worker or, for a shell in MindRoom itself, with its local shell.
+Background command handles belong to that response and stop when it ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
 Ordinary call results and duplicate-call tracking live only as long as their response owner.
 They are unavailable after process restart.
 Pending approvals use existing durable approval recovery.
-If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh worker after the decision.
+If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh shell after the decision.
 Recovery does not directly rerun a saved outer Bash script, and an already claimed interrupted approval is not dispatched again.
 When the recovered approval is for the outer Bash command itself, the agent is told that the command was not run and can issue it again.
 A recovered approval streams its progress into the paused reply through the same continuation driver as a standard approval.

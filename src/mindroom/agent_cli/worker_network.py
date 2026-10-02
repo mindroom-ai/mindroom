@@ -86,13 +86,10 @@ def cli_deployment_problems(runtime_paths: RuntimePaths) -> list[str]:
     return problems
 
 
-def validate_cli_deployment(runtime_paths: RuntimePaths) -> str:
-    """Return the worker-facing primary URL, rejecting settings which expose authority to the worker."""
+def validate_cli_deployment(runtime_paths: RuntimePaths) -> None:
+    """Reject primary auth and endpoint settings which expose authority to the worker."""
     if problems := cli_deployment_problems(runtime_paths):
         raise ValueError(" ".join(problems))
-    primary_url = cli_primary_url(runtime_paths)
-    assert primary_url is not None
-    return primary_url
 
 
 def _headers_to_reject(*, grant: str, control_token: str) -> tuple[dict[str, str], ...]:

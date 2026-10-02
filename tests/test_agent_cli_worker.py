@@ -382,8 +382,9 @@ async def test_lease_rejects_foreign_handle_before_http(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_lease_reports_worker_image_without_cli_routes(tmp_path: Path) -> None:
-    """An older worker image lacks the CLI routes; its 404 names the image, not a transport fault."""
+@pytest.mark.parametrize("status", [404, 422])
+async def test_lease_reports_worker_image_from_another_release(tmp_path: Path, status: int) -> None:
+    """Older images lack the CLI routes or reject this launch schema; both name the image, not a transport fault."""
     context = _runtime_context(tmp_path)
     spec = _cli_worker_spec(context)
     handle = WorkerHandle(
@@ -396,9 +397,9 @@ async def test_lease_reports_worker_image_without_cli_routes(tmp_path: Path) -> 
         0,
         0,
     )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404))) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(status))) as client:
         lease = CliWorkerLease(handle, client, context, spec)
-        with pytest.raises(RuntimeError, match="does not support minimal mode"):
+        with pytest.raises(RuntimeError, match="use a worker image built for this MindRoom release"):
             await lease._post("agent-cli-install", {})
 
 

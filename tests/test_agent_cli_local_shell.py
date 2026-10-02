@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 _COMMAND = (
     "mindroom-agent tools list && "
+    'printf "path=%s\\n" "$PATH" && '
     'printf "pass=%s\\n" "$PASSTHROUGH_PROBE" && '
     'printf "token=%s\\n" "$MINDROOM_AGENT_CLI_TOKEN_PATH" && '
     'stat -c "mode=%a" "$MINDROOM_AGENT_CLI_TOKEN_PATH"'
@@ -110,6 +111,9 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
     # The agent's own shell settings still apply, like in its ordinary local shell.
     assert "pass=visible" in output, output
     token_path = Path(output.split("token=", 1)[1].splitlines()[0])
+    first_path_entry = output.split("path=", 1)[1].splitlines()[0].split(":")[0]
+    # Only `mindroom-agent` is added, from the response's private directory, not MindRoom's whole environment.
+    assert first_path_entry == str(token_path.parent / "bin")
     # The grant file lives outside the workspace and disappears with the response.
     assert not token_path.is_relative_to(tmp_path)
     assert not token_path.exists()

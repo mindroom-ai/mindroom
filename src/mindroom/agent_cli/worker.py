@@ -86,9 +86,11 @@ class CliWorkerLease:
             json=payload,
             headers={"x-mindroom-sandbox-token": self.handle.auth_token or ""},
         )
-        if response.status_code == 404:
+        # Images without CLI routes answer 404; images from another release reject this launch schema.
+        if response.status_code == 404 or (operation == "agent-cli-install" and response.status_code == 422):
             msg = (
-                "Docker worker image does not support minimal mode; use a worker image built for this MindRoom release"
+                "Docker worker image does not support this release's minimal mode; "
+                "use a worker image built for this MindRoom release"
             )
             raise RuntimeError(msg)
         if response.status_code == 504:

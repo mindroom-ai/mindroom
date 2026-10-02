@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from uuid import UUID
 
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
@@ -63,7 +63,8 @@ class AgentCliClient:
         except (OSError, ValueError) as exc:
             msg = "Agent CLI authority is unavailable"
             raise AgentCliUnavailableError(msg) from exc
-        self._opener = build_opener(_NoRedirects())
+        # The CLI only calls its own MindRoom API; never send the grant through an environment proxy.
+        self._opener = build_opener(ProxyHandler({}), _NoRedirects())
 
     def operation(self, payload: dict[str, object]) -> dict[str, object]:
         """Submit once; callers retain the exact call ID on uncertain acceptance."""

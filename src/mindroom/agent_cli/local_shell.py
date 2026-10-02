@@ -44,9 +44,9 @@ def shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_nam
     )
 
 
-def _cli_bin_dir() -> Path:
-    """Return the environment that installed MindRoom, which also provides `mindroom-agent`."""
-    return Path(sys.executable).parent
+def _cli_executable() -> Path:
+    """Return the `mindroom-agent` installed beside the running MindRoom interpreter."""
+    return Path(sys.executable).parent / "mindroom-agent"
 
 
 def local_cli_shell_problems() -> list[str]:
@@ -54,7 +54,7 @@ def local_cli_shell_problems() -> list[str]:
     problems = []
     if get_api_server_address() is None:
         problems.append("Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it.")
-    if shutil.which("mindroom-agent", path=str(_cli_bin_dir())) is None:
+    if shutil.which("mindroom-agent", path=str(_cli_executable().parent)) is None:
         problems.append("Install MindRoom with its `mindroom-agent` command beside the running Python interpreter.")
     return problems
 
@@ -100,8 +100,12 @@ class LocalCliShell:
                 api_url=api_address.base_url,
                 token_path=str(token_path),
             )
-            # Configured prefixes win; the installing environment guarantees `mindroom-agent`.
-            path_prepend = ",".join(part for part in (shell.shell_path_prepend, str(_cli_bin_dir())) if part)
+            # Expose only `mindroom-agent`, not MindRoom's interpreter and dependency commands;
+            # configured prefixes still win, like in the agent's ordinary shell.
+            bin_dir = self._private_dir / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "mindroom-agent").symlink_to(_cli_executable())
+            path_prepend = ",".join(part for part in (shell.shell_path_prepend, str(bin_dir)) if part)
             self._toolkit = build_agent_cli_shell(
                 shell.model_copy(update={"shell_path_prepend": path_prepend}),
                 runtime_paths=self.runtime_paths,
