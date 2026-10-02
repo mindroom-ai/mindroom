@@ -28,6 +28,7 @@ from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
+    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     _HydrationError,
@@ -108,7 +109,13 @@ def redaction(event_id: str, redacts: str, *, ts: int = 1_000, sender: str = ALI
     }
 
 
-def encrypted(event_id: str, *, sender: str = ALICE, ts: int = 1_000) -> dict[str, Any]:
+def encrypted(
+    event_id: str,
+    *,
+    sender: str = ALICE,
+    ts: int = 1_000,
+    relates_to: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return one raw Matrix event the way it sits on the wire in an encrypted room.
 
     nio parses this into a ``MegolmEvent``, whose ``source`` type is
@@ -116,19 +123,24 @@ def encrypted(event_id: str, *, sender: str = ALICE, ts: int = 1_000) -> dict[st
     nothing until something decrypts it. That is what every relation in an
     encrypted room looks like to a hydrator, because nio's ``receive_response``
     has no branch for a relations response and so never decrypts one.
+
+    ``relates_to`` is the relation an encrypted event carries in cleartext.
     """
+    content: dict[str, Any] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": f"ciphertext-of-{event_id}",
+        "sender_key": "sender-key",
+        "session_id": "session",
+        "device_id": "DEVICE",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
     return {
         "event_id": event_id,
         "sender": sender,
         "origin_server_ts": ts,
         "type": "m.room.encrypted",
-        "content": {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": f"ciphertext-of-{event_id}",
-            "sender_key": "sender-key",
-            "session_id": "session",
-            "device_id": "DEVICE",
-        },
+        "content": content,
     }
 
 
@@ -2144,30 +2156,56 @@ class TestEncryptedRelations:
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
-    async def test_a_refresh_does_not_reinstall_a_body_whose_edits_it_could_not_read(
+    async def test_a_refresh_past_an_edit_it_could_not_read_says_so(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """An unread relation tree is not an empty one.
+        """An unread edit is not an absent one, and it must not block the conversation either.
 
-        An empty relation list is a real answer -- it is how a server that
-        already reclaimed the superseded edits says the original is current --
-        so reducing over relations that were dropped unread silently reinstalls
-        the pre-edit body under the same shape, and clears the refresh token
-        that would have brought anyone back to fix it.
+        Reducing over an edit dropped unread would reinstall the pre-edit body
+        as though the server had said it was current. Keeping the debt instead
+        let the edit's sender fail every strict read of the conversation for as
+        long as the edit stayed unreadable, so the body says what is missing.
         """
         await TestPointRefetch._redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
-            relations={"$m": [encrypted("$e2", ts=4_000)]},
+            relations={"$m": [encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"})]},
             olm=object(),
         )
 
-        assert not await hydrator(alice, client).refresh(
+        assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == []
-        assert len(await refreshes(alice)) == 1
+        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await refreshes(alice) == ()
+
+    async def test_unreadable_relations_that_cannot_be_its_edit_do_not_hold_a_refresh(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the sender's own edit can replace a message, so nothing else decides its refetch.
+
+        Anyone in the room can relate an unreadable event to any message, and
+        keeping the debt for it failed every strict read of the conversation.
+        """
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    encrypted("$foreign-edit", sender=BOB, ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"}),
+                    encrypted("$reaction", ts=5_000, relates_to={"rel_type": "m.annotation", "event_id": "$m", "key": "x"}),
+                ],
+            },
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["first"]
+        assert await refreshes(alice) == ()
 
     async def test_a_message_that_could_not_be_decrypted_is_not_treated_as_deleted(
         self,

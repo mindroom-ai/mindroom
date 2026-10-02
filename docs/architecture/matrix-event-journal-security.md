@@ -155,6 +155,12 @@ A point refetch is refused if the revision it chose has since been tombstoned, w
 
 A refetch is also refused if the content it returns still holds a sidecar preview, because installing it would satisfy the debt with the very text the debt was raised about.
 
+A refetch ignores relations it cannot read unless their cleartext relation makes them the original sender's edit of the message, because no other relation can replace what is on screen.
+
+When such an edit cannot be read, the refetch installs the newest readable revision with a notice that a later edit could not be read.
+
+Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
+
 Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
