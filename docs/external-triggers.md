@@ -239,9 +239,9 @@ If delivery succeeds, a later signed request with the same `event_id` is treated
 
 Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
 
-Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 characters.
+Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 bytes as the JSON replay store writes them: printable ASCII characters other than `"` and `\` take one byte each, and every other character takes the 2 to 12 bytes of its JSON escape.
 
-Each trigger may hold at most 10,000 unexpired nonces and 10,000 unexpired `event_id` records, and a request that would add one more is answered with `429` until older records expire.
+Each trigger may hold at most 10,000 unexpired nonces, 10,000 unexpired `event_id` records, and 10,000 unexpired `thread_key` records, and a request that would add one more is answered with `429` until older records expire.
 
 Retries must create a fresh signed request with the same `--event-id`.
 

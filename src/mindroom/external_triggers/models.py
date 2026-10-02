@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.validation import non_empty_stripped
 
-# Event ids, thread keys, and signature nonces are retained in a shared store, so keep them short.
-MAX_REPLAY_KEY_LENGTH = 256
+# Event ids, thread keys, and signature nonces are retained in a shared JSON store
+# that escapes every non-ASCII character, so limit them by their stored size.
+MAX_REPLAY_KEY_BYTES = 256
+
+
+def replay_key_too_large(value: str) -> bool:
+    """Return whether one replay key would occupy more than the limit in the replay store."""
+    return len(json.dumps(value)) - 2 > MAX_REPLAY_KEY_BYTES
 
 
 class ExternalTriggerPayload(BaseModel):
@@ -19,7 +26,7 @@ class ExternalTriggerPayload(BaseModel):
 
     kind: str
     message: str
-    event_id: str | None = Field(default=None, max_length=MAX_REPLAY_KEY_LENGTH)
+    event_id: str | None = None
     title: str | None = None
     thread_key: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
@@ -36,6 +43,15 @@ class ExternalTriggerPayload(BaseModel):
         """Reject empty trigger messages."""
         return non_empty_stripped(value, field_name="message")
 
+    @field_validator("event_id")
+    @classmethod
+    def validate_event_id(cls, value: str | None) -> str | None:
+        """Reject event ids too large to retain in the replay store."""
+        if value is not None and replay_key_too_large(value):
+            msg = f"event_id must be at most {MAX_REPLAY_KEY_BYTES} bytes once JSON-escaped"
+            raise ValueError(msg)
+        return value
+
     @field_validator("thread_key")
     @classmethod
     def validate_thread_key(cls, value: str | None) -> str | None:
@@ -43,8 +59,8 @@ class ExternalTriggerPayload(BaseModel):
         if value is None:
             return None
         stripped = non_empty_stripped(value, field_name="thread_key")
-        if len(stripped) > MAX_REPLAY_KEY_LENGTH:
-            msg = f"thread_key must be at most {MAX_REPLAY_KEY_LENGTH} characters"
+        if replay_key_too_large(stripped):
+            msg = f"thread_key must be at most {MAX_REPLAY_KEY_BYTES} bytes once JSON-escaped"
             raise ValueError(msg)
         return stripped
 

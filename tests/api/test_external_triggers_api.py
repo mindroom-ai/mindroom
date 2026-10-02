@@ -1127,6 +1127,42 @@ def test_thread_key_being_opened_elsewhere_returns_409_for_retry(
     )
 
 
+def test_full_thread_key_scope_returns_429_and_releases_the_event_claim(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct thread keys past the live-claim limit are refused, and the refused event id stays retryable."""
+    execute = AsyncMock(return_value="$root")
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute)
+    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    trigger_id = _create_new_thread_record(trigger_api)
+    snapshot = ExternalTriggerStore(trigger_api.runtime_paths).delivery_snapshot(
+        trigger_id,
+        config=Config.model_validate(_config_payload()),
+        config_generation=1,
+    )
+    assert snapshot is not None
+    replay_store = _new_thread_replay_store(trigger_api)
+    for index in range(2):
+        replay_store.claim_thread_key(
+            snapshot.replay_scope,
+            f"chat:C1:{index}",
+            room_id=snapshot.resolved_room_id,
+            now=int(time.time()),
+            pending_ttl_seconds=60,
+        )
+
+    response = _post_keyed(trigger_api, trigger_id, "msg-1", "nonce-1")
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "External trigger replay limit reached"
+    execute.assert_not_awaited()
+    assert (
+        replay_store.claim_event_id(snapshot.replay_scope, "msg-1", now=int(time.time()), ttl_seconds=60)
+        is ExternalTriggerEventClaim.FRESH
+    )
+
+
 def test_exception_during_first_delivery_releases_thread_key_reservation(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,

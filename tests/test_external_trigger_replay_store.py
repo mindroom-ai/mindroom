@@ -491,13 +491,54 @@ def test_payload_rejects_blank_thread_key() -> None:
 
 def test_payload_rejects_oversized_thread_key() -> None:
     """Thread keys live for days in the shared replay store, so their size is bounded."""
-    with pytest.raises(ValidationError, match="thread_key must be at most 256 characters"):
+    with pytest.raises(ValidationError, match="thread_key must be at most 256 bytes once JSON-escaped"):
         ExternalTriggerPayload(kind="campground.availability", message="Site open", thread_key="k" * 257)
 
     assert (
         ExternalTriggerPayload(kind="campground.availability", message="Site open", thread_key="k" * 256).thread_key
         == "k" * 256
     )
+
+
+@pytest.mark.parametrize("field_name", ["event_id", "thread_key"])
+def test_payload_limits_replay_keys_by_their_stored_size(field_name: str) -> None:
+    """Non-ASCII keys count at the size of the escapes the replay store writes for them."""
+    # 256 characters, but 3,072 bytes once each one is written as a surrogate-pair escape.
+    astral = "\U0001f600" * 256
+    with pytest.raises(ValidationError, match=f"{field_name} must be at most 256 bytes once JSON-escaped"):
+        ExternalTriggerPayload(kind="campground.availability", message="Site open", **{field_name: astral})
+    with pytest.raises(ValidationError, match=f"{field_name} must be at most 256 bytes once JSON-escaped"):
+        ExternalTriggerPayload(kind="campground.availability", message="Site open", **{field_name: "\u00e9" * 43})
+
+    accepted = ExternalTriggerPayload(
+        kind="campground.availability",
+        message="Site open",
+        **{field_name: "\u00e9" * 42},
+    )
+    assert getattr(accepted, field_name) == "\u00e9" * 42
+
+
+def test_full_replay_scope_refuses_new_thread_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flood of distinct thread keys cannot grow one trigger's thread records past the live-claim limit."""
+    monkeypatch.setattr("mindroom.external_triggers.replay_store._MAX_LIVE_CLAIMS_PER_SCOPE", 2)
+    store = ExternalTriggerReplayStore(tmp_path)
+    assert _claim(store, "site-1", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-2", now=1_000) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+
+    with pytest.raises(ExternalTriggerReplayScopeFullError):
+        _claim(store, "site-3", now=1_001)
+
+    # Known keys still resolve, a key re-claimed for a re-pointed room replaces its record,
+    # other triggers keep their own allowance, and expired records stop counting.
+    assert _claim(store, "site-1", now=1_001) == (ExternalTriggerThreadKeyClaim.PENDING, None)
+    assert _claim(store, "site-2", room="!elsewhere:localhost", now=1_001) == (
+        ExternalTriggerThreadKeyClaim.FRESH,
+        None,
+    )
+    assert _claim(store, "site-3", scope="other-trigger", now=1_001) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    assert _claim(store, "site-3", now=1_062) == (ExternalTriggerThreadKeyClaim.FRESH, None)
+    stored = json.loads(_store_path(tmp_path).read_text(encoding="utf-8"))
+    assert len(stored["threads"]["campground"]) <= 2
 
 
 def test_store_without_threads_section_is_accepted(tmp_path: Path) -> None:

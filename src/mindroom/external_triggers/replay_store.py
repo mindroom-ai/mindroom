@@ -15,7 +15,8 @@ from mindroom.file_locks import advisory_file_lock
 if TYPE_CHECKING:
     from pathlib import Path
 
-# Every claim rewrites the shared replay file, so one trigger must not grow it without bound.
+# Every claim rewrites the shared replay file, so one trigger must not grow it without bound;
+# the limit applies separately to its nonces, event ids, and thread keys.
 _MAX_LIVE_CLAIMS_PER_SCOPE = 10_000
 
 
@@ -158,6 +159,8 @@ class ExternalTriggerReplayStore:
                 if record["thread_event_id"] is not None:
                     return ExternalTriggerThreadKeyClaim.BOUND, record["thread_event_id"], None
                 return ExternalTriggerThreadKeyClaim.PENDING, None, None
+            if record is None:
+                _require_room_for_claim(replay_threads)
             reservation = secrets.token_hex(16)
             replay_threads[thread_key] = {
                 "room_id": room_id,
