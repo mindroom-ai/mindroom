@@ -310,11 +310,12 @@ class _UnreadableHistory:
     invalid_events: int = 0
     sessions: set[tuple[str, str]] = field(default_factory=set)
     sessions_limited: bool = False
-    # A point refetch's message and its sender, and whether an unreadable event
-    # claims to be that sender's edit of it. An encrypted event's relation is
-    # cleartext, so this is known even when its content is not.
+    # A point refetch's message and its sender, and the newest unreadable event
+    # that claims to be that sender's edit of it, as ``(origin_server_ts,
+    # event_id)``. An encrypted event's relation is cleartext, so this is known
+    # even when its content is not.
     revision_of: tuple[str, str] | None = None
-    hides_revision: bool = False
+    newest_hidden_revision: tuple[int, str] | None = None
 
     def __bool__(self) -> bool:
         return bool(self.encrypted_events or self.invalid_events)
@@ -322,12 +323,18 @@ class _UnreadableHistory:
     def add(self, event: nio.BaseEvent) -> None:
         """Count one unreadable event without retaining its payload."""
         content = event.source.get("content")
+        timestamp = event.source.get("origin_server_ts")
+        event_id = event.source.get("event_id")
         if (
             self.revision_of is not None
             and isinstance(content, dict)
+            and isinstance(timestamp, int)
+            and isinstance(event_id, str)
             and (replacement_target(content), event.source.get("sender")) == self.revision_of
         ):
-            self.hides_revision = True
+            revision = (timestamp, event_id)
+            if self.newest_hidden_revision is None or is_newer_revision(revision, self.newest_hidden_revision):
+                self.newest_hidden_revision = revision
         if not isinstance(event, nio.MegolmEvent) or event.sender_key is None or event.session_id is None:
             self.invalid_events += 1
             return
@@ -1175,13 +1182,14 @@ class ConversationHydrator:
         )
         revision = _reduce_current_revision(projected, relations.events)
         content = await self._resolved_content(revision.event_id, revision.content)
-        if unreadable.hides_revision:
+        hidden = unreadable.newest_hidden_revision
+        if hidden is not None and is_newer_revision(hidden, (revision.origin_server_ts, revision.event_id)):
             # Only the sender's own edit can replace what is on screen, so no
-            # other unreadable relation holds the refetch back. One that may be
-            # the newest edit is not passed over silently: the newest readable
-            # revision is installed with a notice. Keeping the debt instead
-            # would fail every strict read of this conversation for as long as
-            # the edit stays unreadable, which its sender alone decides.
+            # other unreadable relation holds the refetch back. One that would
+            # be the newest edit is not passed over silently: the newest
+            # readable revision is installed with a notice. Keeping the debt
+            # instead would fail every strict read of this conversation for as
+            # long as the edit stays unreadable, which its sender alone decides.
             logger.info(
                 "conversation_refresh_edit_unreadable",
                 room_id=request.room_id,

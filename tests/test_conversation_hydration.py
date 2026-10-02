@@ -2180,6 +2180,29 @@ class TestEncryptedRelations:
         assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
         assert await refreshes(alice) == ()
 
+    async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An unreadable edit that a newer readable edit supersedes changes nothing on screen."""
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    raw("$e3", "third", ts=5_000, replaces="$m"),
+                    encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"}),
+                ],
+            },
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["third"]
+        assert await refreshes(alice) == ()
+
     async def test_unreadable_relations_that_cannot_be_its_edit_do_not_hold_a_refresh(
         self,
         alice: PrincipalStore,
