@@ -117,7 +117,11 @@ def install_service(
             _console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(0)
 
-    result = _install_and_start_service(manager, resolve_primary_runtime_paths())
+    try:
+        result = _install_and_start_service(manager, resolve_primary_runtime_paths())
+    except ValueError as exc:
+        _err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        raise typer.Exit(1) from None
     if not result.success:
         _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
         raise typer.Exit(1)
@@ -149,14 +153,19 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
     # Asking skips installed services, so only `--service` replaces one.
     replacing = requested and manager.get_service_status().installed
     if _ensure_uv_installed(manager, no_confirm=requested):
-        result = _install_and_start_service(manager, runtime_paths)
-        if result.success:
-            _print_installed_service(manager, result)
-            return True
-        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
-        if not replacing:
-            # A half-installed unit or plist would still start at the next login.
-            manager.uninstall_service()
+        try:
+            result = _install_and_start_service(manager, runtime_paths)
+        except ValueError as exc:
+            # Keys that cannot be saved to `.env` stop the installation before anything is installed.
+            _err_console.print(f"[bold red]Error:[/bold red] {exc}")
+        else:
+            if result.success:
+                _print_installed_service(manager, result)
+                return True
+            _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+            if not replacing:
+                # A half-installed unit or plist would still start at the next login.
+                manager.uninstall_service()
     if requested:
         raise typer.Exit(1)
     _console.print("Starting MindRoom in this terminal instead.")
@@ -164,7 +173,10 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
 
 
 def _install_and_start_service(manager: ServiceManager, runtime_paths: RuntimePaths) -> InstallResult:
-    """Save the keys this shell exports to `.env`, the only environment the service reads, then install and start it."""
+    """Save the keys this shell exports to `.env`, the only environment the service reads, then install and start it.
+
+    Raises `ValueError`, before installing anything, when the keys cannot be saved to `.env`.
+    """
     # Without a config there is no service to install, and no `.env` to save keys for.
     if runtime_paths.config_path.exists() and (shell_keys := _shell_service_keys(runtime_paths)):
         upsert_env_values(runtime_paths.env_path, shell_keys)

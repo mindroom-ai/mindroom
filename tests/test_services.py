@@ -1068,6 +1068,40 @@ def test_service_install_keeps_the_shell_dashboard_key(
     assert dashboard_requires_credential(service_runtime)
 
 
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_refuses_a_shell_key_env_cannot_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """A key that `.env` would expand on reading exits with an error, before anything is saved or installed."""
+    key = "shell-${HOME}-key"
+    runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
+    env_content = "MATRIX_HOMESERVER=https://mindroom.chat\n"
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        assert exit_info.value.exit_code == 1
+        output = capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        monkeypatch.setenv("MINDROOM_API_KEY", key)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 1
+        output = result.output
+
+    assert "Refusing to write MINDROOM_API_KEY to the env file" in output
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == env_content
+    manager.install_runtime.assert_not_called()
+    manager.install_service.assert_not_called()
+    manager.uninstall_service.assert_not_called()
+
+
 @pytest.mark.parametrize("installed", [False, True], ids=["new", "replacing"])
 def test_requested_login_service_failure_exits(tmp_path: Path, installed: bool) -> None:
     """A failed `--service` install exits instead of running here, and only removes a service it created."""
