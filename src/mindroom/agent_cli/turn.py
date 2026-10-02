@@ -629,12 +629,12 @@ class LiveTurnTools(TurnToolBridge):
             self._check_dispatch()
             try:
                 await self._authorize(key, {})
+                descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
             except PermissionError as exc:
                 msg = "Tool is unavailable"
                 raise CliOperationError(msg) from exc
-            try:
-                descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
             except UnknownToolError as exc:
+                # Production authorization binds the key, so an unknown name can surface from either call.
                 raise CliOperationError(str(exc)) from exc
             self._check_dispatch()
             result: dict[str, object] = {

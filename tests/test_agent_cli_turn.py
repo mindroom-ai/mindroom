@@ -681,6 +681,8 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
 
     async def authorize(key, arguments):
         authorized.append(key)
+        # Like the production minimal-mode callback, authorization binds the requested key first.
+        await catalog.bind(key)
 
     catalog = await _catalog(tmp_path, [])
     for index in range(15):
