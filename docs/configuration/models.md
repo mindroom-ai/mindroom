@@ -219,6 +219,7 @@ models:
     provider: zai
     id: glm-5.3
     context_window: 1048576
+    stream_idle_timeout_seconds: 300  # hosted service behind a custom endpoint; see Stalled Streams
     extra_kwargs:
       base_url: https://api.z.ai/api/coding/paas/v4
 
@@ -311,6 +312,7 @@ models:
     provider: openai
     id: orcarouter/auto
     api: chat_completions
+    stream_idle_timeout_seconds: 300  # hosted service behind a custom endpoint; see Stalled Streams
     extra_kwargs:
       base_url: https://api.orcarouter.ai/v1
       api_key: your-orcarouter-api-key
@@ -318,6 +320,7 @@ models:
 
 The `orcarouter/auto` ID lets OrcaRouter choose a model per request; you can replace it with a model ID from its [catalog](https://docs.orcarouter.ai/getting-started/models).
 Set an agent's `model: orcarouter`, or select it for a thread with `!model orcarouter`.
+`stream_idle_timeout_seconds` gives this custom endpoint the same [stall protection](#stalled-streams) that hosted providers get by default.
 
 To keep the key out of YAML, omit `extra_kwargs.api_key` and save the OrcaRouter key in the dashboard's **Models** editor, in this model's **API Key** field.
 That model-specific credential takes precedence over `extra_kwargs.api_key` and the shared OpenAI key, so OrcaRouter and direct OpenAI models can use separate keys.

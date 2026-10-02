@@ -648,7 +648,7 @@ models:
     api_key: null                  # Optional: Model-specific API key used instead of the provider's shared key
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
-    stream_idle_timeout_seconds: null  # Optional: Seconds without a provider event before a stream counts as stalled; unset = 300 for hosted endpoints, no limit for local ones; 0 disables
+    stream_idle_timeout_seconds: null  # Optional: Seconds without a provider event before a stream counts as stalled; unset = 300 on a provider's built-in endpoint, none for ollama, llama_cpp, or a configured endpoint; 0 disables
 
 # Team configurations (optional)
 teams:

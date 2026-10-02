@@ -346,11 +346,16 @@ def _request_refused(gates: dict[int, Callable[[], bool]], run_response: RunOutp
 # AGNO_COMPAT: Model invocation and streaming lack composable middleware.
 # Reason: Agno has no composable invocation/stream middleware, so owners must
 # capture and replace instance methods to retain installation order and context.
+# Stream owners also compose Agno's private _is_retryable_error so Model.retries
+# cannot restart a retry budget the owner already spent (the stream stall veto).
 # Upstream issue: No matching public model invocation middleware issue identified.
 # Upstream PR: None identified for this extension point.
 # Remove when: Public invocation hooks compose sync/async streams and request context
-# with the same ordering; logging, retry limits, and stream cleanup remain owners.
-# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py; tests/test_provider_stream_retry.py.
+# with the same ordering, and a public retry-classifier hook lets owners veto Agno
+# retries; logging, retry limits, and stream cleanup remain owners.
+# Coverage: tests/test_llm_request_logging.py, tests/test_claude_stream_retry.py,
+# tests/test_provider_stream_retry.py, and the stall veto in
+# tests/test_provider_stream_retry.py::test_configured_model_retries_do_not_restart_silent_attempts.
 def install_async_invocation_hooks(
     model: Model,
     *,
