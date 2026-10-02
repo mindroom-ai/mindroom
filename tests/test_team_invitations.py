@@ -219,7 +219,7 @@ class TestTeamRoomMembership:
         room.inviter = event.sender
         bot.client.invited_rooms = {room.room_id: room}
 
-        bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
+        await bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
         await bot._room_lifecycle.handle_recorded_invite(room, event.sender)
 
         join_room.assert_awaited_once_with(bot.client, "!team-room:localhost")
