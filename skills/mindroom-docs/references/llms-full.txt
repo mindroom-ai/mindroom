@@ -2411,6 +2411,7 @@ OAuth credentials are read only from their authoritative SQLite stores and use t
 Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
 An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
 Current encrypted SQLite credentials become readable again when their correct key is restored.
+Dedicated Docker and Kubernetes workers never receive the key, so with encryption enabled they cannot read the worker credential stores and `.shared_credentials` mirrors the primary encrypts, and saved tool settings reach them only through [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 
 ## Debug Logging
 
@@ -21779,6 +21780,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load device pair sessions persisted without a requester address and inspect them with no address. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] register an older client's own agent password unchanged and return no password for it. |
+| [`workers/backends/kubernetes_resources.py`][kubernetes-resources] | [Kubernetes worker tests][kubernetes-worker-tests] remove a planted key from a per-worker Secret and from a shared worker-auth Secret when the worker is ensured, and null both entries when the worker is cleaned up. |
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 | [Hosted instance lifecycle][instance-lifecycle] and [`legacy_instance_lifecycle.py`][legacy-instance-lifecycle] | [Lifecycle tests][instance-lifecycle-tests] mark an instance an older soft delete left `deprovisioned` while its deployment kept running as running again, then hold it or keep it running for an entitled subscription, leave one without a deployment alone, and look only during nightly runs and for accounts pending deletion. |
@@ -21870,6 +21872,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
 | A4 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current inline, named, embedder, and shared OpenAI credential sources. |
 | A5 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current provider aliases and `NAME` or `NAME_FILE` secrets. |
+| A6 | Tiny retained default | [`workers/backends/kubernetes_resources.py`][kubernetes-resources] nulls the credential encryption key entries that earlier releases stored in Kubernetes worker auth Secrets whenever it applies or cleans up a worker's Secret entry. |
 
 ## OAuth, Matrix state, and tools
 
@@ -22016,6 +22019,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
+[kubernetes-resources]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes_resources.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
@@ -22351,7 +22355,7 @@ Those tools follow the agent's `file_access` setting, so the default keeps them 
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
-Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, or a ConfigMap holding it.
+Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
 The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
 Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
@@ -24460,7 +24464,9 @@ Each worker pod runs the sandbox-runner app and is addressed through an internal
 Each dedicated worker needs access to its agent's storage directory.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+Dedicated workers never receive the credential encryption key, matching dedicated Docker workers.
+With encrypted credential storage enabled, the worker credential stores and the `.shared_credentials` mirror the primary writes are encrypted with that key, so worker code cannot read them and tool settings reach the worker only through [credential leases](#credential-leases).
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart refuses this mode, because its tenants share the `mindroom-instances` namespace and a worker manager's Role there would reach every tenant's Deployments and Services.
 
@@ -24896,7 +24902,7 @@ Only fields declared by the receiving toolkit are applied as constructor configu
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
 Scoped calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, except for model-provider tools, because the primary owns scoped tool settings; values in the worker's own credential store apply only where the lease sets nothing.
-Unscoped dedicated workers keep reading tool settings from their own worker credential stores.
+Unscoped dedicated workers keep reading tool settings from their own worker credential stores, which they can read only while credential encryption is disabled.
 Settings saved in a worker credential store before the primary owned them stay there and still apply where a lease sets nothing, so clear worker credential stores after upgrading if those values should stop applying.
 Services selected by the policy override those values.
 
@@ -25468,7 +25474,9 @@ Each worker pod runs the sandbox-runner app and mounts the same agent workspace 
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 Worker pods can reach the primary API over the pod network, so the runtime chart also gives the primary a generated `MINDROOM_API_KEY` in this mode unless the explicit opt-out is configured; worker pods never receive that key.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+Dedicated workers never receive the credential encryption key, matching dedicated Docker workers.
+With encrypted credential storage enabled, the worker credential stores and the `.shared_credentials` mirror the primary writes are encrypted with that key, so worker code cannot read them and tool settings reach the worker only through [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 
 > [!WARNING]

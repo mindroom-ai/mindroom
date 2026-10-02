@@ -1045,6 +1045,7 @@ OAuth credentials are read only from their authoritative SQLite stores and use t
 Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
 An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
 Current encrypted SQLite credentials become readable again when their correct key is restored.
+Dedicated Docker and Kubernetes workers never receive the key, so with encryption enabled they cannot read the worker credential stores and `.shared_credentials` mirrors the primary encrypts, and saved tool settings reach them only through [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 
 ## Debug Logging
 

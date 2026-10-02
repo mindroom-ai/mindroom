@@ -322,7 +322,7 @@ workers:
       key: MINDROOM_SANDBOX_PROXY_TOKEN
       value: ""
     credentialsEncryptionKey:
-      # Optional Secret reference used by the primary runtime; the static runner sidecar never receives it.
+      # Optional Secret reference used by the primary runtime; the static runner sidecar and dedicated workers never receive it.
       existingSecret: ""
       key: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
   staticRunner:

@@ -636,7 +636,8 @@ workers:
   It mounts neither the config ConfigMap nor a file-sourced config; each request carries the allowlisted config fields the runner resolves.
   An init container creates those directories as the runtime user.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.
-  In the release namespace, the chart stores derived worker tokens and optional credential-encryption keys as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
+  In the release namespace, the chart stores derived worker tokens as entries in one chart-created worker-auth Secret and grants only `get` and `patch` on that Secret.
+  Worker pods never receive the credentials encryption key, so with encrypted credential storage enabled saved tool settings reach them only as per-call leases from the primary.
   When `workers.kubernetes.namespace` points at a separate worker namespace, the chart uses per-worker auth Secrets and grants Secret CRUD only in that namespace.
   The chart can create the worker-manager RBAC and a worker NetworkPolicy.
 - With `workers.kubernetes.reconcilePodTemplates` (default `true`), each cleanup pass recreates scaled-down worker Deployments whose pod template (image, env, resources) drifted from the configured spec, so existing workers do not need manual recycling after upgrades.

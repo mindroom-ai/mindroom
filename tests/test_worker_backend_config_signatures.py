@@ -20,7 +20,7 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
-    credentials_encryption_key_hash,
+    _credentials_encryption_key_hash,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
@@ -99,7 +99,7 @@ def _legacy_kubernetes_backend_config_signature(
     """Hand-assembled pre-refactor signature, kept verbatim as the equivalence oracle."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
-    credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
+    credentials_encryption_key_marker = _credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     extra_annotations_json = json.dumps(config.extra_annotations, sort_keys=True, separators=(",", ":"))

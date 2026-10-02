@@ -584,7 +584,7 @@ def kubernetes_backend_config_signature(
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
-    credentials_encryption_key_marker = credentials_encryption_key_hash(credentials_encryption_key) or ""
+    credentials_encryption_key_marker = _credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = stable_signature_json(config.extra_env)
     extra_labels_json = stable_signature_json(config.extra_labels)
     extra_annotations_json = stable_signature_json(config.extra_annotations)
@@ -750,7 +750,7 @@ def resolve_kubeconfig_paths(runtime_paths: RuntimePaths) -> tuple[Path, ...]:
     return tuple(Path(path).expanduser().resolve() for path in configured_paths if path)
 
 
-def credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
+def _credentials_encryption_key_hash(encryption_key: str | None) -> str | None:
     """Return a stable non-secret marker for the credential encryption key."""
     normalized_key = credentials_encryption_key_value(encryption_key)
     if normalized_key is None:

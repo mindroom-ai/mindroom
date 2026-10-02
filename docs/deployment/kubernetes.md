@@ -215,7 +215,9 @@ Each worker pod runs the sandbox-runner app and mounts the same agent workspace 
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 Worker pods can reach the primary API over the pod network, so the runtime chart also gives the primary a generated `MINDROOM_API_KEY` in this mode unless the explicit opt-out is configured; worker pods never receive that key.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+Dedicated workers never receive the credential encryption key, matching dedicated Docker workers.
+With encrypted credential storage enabled, the worker credential stores and the `.shared_credentials` mirror the primary writes are encrypted with that key, so worker code cannot read them and tool settings reach the worker only through [credential leases](sandbox-proxy.md#credential-leases).
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 
 > [!WARNING]

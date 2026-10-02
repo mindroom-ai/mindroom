@@ -106,6 +106,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] load device pair sessions persisted without a requester address and inspect them with no address. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] accept the deployed chat client's Matrix access-token headers on browser-initiated pairing and connection endpoints, prefer the OpenID token when both are sent, and reject access tokens on device inspect and approve. |
 | [`scripts/local_mindroom_provisioning_service.py`][provisioning-service] | [Provisioning service tests][provisioning-service-tests] register an older client's own agent password unchanged and return no password for it. |
+| [`workers/backends/kubernetes_resources.py`][kubernetes-resources] | [Kubernetes worker tests][kubernetes-worker-tests] remove a planted key from a per-worker Secret and from a shared worker-auth Secret when the worker is ensured, and null both entries when the worker is cleaned up. |
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 | [Hosted instance lifecycle][instance-lifecycle] and [`legacy_instance_lifecycle.py`][legacy-instance-lifecycle] | [Lifecycle tests][instance-lifecycle-tests] mark an instance an older soft delete left `deprovisioned` while its deployment kept running as running again, then hold it or keep it running for an entitled subscription, leave one without a deployment alone, and look only during nightly runs and for accounts pending deletion. |
@@ -197,6 +198,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | A3 | Current behavior | [`credentials.py`][credentials] grants untagged shared credentials only through current allowlists and worker policy. |
 | A4 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current inline, named, embedder, and shared OpenAI credential sources. |
 | A5 | Current behavior | [`credentials_sync.py`][credentials-sync] supports current provider aliases and `NAME` or `NAME_FILE` secrets. |
+| A6 | Tiny retained default | [`workers/backends/kubernetes_resources.py`][kubernetes-resources] nulls the credential encryption key entries that earlier releases stored in Kubernetes worker auth Secrets whenever it applies or cleans up a worker's Secret entry. |
 
 ## OAuth, Matrix state, and tools
 
@@ -343,6 +345,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
 [knowledge-legacy-git]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_git_checkout.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
+[kubernetes-resources]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes_resources.py
 [kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-compaction-state]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/legacy_compaction_state.py
