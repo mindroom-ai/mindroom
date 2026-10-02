@@ -9647,6 +9647,7 @@ class TestHotQueriesAreIndexCovered:
 
         assert "created_ts" in plan, plan
 
+    @pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43), reason="octet_length arrived in SQLite 3.43")
     async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:
         """Sizing a page reads each row's byte length from its record header.
 
