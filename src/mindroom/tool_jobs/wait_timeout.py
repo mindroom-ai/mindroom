@@ -18,12 +18,10 @@ def validate_wait_timeout(value: object) -> float | None:
     return float(value)
 
 
-def read_wait_timeout(arguments: dict[str, Any] | None, *, owned_execution: bool = False) -> float | None:
+def read_wait_timeout(arguments: dict[str, Any] | None, *, owned_execution: bool) -> float | None:
     """Validate a caller's wait budget before accepting execution side effects."""
     value = validate_wait_timeout((arguments or {}).get("wait_timeout"))
-    if value is None:
-        return None
-    if owned_execution:
+    if value is not None and owned_execution:
         msg = "wait_timeout cannot detach nested execution from its outer job; omit it or pass null"
         raise ValueError(msg)
     return value

@@ -948,7 +948,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 job_id,
                 owner=caller_identity,
                 depth=delegation_depth,
-                include_result=False,
+                include_approval_state=False,
             )
         except JobAccessError as error:
             if pending_id == job_id and on_event is not None:
@@ -1125,7 +1125,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             child.delegation_id,
                             owner=caller_identity,
                             depth=delegation_depth,
-                            include_result=False,
+                            include_approval_state=False,
                         )
                         child = retained_child(background, background_job)
                         state.children = [

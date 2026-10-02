@@ -438,11 +438,15 @@ async def test_shutdown_drains_a_terminal_cancellation_retry(tmp_path: Path, mon
     retry_started, release_retry = asyncio.Event(), asyncio.Event()
     original_snapshot, original_publish = runtime._snapshot, runtime._publish
 
-    async def snapshot(entry: runtime_module._Entry, *, include_result: bool = True) -> runtime_module.BackgroundJob:
+    async def snapshot(
+        entry: runtime_module._Entry,
+        *,
+        include_approval_state: bool = True,
+    ) -> runtime_module.BackgroundJob:
         if not snapshot_started.is_set():
             snapshot_started.set()
             await release_snapshot.wait()
-        return await original_snapshot(entry, include_result=include_result)
+        return await original_snapshot(entry, include_approval_state=include_approval_state)
 
     async def publish(
         entry: runtime_module._Entry,

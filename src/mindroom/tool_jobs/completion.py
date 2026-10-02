@@ -83,8 +83,7 @@ def background_wait_edit(
     notice: str | None,
 ) -> EditTextRequest:
     """Render active wait progress separately from recoverable answer text."""
-    body = presentation.response_text.strip()
-    visible = body or "Thinking..."
+    visible = presentation.response_text.strip() or "Thinking..."
     return EditTextRequest(
         target=target,
         event_id=event_id,
@@ -243,8 +242,6 @@ async def join_conversation_jobs(
             yield BackgroundWaitChunk("⏳ Waiting for background work…")
             ready = await _wait_until_ready(runtime, jobs, human, pending)
             yield BackgroundWaitChunk(None)
-            if human.is_set():
-                return
         if ready and not human.is_set():
             attempted.update((job.job_id, job.generation) for job in ready)
             yield _ReadyJobContinuation(_completion_prompt(ready))

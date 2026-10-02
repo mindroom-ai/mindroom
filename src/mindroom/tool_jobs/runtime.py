@@ -371,7 +371,7 @@ class ToolJobRuntime:
         return path
 
     @staticmethod
-    def _owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
+    def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
         return replace(owner, thread_id=owner.resolved_thread_id)
 
     def _ensure_open(self, *, accepting: bool = False) -> None:
@@ -409,7 +409,11 @@ class ToolJobRuntime:
     def _visible(self, entry: _Entry, owner: ToolExecutionIdentity, depth: int) -> bool:
         """Whether a caller's conversation, requester, and depth own a job it may still access."""
         job = entry.job
-        return bool(owner.session_id) and (job.owner, job.depth) == (self._owner(owner), depth) and self._authorize(job)
+        return (
+            bool(owner.session_id)
+            and (job.owner, job.depth) == (self._canonical_owner(owner), depth)
+            and self._authorize(job)
+        )
 
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
@@ -448,7 +452,7 @@ class ToolJobRuntime:
                 self._withdrawn_approvals.add(job.job_id)
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
-                self._release_control(entry)
+                self._unsubscribe_human_signal(entry)
                 entry.human_signal, entry.cancel, entry.task = None, None, None
             entry.notify_changed()
             self.changed.set()
@@ -545,7 +549,7 @@ class ToolJobRuntime:
             self._ensure_open(accepting=True)
             job = BackgroundJob(
                 job_id=job_id,
-                owner=self._owner(owner),
+                owner=self._canonical_owner(owner),
                 tool_name=tool_name,
                 depth=depth,
                 kind=kind,
@@ -626,10 +630,10 @@ class ToolJobRuntime:
             if entry.control.cancelled:
                 entry.stopped_outcome = outcome
             if entry.job.status in TERMINAL_STATUSES:
-                self._release_control(entry)
+                self._unsubscribe_human_signal(entry)
 
     @staticmethod
-    def _release_control(entry: _Entry) -> None:
+    def _unsubscribe_human_signal(entry: _Entry) -> None:
         if entry.human_signal is not None:
             entry.human_signal.unsubscribe(entry.notify_changed)
 
@@ -639,16 +643,16 @@ class ToolJobRuntime:
         *,
         owner: ToolExecutionIdentity,
         depth: int,
-        include_result: bool = True,
+        include_approval_state: bool = True,
     ) -> BackgroundJob:
         """Inspect an exact job after validating its current caller and authorization."""
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            return await self._snapshot(entry, include_result=include_result)
+            return await self._snapshot(entry, include_approval_state=include_approval_state)
 
-    async def _snapshot(self, entry: _Entry, *, include_result: bool = True) -> BackgroundJob:
-        """Copy a job's metadata; without its result, the copy also omits a paused generation's approval state."""
-        job = entry.job if include_result else replace(entry.job, approval_state={})
+    async def _snapshot(self, entry: _Entry, *, include_approval_state: bool = True) -> BackgroundJob:
+        """Copy a job's metadata, optionally without its paused generation's approval state."""
+        job = entry.job if include_approval_state else replace(entry.job, approval_state={})
         return await run_blocking_until_complete(deepcopy, job)
 
     async def list_jobs(
@@ -668,7 +672,9 @@ class ToolJobRuntime:
             entries = [entry for entry in self._entries.values() if self._visible(entry, owner, depth)]
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
             entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
-            return [await self._snapshot(entry, include_result=False) for entry in entries[offset : offset + limit]]
+            return [
+                await self._snapshot(entry, include_approval_state=False) for entry in entries[offset : offset + limit]
+            ]
 
     async def wait(
         self,
@@ -777,7 +783,7 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_open()
             candidates = [
-                (entry, await self._snapshot(entry, include_result=False))
+                (entry, await self._snapshot(entry, include_approval_state=False))
                 for entry in self._entries.values()
                 if newer(entry.job) or entry.job.status not in TERMINAL_STATUSES
             ]
@@ -808,7 +814,7 @@ class ToolJobRuntime:
         return failures
 
     async def is_user_stopped(self, job_id: str) -> bool:
-        """Check suppression without confusing a read receipt with explicit user intent."""
+        """Whether an explicit Stop marked this job; consuming its outcome does not count."""
         async with self._lock:
             return (entry := self._entries.get(job_id)) is not None and entry.job.user_stop_receipt_order is not None
 
@@ -826,7 +832,7 @@ class ToolJobRuntime:
             if self._closed or self._shutdown_task is not None:
                 return None
             entry = self._entries.get(job_id)
-            if entry is None or not matches(await self._snapshot(entry, include_result=False)):
+            if entry is None or not matches(await self._snapshot(entry, include_approval_state=False)):
                 return None
             drain = await self._request_cancel(entry)
         return await wait_for_future_until_complete(drain)
@@ -959,7 +965,7 @@ class ToolJobRuntime:
         async with self._lock:
             if self._closed:
                 return []
-            return [await self._snapshot(entry, include_result=False) for entry in entries() if matches(entry)]
+            return [await self._snapshot(entry, include_approval_state=False) for entry in entries() if matches(entry)]
 
     async def pending_outcomes(self) -> list[BackgroundJob]:
         """Return authorized ready generations that no parent run consumed and no waiter claims."""
@@ -992,7 +998,7 @@ class ToolJobRuntime:
                 or not self._pending(entry, source_event_id)
             ):
                 return None
-            return await self._snapshot(entry, include_result=False)
+            return await self._snapshot(entry, include_approval_state=False)
 
     async def source_jobs(
         self,
@@ -1046,7 +1052,7 @@ class ToolJobRuntime:
             if self._closed or self._shutdown_task is not None:
                 return
             candidates = [
-                await self._snapshot(entry, include_result=False)
+                await self._snapshot(entry, include_approval_state=False)
                 for entry in self._entries.values()
                 if self._expirable(entry, before)
             ]
@@ -1081,7 +1087,7 @@ class ToolJobRuntime:
         )
 
     async def quiesce(self) -> None:
-        """Drain owned execution while response finalizers retain result receipt access."""
+        """Drain owned execution while response finalizers can still acknowledge consumed results."""
         if self._shutdown_task is None:
             self.changed.set()
             self._shutdown_task = asyncio.create_task(self._shutdown())
@@ -1095,7 +1101,7 @@ class ToolJobRuntime:
             await run_coroutine_until_complete(self._close())
 
     async def _close(self) -> None:
-        """Serialize lease release after every admitted receipt write."""
+        """Serialize lease release after every admitted write."""
         async with self._lock:
             self._closed = True
             self.changed.set()
@@ -1110,7 +1116,7 @@ class ToolJobRuntime:
                 if entry.job.status not in READY_STATUSES:
                     # A Stop that arrived while shutdown refused new cancellations remains a cancellation.
                     entry.control.cancel(shutdown=entry.job.user_stop_receipt_order is None)
-                self._release_control(entry)
+                self._unsubscribe_human_signal(entry)
                 if entry.drain is not None:
                     # The cancellation request already cancelled execution; its drain settles it.
                     tasks.append(entry.drain)

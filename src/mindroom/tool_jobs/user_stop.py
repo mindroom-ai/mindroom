@@ -21,14 +21,17 @@ if TYPE_CHECKING:
     from mindroom.turn_record import TurnRecord
 
 
-async def _reply_receipt_order(store: PrincipalStore, stopped: TurnRecord, stop_receipt_order: int) -> int | None:
+async def _reply_receipt_order(
+    store: PrincipalStore,
+    stopped: TurnRecord,
+    room_id: str,
+    stop_receipt_order: int,
+) -> int | None:
     """Bound the clicked response using durable sources, even before its first delivery binds."""
-    target = stopped.conversation_target
-    assert target is not None
     orders = []
     if stopped.response_event_id is not None:
         bound = await store.response_receipt_order_before_stop(
-            room_id=target.room_id,
+            room_id=room_id,
             response_event_id=stopped.response_event_id,
             stop_receipt_order=stop_receipt_order,
         )
@@ -76,7 +79,7 @@ async def stop_conversation_jobs(
     target = stopped.conversation_target
     if target is None or stopped.requester_id is None:
         return
-    cutoff = await _reply_receipt_order(store, stopped, stop_receipt_order)
+    cutoff = await _reply_receipt_order(store, stopped, target.room_id, stop_receipt_order)
     if cutoff is None:
         return
 

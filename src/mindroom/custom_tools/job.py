@@ -202,7 +202,7 @@ async def project_native_job_wait(call: FunctionCall, *, depth: int) -> None:
     if runtime is None or not isinstance(job_id, str):
         return
     try:
-        job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth, include_result=False)
+        job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth, include_approval_state=False)
     except JobAccessError:
         return
     if job.kind != "delegation":
