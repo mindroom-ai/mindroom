@@ -681,21 +681,29 @@ async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: Created
         raise InstanceClaimLostError
 
 
-async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
-    """Best-effort delete of a created key that was not published or not recorded, so no unrecorded key stays live."""
+async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> bool:
+    """Best-effort delete of a created key that was not published or not recorded; return whether the key is gone."""
     delete_key = partial(
         delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
     )
     try:
         await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterKeyNotFoundError:
+        return True
     except OpenRouterError:
         logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
+        return False
+    return True
 
 
 async def _discard_recorded_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Delete a recorded key whose Secret was not published, and forget it unless another run replaced the record."""
-    await _discard_openrouter_key(created_key, instance_id)
-    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=created_key.hash)
+    """Delete a recorded key whose Secret was not published, and forget it once it is gone.
+
+    A key whose deletion fails stays recorded, so a later revocation can still reach it; a key another run recorded
+    in the meantime also stays recorded.
+    """
+    if await _discard_openrouter_key(created_key, instance_id):
+        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=created_key.hash)
 
 
 class InstanceClaimLostError(HTTPException):
