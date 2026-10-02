@@ -210,7 +210,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                     if block.get("type") not in dropped_types and not _is_unsigned_thinking(block)
                 ]
             if items:
-                next_data["content_blocks"] = items
+                next_data["content_blocks"] = [item for item in items if not _is_unsigned_thinking(item)]
             updates: dict[str, Any] = {"provider_data": next_data}
             if drop_thinking:
                 next_data.pop("signature", None)

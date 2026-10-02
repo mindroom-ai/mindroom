@@ -274,6 +274,36 @@ def test_replay_drops_unsigned_thinking_from_a_cut_off_response(*, vertex: bool)
     assert messages[1].provider_data["content_blocks"] == stored_blocks
 
 
+def test_checkpoint_replay_drops_unsigned_thinking_after_the_checkpoint() -> None:
+    """Checkpoint items replace the stored blocks on replay, so they must drop unsigned thinking too."""
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
+    model.configure_native_compaction(threshold=60000)
+    signed = {"type": "thinking", "thinking": "", "signature": "complete"}
+    unsigned = {"type": "thinking", "thinking": "", "signature": ""}
+    tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
+    parsed = model._parse_provider_response(
+        BetaMessage.model_validate(_response([_CHECKPOINT, signed, tool_use, unsigned], stop_reason="tool_use")),
+    )
+    messages = [
+        Message(role="user", content="Look it up."),
+        Message(
+            role="assistant",
+            content=parsed.content,
+            provider_data=parsed.provider_data,
+            tool_calls=parsed.tool_calls,
+            reasoning_content=parsed.reasoning_content,
+        ),
+        Message(role="tool", tool_call_id="toolu_lookup", content="Found it"),
+    ]
+
+    wire, _ = format_messages(model.native_replay_messages(messages))
+
+    assistant_blocks = wire[-2]["content"]
+    assert unsigned not in assistant_blocks
+    assert signed in assistant_blocks
+    assert tool_use in assistant_blocks
+
+
 @pytest.mark.asyncio
 async def test_native_reactivation_discards_only_mismatched_thinking() -> None:
     """Restoring an old checkpoint must drop canonical-prefix thinking and retain new valid reasoning."""
