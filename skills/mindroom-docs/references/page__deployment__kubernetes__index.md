@@ -388,6 +388,12 @@ Platform ingress hosts:
 - `api.{domain}` - Platform backend API
 - `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
+The backend keys its rate limits and its authentication-failure lockout on the client address.
+It takes that address from `X-Real-IP` only when the connection comes from a network in `trustedProxyCidrs` (`TRUSTED_PROXY_CIDRS`), and keys every other caller by its own connection address.
+The default lists the private IPv4 ranges, so an in-cluster ingress-nginx controller, which overwrites `X-Real-IP`, is trusted, while instance pods cannot reach the backend port to use that trust.
+Narrow the list to the controller's pod network when you know it, and include only proxies that overwrite `X-Real-IP`.
+Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is keyed by its connection address.
+
 ## Local Development with Kind
 
 ```bash
