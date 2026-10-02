@@ -12,7 +12,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.constants import PROVIDER_ENV_KEYS, resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import is_unset_env_value
 
 from .env_file import upsert_env_values
@@ -117,8 +117,7 @@ def install_service(
             _console.print("[dim]Cancelled.[/dim]")
             raise typer.Exit(0)
 
-    _install_service_runtime(manager)
-    result = manager.install_service()
+    result = _install_and_start_service(manager, resolve_primary_runtime_paths())
     if not result.success:
         _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
         raise typer.Exit(1)
@@ -138,7 +137,7 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
     """Install and start MindRoom as a login service after `mindroom run` setup, and return whether the service now runs it.
 
     `manager` comes from `require_login_service` for `--service`; without it, the user is asked first.
-    The service reads only `.env`, so provider keys exported in this shell are saved there first.
+    The service reads only `.env`, so the dashboard and provider keys exported in this shell are saved there first.
     When asking, declining or a failed installation leaves MindRoom to start in this terminal.
     With `--service`, a failure exits with an error, because nobody may be watching a terminal run.
     """
@@ -150,13 +149,7 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
     # Asking skips installed services, so only `--service` replaces one.
     replacing = requested and manager.get_service_status().installed
     if _ensure_uv_installed(manager, no_confirm=requested):
-        if shell_keys := _shell_provider_keys(runtime_paths):
-            upsert_env_values(runtime_paths.env_path, shell_keys)
-            _console.print(
-                f"Saved {', '.join(shell_keys)} from your shell to {runtime_paths.env_path} for the service.",
-            )
-        _install_service_runtime(manager)
-        result = manager.install_service()
+        result = _install_and_start_service(manager, runtime_paths)
         if result.success:
             _print_installed_service(manager, result)
             return True
@@ -170,6 +163,16 @@ def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | N
     return False
 
 
+def _install_and_start_service(manager: ServiceManager, runtime_paths: RuntimePaths) -> InstallResult:
+    """Save the keys this shell exports to `.env`, the only environment the service reads, then install and start it."""
+    # Without a config there is no service to install, and no `.env` to save keys for.
+    if runtime_paths.config_path.exists() and (shell_keys := _shell_service_keys(runtime_paths)):
+        upsert_env_values(runtime_paths.env_path, shell_keys)
+        _console.print(f"Saved {', '.join(shell_keys)} from your shell to {runtime_paths.env_path} for the service.")
+    _install_service_runtime(manager)
+    return manager.install_service()
+
+
 def _install_service_runtime(manager: ServiceManager) -> None:
     """Install the service's MindRoom version as a persistent uv tool, warning instead of failing when uv cannot."""
     _, uv_path = manager.check_uv_installed()
@@ -180,12 +183,17 @@ def _install_service_runtime(manager: ServiceManager) -> None:
         )
 
 
-def _shell_provider_keys(runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Return the provider key variables, `NAME` or `NAME_FILE`, that this shell exports with a usable value."""
+def _shell_service_keys(runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return `MINDROOM_API_KEY` and the provider keys, `NAME` or `NAME_FILE`, that this shell exports with a usable value.
+
+    A dashboard key that protected terminal runs must also protect the service, which listens on every interface.
+    """
+    candidates = [("MINDROOM_API_KEY", "MINDROOM_API_KEY")] + [
+        (env_key, name) for env_key in PROVIDER_ENV_KEYS.values() for name in (env_key, f"{env_key}_FILE")
+    ]
     return {
         name: value
-        for env_key in PROVIDER_ENV_KEYS.values()
-        for name in (env_key, f"{env_key}_FILE")
+        for env_key, name in candidates
         if (value := runtime_paths.process_env.get(name)) and not is_unset_env_value(env_key, value)
     }
 
@@ -269,7 +277,6 @@ def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
 
     The service runs with the environment saved in its unit (config and storage paths), not with the caller's.
     """
-    from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
 
     config_path = service_environment.get("MINDROOM_CONFIG_PATH")
