@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import threading
@@ -11,7 +12,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 from urllib.parse import quote, unquote
 
 import yaml
@@ -33,6 +34,8 @@ _ROOT_MARKER_FILENAME = ".mindroom-thread-exports"
 _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
+_EXPORTED_AT_LINE = re.compile(r"^  exported_at: .*$", re.MULTILINE)
 
 
 logger = get_logger(__name__)
@@ -502,17 +505,27 @@ def thread_payload(
     }
 
 
+def _load_export_mapping(text: str) -> dict[str, Any] | None:
+    """Parse worker-writable export YAML within the bounded loader's limits, or return None."""
+    try:
+        payload = yaml_io.safe_load_without_aliases(text)
+    except yaml.YAMLError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[str, object]] | None:
     """Return one index pair from a thread file below a pinned room directory."""
     text = _read_text_at(directory_fd, filename)
     if text is None:
         return None
-    try:
-        payload = yaml_io.safe_load_without_aliases(text)
-    except yaml.YAMLError:
-        return None
-    if not isinstance(payload, dict):
-        return None
+    payload = _load_export_mapping(text)
+    if payload is None:
+        # Parsing is bounded, so a thread too long to parse whole is indexed from the header before its messages.
+        header = _load_export_mapping(text.partition("\nmessages:")[0])
+        if header is None:
+            return None
+        payload = {**header, "messages": []}
     thread = payload.get("thread")
     messages = payload.get("messages")
     if not isinstance(thread, dict) or not isinstance(messages, list):
@@ -859,27 +872,9 @@ def clear_thread_export_root(
         os.close(root_fd)
 
 
-def _payload_without_exported_at(payload: dict[str, object]) -> dict[str, object]:
-    """Return one thread payload with the per-pass exported_at timestamp removed."""
-    normalized = dict(payload)
-    thread = normalized.get("thread")
-    if isinstance(thread, dict):
-        normalized["thread"] = {key: value for key, value in thread.items() if key != "exported_at"}
-    return normalized
-
-
-def _existing_payload_matches(room_fd: int, filename: str, payload: dict[str, object]) -> bool:
-    """Return whether one regular export file already holds this payload, ignoring exported_at."""
-    text = _read_text_at(room_fd, filename)
-    if text is None:
-        return False
-    try:
-        existing = yaml_io.safe_load_without_aliases(text)
-    except yaml.YAMLError:
-        return False
-    if not isinstance(existing, dict):
-        return False
-    return _payload_without_exported_at(existing) == _payload_without_exported_at(payload)
+def _without_exported_at(text: str) -> str:
+    """Return serialized thread YAML without its per-pass exported_at line."""
+    return _EXPORTED_AT_LINE.sub("", text, count=1)
 
 
 @_serialized_export_mutation
@@ -909,14 +904,16 @@ def write_thread_payload(
         raise RuntimeError(msg)
     try:
         filename = f"{_safe_path_segment(thread_id)}.yaml"
-        if _existing_payload_matches(room_fd, filename, payload):
-            return False
         text = yaml_io.safe_dump(
             payload,
             default_flow_style=False,
             sort_keys=False,
             allow_unicode=True,
         )
+        # Compare text rather than parse it, so even a thread too long for the bounded parser is not rewritten unchanged.
+        existing = _read_text_at(room_fd, filename)
+        if existing is not None and _without_exported_at(existing) == _without_exported_at(text):
+            return False
         _atomic_write_at(room_fd, filename, text)
         return True
     finally:

@@ -2153,6 +2153,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_model"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.runtime_context",
 ]
@@ -4423,6 +4424,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.model_commands"
 depends_on = [
+    "mindroom.authorization",
     "mindroom.model_selection_scope",
     "mindroom.model_selection",
     "mindroom.thread_models",
@@ -4619,6 +4621,7 @@ from = ["mindroom.tool_system.tool_access"]
 expose = [
     "ToolDescriptor",
     "ToolKey",
+    "UnknownToolError",
     "function_schema",
     "search_tool_metadata",
     "validate_tool_arguments",
@@ -6592,7 +6595,7 @@ visibility = ["mindroom.api.main"]
 
 [[modules]]
 path = "mindroom.cli.thread_export"
-depends_on = ["mindroom.constants", "mindroom.thread_export.models"]
+depends_on = ["mindroom.cli.api", "mindroom.thread_export.models"]
 visibility = ["mindroom.cli.main"]
 
 
@@ -6617,6 +6620,7 @@ depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
     "mindroom.logging_config",
+    "mindroom.tool_system.catalog",
 ]
 visibility = ["mindroom.orchestrator", "mindroom.api.main"]
 

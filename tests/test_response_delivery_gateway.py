@@ -70,6 +70,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -4696,6 +4697,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         """
         turn_store = await _store(journal_store, agent_name="agent")
         await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
+        await admit_room_event(alice, _ROOM_ID, "$source")
         gateway = _gateway(
             tmp_path,
             alice,

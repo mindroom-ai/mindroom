@@ -343,13 +343,21 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
     if target.worker_scope is None:
         target.target_manager.delete_credentials(service)
         return
+    primary_built_tool = target_primary_owns_tool_settings(service, target)
     delete_scoped_credentials(
         service,
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
         worker_credentials_manager=target.target_manager,
-        primary_built_tool=target_primary_owns_tool_settings(service, target),
+        primary_built_tool=primary_built_tool,
     )
+    if primary_built_tool:
+        # LEGACY_COMPAT: Worker-store copies of settings the primary now owns.
+        # Legacy format: `<service>_credentials.json` in the agent's worker store, where the dashboard saved a scoped agent's settings of a tool the primary builds; the dashboard no longer lists or reads that copy.
+        # Last legacy release: v2026.9.404; replacement: v2026.9.405 saves them in the primary's agent- or requester-scoped stores.
+        # Handling: deleting the settings also deletes that worker copy, so a deleted value stops reaching worker code.
+        # Coverage: tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings.
+        target.target_manager.delete_credentials(service)
 
 
 def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:

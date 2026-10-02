@@ -440,6 +440,42 @@ def test_worker_path_tool_does_not_list_or_search_a_workspace_replaced_by_link(
     assert "unrestricted" not in result
 
 
+def test_file_tool_content_search_never_reads_a_planted_link_target(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    outside: Path,
+) -> None:
+    """Content search never opens a primary file that worker code linked into the workspace, even beside a real twin.
+
+    Agno's own check strips the trailing space from `d `, so it validated `d/x.txt` and then read `d /x.txt`.
+    """
+    secret = outside / "openai.json"
+    secret.write_text('{"api_key": "sk-SECRET-VALUE"}\n')
+    (workspace / "leak.json").symlink_to(secret)
+    (workspace / "d").mkdir()
+    (workspace / "d" / "x.txt").write_text("harmless\n")
+    (workspace / "d ").mkdir()
+    (workspace / "d " / "x.txt").symlink_to(secret)
+    (workspace / "notes.txt").write_text("sk-workspace-value\n")
+    (workspace / "alias.txt").symlink_to(workspace / "notes.txt")
+    secret_stat = secret.stat()
+    opened_secret: list[object] = []
+    real_open = os.open
+
+    def recording_open(*args: object, **kwargs: object) -> int:
+        descriptor = real_open(*args, **kwargs)
+        if os.path.samestat(os.fstat(descriptor), secret_stat):
+            opened_secret.append(args[0])
+        return descriptor
+
+    monkeypatch.setattr(os, "open", recording_open)
+    result = json.loads(file_tools()(base_dir=workspace).search_content("sk-"))
+
+    assert sorted(match["file"] for match in result["files"]) == ["alias.txt", "notes.txt"]
+    assert "SECRET" not in json.dumps(result)
+    assert opened_secret == []
+
+
 @pytest.mark.parametrize("swap", ["workspace-link", "ancestor-swapped-while-resolving"])
 @pytest.mark.parametrize(
     "build",

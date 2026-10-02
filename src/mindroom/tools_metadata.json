@@ -8563,6 +8563,18 @@
           "required": false,
           "type": "number",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": 104857600,
+          "description": "Maximum file or export size to download into the agent workspace in bytes.",
+          "label": "Max Download Size",
+          "name": "max_download_size",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": true,

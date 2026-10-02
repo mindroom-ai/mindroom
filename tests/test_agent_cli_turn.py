@@ -314,12 +314,31 @@ async def test_write_failure_prevents_shell_and_inner_effects(
     await owner.close()
 
 
+def _run_cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["mindroom-agent", *argv], env=env, capture_output=True, text=True, timeout=5, check=False)
+
+
+def _cli_call_until_settled(env: dict[str, str], *, separate_wait: bool) -> dict[str, object]:
+    """Call through the real CLI, waiting inside the call or with a separate `calls wait`."""
+    if not separate_wait:
+        call = _run_cli(env, "tools", "call", "state.mutate")
+        assert call.returncode == 0, call.stderr
+        return json.loads(call.stdout)
+    call = _run_cli(env, "tools", "call", "state", "mutate", "--timeout", "0")
+    assert call.returncode == 3, call.stderr
+    wait = _run_cli(env, "calls", "wait", json.loads(call.stdout)["call_id"])
+    assert wait.returncode == 0, wait.stderr
+    return json.loads(wait.stdout)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [False, True])
+@pytest.mark.parametrize("separate_wait", [False, True])
 async def test_real_cli_call_wait_completes_inside_outer_bash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     approval: bool,
+    separate_wait: bool,
 ) -> None:
 
     import uvicorn  # noqa: PLC0415 - keep optional provider/server imports deferred
@@ -329,29 +348,8 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         shell_env = current_agent_cli_shell_env()
         assert shell_env is owner.shell_env
         env = os.environ | shell_env.env()
-        first = await asyncio.to_thread(
-            subprocess.run,
-            ["mindroom-agent", "tools", "call", "state", "mutate"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        assert first.returncode == 3, first.stderr
-
-        receipt = json.loads(first.stdout)
-        second = await asyncio.to_thread(
-            subprocess.run,
-            ["mindroom-agent", "calls", "wait", receipt["call_id"]],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        assert second.returncode == 0, second.stderr
-        assert json.loads(second.stdout)["outcome"] == "completed-via-http"
+        receipt = await asyncio.to_thread(_cli_call_until_settled, env, separate_wait=separate_wait)
+        assert receipt["outcome"] == "completed-via-http"
         return "same-window"
 
     async def mutate(run_context: RunContext) -> str:
@@ -742,6 +740,8 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
 
     async def authorize(key, arguments):
         authorized.append(key)
+        # Like the production minimal-mode callback, authorization binds the requested key first.
+        await catalog.bind(key)
 
     catalog = await _catalog(tmp_path, [])
     for index in range(15):
@@ -782,11 +782,20 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(operation)
         assert descriptor["input_schema"]["properties"] == {}
-        with pytest.raises(ValueError, match="unavailable"):
+        with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
                 ToolDescribeOperation(operation="tools.describe", toolkit="unassigned", function="selected"),
             )
-    assert loaded == [12]
+        unknown = "Toolkit 'tool3' has no function 'send'; its functions: selected"
+        with pytest.raises(CliOperationError, match=f"^{unknown}$"):
+            await owner.operation(ToolDescribeOperation(operation="tools.describe", toolkit="tool3", function="send"))
+        receipt = await owner.operation(
+            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="tool3", function="send"),
+        )
+        while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
+            await asyncio.sleep(0.001)
+        assert (receipt["status"], receipt["outcome"]) == ("failed", unknown)
+    assert loaded == [12, 3]
     assert ToolKey("tool12", "selected") in authorized
     await owner.close()
 

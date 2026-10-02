@@ -9,12 +9,14 @@ Standard-mode agents whose shell can reach MindRoom get the same CLI inside thei
 
 Discover tool names and schemas with `tools list`, `tools search`, and `tools describe`.
 Listing accepts `--cursor` and `--limit`; schemas are loaded only when described.
-Call input is one JSON object supplied with `--json`, `--json-file`, or `--json-stdin`.
+Call input is one JSON object supplied as a final argument or with `--json`, `--json-file`, or `--json-stdin`.
 These options are exclusive.
 Omission means `{}`.
 
-A call returns a live receipt immediately.
-Exit 3 means it is pending; shell scripts must preserve that receipt and explicitly wait.
+A call waits up to `--timeout` seconds (default 30) for its result, then prints the live receipt.
+`TOOLKIT.FUNCTION` selects the same function as `TOOLKIT FUNCTION`.
+Exit 3 means it is still pending; shell scripts must preserve that receipt and explicitly wait.
+`--timeout 0` returns the receipt at once, so one command can submit several calls before waiting on them.
 Do not chain the wait with success-only `&&`:
 
 ```bash

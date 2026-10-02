@@ -341,10 +341,11 @@ The other three functions require an active thread context and return an error o
 Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
 With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to all agents and teams in the thread and persists across restarts.
-`get_thread_model` returns the active override and the available model names.
-When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
-`reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
+Every other entity keeps its own thread override or room-level model.
+`get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
+`reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
 
 ### Configuration
 
@@ -368,7 +369,7 @@ reset_thread_model()
 
 ### Notes
 
-- The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
+- The override is stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
 - Users can manage the same override with the `!model` chat command; see [Chat Commands](../chat-commands.md).
 - An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
 
@@ -382,6 +383,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
+An `m.room.message` that `send_event` sends for a human requester names that requester, so the agents and teams it mentions act for that human, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.

@@ -658,6 +658,10 @@ async def _threads_export(
                 max_thread_roots=max_thread_roots,
                 include_invited_rooms=include_invited_rooms,
             )
+        except ValueError as exc:
+            # A refused URL stays refused, so watching would only repeat the error.
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from None
         except (OSError, RuntimeError) as exc:
             _handle_thread_export_error(exc, runtime_paths, watch=watch)
         else:

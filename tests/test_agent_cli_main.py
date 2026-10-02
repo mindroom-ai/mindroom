@@ -10,6 +10,7 @@ from io import BytesIO, TextIOWrapper
 
 import pytest
 
+from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 
 
@@ -17,6 +18,47 @@ def test_call_accepts_json_object() -> None:
 
     args = parse_arguments(["tools", "call", "calculator", "add", "--json", '{"a":1,"b":2}'])
     assert read_call_arguments(args) == {"a": 1, "b": 2}
+
+
+def test_dotted_name_selects_toolkit_and_function() -> None:
+
+    describe = parse_arguments(["tools", "describe", "matrix_message.matrix_message"])
+    assert (describe.toolkit, describe.function) == ("matrix_message", "matrix_message")
+    call = parse_arguments(["tools", "call", "todo.add_todo", "--json", "{}"])
+    assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", 30)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["tools", "call", "matrix_room", "matrix_room", '{"action":"threads"}'],
+        ["tools", "call", "matrix_room.matrix_room", '{"action":"threads"}'],
+        *(
+            ["tools", "call", "matrix_room.matrix_room", f'{space}{{"action":"threads"}}']
+            for space in (" ", "\t", "\n")
+        ),
+    ],
+)
+def test_trailing_json_object_supplies_call_arguments(argv: list[str]) -> None:
+
+    args = parse_arguments(argv)
+    assert (args.toolkit, args.function) == ("matrix_room", "matrix_room")
+    assert read_call_arguments(args) == {"action": "threads"}
+
+
+def test_call_arguments_are_given_once(capsys: pytest.CaptureFixture[str]) -> None:
+
+    with pytest.raises(SystemExit):
+        parse_arguments(["tools", "call", "a.b", '{"x":1}', "--json", '{"x":2}'])
+    assert "give tool arguments once" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["tools", "describe", "scheduler"], ["tools", "call", "scheduler"]])
+def test_missing_function_names_the_search(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+
+    with pytest.raises(SystemExit):
+        parse_arguments(argv)
+    assert "find function names with: mindroom-agent tools search scheduler" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -64,6 +106,21 @@ def test_file_stdin_and_exclusive_inputs(tmp_path, monkeypatch) -> None:
         parse_arguments(["tools", "call", "a", "b", "--json", "{}", "--json-stdin"])
     with pytest.raises(SystemExit):
         parse_arguments(["tools", "unknown"])
+
+
+def test_failed_poll_keeps_the_admitted_receipt(capsys, monkeypatch) -> None:
+
+    class Client:
+        def operation(self, payload) -> dict[str, object]:
+            return {"call_id": payload["call_id"], "toolkit": "a", "function": "b", "status": "queued"}
+
+        def receipt(self, _call_id) -> dict[str, object]:
+            msg = "Agent CLI transport outcome is unknown"
+            raise AgentCliUnavailableError(msg)
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert main(["tools", "call", "a.b", "--timeout", "1"]) == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "queued"
 
 
 def test_unknown_transport_preserves_exact_call_id(capsys, monkeypatch) -> None:

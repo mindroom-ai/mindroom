@@ -44,6 +44,7 @@ It is still coupled to the current persistence split, but its workflow boundary 
 `TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
 The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 A redaction naming an event whose turn or revision owner is recorded in another room changes nothing.
+When no turn records a room for the event, the tombstone is written only if the journal admitted the event in the redaction's room.
 
 ## Current Problems
 
@@ -166,10 +167,12 @@ Live `room-member-joined` hooks remain at-least-once because hook emission happe
 Invite callbacks have no stable event ID for a semantic journal row, so their pending room and inviter are persisted before background handling starts.
 The pending record wakes unfinished work but never grants inviter authority: routers and agents re-read nio's current inviter after the join fence is durable and immediately before requesting the join.
 A failed join keeps the pending invitation and decrypt fence for retry.
-An invite whose current inviter the policy refuses leaves no pending entry, and reconciliation handles each pending room on its own, so one failing join does not stop the rest.
+An invite whose current inviter the policy refuses, or that nio no longer holds because it was withdrawn before the join, leaves no pending entry, and reconciliation handles each pending room on its own, so one failing join does not stop the rest.
+The pending ledger keeps at most the 1,000 newest invitations per entity, evicting the oldest, and invite updates and reconciliation read and rewrite it in a worker thread so a large ledger never stalls the event loop; the bot reads it once synchronously when it starts.
 Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
 Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
+These callbacks settle at once and only request a background reconcile: each room runs at most one, rereads state at most once per second however many events arrive, and ignores membership events that change only a display name or avatar.
 To-device call inputs and desktop pairing receivers remain best-effort because they do not share a stable replayable timeline-event identity, so their background failures are logged without semantic journal ownership.
 
 ## Turn Lifecycle Vocabulary
@@ -350,7 +353,7 @@ One process must own one agent's records; the database merges delivery acknowled
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
-A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions remain bounded ledger barriers without storage probes.
+A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions of events the journal admitted in that room remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
 Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, rolls compaction back to just before the first archived run that consumed the event, and sanitizes coalesced prompt metadata used by later edit regeneration.
 Physical edits register on the owning turn before prompt retention or generation, including edits consumed only as another turn's context, without becoming source indexes or completion aliases.

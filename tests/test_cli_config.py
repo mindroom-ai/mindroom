@@ -2191,11 +2191,12 @@ class TestRunFirstRunSetup:
             "mindroom.cli.service._get_service_manager",
             Mock(side_effect=RuntimeError("Unsupported platform")),
         )
-        # A login service setup saves every exported provider key, so none may leak in from the developer's shell.
+        # A login service setup saves every exported provider and dashboard key, so none may leak in from the developer's shell.
         for env_key in constants_module.PROVIDER_ENV_KEYS.values():
             monkeypatch.delenv(env_key, raising=False)
             monkeypatch.delenv(f"{env_key}_FILE", raising=False)
         for name in (
+            "MINDROOM_API_KEY",
             "MATRIX_HOMESERVER",
             "MATRIX_REGISTRATION_TOKEN",
             "MINDROOM_PROVISIONING_URL",

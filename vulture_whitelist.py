@@ -148,6 +148,7 @@ _.validate_required_text  # unused method (src/mindroom/external_triggers/store.
 _.validate_thread_id  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_thread_placement  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_owner_user_id  # unused method (src/mindroom/external_triggers/store.py)
+_.validate_event_id  # Pydantic field validator (src/mindroom/external_triggers/models.py)
 _.validate_required_record_text  # unused method (src/mindroom/external_triggers/store.py)
 _.normalize_allowed_kinds  # unused method (src/mindroom/external_triggers/store.py)
 _.validate_record_keys  # unused method (src/mindroom/external_triggers/store.py)

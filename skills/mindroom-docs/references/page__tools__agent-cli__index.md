@@ -86,8 +86,10 @@ mindroom-agent calls wait CALL_ID
 ```
 
 Tool names are qualified by toolkit.
+`TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
 Discovery and calls use the current agent's permissions and requester context.
-Calling a tool returns JSON containing its call ID and current status.
+Calling a tool waits up to 30 seconds for the result and prints its receipt: call ID, status, and the outcome once it has finished.
+Use `--timeout SECONDS` on the call to choose another budget, or `--timeout 0` to return at once.
 Top-level `--help` lists every command, including `calls wait CALL_ID` for queued, running, or waiting calls.
 Use command-specific `--help` for arguments and options.
 Use `calls wait` when the result is still queued, running, or waiting for a decision.
@@ -97,8 +99,8 @@ Waiting pauses that shell command and its owning response; other conversations c
 New tool calls and schema preparation require an active Bash call.
 Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
 
-Arguments can also come from `--json-file arguments.json` or `--json-stdin`.
-These three JSON input options are mutually exclusive and require a JSON object.
+Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
+These JSON inputs are mutually exclusive and require a JSON object.
 Omitting them supplies an empty object.
 Use `--call-id UUID` when the caller needs to retain a known ID before submission.
 Reusing an ID with the same tool and arguments joins the existing live call; different arguments are rejected.
@@ -108,7 +110,7 @@ Reusing an ID with the same tool and arguments joins the existing live call; dif
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
 | `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin` |
+| `tools call TOOLKIT FUNCTION [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |

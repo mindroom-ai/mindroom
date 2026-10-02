@@ -13,6 +13,7 @@ from agno.team.team import Team as AgnoTeam
 
 import mindroom.custom_tools.todo as todo_module
 import mindroom.custom_tools.todo_template_render as todo_template_render_module
+import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -702,6 +703,58 @@ def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path
 
     assert "`mindroom-dev`" in listing
     assert "`oversized`" not in listing
+
+
+def test_list_templates_stops_reading_workspace_templates_after_its_budget(tmp_path: Path) -> None:
+    """However many templates worker code plants, one listing reads and returns a bounded amount of their text."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(20):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n", description="d" * 60 * 1024))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`planted-00`" in listing
+    assert "`planted-19`" not in listing
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_examines_only_the_first_workspace_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """However many entries worker code plants, one listing examines a bounded number of them."""
+    monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 4)
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(10):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert listing.count("| `workspace` |") == 4
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_charges_unreadable_workspace_templates_against_its_budget(tmp_path: Path) -> None:
+    """Templates that fail to decode still count, and the unread ones still shadow built-ins of the same name."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    template_dir = _workspace_template_dir(config)
+    template_dir.mkdir(parents=True)
+    for index in range(20):
+        (template_dir / f"invalid-{index:02}.yaml.j2").write_bytes(b"\xff" * 60 * 1024)
+    _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
 
 
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:

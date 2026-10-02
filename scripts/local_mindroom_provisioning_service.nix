@@ -74,8 +74,8 @@ in
 
     statePath = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/mindroom-local-provisioning/state.json";
-      description = "State file path for pair sessions/connections.";
+      default = "/var/lib/mindroom-local-provisioning/state.sqlite3";
+      description = "SQLite database path for pair sessions/connections; the first start imports a legacy .json file of the same name beside it, and a .json path opens the .sqlite3 database beside it.";
     };
 
     caddyHost = lib.mkOption {

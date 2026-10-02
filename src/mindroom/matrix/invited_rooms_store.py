@@ -80,8 +80,8 @@ def load_pending_room_invites(path: Path) -> dict[str, str]:
 
 
 def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
-    """Atomically replace one agent's outstanding room invites."""
-    return _save_json(path, dict(sorted(pending_invites.items())))
+    """Atomically replace one agent's outstanding room invites, keeping them oldest first."""
+    return _save_json(path, pending_invites)
 
 
 def _save_json(path: Path, value: object) -> bool:

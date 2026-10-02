@@ -298,7 +298,7 @@ class GatewayServer:
         allowed_origins: tuple[str, ...] | None = None,
         timeout_seconds: float = 60,
         max_active_calls: int = 128,
-        max_user_calls: int = 32,
+        max_user_calls: int = 16,
         max_grant_calls: int = 16,
         record_activity: Callable[[Request], Awaitable[None]] | None = None,
     ) -> None:

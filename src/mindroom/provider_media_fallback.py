@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -51,6 +52,16 @@ _MAX_LOGGED_ERROR_CHARS = 500
 # Rejections that name one input's size or media type prove only that this input
 # failed, not that the route rejects the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
+# Providers reject one undecodable, oversized, or oddly formatted input with the
+# same errors as a model without that input kind, so only a rejection that names
+# the missing capability may change later requests on the whole route.
+_CAPABILITY_GAP_ERROR = re.compile(
+    r"(?:does not|doesn't) support (?:(?:image|audio|video|file|pdf|document) inputs?|images|vision)\b"
+    r"|(?:image|audio|video|file|pdf|document) inputs? (?:is|are) not supported"
+    r"|is not a multimodal model"
+    r"|is only supported by certain models"
+    r"|no endpoints found that support (?:image|audio|video|file|pdf|document)",
+)
 _ACTIVE_MODELS: ContextVar[frozenset[int]] = ContextVar(
     "mindroom_active_provider_media_fallback_models",
     default=frozenset(),
@@ -573,7 +584,7 @@ def _should_retry(error: Exception) -> bool:
 
 
 def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
-    """Return whether stripped success isolates one unsupported media kind."""
+    """Return whether stripped success isolates one media kind the provider says the model lacks."""
     if len(media_kinds) != 1:
         return False
     if isinstance(error, ContextWindowExceededError):
@@ -589,7 +600,9 @@ def _should_learn(error: Exception, media_kinds: frozenset[MediaKind]) -> bool:
         marker in lowered_error_text for marker in _INPUT_SPECIFIC_ERROR_MARKERS
     ):
         return False
-    return not any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS)
+    if any(marker in lowered_error_text for marker in ModelProviderError.CONTEXT_WINDOW_PATTERNS):
+        return False
+    return _CAPABILITY_GAP_ERROR.search(lowered_error_text) is not None
 
 
 @contextmanager

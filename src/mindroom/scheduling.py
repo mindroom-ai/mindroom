@@ -779,6 +779,33 @@ async def _scheduled_task_event_source(
     )
 
 
+async def _homeserver_returns_full_state_events(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether the homeserver honours ``format=event``, proven on the room's never-changing create event.
+
+    A server that ignores ``format=event`` answers both reads with the same content, which cannot hold itself
+    under ``content``.
+    """
+    try:
+        full, bare = [
+            await client._send(
+                nio.RoomGetStateEventResponse,
+                "GET",
+                nio.Api._build_path(["rooms", room_id, "state", "m.room.create", ""], query),
+                response_data=("m.room.create", "", room_id),
+            )
+            for query in ({"format": "event"}, None)
+        ]
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        msg = f"Failed to read the create event of room {room_id!r}"
+        raise _ScheduledTaskStateReadError(msg) from exc
+    if not isinstance(full, nio.RoomGetStateEventResponse) or not isinstance(bare, nio.RoomGetStateEventResponse):
+        msg = f"Failed to read the create event of room {room_id!r}: {full} {bare}"
+        raise _ScheduledTaskStateReadError(msg)
+    return full.content.get("content") == bare.content
+
+
 async def _read_scheduled_task_state(
     client: nio.AsyncClient,
     room_id: str,
@@ -811,8 +838,12 @@ async def _read_scheduled_task_state(
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
         msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
         raise _ScheduledTaskStateReadError(msg)
-    # A server that ignores format=event returns the state content itself, whose author can shape it like an event,
-    # so the sender comes from a server-built event that state content cannot forge.
+    # A server that ignores format=event returns the state content itself, whose author can shape it like an event
+    # naming a superseded bot-written version, so only a server proven to return whole events names the current one.
+    if not await _homeserver_returns_full_state_events(client, room_id):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} was read from a homeserver that ignores format=event"
+        raise _ScheduledTaskStateReadError(msg)
+    # The sender still comes from a server-built event that state content cannot forge.
     source = await _scheduled_task_event_source(client, room_id, task_id, event_id)
     if (
         source.get("type") != _SCHEDULED_TASK_EVENT_TYPE
