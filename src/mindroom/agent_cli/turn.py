@@ -43,7 +43,7 @@ from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_ag
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.tool_access import ToolKey, search_tool_metadata
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -632,7 +632,10 @@ class LiveTurnTools(TurnToolBridge):
             except PermissionError as exc:
                 msg = "Tool is unavailable"
                 raise CliOperationError(msg) from exc
-            descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
+            try:
+                descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
+            except UnknownToolError as exc:
+                raise CliOperationError(str(exc)) from exc
             self._check_dispatch()
             result: dict[str, object] = {
                 "toolkit": key.toolkit,
@@ -708,6 +711,8 @@ class LiveTurnTools(TurnToolBridge):
                         result = event.execution.result
         except _StaleAttemptError as exc:
             status = "cancelled"
+            result = str(exc)
+        except UnknownToolError as exc:
             result = str(exc)
         except (ValueError, PermissionError):
             result = "Tool is unavailable or arguments are invalid"

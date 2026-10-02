@@ -11,8 +11,10 @@ Call input is one JSON object supplied with `--json`, `--json-file`, or `--json-
 These options are exclusive.
 Omission means `{}`.
 
-A call returns a live receipt immediately.
-Exit 3 means it is pending; shell scripts must preserve that receipt and explicitly wait.
+A call waits up to `--timeout` seconds (default 30) for its result, then prints the live receipt.
+`TOOLKIT.FUNCTION` selects the same function as `TOOLKIT FUNCTION`.
+Exit 3 means it is still pending; shell scripts must preserve that receipt and explicitly wait.
+`--timeout 0` returns the receipt at once, so one command can submit several calls before waiting on them.
 Do not chain the wait with success-only `&&`:
 
 ```bash

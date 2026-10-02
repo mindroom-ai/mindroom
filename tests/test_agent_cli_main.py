@@ -19,6 +19,22 @@ def test_call_accepts_json_object() -> None:
     assert read_call_arguments(args) == {"a": 1, "b": 2}
 
 
+def test_dotted_name_selects_toolkit_and_function() -> None:
+
+    describe = parse_arguments(["tools", "describe", "matrix_message.matrix_message"])
+    assert (describe.toolkit, describe.function) == ("matrix_message", "matrix_message")
+    call = parse_arguments(["tools", "call", "todo.add_todo", "--json", "{}"])
+    assert (call.toolkit, call.function, call.timeout) == ("todo", "add_todo", 30)
+
+
+@pytest.mark.parametrize("argv", [["tools", "describe", "scheduler"], ["tools", "call", "scheduler"]])
+def test_missing_function_names_the_search(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+
+    with pytest.raises(SystemExit):
+        parse_arguments(argv)
+    assert "find function names with: mindroom-agent tools search scheduler" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "payload",
     ["[]", '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}', "{", '"x"', '{"a":"' + "x" * 65536 + '"}'],

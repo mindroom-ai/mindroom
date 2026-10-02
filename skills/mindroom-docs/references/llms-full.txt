@@ -4978,8 +4978,10 @@ mindroom-agent calls wait CALL_ID
 ```
 
 Tool names are qualified by toolkit.
+`TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
 Discovery and calls use the current agent's permissions and requester context.
-Calling a tool returns JSON containing its call ID and current status.
+Calling a tool waits up to 30 seconds for the result and prints JSON containing its call ID, status, and outcome.
+Use `--timeout SECONDS` on the call to choose another budget, or `--timeout 0` to return at once.
 Top-level `--help` lists every command, including `calls wait CALL_ID` for queued, running, or waiting calls.
 Use command-specific `--help` for arguments and options.
 Use `calls wait` when the result is still queued, running, or waiting for a decision.
@@ -5000,7 +5002,7 @@ Reusing an ID with the same tool and arguments joins the existing live call; dif
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
 | `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin` |
+| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |

@@ -21,7 +21,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     groups = parser.add_subparsers(dest="group", required=True)
     tools = groups.add_parser(
         "tools",
-        help="list, search QUERY, describe TOOLKIT FUNCTION, call TOOLKIT FUNCTION",
+        help="list, search QUERY, describe TOOLKIT FUNCTION, call TOOLKIT FUNCTION (or TOOLKIT.FUNCTION)",
     ).add_subparsers(dest="action", required=True)
     listing = tools.add_parser("list")
     listing.add_argument("--cursor")
@@ -32,10 +32,16 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     search.add_argument("--limit", type=int, default=20)
     for action in ("describe", "call"):
         command = tools.add_parser(action)
-        command.add_argument("toolkit")
-        command.add_argument("function")
+        command.add_argument("toolkit", help="toolkit name, or TOOLKIT.FUNCTION")
+        command.add_argument("function", nargs="?")
         if action == "call":
             command.add_argument("--call-id", type=UUID)
+            command.add_argument(
+                "--timeout",
+                type=int,
+                default=30,
+                help="Seconds to wait for the result before returning the pending receipt (default: 30; 0 returns at once)",
+            )
             inputs = command.add_mutually_exclusive_group()
             inputs.add_argument("--json")
             inputs.add_argument("--json-file", type=Path)
@@ -66,7 +72,15 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     read.add_argument("--offset", type=int, default=0)
     read.add_argument("--limit", type=int, default=8000)
     args = parser.parse_args(argv)
-    if args.group == "calls" and args.action == "wait" and args.timeout < 0:
+    if args.group == "tools" and args.action in {"describe", "call"} and args.function is None:
+        toolkit, _, function = args.toolkit.rpartition(".")
+        if not toolkit or not function:
+            parser.error(
+                f"tools {args.action} needs TOOLKIT FUNCTION or TOOLKIT.FUNCTION; "
+                f"find function names with: mindroom-agent tools search {args.toolkit}",
+            )
+        args.toolkit, args.function = toolkit, function
+    if (args.group, args.action) in {("calls", "wait"), ("tools", "call")} and args.timeout < 0:
         parser.error("--timeout must be nonnegative")
     return args
 
@@ -96,6 +110,17 @@ def _exit_code(result: dict[str, object]) -> int:
     return 0
 
 
+def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeout: int) -> dict[str, object]:
+    """Poll a pending receipt until it settles or ``timeout`` seconds pass."""
+    deadline = time.monotonic() + timeout
+    while _exit_code(result) == 3 and time.monotonic() < deadline:
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        if time.monotonic() >= deadline:
+            break
+        result = client.receipt(call_id)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print one bounded JSON envelope and return the documented exit code."""
     call_id: str | None = None
@@ -110,23 +135,23 @@ def main(argv: list[str] | None = None) -> int:
             call_id = str(args.call_id)
             client = AgentCliClient()
             result = client.receipt(call_id)
-            deadline = time.monotonic() + args.timeout if args.action == "wait" else 0
-            while args.action == "wait" and _exit_code(result) == 3 and time.monotonic() < deadline:
-                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-                if time.monotonic() >= deadline:
-                    break
-                result = client.receipt(call_id)
+            if args.action == "wait":
+                result = _wait(client, call_id, result, args.timeout)
         else:
             payload = {
                 key: value
                 for key, value in vars(args).items()
-                if key not in {"group", "action", "json", "json_file", "json_stdin", "call_id"} and value is not None
+                if key not in {"group", "action", "json", "json_file", "json_stdin", "call_id", "timeout"}
+                and value is not None
             }
             payload["operation"] = f"{args.group}.{args.action}"
             if args.action == "call":
                 call_id = str(args.call_id or uuid4())
                 payload.update(call_id=call_id, arguments=read_call_arguments(args))
-            result = AgentCliClient().operation(payload)
+            client = AgentCliClient()
+            result = client.operation(payload)
+            if args.action == "call" and call_id is not None:
+                result = _wait(client, call_id, result, args.timeout)
         print(canonical_json(result))
         return _exit_code(result)
     except (AgentCliUnavailableError, ValueError, OSError) as exc:

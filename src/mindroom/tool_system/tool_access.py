@@ -24,6 +24,10 @@ class _InvalidToolArgumentsError(ValueError):
         super().__init__("Invalid tool arguments")
 
 
+class UnknownToolError(ValueError):
+    """A toolkit or function the catalog lacks; the message names what it does contain."""
+
+
 @dataclass(frozen=True, slots=True)
 class ToolKey:
     """Canonical identity for one function in one toolkit namespace."""

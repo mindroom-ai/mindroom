@@ -4605,6 +4605,7 @@ from = ["mindroom.tool_system.tool_access"]
 expose = [
     "ToolDescriptor",
     "ToolKey",
+    "UnknownToolError",
     "function_schema",
     "search_tool_metadata",
     "validate_tool_arguments",

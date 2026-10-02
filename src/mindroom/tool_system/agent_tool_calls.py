@@ -28,6 +28,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import (
     ToolDescriptor,
     ToolKey,
+    UnknownToolError,
     function_schema,
     validate_tool_arguments,
 )
@@ -238,8 +239,12 @@ class PreparedAgentToolCatalog:
                     del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
             if binding is None:
-                msg = "Tool is unavailable"
-                raise ValueError(msg)
+                functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)
+                if functions:
+                    msg = f"Toolkit {key.toolkit!r} has no function {key.function!r}; its functions: {', '.join(functions)}"
+                else:
+                    msg = f"No toolkit {key.toolkit!r}"
+                raise UnknownToolError(msg)
             return binding
 
     async def describe(
