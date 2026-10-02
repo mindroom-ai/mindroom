@@ -57,7 +57,8 @@ env -u UV_NO_SYNC UV_PROJECT_ENVIRONMENT="$HELPER_ENVIRONMENT" "$UV_BINARY" sync
     --python "$HELPER_PYTHON" \
     --python-platform aarch64-apple-darwin
 # Install local source and version metadata without the backend's dependency set.
-"$UV_BINARY" pip install --python "$HELPER_ENVIRONMENT/bin/python" --no-deps --editable "$ROOT_DIR"
+# --project applies the repository's pinned build constraints whatever the working directory.
+"$UV_BINARY" pip install --project "$ROOT_DIR" --python "$HELPER_ENVIRONMENT/bin/python" --no-deps --editable "$ROOT_DIR"
 "$UV_BINARY" run --no-project --python "$HELPER_ENVIRONMENT/bin/python" \
     python -m PyInstaller \
     --clean \

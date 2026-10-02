@@ -531,6 +531,31 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
+# Exact pins for everything uv installs into isolated build environments, so release, desktop-helper,
+# and image builds run build code fixed by this revision rather than whatever PyPI serves that day.
+# uv build, uv sync (through uv.lock), and uv pip run with --project all read these.
+# hatchling, hatch-vcs, and their requirements build this project; editable installs add editables.
+# Locked dependencies that publish only sdists build with setuptools; pyscreeze adds wheel,
+# and googlemaps adds requests and its requirements.
+build-constraint-dependencies = [
+  "certifi==2026.7.22",
+  "charset-normalizer==3.5.2",
+  "editables==0.6",
+  "hatch-vcs==0.5.0",
+  "hatchling==1.32.4",
+  "idna==3.20",
+  "packaging==26.3",
+  "pathspec==1.1.1",
+  "pluggy==1.6.0",
+  "requests==2.34.2",
+  "setuptools-scm==10.3.4",
+  "setuptools==84.0.0",
+  "tomlkit==0.15.1",
+  "trove-classifiers==2026.9.21.13",
+  "urllib3==2.8.0",
+  "vcs-versioning==2.5.0",
+  "wheel==0.48.0",
+]
 
 [tool.ruff]
 target-version = "py312"

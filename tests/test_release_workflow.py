@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,24 @@ RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 README = ROOT / "README.md"
 MACOS_APP_DOC = ROOT / "docs" / "installation" / "macos-app.md"
 MACOS_BUILD_SCRIPT = ROOT / "macos" / "build-macos-app.sh"
+PYPROJECT = ROOT / "pyproject.toml"
+UV_LOCK = ROOT / "uv.lock"
+# Locked packages that publish no wheels, whose setuptools build requirements are pinned in pyproject.toml.
+_REVIEWED_SOURCE_BUILDS = {
+    "bibtexparser",
+    "google-search-results",
+    "googlemaps",
+    "mouseinfo",
+    "pyautogui",
+    "pygetwindow",
+    "pyrect",
+    "pyscreeze",
+    "pysher",
+    "python3-xlib",
+    "pytweening",
+    "sgmllib3k",
+    "wikipedia",
+}
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +63,34 @@ def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) 
     # Retrying a release whose wheel is already on PyPI must still publish the app.
     assert "skip-existing: true" in release_workflow
     assert "APP_VERSION: ${{ inputs.release_ref }}" in macos_job
+
+
+def test_build_environments_install_only_pinned_packages() -> None:
+    """Release, helper, and image builds run build code fixed by the commit, not whatever PyPI serves that day."""
+    pyproject = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    constraints = pyproject["tool"]["uv"]["build-constraint-dependencies"]
+    pins = {name: version for name, _, version in (constraint.partition("==") for constraint in constraints)}
+    backend = {
+        re.split(r"[^a-z0-9-]", requirement, maxsplit=1)[0] for requirement in pyproject["build-system"]["requires"]
+    }
+    manifest = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))["manifest"]["build-constraints"]
+
+    assert all(re.fullmatch(r"[a-z0-9-]+==[0-9][0-9a-z.]*", constraint) for constraint in constraints), constraints
+    assert len(pins) == len(constraints)
+    # hatchling adds editables to the build environment of editable installs.
+    assert backend | {"editables", "setuptools", "wheel"} <= pins.keys()
+    # `uv sync --locked` reads the build constraints recorded in uv.lock.
+    assert {entry["name"]: entry["specifier"] for entry in manifest} == {
+        name: f"=={version}" for name, version in pins.items()
+    }
+
+
+def test_locked_source_builds_were_reviewed_for_build_pins() -> None:
+    """A locked package without wheels builds from source, so its build requirements must join the pins first."""
+    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    source_only = {package["name"] for package in lock["package"] if "sdist" in package and not package.get("wheels")}
+
+    assert source_only <= _REVIEWED_SOURCE_BUILDS
 
 
 @pytest.mark.parametrize("include_matching_pr", [False, True])

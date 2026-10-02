@@ -20,6 +20,25 @@ overrides = [
     { name = "pillow", marker = "python_full_version < '3.14'", specifier = ">=10.2,<11" },
     { name = "pillow", marker = "python_full_version >= '3.14'", specifier = ">=11,<12" },
 ]
+build-constraints = [
+    { name = "certifi", specifier = "==2026.7.22" },
+    { name = "charset-normalizer", specifier = "==3.5.2" },
+    { name = "editables", specifier = "==0.6" },
+    { name = "hatch-vcs", specifier = "==0.5.0" },
+    { name = "hatchling", specifier = "==1.32.4" },
+    { name = "idna", specifier = "==3.20" },
+    { name = "packaging", specifier = "==26.3" },
+    { name = "pathspec", specifier = "==1.1.1" },
+    { name = "pluggy", specifier = "==1.6.0" },
+    { name = "requests", specifier = "==2.34.2" },
+    { name = "setuptools", specifier = "==84.0.0" },
+    { name = "setuptools-scm", specifier = "==10.3.4" },
+    { name = "tomlkit", specifier = "==0.15.1" },
+    { name = "trove-classifiers", specifier = "==2026.9.21.13" },
+    { name = "urllib3", specifier = "==2.8.0" },
+    { name = "vcs-versioning", specifier = "==2.5.0" },
+    { name = "wheel", specifier = "==0.48.0" },
+]
 
 [[package]]
 name = "agentql"
