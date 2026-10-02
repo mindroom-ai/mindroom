@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING, Never
 from uuid import uuid4
 
 import pytest
+from agno.media import Image
 from agno.models.message import Message
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
@@ -42,6 +43,7 @@ from mindroom.agent_storage import create_state_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from tests.test_agent_tool_calls import _catalog
@@ -186,6 +188,48 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         await owner.operation(
             ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Path) -> None:
+    """An image a CLI call returns reaches the model with the native shell's result, as in minimal Bash."""
+
+    async def produce() -> ToolResult:
+        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="media", tools=[produce])])
+    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    (tmp_path / "workspace").mkdir()
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async def command() -> str:
+        queued = await owner.operation(
+            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
+        )
+        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
+            await asyncio.sleep(0.001)
+        assert receipt["status"] == "completed", receipt
+        return "shell done"
+
+    async with asyncio.timeout(3):
+        result = await owner.run_native_shell(command)
+
+    assert isinstance(result, ToolResult)
+    assert result.content == "shell done"
+    assert [image.content for image in result.images or []] == [b"png"]
     await owner.close()
 
 

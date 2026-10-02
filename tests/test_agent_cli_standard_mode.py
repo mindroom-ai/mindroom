@@ -183,6 +183,32 @@ async def test_approval_gated_tools_stay_native_only(
     assert '"function":"add"' not in listing, listing
 
 
+def test_shell_that_needs_approval_gets_no_cli(tmp_path: Path) -> None:
+    """An approved command resumes later without this response's CLI, so none is offered."""
+    runtime = _helper_runtime(tmp_path, registry=SimpleNamespace())
+    runtime.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+    )
+    set_api_server_address("127.0.0.1", 8765)
+    try:
+        agent = agents.create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            build_execution_identity_from_runtime_context(runtime),
+            agent_cli_in_shell=True,
+            supports_native_tool_approval=True,
+        )
+    finally:
+        clear_api_server_address()
+
+    try:
+        assert not isinstance(agent, CliShellAgent)
+        assert STANDARD_CLI_NOTE not in agent.instructions
+    finally:
+        close_agent_runtime_state_dbs(agent)
+
+
 @pytest.mark.parametrize(
     ("channel", "api_running", "response_turn"),
     [("matrix", False, True), ("openai_compat", True, True), ("matrix", True, False), ("matrix", True, True)],

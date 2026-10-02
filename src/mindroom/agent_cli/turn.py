@@ -115,6 +115,19 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
     return {"items": selected, "next_cursor": str(end) if end < len(items) else None}
 
 
+def _with_media(content: object, media_results: list[ModelResponse]) -> str | ToolResult:
+    """Attach media that CLI calls returned during one shell command to its text result."""
+    if not media_results:
+        return str(content)
+    return ToolResult(
+        content=str(content),
+        images=[item for media in media_results for item in media.images or []],
+        audios=[item for media in media_results for item in media.audios or []],
+        videos=[item for media in media_results for item in media.videos or []],
+        files=[item for media in media_results for item in media.files or []],
+    )
+
+
 class LiveTurnTools(TurnToolBridge):
     """Own call receipts separately from admitted operation lifetimes.
 
@@ -395,15 +408,7 @@ class LiveTurnTools(TurnToolBridge):
             result = str(terminal.result or "")
             if self.control_executions:
                 stop_function_call(fc)
-            result_with_media: str | ToolResult = result
-            if media_results:
-                result_with_media = ToolResult(
-                    content=result,
-                    images=[item for media in media_results for item in media.images or []],
-                    audios=[item for media in media_results for item in media.audios or []],
-                    videos=[item for media in media_results for item in media.videos or []],
-                    files=[item for media in media_results for item in media.files or []],
-                )
+            result_with_media = _with_media(result, media_results)
             self.checkpoint.complete(fc, result_with_media)
             return result_with_media
 
@@ -450,7 +455,9 @@ class LiveTurnTools(TurnToolBridge):
             self._media = []
             async with self._window(f"native-{uuid4().hex}"):
                 with bound_agent_cli_shell_env(self.shell_env):
-                    return await run()
+                    result = await run()
+            # Media returned by CLI calls reaches the model with the shell result, as in minimal Bash.
+            return _with_media(result, self._media) if self._media else result
 
     async def _invoke_shell(self, binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> object:
         """Run the agent's own shell function, wherever it runs, with this response's CLI environment."""
