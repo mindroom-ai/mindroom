@@ -121,9 +121,13 @@ A file that cannot be read settles the debt as a plain text message holding the 
 
 Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
 
-Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
+Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 2 MiB of stored content, newest messages first.
+
+The budget is small because decoding stored JSON can take about 45 times its size in memory, so 2 MiB of the costliest content still decodes to under 100 MiB.
 
 A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
+
+A page always keeps at least one message, even when that message alone is over the budget.
 
 ## Edits
 
@@ -157,7 +161,7 @@ A refetch is also refused if the content it returns still holds a sidecar previe
 
 A refetch ignores relations it cannot read unless their cleartext relation makes them the original sender's edit of the message, because no other relation can replace what is on screen.
 
-When such an edit cannot be read, the refetch installs the newest readable revision with a notice that a later edit could not be read.
+When such an edit cannot be read and is newer than every readable revision, the refetch installs the newest readable revision with a notice that a later edit could not be read.
 
 Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
 

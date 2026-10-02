@@ -28,13 +28,19 @@ _PAGE_COLUMNS = """
     revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
 """
 # Order and stored size only, so a page is sized before any content is loaded.
-# Stored content is ASCII-only JSON, so its length is its size in bytes.
-_PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, length(content_json) AS content_bytes"
+# Both backends read a text value's byte length without loading the value;
+# SQLite before 3.43 has no ``octet_length``, and the backend supplies one.
+_PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) AS content_bytes"
 
 # How much stored content one page loads, newest message first. A resolved
 # long-text sidecar can be megabytes, and anyone who can post can make every
 # message in a thread name one, so a row limit alone does not bound a read.
-_PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
+#
+# The budget is set by what a page decodes to, not by what it stores: JSON of
+# nested empty containers decodes to about 45 times its size on CPython, so
+# 2 MiB of it takes about 90 MiB. One maximal sidecar costs that much by
+# itself, and a page keeps one message even when it alone is over the budget.
+_PAGE_CONTENT_BUDGET_BYTES = 2 * 1024 * 1024
 
 # Everything older than one page's last row, spelled as a row value.
 #
@@ -84,6 +90,11 @@ def read_conversation(
     A page also ends before ``limit`` once its stored content passes a fixed
     budget, and then carries a cursor exactly as a full page does. Its rows are
     sized first and only the ones that fit are loaded.
+
+    On PostgreSQL the size and content queries can see different snapshots,
+    so a write committed between them can carry a page past its budget by the
+    rows that write changed. That overshoot is accepted rather than folding
+    the thread root's separate lookup into one windowed statement.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"

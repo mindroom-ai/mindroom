@@ -22,6 +22,7 @@ import sqlite3
 import sys
 import threading
 import time
+import tracemalloc
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -60,6 +61,7 @@ from mindroom.event_journal import (
     delivery_transaction_id,
     reads,
     replacement_target,
+    sqlite_backend,
 )
 from mindroom.event_journal.offloading import ThreadOffload, settled
 from mindroom.event_journal.reads import _CONVERSATION_CURSOR_CLAUSE
@@ -138,6 +140,12 @@ _WRITES_OUTNUMBERING_THE_OLD_QUEUE_BOUND = 1_100
 # inference.
 _HYDRATION_TRANSACTION_EVENT_LIMIT = 256
 _EVENTS_SPANNING_TWO_HYDRATION_CHUNKS = _HYDRATION_TRANSACTION_EVENT_LIMIT + 1
+# What one conversation page may take in memory at worst. Every agent in a room
+# reads the thread at once, inside one process with a 2 GiB limit.
+_MOST_ONE_PAGE_MAY_DECODE_TO = 100 * 1024 * 1024
+# SQLite's OPFLAG_BYTELENARG: a column read only for its byte length, which the
+# record header already holds, so the value itself is never loaded.
+_SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ = 0xC0
 
 # `PRAGMA synchronous` reports the mode it is set to as an integer.
 _SQLITE_SYNCHRONOUS_NORMAL = 1
@@ -1657,6 +1665,66 @@ class TestBoundedReads:
             cursor = page.next_cursor
 
         assert pages == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
+
+    async def test_a_sqlite_library_without_octet_length_still_sizes_pages(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Libraries before SQLite 3.43 have no ``octet_length``, so the backend supplies one."""
+        measured: list[object] = []
+        supplied = sqlite_backend._octet_length
+
+        def measuring(value: str | bytes | None) -> int | None:
+            measured.append(value)
+            return supplied(value)
+
+        monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 42, 0))
+        monkeypatch.setattr(sqlite_backend, "_octet_length", measuring)
+        monkeypatch.setattr(reads, "_PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        store = EventJournalStore.open_sqlite(tmp_path / "older-library.db")
+        try:
+            principal = store.principal("agent@alice")
+            for index in range(3):
+                await admit(principal, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
+
+            page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        finally:
+            await store.close()
+
+        assert [m.logical_event_id for m in page.messages] == ["$m1", "$m2"]
+        assert page.next_cursor is not None
+        assert measured
+
+    async def test_a_page_of_the_costliest_json_to_decode_stays_small_in_memory(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The budget bounds what a page decodes to, not only what it stores.
+
+        JSON of nested empty containers decodes to about 45 times its stored
+        size, so a budget sized for text let anyone who can post make one page
+        hold hundreds of megabytes, once for every agent reading the thread.
+        """
+        nested: object = {}
+        for _depth in range(32):
+            nested = [nested]
+        # About the size of one Matrix event, the most a message can carry inline.
+        content = text("x") | {"pad": [nested] * 900}
+        stored_bytes = len(json.dumps(content, separators=(",", ":")))
+        for index in range(reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+            await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
+
+        tracemalloc.start()
+        try:
+            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2_000)
+            _held, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert page.next_cursor is not None
+        assert peak <= _MOST_ONE_PAGE_MAY_DECODE_TO
+        assert peak >= len(page.messages) * stored_bytes * 30
 
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
         """A page is chronological."""
@@ -9511,6 +9579,26 @@ class TestHotQueriesAreIndexCovered:
         )
 
         assert "created_ts" in plan, plan
+
+    async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:
+        """Sizing a page reads each row's byte length from its record header.
+
+        ``length`` counts the characters of a text value, so SQLite loads every
+        value in the window to size it, which is the cost sizing exists to
+        avoid. ``octet_length`` marks its column read as length-only.
+        """
+        database = sqlite3.connect(tmp_path / "size-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = (
+            f"SELECT {reads._PAGE_SIZE_COLUMNS} FROM visible_messages "  # noqa: S608 - the production columns, not input
+            "WHERE principal_id=? AND room_id=? AND thread_id=? "
+            "ORDER BY created_ts DESC, logical_event_id DESC LIMIT 50"
+        )
+
+        column_reads = {row[6] for row in database.execute("EXPLAIN " + sql, ("x", "x", "x")) if row[1] == "Column"}
+
+        assert _SQLITE_BYTE_LENGTH_ONLY_COLUMN_READ in column_reads, column_reads
 
     async def test_a_redaction_seeks_the_held_edit_it_names(self, tmp_path: Path) -> None:
         """A redaction finds the held edit it blanks by ID instead of walking every held edit in the room.
