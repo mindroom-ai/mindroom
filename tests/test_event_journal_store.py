@@ -164,7 +164,7 @@ _PADDING_COSTLIEST_TO_DECODE = {
     "three-digit-ints": [999] * 15_000,
     "one-key-objects": [{"a": 1}] * 7_500,
     # Just past a hash table resize, a dict holds about twice the slots it needs.
-    "unique-keys-past-a-resize": {f"k{index}": 0 for index in range(5_462)},
+    "unique-keys-past-a-resize": {chr(0x100 + index): "\u0100" for index in range(5_462)},
     "one-character-non-ascii-strings": ["\u0100"] * 6_500,
 }
 
