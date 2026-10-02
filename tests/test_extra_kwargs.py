@@ -1519,8 +1519,8 @@ def test_replay_safe_tool_search_results_drops_unavailable_references() -> None:
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unavailable() -> None:
-    """A search use and result should both disappear when no referenced tool remains available."""
+def test_replay_safe_tool_search_results_empties_result_when_all_references_are_unavailable() -> None:
+    """A search whose referenced tools are all unavailable keeps its pair with an empty result."""
     request_kwargs = {
         "tools": [_wire_tool("other_tool")],
         "messages": [
@@ -1540,6 +1540,12 @@ def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unav
 
     assert prepared["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
         {"type": "text", "text": "found it"},
     ]
     assert request_kwargs["messages"][0]["content"][1] == _SERVER_TOOL_USE_BLOCK
@@ -1547,8 +1553,8 @@ def test_replay_safe_tool_search_results_drops_pair_when_all_references_are_unav
     assert _request_kwargs_with_replay_safe_tool_search_results(prepared) is prepared
 
 
-def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> None:
-    """Missing current tools means every replayed tool reference is stale."""
+def test_replay_safe_tool_search_results_empties_results_without_a_tools_array() -> None:
+    """Missing current tools means every replayed tool reference is stale, so the result is emptied."""
     request_kwargs = {
         "messages": [
             {
@@ -1564,7 +1570,15 @@ def test_replay_safe_tool_search_results_drops_pairs_without_a_tools_array() -> 
 
     prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
 
-    assert prepared["messages"][0]["content"] == [_OTHER_SERVER_TOOL_USE_BLOCK]
+    assert prepared["messages"][0]["content"] == [
+        _OTHER_SERVER_TOOL_USE_BLOCK,
+        _SERVER_TOOL_USE_BLOCK,
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_01ABC",
+            "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+        },
+    ]
     assert request_kwargs["messages"][0]["content"] == [
         _OTHER_SERVER_TOOL_USE_BLOCK,
         _SERVER_TOOL_USE_BLOCK,
@@ -1616,6 +1630,44 @@ def test_replay_safe_tool_search_results_keeps_empty_search_between_signed_think
     }
 
     assert _request_kwargs_with_replay_safe_tool_search_results(request_kwargs) is request_kwargs
+
+
+def test_replay_safe_tool_search_results_empties_filtered_search_between_signed_thinking() -> None:
+    """A search whose found tools are all gone keeps its pair, so signed thinking blocks never become adjacent."""
+    thinking_before = {"type": "thinking", "thinking": "", "signature": "sig-before-search"}
+    thinking_after = {"type": "thinking", "thinking": "", "signature": "sig-after-search"}
+    request_kwargs = {
+        "tools": [_wire_tool("bridge_call_tool")],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "List the open jobs."}]},
+            {
+                "role": "assistant",
+                "content": [
+                    dict(thinking_before),
+                    dict(_SERVER_TOOL_USE_BLOCK),
+                    dict(_TOOL_SEARCH_RESULT_BLOCK),
+                    dict(thinking_after),
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "done"}]},
+        ],
+    }
+
+    prepared = _request_kwargs_with_replay_safe_tool_search_results(request_kwargs)
+
+    content = prepared["messages"][1]["content"]
+    assert [block["type"] for block in content] == [
+        "thinking",
+        "server_tool_use",
+        "tool_search_tool_result",
+        "thinking",
+        "tool_use",
+    ]
+    assert content[0] == thinking_before
+    assert content[3] == thinking_after
+    assert content[2]["content"]["tool_references"] == []
+    assert request_kwargs["messages"][1]["content"][2] == _TOOL_SEARCH_RESULT_BLOCK
 
 
 @pytest.mark.asyncio
@@ -1882,15 +1934,22 @@ def _wire_tool_search_results(wire_messages: list[dict[str, object]]) -> list[ob
     ]
 
 
+_EMPTIED_TOOL_SEARCH_RESULT_BLOCK = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_01ABC",
+    "content": {"type": "tool_search_tool_search_result", "tool_references": []},
+}
+
+
 def test_prompt_cache_hook_sanitizes_replayed_tool_search_results() -> None:
-    """A replayed search pair with no currently available tool must not reach the wire."""
+    """A replayed search result with no currently available tool reaches the wire emptied and schema-clean."""
     model = _vertex_claude_model()
     captured_kwargs = _install_fake_sync_client(model)
     install_claude_prompt_cache_hook(model)
 
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
-    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == []
+    assert _wire_tool_search_results(captured_kwargs[0]["messages"]) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
 
 
 def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_tools() -> None:
@@ -1908,7 +1967,7 @@ def test_prompt_cache_hook_sanitizes_replay_with_cache_disabled_and_no_deferred_
     model.response(messages=_dirty_replay_messages(), compression_manager=None)
 
     wire_messages = captured_kwargs[0]["messages"]
-    assert _wire_tool_search_results(wire_messages) == []
+    assert _wire_tool_search_results(wire_messages) == [_EMPTIED_TOOL_SEARCH_RESULT_BLOCK]
     assert _count_cache_markers({"messages": list(wire_messages)}) == 0
 
 
