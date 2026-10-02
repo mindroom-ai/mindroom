@@ -74,5 +74,10 @@ def bind_response_owner(
     now = time.time_ns()
     lifetime.grant_expires_at_ns = now + MAX_CLI_GRANT_LIFETIME_NS
     grant = new_owner.issue(now_ns=now, expires_at_ns=lifetime.grant_expires_at_ns)
-    new_owner.shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, runtime.agent_name, grant.raw_token)
+    new_owner.shell_env = agent_cli_shell_env(
+        runtime.config,
+        runtime.runtime_paths,
+        runtime.agent_name,
+        grant.raw_token,
+    )
     return new_owner

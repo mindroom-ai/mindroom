@@ -210,13 +210,7 @@ def run(
             raise typer.Exit(1) from None
         # Pick up the new config and .env before pairing and startup.
         runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
-    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
-
-    if ensure_worker_dashboard_api_key(
-        runtime_paths,
-        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
-    ):
-        runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    runtime_paths = _protect_dashboard_from_workers(runtime_paths, config_path, storage_path)
     # Report a broken config or missing model keys before any pairing waits for a human.
     config = _load_active_config_or_exit(runtime_paths)
     if not first_run:
@@ -257,6 +251,22 @@ def run(
             api_host=api_host,
         ),
     )
+
+
+def _protect_dashboard_from_workers(
+    runtime_paths: RuntimePaths,
+    config_path: Path | None,
+    storage_path: Path | None,
+) -> RuntimePaths:
+    """Give the dashboard API a generated key when dedicated workers could reach it, then reload that runtime."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    if ensure_worker_dashboard_api_key(
+        runtime_paths,
+        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
+    ):
+        return activate_cli_runtime(path=config_path, storage_path=storage_path)
+    return runtime_paths
 
 
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:

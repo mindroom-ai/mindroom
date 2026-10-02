@@ -107,7 +107,10 @@ async def test_nested_cli_shell_call_runs_inside_the_outer_window(
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     command = _call_and_wait(
-        "00000000-0000-4000-8000-000000000002", "shell", "run_shell_command", {"args": "echo nested-ok"}
+        "00000000-0000-4000-8000-000000000002",
+        "shell",
+        "run_shell_command",
+        {"args": "echo nested-ok"},
     )
     provider.steps = [[("run_shell_command", {"args": command})], "done"]
 
@@ -135,8 +138,11 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
                 "run_shell_command",
                 {
                     "args": _call_and_wait(
-                        f"00000000-0000-4000-8000-00000000001{index}", "calculator", "add", {"a": index, "b": 10}
-                    )
+                        f"00000000-0000-4000-8000-00000000001{index}",
+                        "calculator",
+                        "add",
+                        {"a": index, "b": 10},
+                    ),
                 },
             )
             for index in (1, 2)
