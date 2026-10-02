@@ -24,7 +24,11 @@ from backend.services.instance_lifecycle import (
     reconcile_all_subscriptions,
     reconcile_subscription_instances,
 )
-from backend.services.provisioner_service import provision_instance, set_instance_openrouter_key_disabled
+from backend.services.provisioner_service import (
+    InstanceClaimLostError,
+    provision_instance,
+    set_instance_openrouter_key_disabled,
+)
 from backend.tasks.cleanup import run_cleanup_job
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -1129,6 +1133,42 @@ async def test_failed_secret_publication_never_leaves_stored_metadata_naming_an_
     assert published["openrouter_key"] == "key_A"
     assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_A"
     assert alive == {"hash_A"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_redeploys_keep_only_the_first_recorded_key() -> None:
+    db = FakeSupabase({"instances": [_instance("running", tier="byok", openrouter_key_hash=None)]})
+    alive: set[str] = set()
+
+    def create_key(*, management_api_key: str, plan: Any) -> CreatedOpenRouterKey:  # noqa: ARG001
+        # A redeploy on another backend replica, which claimed the instance at the same time, records its key first.
+        alive.update({"hash_other", "hash_ours"})
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_other"
+        return CreatedOpenRouterKey("key_ours", "hash_ours", plan.name, plan.monthly_limit_usd, "monthly")
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        alive.discard(key_hash)
+
+    helm = AsyncMock(return_value=(0, "deployed", ""))
+    service = "backend.services.provisioner_service"
+    data = {"subscription_id": SUBSCRIPTION_ID, "account_id": ACCOUNT_ID, "tier": "hobby", "instance_id": 7}
+    with (
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.create_openrouter_key", create_key),
+        patch(f"{service}.delete_openrouter_key", delete_key),
+        patch(f"{service}._apply_instance_secret", AsyncMock(return_value="hash")),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.run_helm", helm),
+        patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+        pytest.raises(InstanceClaimLostError),
+    ):
+        await provision_instance(db, data=data, background_tasks=None)
+
+    assert alive == {"hash_other"}
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_other"
+    assert db.row("instances", instance_id=7)["status"] == "provisioning"
+    helm.assert_not_awaited()
 
 
 def test_lifecycle_migration_is_idempotent_and_service_role_only() -> None:

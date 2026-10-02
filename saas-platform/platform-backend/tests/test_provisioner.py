@@ -572,7 +572,7 @@ class TestProvisionerEndpoints:
         update_payloads = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
         assert any(payload.get("openrouter_key_hash") == "hobby_hash" for payload in update_payloads)
 
-    def test_hobby_provisioning_continues_if_openrouter_metadata_persist_fails(
+    def test_hobby_provisioning_deletes_a_key_whose_metadata_cannot_be_recorded(
         self,
         client: TestClient,
         mock_supabase: MagicMock,
@@ -582,7 +582,7 @@ class TestProvisionerEndpoints:
         valid_auth_header: dict,
         mock_config,
     ):
-        """Generated OpenRouter keys should still be applied if audit metadata persistence fails."""
+        """A created key the instance row does not record is deleted, because only recorded keys are ever disabled."""
         mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
         created_key = CreatedOpenRouterKey(
@@ -600,6 +600,7 @@ class TestProvisionerEndpoints:
                 create=True,
             ),
             patch("backend.services.provisioner_service.create_openrouter_key", return_value=created_key, create=True),
+            patch("backend.services.provisioner_service.delete_openrouter_key") as delete_key,
             patch(
                 "backend.services.provisioner_service._persist_openrouter_key_metadata",
                 side_effect=RuntimeError("supabase unavailable"),
@@ -615,9 +616,9 @@ class TestProvisionerEndpoints:
                 headers=valid_auth_header,
             )
 
-        assert response.status_code == 200
-        secret_data = _applied_instance_secret_data(apply_secret)
-        assert secret_data["openrouter_key"] == "sk-or-v1-hobby-customer"
+        assert response.status_code == 500
+        delete_key.assert_called_once_with(management_api_key="sk-or-v1-management", key_hash="hobby_hash")
+        mock_helm.assert_not_called()
 
     def test_hobby_provisioning_missing_openrouter_management_key_returns_operator_error(
         self,

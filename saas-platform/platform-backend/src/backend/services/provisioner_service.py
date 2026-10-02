@@ -581,9 +581,9 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
             raise RuntimeError(msg)
 
 
-def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Persist non-secret OpenRouter key metadata for reuse and audit."""
-    update_instance(
+def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> bool:
+    """Persist non-secret metadata of a created key unless the instance records a key already; return whether it did."""
+    recorded = update_instance(
         sb,
         instance_id,
         {
@@ -593,7 +593,9 @@ def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: Cre
             "openrouter_key_limit_reset": created_key.limit_reset,
             "openrouter_key_created_at": datetime.now(UTC).isoformat(),
         },
+        without_openrouter_key=True,
     )
+    return bool(recorded)
 
 
 def _mark_instance_provision_error(sb: Any, instance_id: str, context: str) -> None:
@@ -616,7 +618,8 @@ async def _provision_openrouter_key(
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
     Stored keys keep their usage across plan changes; only their spending limit changes.
-    A created key is recorded after its Secret is published, or discarded if publication fails.
+    A created key is recorded after its Secret is published, or discarded if publication fails or another run
+    recorded a key first.
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
@@ -651,15 +654,26 @@ async def _provision_openrouter_key(
 
 
 async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Record a newly published key."""
+    """Record a newly published key, or delete it when it cannot be recorded.
+
+    Disabling, limiting, and revoking act only on the recorded key, so a published key is never left unrecorded.
+    Concurrent provisions of one instance may each create a key; only the first one recorded is kept, and the
+    others get `InstanceClaimLostError`.
+    """
     try:
-        await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
+        recorded = await anyio.to_thread.run_sync(
+            partial(_persist_openrouter_key_metadata, sb, instance_id, created_key)
+        )
     except Exception:
-        logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
+        await _discard_openrouter_key(created_key, instance_id)
+        raise
+    if not recorded:
+        await _discard_openrouter_key(created_key, instance_id)
+        raise InstanceClaimLostError
 
 
 async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
-    """Best-effort delete of a key whose Secret was never published, so the next attempt mints a fresh one."""
+    """Best-effort delete of a created key that was not published or not recorded, so no unrecorded key stays live."""
     delete_key = partial(
         delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
     )
@@ -670,7 +684,7 @@ async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id
 
 
 class InstanceClaimLostError(HTTPException):
-    """Another request claimed the instance first, so this re-provision neither deploys it nor mints its key."""
+    """Another run claimed the instance or recorded its key first, so this run neither deploys it nor keeps a key."""
 
     def __init__(self) -> None:
         super().__init__(status_code=409, detail="Instance is already being provisioned")
@@ -691,6 +705,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
+    Runs that claim the instance without a condition may each create a key, but only the first one recorded is
+    kept; the others delete theirs and get `InstanceClaimLostError` before deploying.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -944,6 +960,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Older releases managed this Secret in Helm. Apply it again after Helm
         # because Helm's resource pruning deletes the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+    except InstanceClaimLostError:
+        # The provision that recorded its key owns the instance and its status.
+        raise
     except HTTPException:
         _mark_instance_provision_error(sb, customer_id, "deployment HTTP exception")
         raise
