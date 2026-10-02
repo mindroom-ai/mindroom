@@ -294,7 +294,9 @@ def _store_media_bytes_locally(
     """Persist media bytes to storage so agents can access them as files.
 
     The file is named by its content, so any number of events naming one
-    upload keep one copy rather than one each.
+    upload keep one copy rather than one each. Reusing it refreshes its
+    modification time, which cleanup reads before deleting media whose records
+    expired, so a cleanup that saw only an old record keeps it for the new one.
     """
     if media_bytes is None:
         return None
@@ -303,7 +305,7 @@ def _store_media_bytes_locally(
         media_dir = _prepare_retained_media_dir(storage_path)
         with open_directory_within_root(media_dir) as media_fd:
             try:
-                os.stat(media_name, dir_fd=media_fd, follow_symlinks=False)
+                os.utime(media_name, dir_fd=media_fd, follow_symlinks=False)
             except FileNotFoundError:
                 atomic_write_bytes_at(media_fd, media_name, media_bytes, file_mode=0o600)
     except OSError:
@@ -411,18 +413,28 @@ def _remove_paths(paths: list[Path]) -> int:
 def _prune_expired_records_and_collect_removable_media_paths(
     storage_path: Path,
     *,
+    cutoff: datetime,
     expired_records: list[tuple[AttachmentRecord, Path]],
     active_media_ref_counts: dict[Path, int],
 ) -> tuple[set[Path], int]:
-    """Delete expired metadata records and collect removable managed media files."""
+    """Delete expired metadata records and collect removable managed media files.
+
+    Media modified since the cutoff is kept, as the orphan pass keeps it,
+    because a record registered after this cleanup counted references may
+    already be reusing it.
+    """
     removable_media_paths: set[Path] = set()
     expired_records_deleted = _remove_paths([record_path for _record, record_path in expired_records])
     for record, _record_path in expired_records:
         resolved_media_path = record.local_path.resolve()
         if not _is_managed_media_path(storage_path, resolved_media_path):
             continue
-        if active_media_ref_counts.get(resolved_media_path, 0) == 0:
-            removable_media_paths.add(resolved_media_path)
+        if active_media_ref_counts.get(resolved_media_path, 0) != 0:
+            continue
+        media_mtime = _record_mtime(resolved_media_path)
+        if media_mtime is None or media_mtime >= cutoff:
+            continue
+        removable_media_paths.add(resolved_media_path)
     return removable_media_paths, expired_records_deleted
 
 
@@ -475,6 +487,7 @@ def _cleanup_attachment_storage(storage_path: Path) -> None:
 
     removable_media_paths, expired_records_deleted = _prune_expired_records_and_collect_removable_media_paths(
         storage_path,
+        cutoff=cutoff,
         expired_records=expired_records,
         active_media_ref_counts=active_media_ref_counts,
     )

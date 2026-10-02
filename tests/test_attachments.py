@@ -369,6 +369,58 @@ async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) 
     assert [path.read_bytes() for path in (tmp_path / "incoming_media").iterdir()] == [b"%PDF-1.7 shared"]
 
 
+def test_shared_media_reused_while_cleanup_runs_outlives_its_expired_record(tmp_path: Path) -> None:
+    """Cleanup counts references before deleting, so media reused in between must survive it.
+
+    Events naming one upload share a single file. When the only record a
+    cleanup counted for it had expired, the cleanup deleted the file under a
+    record that a new event had just registered against it.
+    """
+    payload = b"%PDF-1.7 shared"
+
+    def register(event_id: str) -> AttachmentRecord | None:
+        local_path = attachments_module._store_media_bytes_locally(tmp_path, payload, "application/pdf")
+        assert local_path is not None
+        return register_local_attachment(
+            tmp_path,
+            local_path,
+            kind="file",
+            attachment_id=_attachment_id_for_event(event_id),
+            mime_type="application/pdf",
+            room_id="!room:localhost",
+            source_event_id=event_id,
+            retained_name=local_path.name,
+        )
+
+    old = register("$old")
+    assert old is not None
+    old_record_path = tmp_path / "attachments" / f"{old.attachment_id}.json"
+    expired = datetime.now(UTC) - timedelta(days=45)
+    old_record_path.write_text(
+        json.dumps(json.loads(old_record_path.read_text(encoding="utf-8")) | {"created_at": expired.isoformat()}),
+        encoding="utf-8",
+    )
+    os.utime(old.local_path, (expired.timestamp(), expired.timestamp()))
+
+    collect = attachments_module._collect_attachment_cleanup_state
+    reused: list[AttachmentRecord | None] = []
+
+    def collect_then_reuse(storage_path: Path, *, cutoff: datetime) -> object:
+        state = collect(storage_path, cutoff=cutoff)
+        reused.append(register("$new"))
+        return state
+
+    with patch.object(attachments_module, "_collect_attachment_cleanup_state", collect_then_reuse):
+        attachments_module._cleanup_attachment_storage(tmp_path)
+
+    [new] = reused
+    assert new is not None
+    assert new.local_path == old.local_path
+    assert load_attachment(tmp_path, old.attachment_id) is None
+    assert load_attachment(tmp_path, new.attachment_id) == new
+    assert new.local_path.read_bytes() == payload
+
+
 def test_register_bytes_attachment_retains_any_file_type_under_a_generated_name(tmp_path: Path) -> None:
     """Tool-produced bytes of any type become a scoped record under a name derived from its ID."""
     payload = b"%PDF-1.7 example"
