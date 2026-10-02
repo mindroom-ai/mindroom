@@ -442,12 +442,13 @@ How it works:
 Usage: `!model [name|list|reset]` - Show or switch the model used in the current thread
 
 **Examples:**
-- `!model` or `!model list` - Show the current thread's model override and the available models
+- `!model` or `!model list` - Show the current thread's model overrides, each with the entities it applies to, and the available models
 - `!model opus` - Make the agents and teams you may address in this thread use the `opus` model
-- `!model reset` - Remove the override so room-level model selection applies again
+- `!model reset` - Remove the override of the agents and teams you may address so room-level model selection applies to them again
 
 How it works:
 - The override applies from the next message in the thread to the agents, teams, and router you may address
+- Every other entity keeps its own thread override or room-level model
 - Model names come from the `models:` section of config.yaml
 - The override is scoped to one thread and survives restarts; other threads and rooms are unaffected
 - Use `!room_model` for a runtime room default, or `room_models` in config.yaml for an authored room default"""
