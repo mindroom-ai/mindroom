@@ -623,6 +623,25 @@ class TestInstancesEndpoints:
         update_call = mock_supabase.table().update.call_args[0][0]
         assert update_call["status"] == "error"
 
+    def test_background_sync_keeps_a_claim_made_during_its_kubernetes_check(self):
+        """A provision claiming a deprovisioned instance during the sync is not undone by the status the sync read."""
+        import asyncio
+        from backend.routes.instances import _background_sync_instance_status
+
+        db = FakeSupabase({"instances": [{"instance_id": "789", "status": "deprovisioned"}]})
+
+        async def claim_during_check(_instance_id: str) -> bool:
+            db.row("instances", instance_id="789")["status"] = "provisioning"
+            return False
+
+        with (
+            patch("backend.routes.instances.ensure_supabase", return_value=db),
+            patch("backend.routes.instances.check_deployment_exists", side_effect=claim_during_check),
+        ):
+            asyncio.run(_background_sync_instance_status("789"))
+
+        assert db.row("instances", instance_id="789")["status"] == "provisioning"
+
     def test_background_sync_task_instance_row_missing(
         self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
     ):

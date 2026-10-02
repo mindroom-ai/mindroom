@@ -88,10 +88,14 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         else:
             actual_status = "error"
 
-        # Update database
+        # Write only while the row keeps the status read before the Kubernetes calls, so a provision that claimed it
+        # meanwhile is never undone.
         now = datetime.now(UTC).isoformat()
         instances_data.update_instance(
-            sb, instance_id, {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
+            sb,
+            instance_id,
+            {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now},
+            expected_status=current_status,
         )
 
         total_time = (time.perf_counter() - start) * 1000
