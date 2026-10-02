@@ -541,17 +541,30 @@ def config_init(
     )
 
 
-def create_first_run_config(runtime_paths: RuntimePaths) -> None:
-    """Ask for a provider and its key, then write the hosted starter config that `mindroom run` found missing."""
+def create_first_run_config(
+    runtime_paths: RuntimePaths,
+    *,
+    provider: str | None,
+    interactive: bool,
+) -> None:
+    """Write the hosted starter config that `mindroom run` found missing, asking a terminal for what is still open.
+
+    Without a terminal nothing is asked, so `provider` is required and a missing key is skipped.
+    """
     config_path = runtime_paths.config_path
     env_path = runtime_paths.env_path
+    if provider is None:
+        selected_preset = None
+    elif (selected_preset := _normalize_provider_preset(provider)) is None:
+        msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
+        raise ValueError(msg)
     console.print(f"[yellow]No MindRoom config found at {config_path}.[/yellow]")
     console.print(
         "Let's create one for MindRoom Chat (mindroom.chat). "
         "For your own Matrix server, press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.",
     )
-    selected_preset = _prompt_provider_preset()
-    provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path)
+    selected_preset = selected_preset or _prompt_provider_preset()
+    provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path, interactive=interactive)
     _write_starter_setup(
         config_path,
         env_path,
@@ -573,8 +586,10 @@ def _prompt_provider_key(
     selected_preset: _ProviderPreset,
     runtime_paths: RuntimePaths,
     env_path: Path,
+    *,
+    interactive: bool,
 ) -> str | None:
-    """Ask for the preset's API key with hidden input; return None when none was typed or none is needed."""
+    """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     label = _API_KEY_PRESET_LABELS.get(selected_preset)
@@ -584,12 +599,16 @@ def _prompt_provider_key(
     if get_secret_from_env(env_key, runtime_paths):
         console.print(f"Using {env_key} from your environment.")
         return None
-    value = typer.prompt(
-        f"{label} API key (input hidden, press Enter to skip)",
-        default="",
-        show_default=False,
-        hide_input=True,
-    ).strip()
+    value = (
+        typer.prompt(
+            f"{label} API key (input hidden, press Enter to skip)",
+            default="",
+            show_default=False,
+            hide_input=True,
+        ).strip()
+        if interactive
+        else ""
+    )
     if not value:
         console.print(
             f"Skipped. Connect your provider in the dashboard once MindRoom is running, "

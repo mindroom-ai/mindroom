@@ -31,15 +31,27 @@ When no config exists yet and MindRoom runs in a terminal, it asks a few setup q
    Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting `mindroom run`.
 
 MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
-Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`.
+Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`, unless the flags below answer the questions.
+
+Flags answer the same questions up front, which lets a coding agent or script set up MindRoom without a terminal:
+
+```bash
+OPENAI_API_KEY=sk-... uvx mindroom run --provider openai --service
+```
+
+`--provider` picks the preset, the API key comes from the environment, and `--service` installs the login service after pairing (`--no-service` skips the question).
+Without a terminal, MindRoom prints the pairing link and code for a person to approve, and the approving account is printed instead of asked about.
 
 On first run, MindRoom automatically initiates pairing.
 It prints a pairing link and QR code.
 Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
 Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [y/N]` before saving anything.
+After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
 
-After pairing completes, MindRoom starts the runtime and dashboard.
+After pairing completes, first-run setup asks whether to run MindRoom in the background and start it at login, as a systemd user service on Linux or a launchd agent on macOS.
+Pressing Enter installs and starts the service, the same as `mindroom service install`, and returns to your shell; check it with `mindroom service status`, and run `mindroom service restart` after editing `~/.mindroom/.env`.
+Answering `n` starts the runtime and dashboard in the terminal instead, which also happens on platforms without launchd or systemd or when the service cannot be installed.
+See [`mindroom service`](cli.md#service) for when the question is skipped.
 
 Notes:
 

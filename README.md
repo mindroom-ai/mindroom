@@ -105,9 +105,11 @@ uvx mindroom run
 # First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
 # MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
 # then prints a link and QR code: approve it with your MindRoom Chat account,
-# or enter the code in MindRoom Chat -> Settings -> Local MindRoom
+# or enter the code in MindRoom Chat -> Settings -> Local MindRoom.
+# Finally, Enter keeps MindRoom running in the background as a login service (systemd or launchd); n runs it here
 ```
 
+Coding agents and scripts can answer every question with flags instead: `OPENAI_API_KEY=sk-... uvx mindroom run --provider openai --service`.
 To create or review the files without starting, run `uvx mindroom config init` (optionally with `--provider codex` or another preset), edit `~/.mindroom/.env`, and then run `uvx mindroom run`.
 See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for full details.
 

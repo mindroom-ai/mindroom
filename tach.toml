@@ -4195,6 +4195,7 @@ visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
     "mindroom.cli.local_stack",
+    "mindroom.cli.service",
 ]
 
 [[modules]]
@@ -4282,8 +4283,10 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.service"
 depends_on = [
+    "mindroom.cli.env_file",
     "mindroom.constants",
     "mindroom.matrix.provisioning_env",
+    "mindroom.runtime_env_policy",
     "mindroom.services.config",
     "mindroom.services.manager",
 ]

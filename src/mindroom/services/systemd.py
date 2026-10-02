@@ -147,6 +147,11 @@ def _get_service_status() -> ServiceStatus:
     return ServiceStatus(installed=True, running=running, pid=pid)
 
 
+def _systemd_running() -> bool:
+    """Whether systemd manages this machine, the same check as sd_booted(3); containers and WSL often lack it."""
+    return Path("/run/systemd/system").is_dir()
+
+
 def _install_service() -> InstallResult:
     """Install and start the systemd user service."""
     uv_path = find_uv(extra_paths=_LINUX_UV_PATHS)
@@ -258,6 +263,8 @@ def _check_uv_installed() -> tuple[bool, Path | None]:
 
 
 manager = ServiceManager(
+    description="systemd user service",
+    is_available=_systemd_running,
     check_uv_installed=_check_uv_installed,
     install_uv=install_uv,
     install_service=_install_service,

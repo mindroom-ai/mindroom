@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -58,6 +59,7 @@ from mindroom.model_defaults import (
     llama_cpp_server_command,
 )
 from mindroom.model_loading import missing_model_api_key_provider
+from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
@@ -2139,10 +2141,16 @@ class TestRunFirstRunSetup:
     @pytest.fixture(autouse=True)
     def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: True)
+        # On a platform without a service manager, first-run setup starts MindRoom in the terminal without asking.
+        monkeypatch.setattr(
+            "mindroom.cli.service._get_service_manager",
+            Mock(side_effect=RuntimeError("Unsupported platform")),
+        )
+        # A login service setup saves every exported provider key, so none may leak in from the developer's shell.
+        for env_key in constants_module.PROVIDER_ENV_KEYS.values():
+            monkeypatch.delenv(env_key, raising=False)
+            monkeypatch.delenv(f"{env_key}_FILE", raising=False)
         for name in (
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "OPENROUTER_API_KEY",
             "MATRIX_HOMESERVER",
             "MATRIX_REGISTRATION_TOKEN",
             "MINDROOM_PROVISIONING_URL",
@@ -2157,7 +2165,7 @@ class TestRunFirstRunSetup:
         answers: str,
         *,
         env: dict[str, str] | None = None,
-        args: tuple[str, ...] = (),
+        args: tuple[str, ...] = ("--no-api",),
     ) -> tuple[object, list[constants_module.RuntimePaths], list[constants_module.RuntimePaths]]:
         paired: list[constants_module.RuntimePaths] = []
         started: list[constants_module.RuntimePaths] = []
@@ -2170,9 +2178,10 @@ class TestRunFirstRunSetup:
 
         with (
             patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
+            patch("mindroom.cli.pairing_probes.serve_pairing_probes", return_value=nullcontext()),
             patch("mindroom.cli.main._run", side_effect=fake_run),
         ):
-            result = _invoke_with_runtime(["run", "--no-api", *args], config_path, input=answers, env=env)
+            result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)
         return result, paired, started
 
     def test_prompts_writes_hosted_config_with_hidden_key_then_pairs_and_starts(self, tmp_path: Path) -> None:
@@ -2202,6 +2211,282 @@ class TestRunFirstRunSetup:
         assert paired[0].env_value("MINDROOM_PROVISIONING_URL") == "https://mindroom.chat"
         assert len(started) == 1
         assert started[0].env_value("OPENAI_API_KEY") == typed_key
+
+    @staticmethod
+    def _service_manager(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        available: bool = True,
+        installed: bool = False,
+    ) -> Mock:
+        manager = Mock(spec=ServiceManager)
+        manager.description = "systemd user service"
+        manager.is_available.return_value = available
+        manager.get_service_status.return_value = ServiceStatus(installed=installed, running=installed)
+        manager.check_uv_installed.return_value = (True, Path("/usr/bin/uv"))
+        manager.install_service.return_value = InstallResult(success=True, message="Installed and started")
+        manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+        monkeypatch.setattr("mindroom.cli.service._get_service_manager", lambda: manager)
+        return manager
+
+    def test_first_run_installs_the_login_service_by_default_instead_of_running_here(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell."""
+        config_path = tmp_path / "config.yaml"
+        manager = self._service_manager(monkeypatch)
+
+        result, paired, started = self._invoke_run(config_path, "codex\n\n", args=())
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Run MindRoom in the background and start it at login (systemd user service)? [Y/n]" in output
+        assert "Service Installed" in output
+        assert "Dashboard: http://localhost:8765" in output
+        assert "mindroom service restart" in output
+        assert len(paired) == 1
+        assert started == []
+        manager.install_service.assert_called_once_with()
+
+    @pytest.mark.parametrize("exported", ["", "your-openai-key-here"])
+    def test_first_run_service_keeps_a_typed_key_over_an_unset_shell_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        exported: str,
+    ) -> None:
+        """A blank or placeholder export is not a key, so the service setup never writes it over the typed one."""
+        config_path = tmp_path / "config.yaml"
+        self._service_manager(monkeypatch)
+
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "openai\nsk-typed\n\n",
+            env={"OPENAI_API_KEY": exported, "ANTHROPIC_API_KEY": exported and "your-anthropic-key-here"},
+            args=(),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Saved" not in result.output
+        assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
+        assert started == []
+
+    def test_first_run_saves_a_shell_only_key_for_the_service(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The service reads only `.env`, so a provider key exported in this shell is saved there before it starts."""
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        self._service_manager(monkeypatch)
+
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "openai\n\n",
+            env={"OPENAI_API_KEY": "sk-exported"},
+            args=(),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Saved OPENAI_API_KEY from your shell" in normalize_console_output(result.output)
+        assert re.findall(r"^OPENAI_API_KEY=.*$", env_path.read_text(encoding="utf-8"), re.MULTILINE) == [
+            "OPENAI_API_KEY=sk-exported",
+        ]
+        assert env_path.stat().st_mode & 0o777 == 0o600
+        assert started == []
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("--no-api",),
+            ("--api-host", "127.0.0.1"),
+            ("--api-port", "9000"),
+            ("--storage-path", "chosen-storage"),
+            ("--config", "config.yaml"),
+        ],
+    )
+    def test_first_run_does_not_offer_a_service_that_would_run_differently(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: tuple[str, ...],
+    ) -> None:
+        """The service runs a plain `mindroom run`, so a run with other paths or API options is not offered one."""
+        config_path = tmp_path / "config.yaml"
+        manager = self._service_manager(monkeypatch)
+        args = tuple(str(tmp_path / arg) if arg in {"chosen-storage", "config.yaml"} else arg for arg in args)
+
+        result, _paired, started = self._invoke_run(config_path, "codex\n", args=args)
+
+        assert result.exit_code == 0, result.output
+        assert "start it at login" not in result.output
+        manager.install_service.assert_not_called()
+        assert len(started) == 1
+
+    def test_flags_answer_every_first_run_question_without_a_terminal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An agent sets up, pairs, and installs the login service in one command, with the key from its environment."""
+        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        config_path = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        manager = self._service_manager(monkeypatch)
+
+        result, paired, started = self._invoke_run(
+            config_path,
+            "",
+            env={"OPENAI_API_KEY": "sk-agent"},
+            args=("--provider", "openai", "--service"),
+        )
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Choose provider preset" not in output
+        assert "[Y/n]" not in output
+        assert "provider: openai" in config_path.read_text(encoding="utf-8")
+        assert "OPENAI_API_KEY=sk-agent\n" in env_path.read_text(encoding="utf-8")
+        assert len(paired) == 1
+        assert started == []
+        manager.install_service.assert_called_once_with()
+
+    @pytest.mark.parametrize("preset", ["codex", "openai"])
+    def test_provider_flag_sets_up_without_a_terminal_and_runs_here(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        preset: str,
+    ) -> None:
+        """Without a terminal, `--provider` creates the config with no prompts, and a missing key is skipped."""
+        config_path = tmp_path / "config.yaml"
+        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        manager = self._service_manager(monkeypatch)
+
+        result, paired, started = self._invoke_run(config_path, "", args=("--provider", preset))
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Choose provider preset" not in output
+        assert "API key (" not in output
+        assert "start it at login" not in output
+        assert f"provider: {preset}" in config_path.read_text(encoding="utf-8")
+        assert ("Skipped" in output) is (preset == "openai")
+        manager.install_service.assert_not_called()
+        assert len(paired) == 1
+        assert len(started) == 1
+
+    def test_invalid_provider_flag_writes_nothing(self, tmp_path: Path) -> None:
+        """An unknown `--provider` fails before setup writes any file."""
+        config_path = tmp_path / "config.yaml"
+
+        result, paired, started = self._invoke_run(config_path, "", args=("--provider", "nope"))
+
+        assert result.exit_code == 1
+        assert "Invalid --provider value" in normalize_console_output(result.output)
+        assert not config_path.exists()
+        assert not (tmp_path / ".env").exists()
+        assert paired == started == []
+
+    def test_no_service_flag_never_asks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`--no-service` answers the service question up front, and MindRoom starts in the terminal."""
+        config_path = tmp_path / "config.yaml"
+        manager = self._service_manager(monkeypatch)
+
+        result, _paired, started = self._invoke_run(config_path, "codex\n", args=("--no-service",))
+
+        assert result.exit_code == 0, result.output
+        assert "start it at login" not in result.output
+        manager.install_service.assert_not_called()
+        assert len(started) == 1
+
+    def test_service_flag_installs_for_an_existing_config_without_asking(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`--service` also works on a rerun after setup, still handing the shell's key to the service."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        manager = self._service_manager(monkeypatch, installed=True)
+
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "",
+            env={"OPENAI_API_KEY": "sk-agent"},
+            args=("--service",),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "[Y/n]" not in result.output
+        assert "OPENAI_API_KEY=sk-agent\n" in (tmp_path / ".env").read_text(encoding="utf-8")
+        manager.install_service.assert_called_once_with()
+        assert started == []
+
+    def test_service_flag_fails_before_setup_where_the_service_cannot_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without systemd, `--service` exits before setup or pairing asks a person for anything."""
+        config_path = tmp_path / "config.yaml"
+        manager = self._service_manager(monkeypatch, available=False)
+
+        result, paired, started = self._invoke_run(config_path, "codex\n", args=("--service",))
+
+        assert result.exit_code == 1
+        assert "This machine cannot run a systemd user service." in normalize_console_output(result.output)
+        assert not config_path.exists()
+        assert paired == started == []
+        manager.install_service.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("--no-api",),
+            ("--api-host", "127.0.0.1"),
+            ("--api-port", "9000"),
+            ("--storage-path", "elsewhere"),
+            ("--config", "elsewhere.yaml"),
+        ],
+    )
+    def test_service_flag_rejects_options_the_service_would_drop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        args: tuple[str, ...],
+    ) -> None:
+        """`--service` with options a plain `mindroom run` service would not keep is a usage error before any setup."""
+        config_path = tmp_path / "config.yaml"
+        manager = self._service_manager(monkeypatch)
+
+        result, paired, started = self._invoke_run(config_path, "codex\n", args=("--service", *args))
+
+        assert result.exit_code == 2
+        assert "--service runs a plain `mindroom run`" in normalize_console_output(result.output)
+        assert not config_path.exists()
+        manager.install_service.assert_not_called()
+        assert paired == started == []
+
+    def test_existing_config_does_not_offer_a_login_service(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only first-run setup asks about the service, so every later `mindroom run` starts without a question."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        manager = self._service_manager(monkeypatch)
+
+        result, _paired, started = self._invoke_run(config_path, "", args=())
+
+        assert result.exit_code == 0, result.output
+        assert "start it at login" not in result.output
+        manager.install_service.assert_not_called()
+        assert len(started) == 1
 
     def test_skipped_key_leaves_placeholder_and_says_where_to_add_it(self, tmp_path: Path) -> None:
         """Pressing Enter writes the `config init` placeholder, which counts as unset, and points to the dashboard and `.env`."""
@@ -2307,7 +2592,11 @@ class TestRunFirstRunSetup:
         config_path = tmp_path / "config.yaml"
         storage = tmp_path / "chosen-storage"
 
-        result, _paired, started = self._invoke_run(config_path, "codex\n", args=("--storage-path", str(storage)))
+        result, _paired, started = self._invoke_run(
+            config_path,
+            "codex\n",
+            args=("--no-api", "--storage-path", str(storage)),
+        )
 
         assert result.exit_code == 0, result.output
         env_content = (tmp_path / ".env").read_text(encoding="utf-8")
@@ -2462,6 +2751,8 @@ class TestRunErrorHandling:
             "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
         )
         assert provider_guidance in result.output
+        assert "mindroom run --provider" in result.output
+        assert "Without a terminal" in normalize_console_output(result.output)
         mock_main.assert_not_awaited()
         assert not cfg.exists()
 
@@ -4781,7 +5072,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert result.exit_code == 1
         assert "Error: bad runtime" in result.output
 
-    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", False), ("y\n", True)])
+    @pytest.mark.parametrize(("answer", "saved"), [("n\n", False), ("\n", True), ("y\n", True)])
     def test_connect_asks_whether_the_approving_account_is_yours(
         self,
         tmp_path: Path,
@@ -4789,7 +5080,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         answer: str,
         saved: bool,
     ) -> None:
-        """A terminal saves the approving account only on an explicit yes; a bare Enter or no saves nothing and fails."""
+        """A terminal saves the approving account on yes or a bare Enter; no saves nothing and fails."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
@@ -4808,7 +5099,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
 
         output = normalize_console_output(result.output)
         assert "Approved by @alice:mindroom.chat." in output
-        assert "Is this your account? [y/N]" in output
+        assert "Is this your account? [Y/n]" in output
         assert (tmp_path / ".env").exists() is saved
         assert (OWNER_MATRIX_USER_ID_PLACEHOLDER in cfg.read_text()) is not saved
         if saved:

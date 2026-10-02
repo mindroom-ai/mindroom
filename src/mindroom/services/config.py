@@ -59,6 +59,8 @@ class ServiceActionResult:
 class ServiceManager(NamedTuple):
     """Platform-specific MindRoom service manager interface."""
 
+    description: str
+    is_available: Callable[[], bool]
     check_uv_installed: Callable[[], tuple[bool, Path | None]]
     install_uv: Callable[[], tuple[bool, str]]
     install_service: Callable[[], InstallResult]
@@ -117,6 +119,7 @@ def install_uv() -> tuple[bool, str]:
             text=True,
             check=True,
         )
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # OSError covers a machine without curl or sh.
         return False, f"Failed to install uv: {exc}"
     return True, "uv installed successfully"

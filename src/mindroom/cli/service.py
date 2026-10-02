@@ -12,10 +12,16 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.runtime_env_policy import is_unset_env_value
+
+from .env_file import upsert_env_values
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.services.config import ServiceActionResult, ServiceManager
+    from mindroom.constants import RuntimePaths
+    from mindroom.services.config import InstallResult, ServiceActionResult, ServiceManager
 
 _console = Console()
 _err_console = Console(stderr=True)
@@ -58,28 +64,30 @@ def _confirm_action(message: str) -> bool:
     except (KeyboardInterrupt, EOFError):
         _console.print("\n[dim]Cancelled.[/dim]")
         raise typer.Exit(0) from None
-    return not answer or answer == "y"
+    return answer in {"", "y", "yes"}
 
 
-def _ensure_uv_installed(*, no_confirm: bool) -> None:
-    """Ensure uv is installed before service installation."""
-    manager = _manager_or_exit()
+def _ensure_uv_installed(manager: ServiceManager, *, no_confirm: bool) -> bool:
+    """Ensure uv is installed before service installation and return whether it is."""
     uv_installed, uv_path = manager.check_uv_installed()
     if uv_installed:
         _console.print(f"  [green]uv installed:[/green] {uv_path}")
-        return
+        return True
 
     _console.print("[yellow]uv is required to run the MindRoom service.[/yellow]")
     if not no_confirm and not _confirm_action("Install uv now?"):
-        _console.print("[yellow]Install uv from https://docs.astral.sh/uv/ and run this command again.[/yellow]")
-        raise typer.Exit(1)
+        _console.print(
+            "[yellow]Install uv from https://docs.astral.sh/uv/, then run `mindroom service install`.[/yellow]",
+        )
+        return False
 
     _console.print("Installing uv...")
     success, message = manager.install_uv()
     if not success:
         _err_console.print(f"[bold red]Error:[/bold red] {message}")
-        raise typer.Exit(1)
+        return False
     _console.print(f"  [green]{message}[/green]")
+    return True
 
 
 def _print_service_action_result(result: ServiceActionResult) -> None:
@@ -98,8 +106,8 @@ def install_service(
     """Install and start MindRoom as a background user service."""
     manager = _manager_or_exit()
 
-    if not skip_deps:
-        _ensure_uv_installed(no_confirm=no_confirm)
+    if not skip_deps and not _ensure_uv_installed(manager, no_confirm=no_confirm):
+        raise typer.Exit(1)
 
     if not no_confirm:
         _console.print()
@@ -112,7 +120,80 @@ def install_service(
     if not result.success:
         _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
         raise typer.Exit(1)
+    _print_installed_service(manager, result)
 
+
+def require_login_service() -> ServiceManager:
+    """Return the service manager for `mindroom run --service`, exiting before setup when this machine cannot run the service."""
+    manager = _manager_or_exit()
+    if not manager.is_available():
+        _err_console.print(f"[bold red]Error:[/bold red] This machine cannot run a {manager.description}.")
+        raise typer.Exit(1)
+    return manager
+
+
+def start_login_service(runtime_paths: RuntimePaths, manager: ServiceManager | None) -> bool:
+    """Install and start MindRoom as a login service after `mindroom run` setup, and return whether the service now runs it.
+
+    `manager` comes from `require_login_service` for `--service`; without it, the user is asked first.
+    The service reads only `.env`, so provider keys exported in this shell are saved there first.
+    When asking, declining or a failed installation leaves MindRoom to start in this terminal.
+    With `--service`, a failure exits with an error, because nobody may be watching a terminal run.
+    """
+    requested = manager is not None
+    if manager is None:
+        manager = _ask_for_login_service()
+        if manager is None:
+            return False
+    # Asking skips installed services, so only `--service` replaces one.
+    replacing = requested and manager.get_service_status().installed
+    if _ensure_uv_installed(manager, no_confirm=requested):
+        if shell_keys := _shell_provider_keys(runtime_paths):
+            upsert_env_values(runtime_paths.env_path, shell_keys)
+            _console.print(
+                f"Saved {', '.join(shell_keys)} from your shell to {runtime_paths.env_path} for the service.",
+            )
+        result = manager.install_service()
+        if result.success:
+            _print_installed_service(manager, result)
+            return True
+        _err_console.print(f"[bold red]Error:[/bold red] {result.message}")
+        if not replacing:
+            # A half-installed unit or plist would still start at the next login.
+            manager.uninstall_service()
+    if requested:
+        raise typer.Exit(1)
+    _console.print("Starting MindRoom in this terminal instead.")
+    return False
+
+
+def _shell_provider_keys(runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return the provider key variables, `NAME` or `NAME_FILE`, that this shell exports with a usable value."""
+    return {
+        name: value
+        for env_key in PROVIDER_ENV_KEYS.values()
+        for name in (env_key, f"{env_key}_FILE")
+        if (value := runtime_paths.process_env.get(name)) and not is_unset_env_value(env_key, value)
+    }
+
+
+def _ask_for_login_service() -> ServiceManager | None:
+    """Return the service manager when the user wants a login service; an unusable or existing service skips the question."""
+    try:
+        manager = _get_service_manager()
+    except RuntimeError:
+        return None
+    # Installing would fail without systemd, or repoint a service that already runs another setup.
+    if not manager.is_available() or manager.get_service_status().installed:
+        return None
+    _console.print()
+    if not _confirm_action(f"Run MindRoom in the background and start it at login ({manager.description})?"):
+        return None
+    return manager
+
+
+def _print_installed_service(manager: ServiceManager, result: InstallResult) -> None:
+    """Print where to check on a service that was just installed and started."""
     log_hint = f"View logs: [cyan]{manager.get_log_command()}[/cyan]"
     if result.log_dir is not None:
         log_hint = f"View logs: [cyan]{result.log_dir}/[/cyan]"

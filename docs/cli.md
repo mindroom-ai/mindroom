@@ -152,8 +152,10 @@ It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, f
 Pressing Enter skips the key; connect the provider later through the dashboard's provider setup, or add the key to the `.env` next to `config.yaml` and restart `mindroom run`.
 It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
 `.env` is read only at startup, so settings added there after setup take effect when `mindroom run` restarts.
-The same process then pairs with MindRoom Chat and starts.
-Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
+The same process then pairs with MindRoom Chat, offers to install a login service (see [`service`](#service)), and otherwise starts in the terminal.
+`--provider <preset>` answers the provider question, and with it first-run setup also runs without a terminal: nothing is asked, the API key comes from the environment, and a missing key is skipped with the same hint.
+`--service` installs the login service after pairing without asking, and `--no-service` never offers it, so `OPENAI_API_KEY=... mindroom run --provider openai --service` sets up, pairs, and installs MindRoom in one command.
+Without a terminal and without `--provider`, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
 While a hosted install waits for pairing approval, `mindroom run` already listens on the API address: `/api/health` returns `200` and `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`, so container health checks do not restart it.
 The dashboard and the rest of the API start after pairing, and `--no-api` skips these probes too.
@@ -176,45 +178,63 @@ The dashboard and the rest of the API start after pairing, and `--no-api` skips 
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
- - Creates a hosted starter config on first run in a terminal
+ - Creates a hosted starter config on first run in a terminal, or with --provider
  - Pairs hosted installs with your MindRoom Chat account on first run
+ - Offers on first run to keep running as a background service that starts at login
+ (--service/--no-service)
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level                     -l              TEXT     Set the logging level (DEBUG, │
-│                                                          INFO, WARNING, ERROR)         │
-│                                                          [env var: LOG_LEVEL]          │
-│                                                          [default: INFO]               │
-│ --config                        -c              PATH     Use this config file path.    │
-│                                                          Defaults the storage location │
-│                                                          to the selected config        │
-│                                                          directory unless              │
-│                                                          --storage-path is set.        │
-│ --storage-path                  -s              PATH     Base directory for persistent │
-│                                                          MindRoom data (state,         │
-│                                                          sessions, tracking)           │
-│ --bootstrap-config-bundle                       PATH     Initialize the selected       │
-│                                                          config directory from this    │
-│                                                          bundle only when the          │
-│                                                          directory is absent.          │
-│ --bootstrap-config-bundle-rev…                  TEXT     Install a changed bootstrap   │
-│                                                          revision through native       │
-│                                                          validation; preserve a        │
-│                                                          matching active revision.     │
-│ --api                               --no-api             Start the bundled             │
-│                                                          dashboard/API server          │
-│                                                          alongside the bot             │
-│                                                          [default: api]                │
-│ --api-port                                      INTEGER  Port for the bundled          │
-│                                                          dashboard/API server          │
-│                                                          [default: 8765]               │
-│ --api-host                                      TEXT     Host for the bundled          │
-│                                                          dashboard/API server          │
-│                                                          [default: 0.0.0.0]            │
-│ --help                          -h                       Show this message and exit.   │
+│ --log-level                   -l                  TEXT     Set the logging level       │
+│                                                            (DEBUG, INFO, WARNING,      │
+│                                                            ERROR)                      │
+│                                                            [env var: LOG_LEVEL]        │
+│                                                            [default: INFO]             │
+│ --config                      -c                  PATH     Use this config file path.  │
+│                                                            Defaults the storage        │
+│                                                            location to the selected    │
+│                                                            config directory unless     │
+│                                                            --storage-path is set.      │
+│ --storage-path                -s                  PATH     Base directory for          │
+│                                                            persistent MindRoom data    │
+│                                                            (state, sessions, tracking) │
+│ --bootstrap-config-bundle                         PATH     Initialize the selected     │
+│                                                            config directory from this  │
+│                                                            bundle only when the        │
+│                                                            directory is absent.        │
+│ --bootstrap-config-bundle-r…                      TEXT     Install a changed bootstrap │
+│                                                            revision through native     │
+│                                                            validation; preserve a      │
+│                                                            matching active revision.   │
+│ --api                             --no-api                 Start the bundled           │
+│                                                            dashboard/API server        │
+│                                                            alongside the bot           │
+│                                                            [default: api]              │
+│ --api-port                                        INTEGER  Port for the bundled        │
+│                                                            dashboard/API server        │
+│                                                            [default: 8765]             │
+│ --api-host                                        TEXT     Host for the bundled        │
+│                                                            dashboard/API server        │
+│                                                            [default: 0.0.0.0]          │
+│ --provider                                        TEXT     Model provider preset for   │
+│                                                            the starter config when     │
+│                                                            none exists, with the       │
+│                                                            choices of `config init     │
+│                                                            --provider`. It also lets   │
+│                                                            setup run without a         │
+│                                                            terminal, taking the API    │
+│                                                            key from the environment.   │
+│ --service                         --no-service             After setup and pairing,    │
+│                                                            install and start MindRoom  │
+│                                                            as a login service (systemd │
+│                                                            or launchd) instead of      │
+│                                                            running it here, or never   │
+│                                                            offer to. A first run in a  │
+│                                                            terminal asks.              │
+│ --help                        -h                           Show this message and exit. │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -938,6 +958,13 @@ MindRoom runs the version installed by this command through `uv tool run` and st
 Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
+On first run in a terminal, a plain `mindroom run` offers the same installation after pairing; answering yes starts the service instead of running MindRoom in that terminal.
+The offer is skipped when a MindRoom service is already installed, when systemd is not running (for example in containers), with `--no-service`, and when `run` was given `--config`, `--storage-path`, `--no-api`, `--api-host`, or `--api-port`, because the service runs a plain `mindroom run`.
+If installation fails, MindRoom starts in the terminal instead.
+`mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
+Provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) are saved to `.env` first, because the service does not see your shell's environment.
+If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
+On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -1438,8 +1465,9 @@ You usually do not need `connect` at all, because `mindroom run` pairs automatic
 
 After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
 Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
-In a terminal, `connect` and `run` then ask `Is this your account? [y/N]`.
-Answering `n`, pressing Enter without an answer, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Pressing Enter or answering `y` saves the credentials.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.

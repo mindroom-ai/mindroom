@@ -8,9 +8,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
+from mindroom.cli.service import require_login_service, start_login_service
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.services.config import (
     InstallResult,
     ServiceActionResult,
@@ -103,10 +106,11 @@ def test_install_uv_success(mock_run: MagicMock) -> None:
     assert shell_call.kwargs["text"] is True
 
 
+@pytest.mark.parametrize("error", [subprocess.CalledProcessError(1, "curl"), FileNotFoundError("curl")])
 @patch("subprocess.run")
-def test_install_uv_failure(mock_run: MagicMock) -> None:
-    """install_uv returns a user-facing failure message on subprocess errors."""
-    mock_run.side_effect = subprocess.CalledProcessError(1, "curl")
+def test_install_uv_failure(mock_run: MagicMock, error: Exception) -> None:
+    """install_uv returns a user-facing failure message on subprocess errors and on a machine without curl."""
+    mock_run.side_effect = error
 
     success, message = install_uv()
 
@@ -872,3 +876,135 @@ def test_service_restart_failure_exits_with_message(mock_get_manager: MagicMock)
     assert result.exit_code == 1
     assert "restart failed" in result.output
     mock_manager.restart_service.assert_called_once_with()
+
+
+def _login_service_manager(
+    *,
+    available: bool = True,
+    installed: bool = False,
+    uv_installed: bool = True,
+    install_result: InstallResult | None = None,
+) -> MagicMock:
+    manager = MagicMock(spec=ServiceManager)
+    manager.description = "systemd user service"
+    manager.is_available.return_value = available
+    manager.get_service_status.return_value = ServiceStatus(installed=installed, running=installed)
+    manager.check_uv_installed.return_value = (uv_installed, Path("/usr/bin/uv") if uv_installed else None)
+    manager.install_service.return_value = install_result or InstallResult(
+        success=True,
+        message="Installed and started",
+    )
+    manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+    return manager
+
+
+def _shell_runtime(tmp_path: Path, **process_env: str) -> RuntimePaths:
+    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
+
+
+@pytest.mark.parametrize(
+    ("answers", "uv_installed", "install_result"),
+    [
+        ([False], True, None),
+        ([True, False], False, None),
+        ([True], True, InstallResult(success=False, message="Failed to start service: no bus")),
+    ],
+    ids=["declined", "uv-declined", "install-failed"],
+)
+def test_login_service_question_falls_back_to_the_terminal(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    answers: list[bool],
+    uv_installed: bool,
+    install_result: InstallResult | None,
+) -> None:
+    """Declining the service or uv, or a failed install, leaves MindRoom to start here and no service behind."""
+    manager = _login_service_manager(uv_installed=uv_installed, install_result=install_result)
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", return_value=manager),
+        patch("mindroom.cli.service._confirm_action", side_effect=answers),
+    ):
+        assert start_login_service(_shell_runtime(tmp_path, OPENAI_API_KEY="sk-shell"), None) is False
+
+    output = capsys.readouterr()
+    if install_result is None:
+        manager.uninstall_service.assert_not_called()
+        # Shell keys are saved only once a service is about to be installed.
+        assert not (tmp_path / ".env").exists()
+    else:
+        assert "Failed to start service: no bus" in output.err
+        assert "Starting MindRoom in this terminal instead." in output.out
+        # A half-installed service would otherwise start a second runtime at the next login.
+        manager.uninstall_service.assert_called_once_with()
+    if not uv_installed:
+        manager.install_service.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["unsupported", "unavailable", "installed"])
+def test_login_service_question_is_skipped_where_it_cannot_help(tmp_path: Path, reason: str) -> None:
+    """An unsupported platform, a machine without systemd, or an existing service is never asked about."""
+    manager = _login_service_manager(available=reason != "unavailable", installed=reason == "installed")
+    get_manager = MagicMock(return_value=manager)
+    if reason == "unsupported":
+        get_manager.side_effect = RuntimeError("Unsupported platform")
+    confirm = MagicMock()
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", get_manager),
+        patch("mindroom.cli.service._confirm_action", confirm),
+    ):
+        assert start_login_service(_shell_runtime(tmp_path), None) is False
+
+    confirm.assert_not_called()
+    manager.install_service.assert_not_called()
+
+
+def test_requested_login_service_saves_usable_shell_provider_keys(tmp_path: Path) -> None:
+    """`--service` hands exported provider keys and key files to the service, but never a blank or placeholder value."""
+    manager = _login_service_manager()
+    runtime_paths = _shell_runtime(
+        tmp_path,
+        OPENAI_API_KEY="sk-shell",
+        GOOGLE_API_KEY_FILE="/run/secrets/google",
+        ANTHROPIC_API_KEY="your-anthropic-key-here",
+        GROQ_API_KEY="",
+    )
+
+    assert start_login_service(runtime_paths, manager) is True
+
+    env_content = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY=sk-shell\n" in env_content
+    assert "GOOGLE_API_KEY_FILE=/run/secrets/google\n" in env_content
+    assert "ANTHROPIC_API_KEY" not in env_content
+    assert "GROQ_API_KEY" not in env_content
+    manager.install_service.assert_called_once_with()
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["new", "replacing"])
+def test_requested_login_service_failure_exits(tmp_path: Path, installed: bool) -> None:
+    """A failed `--service` install exits instead of running here, and only removes a service it created."""
+    manager = _login_service_manager(
+        installed=installed,
+        install_result=InstallResult(success=False, message="Failed to start service: no bus"),
+    )
+
+    with pytest.raises(typer.Exit) as exit_info:
+        start_login_service(_shell_runtime(tmp_path), manager)
+
+    assert exit_info.value.exit_code == 1
+    assert manager.uninstall_service.call_count == (0 if installed else 1)
+
+
+def test_require_login_service_refuses_a_machine_that_cannot_run_it(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--service` on a machine without systemd exits with a clear error."""
+    manager = _login_service_manager(available=False)
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", return_value=manager),
+        pytest.raises(typer.Exit) as exit_info,
+    ):
+        require_login_service()
+
+    assert exit_info.value.exit_code == 1
+    assert "This machine cannot run a systemd user service." in capsys.readouterr().err

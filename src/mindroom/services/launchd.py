@@ -266,6 +266,8 @@ def _check_uv_installed() -> tuple[bool, Path | None]:
 
 
 manager = ServiceManager(
+    description="launchd agent",
+    is_available=lambda: True,
     check_uv_installed=_check_uv_installed,
     install_uv=install_uv,
     install_service=_install_service,

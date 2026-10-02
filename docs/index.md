@@ -47,7 +47,8 @@ uvx mindroom run
 # First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
 # MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
 # then prints a link and QR code: approve it with your MindRoom Chat account,
-# or enter the code in MindRoom Chat → Settings → Local MindRoom
+# or enter the code in MindRoom Chat → Settings → Local MindRoom.
+# Finally, Enter keeps MindRoom running in the background as a login service (systemd or launchd); n runs it here
 ```
 
 To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
