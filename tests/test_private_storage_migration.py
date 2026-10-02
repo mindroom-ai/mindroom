@@ -417,7 +417,7 @@ async def test_entries_planted_after_the_receipt_are_never_read(tmp_path: Path, 
 def _entry_snapshot(entry: Path) -> object:
     info = entry.lstat()
     if stat.S_ISLNK(info.st_mode):
-        return "link", os.readlink(entry)
+        return "link", entry.readlink()
     if stat.S_ISDIR(info.st_mode):
         return "directory", {child.name: child.read_bytes() for child in entry.iterdir()}
     return stat.S_IFMT(info.st_mode), entry.read_bytes() if stat.S_ISREG(info.st_mode) else None
@@ -450,7 +450,7 @@ async def test_first_start_leaves_planted_entries_and_writes_its_receipt(tmp_pat
 
     assert _entry_snapshot(planted) == before
     current = private_instance_scope_root_path(paths.storage_root, _NEW)
-    assert os.readlink(source) == current.name
+    assert source.readlink() == Path(current.name)
     assert (current / "writer" / "workspace" / "notes.txt").read_bytes() == b"private workspace\x00retained"
 
 
@@ -702,7 +702,6 @@ async def test_missing_configured_session_volume_blocks_startup(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_absent_optional_mirror_stays_absent_on_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicitly absent mirror cannot acquire unrelated data during recovery."""
-    migration = importlib.import_module("mindroom.legacy_private_storage")
     paths = _paths(tmp_path)
     source = _seed(paths, _OLD, _REQUESTER)
     shutil.rmtree(resolve_session_state_root(source, paths))

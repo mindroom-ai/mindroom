@@ -252,7 +252,11 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
 
 def _leave_invalid_entry(entry: Path, error: ValueError) -> None:
     # Sandbox runners can write private_instances, so one invalid entry must not stop every start.
-    logger.warning("Leaving an invalid private storage entry untouched; not migrating", entry=str(entry), error=str(error))
+    logger.warning(
+        "Leaving an invalid private storage entry untouched; not migrating",
+        entry=str(entry),
+        error=str(error),
+    )
 
 
 def _discover_scope(roots: tuple[Path, Path], scope: Path) -> _Intent | None:
