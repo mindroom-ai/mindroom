@@ -41,7 +41,13 @@ if TYPE_CHECKING:
     from agno.learn.stores.protocol import LearningStore
 
 
-async def _catalog(tmp_path: Path, tools: list, **kwargs: Any) -> agent_tool_calls.PreparedAgentToolCatalog:  # noqa: ANN401
+async def _catalog(
+    tmp_path: Path,
+    tools: list,
+    *,
+    include: Callable[[Function], bool] | None = None,
+    **kwargs: Any,  # noqa: ANN401
+) -> agent_tool_calls.PreparedAgentToolCatalog:
     agent = KnowledgeToolDescribingAgent(id="helper", model=OpenAIChat(), tools=tools, **kwargs)
     context = RunContext(run_id="run", session_id="session", session_state={})
     output = RunOutput(run_id="run", session_id="session", messages=[])
@@ -58,8 +64,29 @@ async def _catalog(tmp_path: Path, tools: list, **kwargs: Any) -> agent_tool_cal
     )
     catalog = agent_tool_calls.PreparedAgentToolCatalog(agent, context, output, session, runtime)
     processed = await agent.aget_tools(output, context, session)
-    await catalog.prepare(processed)
+    await catalog.prepare(processed, include=include)
     return catalog
+
+
+@pytest.mark.asyncio
+async def test_catalog_prepares_only_included_functions(tmp_path: Path) -> None:
+    """Excluded functions are neither listed nor callable through the catalog."""
+
+    async def keep() -> str:
+        return "kept"
+
+    async def drop() -> str:
+        return "dropped"
+
+    catalog = await _catalog(
+        tmp_path,
+        [Toolkit(name="mixed", tools=[keep, drop])],
+        include=lambda function: function.name != "drop",
+    )
+
+    assert [(item["toolkit"], item["function"]) for item in catalog.metadata()] == [("mixed", "keep")]
+    with pytest.raises(ValueError, match="unavailable"):
+        await catalog.bind(ToolKey("mixed", "drop"))
 
 
 async def _events(

@@ -143,14 +143,25 @@ class PreparedAgentToolCatalog:
             msg = "Agent tool catalog is closed"
             raise RuntimeError(msg)
 
-    async def prepare(self, processed_tools: list[Toolkit | Callable | Function | dict]) -> None:
-        """Prepare qualified entries separately so Agno cannot flatten collisions."""
+    async def prepare(
+        self,
+        processed_tools: list[Toolkit | Callable | Function | dict],
+        *,
+        include: Callable[[Function], bool] | None = None,
+    ) -> None:
+        """Prepare qualified entries separately so Agno cannot flatten collisions; skip functions `include` rejects."""
         async with self._lock:
             self._check_open()
             with self.execution_context():
-                self._prepare(processed_tools)
+                self._prepare(processed_tools, include=include)
 
-    def _prepare(self, processed_tools: list[Toolkit | Callable | Function | dict], owner: str | None = None) -> None:
+    def _prepare(
+        self,
+        processed_tools: list[Toolkit | Callable | Function | dict],
+        owner: str | None = None,
+        *,
+        include: Callable[[Function], bool] | None = None,
+    ) -> None:
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
         instructions: dict[ToolKey, tuple[str, ...]] = {}
         authored_ids = {id(tool) for tool in self.agent.tools or []} if isinstance(self.agent.tools, list) else set()
@@ -170,6 +181,8 @@ class PreparedAgentToolCatalog:
                     else ()
                 )
             for source in functions:
+                if include is not None and not include(source):
+                    continue
                 authored = isinstance(tool, Toolkit) or id(tool) in authored_ids or source.owning_toolkit is not None
                 namespace = (
                     owner
