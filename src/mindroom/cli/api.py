@@ -24,7 +24,7 @@ def is_loopback_host(host: str) -> bool:
 
 
 @dataclass(frozen=True)
-class ApiTarget:
+class _ApiTarget:
     """A checked MindRoom API base URL with the headers and proxy setting its requests must use."""
 
     base_url: str
@@ -32,7 +32,7 @@ class ApiTarget:
     trust_env: bool
 
 
-def resolve_api_target(runtime_paths: RuntimePaths, url: str | None, *, require_key: bool = False) -> ApiTarget:
+def resolve_api_target(runtime_paths: RuntimePaths, url: str | None, *, require_key: bool = False) -> _ApiTarget:
     """Pick the MindRoom URL, refusing to send an operator key over remote HTTP or through an environment proxy."""
     import httpx  # noqa: PLC0415
 
@@ -52,7 +52,7 @@ def resolve_api_target(runtime_paths: RuntimePaths, url: str | None, *, require_
     if token and parsed.scheme == "http" and not is_loopback_host(parsed.host):
         msg = "Use HTTPS when sending MINDROOM_API_KEY to a remote endpoint."
         raise ValueError(msg)
-    return ApiTarget(
+    return _ApiTarget(
         base_url=base_url.rstrip("/"),
         headers={"Authorization": f"Bearer {token}"} if token else {},
         trust_env=not (token and parsed.scheme == "http"),
