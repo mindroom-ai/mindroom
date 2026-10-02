@@ -944,9 +944,14 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     receipt = await owner.operation(original)
     assert called == ["original"]
     assert receipt["status"] == "completed"
-    assert ToolCallReceipt.model_validate(receipt).outcome == (
-        {"error": "Tool result projection failed; execution status is retained"} if large_result else "original"
-    )
+    outcome = ToolCallReceipt.model_validate(receipt).outcome
+    if large_result:
+        # Without a workspace to save it to, the output is shortened to fit its receipt.
+        assert isinstance(outcome, str)
+        assert outcome.startswith("x" * 1000)
+        assert outcome.endswith("Call the tool directly for all of it.]")
+    else:
+        assert outcome == "original"
     await owner.close()
 
 

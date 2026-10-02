@@ -5028,7 +5028,7 @@ mindroom-agent context read NAME --offset 0 --limit 8000
 Use names returned by context discovery.
 Context reads do not accept arbitrary filesystem paths.
 Large schemas provide a context name for paged readback.
-Large tool results provide a bounded preview and a workspace artifact path containing the full output.
+Large tool results provide a bounded preview and a workspace artifact path containing the full output; for an agent without a workspace, they are shortened instead.
 Images, audio, and files remain available through the normal response attachment handling.
 
 ## Exit codes
