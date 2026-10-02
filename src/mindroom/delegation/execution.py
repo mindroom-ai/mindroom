@@ -902,14 +902,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
     excluded = tool.tool_name != "job" and toolkit_is_background_excluded("delegate", config, runtime_paths)
-    mode = "native" if excluded else "managed" if background is not None else "inline"
     # A saved approval keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):
             background = None
-    elif mode != "managed":
+    elif excluded:
+        # An excluded delegate toolkit runs its child natively, outside the job runtime.
         background = None
-        if mode == "native" and "wait_timeout" in (tool.tool_args or {}):
+        if "wait_timeout" in (tool.tool_args or {}):
             tool.tool_call_error = True
             resolve_result("wait_timeout is unavailable for the excluded delegate toolkit.")
             return False
@@ -973,6 +973,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # Recheck current authorization and output policy for launches and resumed approvals.
     # Retrieving a finished job's result only reads it; the lookup already checked current access.
     authorization: Config | str = config
+    output_request = None
     if background_job is None or background_job.status == "awaiting_approval":
         authorization = authorize_delegation(
             caller,
@@ -984,26 +985,25 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             depth=delegation_depth,
             model=model,
         )
-    output_request = None
-    if not isinstance(authorization, str) and (background_job is None or background_job.status == "awaiting_approval"):
-        output_path = args.get(OUTPUT_PATH_ARGUMENT)
-        output_tool_name = tool.tool_name or "run_subagent"
-        if background_job is not None:
-            output_path = background_job.adapter.get("output_path")
-            assert retained is not None
-            output_tool_name = "continue_subagent" if retained.previous_delegation_id else "run_subagent"
-        prepared_output = _prepare_delegation_output(
-            caller,
-            config,
-            runtime_paths,
-            caller_identity,
-            output_path,
-            tool_name=output_tool_name,
-        )
-        if isinstance(prepared_output, dict):
-            authorization = json.dumps(prepared_output)
-        else:
-            output_request = prepared_output
+        if not isinstance(authorization, str):
+            output_path = args.get(OUTPUT_PATH_ARGUMENT)
+            output_tool_name = tool.tool_name or "run_subagent"
+            if background_job is not None:
+                output_path = background_job.adapter.get("output_path")
+                assert retained is not None
+                output_tool_name = "continue_subagent" if retained.previous_delegation_id else "run_subagent"
+            prepared_output = _prepare_delegation_output(
+                caller,
+                config,
+                runtime_paths,
+                caller_identity,
+                output_path,
+                tool_name=output_tool_name,
+            )
+            if isinstance(prepared_output, dict):
+                authorization = json.dumps(prepared_output)
+            else:
+                output_request = prepared_output
     if isinstance(authorization, str):
         if retained is not None:
             if background_job is not None:
@@ -1376,6 +1376,22 @@ def prepare_delegation_state(
     return state, previous_state
 
 
+async def _newer_pause(
+    entity: Agent | Team,
+    response: RunOutput | TeamRunOutput,
+    resolved: DelegationState,
+) -> RunOutput | TeamRunOutput | None:
+    """Return the parent run's latest saved output when it already presents a newer pause than `resolved`."""
+    if response.run_id is None:
+        return None
+    latest = await entity.aget_run_output(response.run_id, session_id=response.session_id)
+    if latest is None:
+        return None
+    latest_state = DelegationState.from_metadata(latest.metadata)
+    pending = (resolved.pending_child_id, resolved.pending_job_generation)
+    return latest if (latest_state.pending_child_id, latest_state.pending_job_generation) != pending else None
+
+
 async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
     entity: Agent | Team,
     response: RunOutput | TeamRunOutput,
@@ -1444,19 +1460,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             except JobContinuationError as error:
                 # A duplicate card must not overwrite a newer pause saved
                 # by this same parent run, or touch another parent's child.
-                pending = (previous_state.pending_child_id, previous_state.pending_job_generation)
-                latest = (
-                    await entity.aget_run_output(response.run_id, session_id=response.session_id)
-                    if response.run_id is not None
-                    else None
-                )
-                if latest is not None:
-                    latest_state = DelegationState.from_metadata(latest.metadata)
-                    if (latest_state.pending_child_id, latest_state.pending_job_generation) != pending:
-                        return latest
+                if (latest := await _newer_pause(entity, response, previous_state)) is not None:
+                    return latest
                 reason = str(error)
                 _resolve_delegation_requirement(requirement, reason, response, agent_name, on_event)
-                state.children = [item for item in state.children if item.delegation_id != pending[0]]
+                state.children = [
+                    item for item in state.children if item.delegation_id != previous_state.pending_child_id
+                ]
                 if on_event is not None:
                     _settle_pending_child_tools(response, previous_state.pending_tools, on_event, reason=reason)
                 await after_delegation(

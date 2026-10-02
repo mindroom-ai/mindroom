@@ -56,10 +56,9 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
 class JobTools(Toolkit):
     """Discover and manage jobs belonging to the exact caller and conversation."""
 
-    def __init__(self, runtime_paths: RuntimePaths, owner: ToolExecutionIdentity, *, depth: int = 0) -> None:
+    def __init__(self, runtime_paths: RuntimePaths, owner: ToolExecutionIdentity) -> None:
         self._runtime_paths = runtime_paths
         self._owner = owner
-        self._depth = depth
         super().__init__(
             name="job",
             tools=[self.job],
@@ -110,7 +109,7 @@ class JobTools(Toolkit):
         if any("job" in toolkit.get_async_functions() for toolkit in tools):
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
-        return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner, depth=depth), output_file_policy)
+        return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner), output_file_policy)
 
     def caller_identity(self) -> ToolExecutionIdentity:
         """Keep the original execution owner with the current conversation session."""
@@ -160,31 +159,31 @@ class JobTools(Toolkit):
         if runtime is None:
             return "Job controls require a managed conversation."
         owner = self.caller_identity()
+        # Job controls exist only for the top-level caller, so every job they reach has depth 0.
         try:
             if action == "list":
                 return json.dumps(
                     [
                         job_summary(job)
-                        for job in await runtime.list_jobs(owner=owner, depth=self._depth, limit=limit, offset=offset)
+                        for job in await runtime.list_jobs(owner=owner, depth=0, limit=limit, offset=offset)
                     ],
                 )
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":
-                waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
+                waited = await runtime.wait(job_id, owner=owner, depth=0, timeout=wait_timeout)
                 if waited.claim is not None and waited.job.status == "awaiting_approval":
                     # Only the native delegation projection can present a child's pending approval.
                     await runtime.release_wait(job_id, waited.claim)
                 elif waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return format_job_handle(waited.job)
-            if action == "cancel":
-                job = await runtime.cancel(job_id, owner=owner, depth=self._depth)
-                waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
-                if waited.claim is not None:
-                    await retain_claim(runtime, job_id, waited.claim)
-            else:
+            if action != "cancel":
                 return "Unknown job action."
+            job = await runtime.cancel(job_id, owner=owner, depth=0)
+            waited = await runtime.wait(job_id, owner=owner, depth=0, timeout=0)
+            if waited.claim is not None:
+                await retain_claim(runtime, job_id, waited.claim)
             return format_job_handle(job)
         except ValueError as error:
             # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.

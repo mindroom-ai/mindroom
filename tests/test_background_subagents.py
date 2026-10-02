@@ -47,6 +47,7 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     job_child,
     job_owner,
+    keep_child,
     start_delegation_job,
     tool_job_runtime,
     wait_for_status,
@@ -770,7 +771,7 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
             operation=operation,
         )
         if continuation
-        else start_delegation(runtime, child, owner=job_owner(), operation=operation),
+        else start_delegation(runtime, child, owner=job_owner(), operation=operation, cancel=keep_child),
     )
     try:
         await written.wait()

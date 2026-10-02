@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from weakref import WeakKeyDictionary, ref
 
@@ -119,13 +120,25 @@ async def reconcile_delegation(
     return _terminal(child)
 
 
+async def _run_refreshing_snapshot(
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    child: DelegationChild,
+    adapter: dict[str, Any],
+) -> BackgroundOutcome:
+    """Run the child, then snapshot its native state into the job adapter however the run ends."""
+    try:
+        return await operation()
+    finally:
+        adapter["child"] = _child_snapshot(child)
+
+
 async def start_delegation(
     runtime: ToolJobRuntime,
     child: DelegationChild,
     *,
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
-    cancel: Callable[[DelegationChild], Awaitable[None]] | None = None,
+    cancel: Callable[[DelegationChild], Awaitable[None]],
     output_path: str | None = None,
 ) -> tuple[BackgroundJob, JobClaim | None]:
     """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
@@ -135,17 +148,8 @@ async def start_delegation(
     context = get_tool_runtime_context()
     adapter = {"child": _child_snapshot(child), "output_path": output_path}
 
-    async def run() -> BackgroundOutcome:
-        try:
-            return await operation()
-        finally:
-            adapter["child"] = _child_snapshot(child)
-
     async def cleanup(job: BackgroundJob) -> BackgroundOutcome | None:
-        if cancel is not None:
-            return await reconcile_delegation(job, cleanup=cancel, child=child)
-        job.adapter["child"] = _child_snapshot(child)
-        return _terminal(child)
+        return await reconcile_delegation(job, cleanup=cancel, child=child)
 
     try:
         return await runtime.start(
@@ -157,7 +161,7 @@ async def start_delegation(
             source_kind=context.source_kind if context is not None else None,
             adapter=adapter,
             owner=owner,
-            operation=run,
+            operation=partial(_run_refreshing_snapshot, operation, child, adapter),
             cancel=cleanup,
         )
     finally:
@@ -177,20 +181,13 @@ async def continue_delegation(
     """Continue native approval work under the existing generic job."""
     job = await runtime.lookup(job_id, owner=owner, depth=depth)
     child, adapter = _retained_delegation(runtime, job)
-
-    async def run() -> BackgroundOutcome:
-        try:
-            return await operation()
-        finally:
-            # Continuation metadata is applied atomically with its outcome by the runtime.
-            adapter["child"] = _child_snapshot(child)
-
+    # Continuation metadata is applied atomically with its outcome by the runtime.
     return await runtime.continue_job(
         job_id,
         owner=owner,
         depth=depth,
         expected_generation=expected_generation,
-        operation=run,
+        operation=partial(_run_refreshing_snapshot, operation, child, adapter),
         adapter=adapter,
     )
 

@@ -70,8 +70,13 @@ async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> Bac
     return job
 
 
+async def keep_child(_child: DelegationChild) -> None:
+    """A cancellation cleanup that leaves the child as its operation settled it."""
+
+
 async def start_delegation_job(runtime: ToolJobRuntime, child: DelegationChild, **options: Any) -> BackgroundJob:  # noqa: ANN401
     """Accept a native child, then drop the claim its start minted, as `start_job` does."""
+    options.setdefault("cancel", keep_child)
     job, claim = await start_delegation(runtime, child, **options)
     await runtime.release_wait(job.job_id, claim)
     return job

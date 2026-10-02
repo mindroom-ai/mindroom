@@ -150,13 +150,14 @@ def _is_framework_function(function: Function) -> bool:
     return function.owning_toolkit is None or function_actor(function) is None
 
 
-def _declares_wait_timeout(function: Function) -> bool:
+def declares_wait_timeout(function: Function) -> bool:
+    """Whether the application function itself declares a wait_timeout parameter."""
     return "wait_timeout" in function.parameters.get("properties", {})
 
 
 def _validate_wait_timeout_parameter(function: Function) -> None:
     """Reject application parameters that would be consumed as framework metadata."""
-    if _declares_wait_timeout(function):
+    if declares_wait_timeout(function):
         msg = (
             f"Tool {function.name!r} declares its own wait_timeout parameter. "
             "Rename it or add its toolkit to background_tool_jobs.exclude_toolkits."
@@ -418,16 +419,13 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             check_current_execution_authority()
             return await original(call)
         mode = wait_mode(call.function, depth=depth)
-        try:
-            if mode != "native":
+        wait_timeout = None
+        if mode != "native":
+            try:
                 _validate_wait_timeout_parameter(call.function)
-            wait_timeout = (
-                None
-                if mode == "native"
-                else read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
-            )
-        except ValueError as error:
-            return _failed_call(call, error)
+                wait_timeout = read_wait_timeout(call.arguments, owned_execution=job_owns_execution() or depth > 0)
+            except ValueError as error:
+                return _failed_call(call, error)
         if call.function.stop_after_tool_call and wait_timeout is not None:
             return _failed_call(
                 call,

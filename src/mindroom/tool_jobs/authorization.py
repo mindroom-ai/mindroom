@@ -82,12 +82,8 @@ def locally_allowed(
     """Check current authored ownership and filters without remote availability probes."""
     if owner.agent_name not in config.agents:
         return False
-    policy = resolve_agent_policy_from_data(
-        owner.agent_name,
-        config.agents[owner.agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-    )
-    if "scope" not in authority or authority["scope"] != policy.effective_execution_scope:
+    # The execution scope recorded when the toolkit was built must still be the actor's current scope.
+    if "scope" not in authority or authority["scope"] != authority_snapshot(config, owner.agent_name)["scope"]:
         return False
     construction = authority.get("construction")
     if not isinstance(construction, dict):
@@ -128,11 +124,10 @@ def _configured_tool_allowed(
     if metadata is not None and metadata.requires_room_context and owner.room_id is None:
         return False
     server_id = mcp_server_id_from_tool_name(entry.name)
-    filtered_name = tool_name
     authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
     if server_id is None:
         return construction.get("config_signature") == tool_config_signature(authored_filter) and tool_name_allowed(
-            filtered_name,
+            tool_name,
             include=authored_filter.get("include_tools"),
             exclude=authored_filter.get("exclude_tools"),
         )

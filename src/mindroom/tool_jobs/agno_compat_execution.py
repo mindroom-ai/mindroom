@@ -12,7 +12,12 @@ from agno.models.base import Model
 from agno.tools.function import Function
 
 from mindroom.custom_tools.job import project_native_job_wait
-from mindroom.tool_jobs.agno_execution import execute_owned_tool_call, wait_mode, wrap_tool_execution
+from mindroom.tool_jobs.agno_execution import (
+    declares_wait_timeout,
+    execute_owned_tool_call,
+    wait_mode,
+    wrap_tool_execution,
+)
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -75,7 +80,7 @@ def _wrap_tool_schemas(
             if (
                 not isinstance(tool, Function)
                 or wait_mode(tool, depth=depth) != "managed"
-                or "wait_timeout" in tool.parameters.get("properties", {})
+                or declares_wait_timeout(tool)
             ):
                 projected.append(tool)
                 continue
