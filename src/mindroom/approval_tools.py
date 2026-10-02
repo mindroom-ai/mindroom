@@ -101,7 +101,7 @@ def validate_approval_tool_owners(
     calls: Sequence[ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> None:
-    """Reject an approved call unless its final executable has the recorded owner."""
+    """Reject an approved call unless its final executable has the recorded owner and arguments."""
     owners = toolkit_owners_for_agents(agents)
     pending = {
         requirement.tool_execution.tool_call_id: requirement
@@ -117,9 +117,10 @@ def validate_approval_tool_owners(
         if (
             tool is None
             or tool.tool_name != call.tool_name
+            or not call.binds_arguments(tool.tool_args)
             or (requirement.member_agent_id is not None and requirement.member_agent_id != call.invoking_agent)
         ):
-            msg = "Saved approval function or member no longer matches the pending call; retry the request"
+            msg = "Saved approval function, arguments, or member no longer match the pending call; retry the request"
             raise RuntimeError(msg)
         if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
             msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"

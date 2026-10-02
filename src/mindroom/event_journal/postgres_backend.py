@@ -15,7 +15,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from .legacy_response_attempts import migrate_response_attempts
-from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
+from .legacy_schema import upgrade_approval_argument_digests, upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
 
@@ -139,10 +139,9 @@ class PostgresBackend:
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_schema = current_schema() AND table_name = 'approval_continuation_calls'",
             )
-            upgrade_approval_toolkit_origins(
-                _PostgresTransaction(cursor),
-                frozenset(str(row["column_name"]) for row in cursor.fetchall()),
-            )
+            call_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
+            upgrade_approval_toolkit_origins(_PostgresTransaction(cursor), call_columns)
+            upgrade_approval_argument_digests(_PostgresTransaction(cursor), call_columns)
             migrate_response_attempts(_PostgresTransaction(cursor), existing_tables)
         self._writer.commit()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field, replace
@@ -92,6 +93,16 @@ class ApprovalCall:
     reason: str | None = None
     human_approval_required: bool | None = None
     toolkit_name: str | None = None
+    arguments_digest: str | None = None
+
+    def binds_arguments(self, tool_args: Mapping[str, object] | None) -> bool:
+        """Return whether these are exactly the arguments this call paused with."""
+        return self.arguments_digest is not None and self.arguments_digest == approval_arguments_digest(tool_args)
+
+
+def approval_arguments_digest(tool_args: Mapping[str, object] | None) -> str:
+    """Return the canonical digest that binds one approval to its call's exact arguments."""
+    return hashlib.sha256(_json(tool_args or {}).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +277,7 @@ def get(
     call_rows = transaction.fetchall(
         """
         SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
-               human_approval_required, toolkit_name
+               human_approval_required, toolkit_name, arguments_digest
         FROM approval_continuation_calls
         WHERE principal_id = ? AND approval_id = ? AND generation = ?
         ORDER BY call_ordinal
@@ -306,6 +317,7 @@ def _from_rows(
             tool_name=str(call["tool_name"]),
             invoking_agent=str(call["invoking_agent"]),
             toolkit_name=cast("str | None", call["toolkit_name"]),
+            arguments_digest=cast("str | None", call["arguments_digest"]),
             expires_at_ns=int(call["expires_at_ns"]),
             decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
             reason=cast("str | None", call["reason"]),
@@ -399,8 +411,8 @@ def _insert_calls(
             INSERT INTO approval_continuation_calls (
                 principal_id, approval_id, generation, tool_call_id, call_ordinal,
                 tool_name, invoking_agent, expires_at_ns, decision, reason,
-                human_approval_required, toolkit_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                human_approval_required, toolkit_name, arguments_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -415,6 +427,7 @@ def _insert_calls(
                 call.reason,
                 call.human_approval_required,
                 call.toolkit_name,
+                call.arguments_digest,
             ),
         )
 
@@ -566,7 +579,7 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         f"""
         SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
                calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
-               calls.human_approval_required, calls.toolkit_name
+               calls.human_approval_required, calls.toolkit_name, calls.arguments_digest
         FROM approval_continuation_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.principal_id = calls.principal_id

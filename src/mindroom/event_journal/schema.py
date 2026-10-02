@@ -406,6 +406,7 @@ _TABLES = (
         reason TEXT,
         human_approval_required BOOLEAN,
         toolkit_name TEXT,
+        arguments_digest TEXT,
         PRIMARY KEY (principal_id, approval_id, generation, tool_call_id),
         UNIQUE (principal_id, approval_id, generation, call_ordinal),
         FOREIGN KEY (principal_id, approval_id)

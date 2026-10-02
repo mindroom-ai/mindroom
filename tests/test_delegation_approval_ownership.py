@@ -24,7 +24,7 @@ from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.response_sources import ResponseSources
@@ -175,6 +175,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
                 invoking_agent=invoking_agent,
                 toolkit_name="file" if decision == "wrong_owner" else toolkit_name,
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
             )
             if not gate:
                 child = DelegationState.from_metadata(response.metadata).children[0]

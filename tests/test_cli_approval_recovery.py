@@ -36,7 +36,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.config.agent import AgentConfig
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
@@ -175,7 +175,16 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         state="claimed",
         request_body="Load sleep and answer using knowledge",
         continuation_count=continuation_count,
-        calls=(ApprovalCall("loader", "load_tool", "helper", 100, toolkit_name="dynamic_tools"),),
+        calls=(
+            ApprovalCall(
+                "loader",
+                "load_tool",
+                "helper",
+                100,
+                toolkit_name="dynamic_tools",
+                arguments_digest=approval_arguments_digest({"tool_name": "sleep"}),
+            ),
+        ),
         cli_call={
             "kind": "agent_cli",
             "toolkit": "dynamic_tools",
@@ -312,6 +321,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
                 100,
                 decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
                 toolkit_name="actions",
+                arguments_digest=approval_arguments_digest({"value": "exact\nargument"}),
             ),
         ),
         cli_call={
@@ -434,6 +444,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
                 100,
                 decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
                 toolkit_name="shell",
+                arguments_digest=approval_arguments_digest(arguments),
             ),
         ),
         cli_call=CliApprovalCall(
@@ -600,7 +611,15 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         response_text=presentation.response_text,
         response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
         calls=(
-            ApprovalCall("hidden", name, "helper", 100, decision=ApprovalDecision.APPROVED, toolkit_name=namespace),
+            ApprovalCall(
+                "hidden",
+                name,
+                "helper",
+                100,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name=namespace,
+                arguments_digest=approval_arguments_digest(arguments),
+            ),
         ),
         cli_call={
             "kind": "agent_cli",
