@@ -45,6 +45,28 @@ def test_safe_load_accepts_bytes_and_binary_streams() -> None:
     assert yaml_io.safe_load(io.BytesIO(b"a: 1")) == {"a": 1}
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("x: 1" + ":1" * 32, id="base-60-int"),
+        pytest.param("x: !!int '1" + ":1" * 32 + "'", id="tagged-base-60-int"),
+        pytest.param("{" + "<<: {}, " * 65 + "a: 1}", id="merge-keys"),
+        pytest.param("x: 0000-01-01", id="year-0-date"),
+        pytest.param("x: !!bool maybe", id="mistagged-bool"),
+    ],
+)
+def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document: str) -> None:
+    """Worker-written YAML must not take superlinear time to build or escape callers that catch only YAML errors."""
+    with pytest.raises(yaml.YAMLError):
+        yaml_io.safe_load_without_aliases(document)
+
+
+def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
+    """Short base-60 integers and a few merge keys still load exactly like ``safe_load``."""
+    document = "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\n"
+    assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
+
+
 def test_safe_dump_roundtrips() -> None:
     """Dumped documents should parse back to the original data."""
     data = yaml.safe_load(_SAMPLE_DOCUMENT)

@@ -60,6 +60,8 @@ Reads through those descriptors are capped per surface.
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
 A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.
+The same files are refused when one mapping holds more than 64 `<<` merge keys or a base-60 integer such as `1:30:00` is longer than 64 characters, because PyYAML builds both in time that grows with the square of their size.
+A value PyYAML cannot build, such as a year-0 date, is handled like any other YAML error in that file.
 The thread exporter decides whether a file changed by comparing its text rather than parsing it, and indexes a thread file too large to parse whole from the thread header before its messages.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
