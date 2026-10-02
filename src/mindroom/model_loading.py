@@ -41,29 +41,9 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
 # A hosted API that sends no stream event for this long has stalled.
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
-# Providers whose built-in endpoint is a hosted API. A local server can stay
-# silent for minutes while it queues a request or loads a model, so ollama,
-# llama_cpp, and custom endpoints get an idle limit only when configured.
-_HOSTED_STREAM_PROVIDERS = frozenset(
-    {
-        "anthropic",
-        "azure",
-        _BEDROCK_CLAUDE_PROVIDER,
-        "cerebras",
-        "codex",
-        "deepseek",
-        "gemini",
-        "google",
-        "groq",
-        "kimi",
-        "kimi_code",
-        "openai",
-        "openai_codex",
-        "openrouter",
-        "vertexai_claude",
-        "zai",
-    },
-)
+# Local servers can stay silent for minutes while a request queues or a model
+# loads, so they and custom endpoints get an idle limit only when configured.
+_LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 
 
 def canonical_provider(provider: str) -> str:
@@ -410,7 +390,7 @@ def _stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runti
         or (isinstance(client_params, dict) and client_params.get("base_url"))
         or (provider == "openai" and runtime_paths.env_value("OPENAI_BASE_URL"))
     )
-    if provider not in _HOSTED_STREAM_PROVIDERS or custom_endpoint:
+    if provider in _LOCAL_STREAM_PROVIDERS or custom_endpoint:
         return None
     return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
 
