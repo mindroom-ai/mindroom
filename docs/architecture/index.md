@@ -75,6 +75,7 @@ MindRoom's architecture consists of several key components working together.
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
+| `cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |

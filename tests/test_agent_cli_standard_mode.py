@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -88,6 +89,71 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     assert not running_api._owners
 
 
+def _call_and_wait(call_id: str, toolkit: str, function: str, arguments: dict[str, object]) -> str:
+    return (
+        f"mindroom-agent tools call {toolkit} {function} --call-id {call_id} --json '{json.dumps(arguments)}'; "
+        f"mindroom-agent calls wait {call_id}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_nested_cli_shell_call_runs_inside_the_outer_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """A shell call made through the CLI reuses the outer command's window instead of waiting for it."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    command = _call_and_wait(
+        "00000000-0000-4000-8000-000000000002", "shell", "run_shell_command", {"args": "echo nested-ok"}
+    )
+    provider.steps = [[("run_shell_command", {"args": command})], "done"]
+
+    async with asyncio.timeout(60):
+        assert "done" in await _respond(runtime)
+
+    output = _tool_output(provider)
+    assert "nested-ok" in output, output
+    assert '"status":"completed"' in output.replace(" ", ""), output
+
+
+@pytest.mark.asyncio
+async def test_parallel_native_shell_calls_each_reach_the_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """Shell calls in one provider batch take turns at the response's CLI window."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    provider.steps = [
+        [
+            (
+                "run_shell_command",
+                {
+                    "args": _call_and_wait(
+                        f"00000000-0000-4000-8000-00000000001{index}", "calculator", "add", {"a": index, "b": 10}
+                    )
+                },
+            )
+            for index in (1, 2)
+        ],
+        "done",
+    ]
+
+    async with asyncio.timeout(60):
+        assert "done" in await _respond(runtime)
+
+    outputs = [str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool"]
+    assert len(outputs) == 2
+    assert all('"status":"completed"' in output.replace(" ", "") for output in outputs), outputs
+    assert any("11" in output for output in outputs), outputs
+    assert any("12" in output for output in outputs), outputs
+
+
 @pytest.mark.asyncio
 async def test_approval_gated_tools_stay_native_only(
     tmp_path: Path,
@@ -97,7 +163,7 @@ async def test_approval_gated_tools_stay_native_only(
     """A tool that may need approval keeps its native confirmation and is not offered to the CLI."""
     runtime = _helper_runtime(tmp_path, running_api)
     runtime.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="add", action="require_approval")]
+        rules=[ApprovalRuleConfig(match="add", action="require_approval")],
     )
     provider = ScriptedProvider()
     provider.install(monkeypatch)

@@ -5,6 +5,7 @@ Its stdlib client reads `MINDROOM_AGENT_CLI_URL` and `MINDROOM_AGENT_CLI_TOKEN` 
 Bash is the agent's own shell: it runs in the primary for agents without a worker, or in the agent's ordinary worker through the sandbox proxy.
 The token identifies one response turn; arguments cannot select another requester, agent, worker, or credential owner.
 Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shell-permission preflight.
+Standard-mode agents whose shell can reach MindRoom get the same CLI inside their native `run_shell_command`: `cli_shell_agent.py` binds the response owner to a catalog of the tools that finish inside a command and opens its admission window around each native shell call.
 
 Discover tool names and schemas with `tools list`, `tools search`, and `tools describe`.
 Listing accepts `--cursor` and `--limit`; schemas are loaded only when described.

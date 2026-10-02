@@ -177,6 +177,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
+| `cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |

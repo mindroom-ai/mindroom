@@ -4941,6 +4941,15 @@ A minimal subagent cannot pause for approval, so approval-gated tools are hidden
 Minimal subagents run only inside Matrix conversations.
 A minimal child runs Bash where its own shell runs.
 
+## Standard mode
+
+Standard-mode agents with the `shell` tool can also use `mindroom-agent` inside their shell commands, so one script can combine many tool calls, loop over results, or filter them before anything returns to the model.
+It is available automatically in Matrix conversations when the agent's shell meets the [deployment requirements](#deployment-requirements); the agent's instructions then mention it.
+The agent keeps all of its tools as ordinary tools as well.
+Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
+Calls are admitted only while the shell command that made them is running, and shell commands of one response take turns when they use the CLI.
+Streamed responses show calls made through the CLI as their own tool-trace entries.
+
 ## Instructions and context
 
 Minimal mode replaces the automatically assembled long prompt with discovery guidance and optional `minimal_instructions`:
@@ -20859,6 +20868,7 @@ MindRoom's architecture consists of several key components working together.
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
+| `cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
