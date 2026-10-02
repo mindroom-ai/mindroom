@@ -21,7 +21,7 @@ from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_roo
 from mindroom.path_confinement import read_regular_file_within_root, write_file_within_root
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from mindroom.constants import RuntimePaths
 
@@ -41,8 +41,8 @@ def _migrate(runtime_paths: RuntimePaths) -> None:
     if receipt.exists():
         return
     storage_root = runtime_paths.storage_root
-    for relative in _legacy_records(storage_root):
-        payload = _read_valid(storage_root, relative)
+    for relative, is_valid in _legacy_records(storage_root):
+        payload = _read_valid(storage_root, relative, is_valid)
         if payload is None:
             continue
         if not (records_root / relative).exists():
@@ -54,16 +54,18 @@ def _migrate(runtime_paths: RuntimePaths) -> None:
     write_json_file_durable(receipt, {"version": 1}, strict_atomic_replace=True)
 
 
-def _legacy_records(storage_root: Path) -> Iterator[Path]:
+def _legacy_records(storage_root: Path) -> Iterator[tuple[Path, Callable[[Path, bytes], bool]]]:
     for agent in _directories(storage_root / "agents"):
         base = Path("agents", agent.name)
-        yield from (base / name for name in ("invited_rooms.json", "pending_room_invites.json", "agent_modes.json"))
-        records = (path.name for path in _children(agent / "personal_rooms") if path.suffix == ".json")
-        yield from (base / "personal_rooms" / name for name in records)
+        yield base / "invited_rooms.json", _is_room_list
+        yield base / "pending_room_invites.json", _is_invite_map
+        yield base / "agent_modes.json", _is_object
+        for record in _children(agent / "personal_rooms"):
+            if record.suffix == ".json":
+                yield base / "personal_rooms" / record.name, _is_personal_room
     for scope in _directories(storage_root / "private_instances"):
-        yield from (
-            Path("private_instances", scope.name, agent.name, "agent_modes.json") for agent in _directories(scope)
-        )
+        for agent in _directories(scope):
+            yield Path("private_instances", scope.name, agent.name, "agent_modes.json"), _is_object
 
 
 def _directories(directory: Path) -> list[Path]:
@@ -80,7 +82,7 @@ def _children(directory: Path) -> list[Path]:
         return []
 
 
-def _read_valid(storage_root: Path, relative: Path) -> bytes | None:
+def _read_valid(storage_root: Path, relative: Path, is_valid: Callable[[Path, bytes], bool]) -> bytes | None:
     """Read one old record without following links or blocking, and only if it is valid."""
     try:
         payload = read_regular_file_within_root(storage_root, relative, max_bytes=_MAX_RECORD_BYTES)
@@ -90,22 +92,30 @@ def _read_valid(storage_root: Path, relative: Path) -> bytes | None:
         logger.warning("Left an unreadable record in a worker-mounted state root", path=str(relative), error=str(error))
         return None
     try:
-        if relative.parent.name == "personal_rooms":
-            valid = (
-                relative.name == f"{personal_room_digest(PersonalRoomRecord.model_validate_json(payload).user_id)}.json"
-            )
-        else:
-            value = json.loads(payload)
-            if relative.name == "invited_rooms.json":
-                valid = isinstance(value, list) and all(isinstance(room_id, str) for room_id in value)
-            elif relative.name == "pending_room_invites.json":
-                valid = isinstance(value, dict) and all(isinstance(inviter, str) for inviter in value.values())
-            else:
-                # The agent-mode reader keeps only the valid choices of an object.
-                valid = isinstance(value, dict)
+        valid = is_valid(relative, payload)
     except (RecursionError, ValueError):
         valid = False
     if not valid:
         logger.warning("Left an invalid record in a worker-mounted state root", path=str(relative))
         return None
     return payload
+
+
+def _is_room_list(_relative: Path, payload: bytes) -> bool:
+    value = json.loads(payload)
+    return isinstance(value, list) and all(isinstance(room_id, str) for room_id in value)
+
+
+def _is_invite_map(_relative: Path, payload: bytes) -> bool:
+    value = json.loads(payload)
+    return isinstance(value, dict) and all(isinstance(inviter, str) for inviter in value.values())
+
+
+def _is_object(_relative: Path, payload: bytes) -> bool:
+    # The agent-mode reader keeps only the valid choices of an object.
+    return isinstance(json.loads(payload), dict)
+
+
+def _is_personal_room(relative: Path, payload: bytes) -> bool:
+    record = PersonalRoomRecord.model_validate_json(payload)
+    return relative.name == f"{personal_room_digest(record.user_id)}.json"
