@@ -6,6 +6,7 @@ from typing import Literal
 
 from agno.tools import Toolkit
 
+from mindroom.authorization import addressable_responder_names
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.thread_models import (
     clear_thread_model_override,
@@ -18,7 +19,7 @@ _MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
 
 
 class ThreadModelTools(Toolkit):
-    """Tools for switching the model used by all agents in the current Matrix thread."""
+    """Tools for switching the model used by the requester's agents and teams in the current Matrix thread."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -91,7 +92,7 @@ class ThreadModelTools(Toolkit):
         model_name: str,
         when: Literal["after-toolcall", "next-turn"] = "next-turn",
     ) -> str:
-        """Switch the model that all agents and teams use in the current thread.
+        """Switch the model that the agents and teams the requester may address use in the current thread.
 
         The override persists for this thread until reset. It can take effect
         after this tool call or from the next message in the thread.
@@ -127,6 +128,13 @@ class ThreadModelTools(Toolkit):
             model_name=model_name,
             room_id=context.room_id,
             set_by=context.requester_id,
+            entity_names=addressable_responder_names(
+                context.requester_id,
+                context.room_id,
+                context.config,
+                context.runtime_paths,
+                context.require_agent_reply_memberships(),
+            ),
         )
         model = context.config.models[model_name]
         return self._payload(

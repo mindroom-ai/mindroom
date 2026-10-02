@@ -1989,8 +1989,9 @@ class Config(BaseModel):
     ) -> ResolvedRuntimeModel:
         """Resolve the active runtime model plus its configured context window.
 
-        Precedence: explicit `active_model_name`, persisted thread override,
-        persisted room override, configured room override, then authored entity model.
+        Precedence: explicit `active_model_name`, persisted thread override for
+        the entities its setter may address, persisted room override,
+        configured room override, then authored entity model.
         """
         resolved_model_name = active_model_name
         if resolved_model_name is None and thread_id is not None:
@@ -2001,9 +2002,9 @@ class Config(BaseModel):
                 runtime_paths,
                 thread_id,
                 configured_models=self.models,
-            ).active
-            if thread_override is not None:
-                resolved_model_name = thread_override
+            )
+            if thread_override.active is not None and entity_name in thread_override.entity_names:
+                resolved_model_name = thread_override.active
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name

@@ -885,6 +885,7 @@ class TestDelegateKnowledge:
                 model_name=thread_model_name,
                 room_id="!room:example.org",
                 set_by="@alice:example.org",
+                entity_names=("leader", "worker"),
             )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",

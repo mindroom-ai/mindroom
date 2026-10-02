@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.authorization import addressable_responder_names
 from mindroom.model_selection import model_selection_result, parse_model_selection
 from mindroom.model_selection_scope import validate_model_picker_scope
 from mindroom.thread_models import (
@@ -34,6 +35,7 @@ def _apply_model_selection(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     room_id: str,
     thread_id: str,
     requester_user_id: str,
@@ -50,21 +52,40 @@ def _apply_model_selection(
     if request.model not in config.models:
         error = f"Unknown model `{request.model}`. Refresh the model picker."
         return f"❌ {error}", error
+    text = _set_thread_model(
+        request.model,
+        config=config,
+        runtime_paths=runtime_paths,
+        membership_index=membership_index,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_user_id=requester_user_id,
+    )
+    return text, None
+
+
+def _set_thread_model(
+    model_name: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    room_id: str,
+    thread_id: str,
+    requester_user_id: str,
+) -> str:
+    """Persist the override for the entities the requester may address and describe it for either command path."""
     set_thread_model_override(
         runtime_paths,
         thread_id=thread_id,
-        model_name=request.model,
+        model_name=model_name,
         room_id=room_id,
         set_by=requester_user_id,
+        entity_names=addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),
     )
-    return _model_selected_text(request.model, config), None
-
-
-def _model_selected_text(model_name: str, config: Config) -> str:
-    """Describe the exact model key that was persisted by either command path."""
     model = config.models[model_name]
     return (
-        f"✅ This thread now uses `{model_name}` ({model.provider} {model.id}) for all agents and teams.\n"
+        f"✅ This thread now uses `{model_name}` ({model.provider} {model.id}) for the agents and teams you may address.\n"
         "Use `!model reset` to restore room-level model selection."
     )
 
@@ -110,6 +131,7 @@ async def handle_structured_model_command(
             request,
             config=config,
             runtime_paths=runtime_paths,
+            membership_index=membership_index,
             room_id=room_id,
             thread_id=thread_id,
             requester_user_id=requester_user_id,
@@ -145,6 +167,7 @@ def handle_model_command(  # noqa: PLR0911
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
     room_id: str,
     thread_id: str | None,
     requester_user_id: str,
@@ -165,11 +188,12 @@ def handle_model_command(  # noqa: PLR0911
         return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
     if thread_id is None:
         return _THREAD_REQUIRED_MESSAGE
-    set_thread_model_override(
-        runtime_paths,
-        thread_id=thread_id,
-        model_name=requested,
+    return _set_thread_model(
+        requested,
+        config=config,
+        runtime_paths=runtime_paths,
+        membership_index=membership_index,
         room_id=room_id,
-        set_by=requester_user_id,
+        thread_id=thread_id,
+        requester_user_id=requester_user_id,
     )
-    return _model_selected_text(requested, config)

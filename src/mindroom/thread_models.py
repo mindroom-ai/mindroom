@@ -14,7 +14,7 @@ from mindroom.durable_write import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Container
+    from collections.abc import Container, Iterable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -29,7 +29,11 @@ def _store_path(runtime_paths: RuntimePaths) -> Path:
 
 def _is_valid_override(_thread_id: str, record: dict[object, object]) -> bool:
     """Return whether one persisted thread-model record has the required shape."""
-    return isinstance(record.get("model"), str) and isinstance(record.get("set_at", ""), str)
+    return (
+        isinstance(record.get("model"), str)
+        and isinstance(record.get("entities"), str)
+        and isinstance(record.get("set_at", ""), str)
+    )
 
 
 def _load_overrides(path: Path) -> dict[str, OverrideRecord]:
@@ -41,20 +45,23 @@ def _save_overrides(path: Path, overrides: dict[str, OverrideRecord]) -> None:
     write_bounded_override_records(path, overrides, max_records=_MAX_TRACKED_THREADS)
 
 
-def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> str | None:
-    """Return the model name stored for one thread root, if any."""
+def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> OverrideRecord | None:
+    """Return the override record stored for one thread root, if any."""
     if thread_id is None:
         return None
-    record = _load_overrides(_store_path(runtime_paths)).get(thread_id)
-    return record["model"] if record is not None else None
+    return _load_overrides(_store_path(runtime_paths)).get(thread_id)
 
 
 @dataclass(frozen=True)
 class _ThreadModelOverrideState:
-    """One thread's stored override split into the runtime-active name and a stale leftover."""
+    """One thread's stored override split into the runtime-active name and a stale leftover.
+
+    ``entity_names`` are the entities whose runtime model the override governs.
+    """
 
     active: str | None
     stale: str | None
+    entity_names: frozenset[str] = frozenset()
 
 
 def resolve_thread_model_override(
@@ -69,11 +76,12 @@ def resolve_thread_model_override(
     runtime resolution, `!model`, and the `thread_model` tool must all ignore
     it rather than apply or report it as active.
     """
-    override = _get_thread_model_override(runtime_paths, thread_id)
-    if override is None:
+    record = _get_thread_model_override(runtime_paths, thread_id)
+    if record is None:
         return _ThreadModelOverrideState(active=None, stale=None)
+    override = record["model"]
     if override in configured_models:
-        return _ThreadModelOverrideState(active=override, stale=None)
+        return _ThreadModelOverrideState(active=override, stale=None, entity_names=frozenset(record["entities"].split()))
     return _ThreadModelOverrideState(active=None, stale=override)
 
 
@@ -84,12 +92,15 @@ def set_thread_model_override(
     model_name: str,
     room_id: str,
     set_by: str,
+    entity_names: Iterable[str],
 ) -> None:
-    """Persist one thread's model override, replacing any previous one."""
+    """Persist one thread's model override for the entities its setter may address, replacing any previous one."""
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
     overrides[thread_id] = {
         "model": model_name,
+        # Entity names never contain whitespace, so one string keeps the shared string-valued record shape.
+        "entities": " ".join(sorted(entity_names)),
         "room_id": room_id,
         "set_by": set_by,
         "set_at": datetime.now(UTC).isoformat(),

@@ -341,7 +341,7 @@ The other three functions require an active thread context and return an error o
 Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
 With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to all agents and teams in the thread and persists across restarts.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
 `get_thread_model` returns the active override and the available model names.
 When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
 `reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.

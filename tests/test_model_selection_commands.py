@@ -10,15 +10,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import command_parser
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
 from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
-from tests.conftest import make_conversation_reader_mock
+from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup, root_event
 from tests.test_turn_controller_focused import _build_harness
 
@@ -47,7 +52,14 @@ async def test_explicit_model_operation(
     """Explicit reset clears even with a reset key; explicit set never uses aliases."""
     client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models.update({name: ModelConfig(provider="openai", id="test-model") for name in ("reset", "list")})
-    set_thread_model_override(paths, thread_id="$root", model_name="default", room_id=ROOM, set_by=USER)
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="default",
+        room_id=ROOM,
+        set_by=USER,
+        entity_names=("helper",),
+    )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": operation}
     if model is not None:
         metadata["model"] = model
@@ -97,7 +109,14 @@ async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path:
             " fast ": ModelConfig(provider="openai", id="padded-fast"),
         },
     )
-    set_thread_model_override(paths, thread_id="$root", model_name="default", room_id=ROOM, set_by=USER)
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="default",
+        room_id=ROOM,
+        set_by=USER,
+        entity_names=("helper",),
+    )
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
     executor = harness.controller.deps.command_executor
     executor.deps.runtime.client = client
@@ -138,7 +157,14 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
     """Rejected metadata or scope must leave the override untouched despite valid body."""
     client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models["reset"] = ModelConfig(provider="openai", id="test-model")
-    set_thread_model_override(paths, thread_id="$root", model_name="default", room_id=ROOM, set_by=USER)
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="default",
+        room_id=ROOM,
+        set_by=USER,
+        entity_names=("helper",),
+    )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": "reset"}
     if failure == "malformed":
         metadata["model"] = "reset"
@@ -256,7 +282,14 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
     # A different writer changes the live state after the failed send. Replay
     # must preserve the first outcome without reapplying its old mutation.
     config.models["later"] = ModelConfig(provider="openai", id="later-model")
-    set_thread_model_override(paths, thread_id="$root", model_name="later", room_id=ROOM, set_by=USER)
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="later",
+        room_id=ROOM,
+        set_by=USER,
+        entity_names=("helper",),
+    )
     await executor.execute(client.rooms[ROOM], event, USER, command, target=target, handled_turn=pending)
     assert resolve_thread_model_override(paths, "$root", configured_models=config.models).active == "later"
     assert json.dumps(harness.gateway.sent[0].extra_content, sort_keys=True) == saved
@@ -367,3 +400,60 @@ async def test_same_thread_senders_cannot_overtake_waiting_model_command(
         await asyncio.gather(first, second)
     assert resolve_thread_model_override(paths, "$root", configured_models=config.models).active == "later"
     assert [request.delivery_turn_id for request in harness.gateway.sent] == ["$first", "$second"]
+
+
+@pytest.mark.asyncio
+async def test_thread_override_leaves_entities_the_requester_cannot_address(tmp_path: Path) -> None:
+    """A member excluded by an agent's access cannot switch the model that agent uses in the thread."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(display_name="Helper", access=ResponderAccessConfig(users=[USER])),
+                "restricted": AgentConfig(
+                    display_name="Restricted",
+                    access=ResponderAccessConfig(users=["@other:localhost"]),
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="test-model"),
+                "expensive": ModelConfig(provider="openai", id="expensive-model"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = entity_identity_registry(config, paths).current_id("router").full_id
+    room = nio.MatrixRoom(ROOM, client.user_id)
+    event = root_event(event_id="$command", content={"body": "!model expensive", "msgtype": "m.text"})
+    context = make_test_command_handler_context(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command_parser.parse(event.body),
+        requester_user_id=USER,
+    )
+
+    resolved = {
+        name: config.resolve_runtime_model(
+            entity_name=name,
+            room_id=ROOM,
+            thread_id="$root",
+            runtime_paths=paths,
+        ).model_name
+        for name in ("helper", "restricted")
+    }
+    assert resolved == {"helper": "expensive", "restricted": "default"}
