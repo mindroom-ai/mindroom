@@ -997,7 +997,7 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
 
 
 @pytest.mark.asyncio
-async def test_recovered_invite_waits_for_current_matrix_evidence(
+async def test_recovered_invite_without_current_invite_is_forgotten_without_joining(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
