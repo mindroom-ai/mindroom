@@ -167,7 +167,7 @@ Invite callbacks have no stable event ID for a semantic journal row, so their pe
 The pending record wakes unfinished work but never grants inviter authority: routers and agents re-read nio's current inviter after the join fence is durable and immediately before requesting the join.
 A failed join keeps the pending invitation and decrypt fence for retry.
 An invite whose current inviter the policy refuses, or that nio no longer holds because it was withdrawn before the join, leaves no pending entry, and reconciliation handles each pending room on its own, so one failing join does not stop the rest.
-The pending ledger keeps at most the 1,000 newest invitations per entity, evicting the oldest, and is read and rewritten in a worker thread so a large ledger never stalls the event loop.
+The pending ledger keeps at most the 1,000 newest invitations per entity, evicting the oldest, and invite updates and reconciliation read and rewrite it in a worker thread so a large ledger never stalls the event loop; the bot reads it once synchronously when it starts.
 Invite handling remains independent from responder conversation authorization.
 Auxiliary callback records dispatch after journal admission and before nio acknowledgement; a callback failure leaves the batch available for retry.
 Call-manager membership and unknown-event callbacks remain reconciliation wakeups because their standalone payloads cannot replay the current room call state; the manager reconciles joined rooms after sync and retries transient state fetches directly.
