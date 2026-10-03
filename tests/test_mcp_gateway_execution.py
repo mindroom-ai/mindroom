@@ -296,22 +296,19 @@ async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thre
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
-async def test_timed_out_google_scholar_search_keeps_capacity_until_the_scrape_returns(
+async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_returns(
     context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocking Google Scholar scrape runs on the gateway pool and keeps its slot after the call times out."""
-    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    """A blocking Google Scholar scrape runs on the gateway pool and keeps its slot after the call is cancelled."""
+    started, release = threading.Event(), threading.Event()
     threads: list[str] = []
 
     def search(_query: str, _limit: int) -> list[dict[str, object]]:
         threads.append(threading.current_thread().name)
         started.set()
-        try:
-            assert release.wait(5)
-            return []
-        finally:
-            finished.set()
+        assert release.wait(5)
+        return []
 
     monkeypatch.setattr(google_scholar, "_search_publications", search)
     monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: GoogleScholarTools())
@@ -326,15 +323,14 @@ async def test_timed_out_google_scholar_search_keeps_capacity_until_the_scrape_r
             arguments={"query": "attention"},
         )
 
-    async with _client(dispatch, max_active_calls=1, deadline_seconds=0.5) as client:
+    async with _client(dispatch, max_active_calls=1) as client:
         first = asyncio.create_task(client.post("/mcp", json=_call(1)))
         try:
             await _wait(started)
-            assert _code(await asyncio.wait_for(first, 2)) == "timeout"
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
             assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
             assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
-            release.set()
-            await _wait(finished)
         finally:
             release.set()
             await asyncio.gather(first, return_exceptions=True)
