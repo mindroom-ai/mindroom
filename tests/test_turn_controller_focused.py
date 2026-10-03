@@ -104,6 +104,8 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs, Respons
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.scheduling import ScheduledWorkflow
+from mindroom.scheduling_executor import _prepare_scheduled_trigger
 from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -2084,6 +2086,56 @@ async def test_desktop_command_an_agent_wrote_for_a_human_is_refused(tmp_path: P
 
     assert harness.gateway.sent[-1].response_text == "✅ Desktop disconnected for you and agent `code`."
     assert load_desktop_credentials(credentials, requester_id=_SENDER, agent_name="code") is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_task_text_never_runs_as_a_command(tmp_path: Path) -> None:
+    """An agent cannot run a command as the human by scheduling its text in a new thread."""
+    config = bind_runtime_paths(
+        Config(agents={"code": AgentConfig(display_name="Code", tools=["desktop"])}),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "code")
+    room.members_synced = True
+    credentials = get_runtime_credentials_manager(runtime_paths_for(config))
+    save_desktop_credentials(credentials, {"device_id": "DEVICE"}, requester_id=_SENDER, agent_name="code")
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        message="!desktop disconnect confirm",
+        description="Disconnect Desktop",
+        created_by=_SENDER,
+        room_id=_ROOM_ID,
+        new_thread=True,
+    )
+    content = await _prepare_scheduled_trigger(
+        make_matrix_client_mock(),
+        workflow,
+        config,
+        runtime_paths_for(config),
+        make_conversation_reader_mock(),
+        "task-1",
+        None,
+        MessageTarget.for_scheduled_task(workflow),
+        "correlation-1",
+    )
+    assert content is not None
+    assert content["body"] == "!desktop disconnect confirm"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": "$scheduled-command:localhost",
+            "sender": _entity_user_id(config, "code"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert load_desktop_credentials(credentials, requester_id=_SENDER, agent_name="code") is not None
+    assert all("Desktop disconnected" not in sent.response_text for sent in harness.gateway.sent)
 
 
 @pytest.mark.asyncio

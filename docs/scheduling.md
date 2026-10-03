@@ -8,6 +8,7 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 
 By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
+A fire's text never runs as a chat command, even when it starts with `!`; it reaches the agents as an ordinary scheduled message.
 
 Schedules with a recorded creator are automatically canceled once live membership checks confirm that neither the creator nor any permitted human alias is joined to the room.
 Configured bot accounts and managed identities do not count as human aliases.
