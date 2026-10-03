@@ -26,6 +26,12 @@ class WorkspaceVisualizationTools(VisualizationTools):
         self,
         tool_output_workspace_root: Path | None = None,
         output_dir: str = "charts",
+        enable_create_bar_chart: bool = True,
+        enable_create_line_chart: bool = True,
+        enable_create_pie_chart: bool = True,
+        enable_create_scatter_plot: bool = True,
+        enable_create_histogram: bool = True,
+        all: bool = False,  # noqa: A002
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         relative_output_dir = Path(output_dir)
@@ -33,7 +39,16 @@ class WorkspaceVisualizationTools(VisualizationTools):
             msg = "visualization output_dir must be a relative path inside the agent workspace"
             raise ValueError(msg)
         # Upstream creates output_dir when it is missing; every chart is drawn into a private directory instead.
-        super().__init__(output_dir=tempfile.gettempdir(), **kwargs)
+        super().__init__(
+            output_dir=tempfile.gettempdir(),
+            enable_create_bar_chart=enable_create_bar_chart,
+            enable_create_line_chart=enable_create_line_chart,
+            enable_create_pie_chart=enable_create_pie_chart,
+            enable_create_scatter_plot=enable_create_scatter_plot,
+            enable_create_histogram=enable_create_histogram,
+            all=all,
+            **kwargs,
+        )
         self._workspace_root = tool_output_workspace_root
         self._relative_output_dir = relative_output_dir
 
