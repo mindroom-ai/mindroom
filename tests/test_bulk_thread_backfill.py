@@ -517,6 +517,43 @@ async def test_thread_scan_stops_at_its_page_bound_without_calling_the_root_abse
 
 
 @pytest.mark.asyncio
+async def test_thread_scan_reaches_a_root_behind_hundreds_of_pages_of_other_replies_edits() -> None:
+    """Every streaming edit in the room counts toward the scan bound, so a busy room's ordinary thread still fits.
+
+    A streamed reply leaves dozens of edits on a homeserver that keeps them, so
+    a few hundred replies elsewhere in the room fill 100 pages.
+    """
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    edit_pages = [
+        _messages_response(
+            [
+                _edit_event(
+                    f"$edit-{page}:localhost",
+                    "$other-reply:localhost",
+                    timestamp=10_000 - page,
+                    thread_root_id="$other-root:localhost",
+                ),
+            ],
+            end=f"page-{page}",
+        )
+        for page in range(300)
+    ]
+    root_page = _messages_response(
+        [
+            _message_event("$reply:localhost", "reply", timestamp=2, thread_root_id="$root:localhost"),
+            _message_event("$root:localhost", "root", timestamp=1),
+        ],
+        end=None,
+    )
+    client.room_messages = AsyncMock(side_effect=[*edit_pages, root_page])
+
+    scan = await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$root:localhost")
+
+    assert [source["event_id"] for source in scan.event_sources] == ["$root:localhost", "$reply:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_root_not_found_log_names_the_acting_client() -> None:
     """A scan that never sees the thread root must also name the acting client.
 

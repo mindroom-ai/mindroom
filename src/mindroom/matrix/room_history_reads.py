@@ -62,8 +62,10 @@ _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 # Reading a thread from source walks room history back to its root, and anyone
-# who can post in the room decides how old that root is.
-_MAX_THREAD_ROOM_SCAN_PAGES = 100
+# who can post in the room decides how old that root is. Every message event in
+# the room counts, including each streaming edit of every other reply, so the
+# bound leaves room for a busy room's ordinary long-running threads.
+_MAX_THREAD_ROOM_SCAN_PAGES = 1000
 
 
 class _ThreadRoomScanBoundError(RuntimeError):
