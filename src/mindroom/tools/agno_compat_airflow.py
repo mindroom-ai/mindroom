@@ -9,6 +9,7 @@ from agno.tools.airflow import AirflowTools
 from agno.utils.log import log_error
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 class MindRoomAirflowTools(AirflowTools):
     """Resolve DAG files from a ``dags_dir`` relative to the agent workspace, where the agent's ``file_access`` allows.
 
-    Reads open the file through no-follow descriptors; writes replace it atomically without following links below the workspace.
+    Reads go through capped no-follow descriptor reads; writes replace it atomically without following links below the workspace.
     """
 
     def __init__(
@@ -86,8 +87,7 @@ class MindRoomAirflowTools(AirflowTools):
                 file_access=self._file_access,
                 field_name="dag_file",
             )
-            with authorized.open() as file:
-                return file.read().decode()
+            return read_regular_file_within_root(authorized.root, authorized.relative).decode()
         except Exception as e:
             log_error(f"Error reading file: {e}")
             return f"Error reading file: {e}"

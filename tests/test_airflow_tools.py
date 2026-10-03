@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tools.airflow import airflow_tools
 
 if TYPE_CHECKING:
@@ -42,3 +43,17 @@ def test_dag_files_follow_file_access(tmp_path: Path, monkeypatch: pytest.Monkey
 
     assert (primary / "config.yaml").read_text(encoding="utf-8") == "administrators: []\n"
     assert sorted(entry.name for entry in primary.iterdir()) == [".env", "config.yaml"]
+
+
+def test_oversized_dag_file_is_refused_before_reading(tmp_path: Path) -> None:
+    """A worker-planted sparse DAG file above the shared read limit is refused instead of buffered whole."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with (workspace / "huge.py").open("wb") as dag:
+        dag.truncate(MAX_READ_BYTES + 1)
+    tool = airflow_tools()(tool_output_workspace_root=workspace)
+
+    result = tool.read_dag_file("huge.py")
+
+    assert result.startswith("Error reading file:")
+    assert "size limit" in result

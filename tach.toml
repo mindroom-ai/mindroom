@@ -7788,7 +7788,7 @@ depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registr
 
 [[modules]]
 path = "mindroom.tools.agno_compat_airflow"
-depends_on = ["mindroom.file_access"]
+depends_on = ["mindroom.file_access", "mindroom.path_confinement"]
 visibility = ["mindroom.tools.airflow"]
 
 [[interfaces]]
