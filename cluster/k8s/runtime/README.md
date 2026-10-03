@@ -445,6 +445,35 @@ workers:
               name: vault-settings
 ```
 
+### Agent Vault Server NetworkPolicy
+
+The chart-managed Agent Vault server gets its own NetworkPolicy by default, because the API port can create vaults and agent tokens and the proxy port injects stored credentials.
+Ingress to the API port (`server.apiPort`) is limited to the in-chart clients that are enabled: dedicated workers when `agentVault.enabled` is true, the control plane when `accessTool.enabled` is true, the bootstrap Job, and the access-grants Job.
+Ingress to the proxy port (`server.mitmPort`) is limited to the approved egress proxy when `approvedEgress.parentProxy.enabled` is true, or to dedicated workers when `approvedEgress` is disabled and workers use `agentVault.proxyUrl` directly.
+Egress is limited to DNS, TCP `80` and `443` for proxied upstreams and OAuth providers, and `server.smtp.port` when SMTP is enabled.
+Kubelet health probes are unaffected.
+
+Clients the chart does not render, such as an SSO proxy in front of the vault UI or an ingress controller, need `server.networkPolicy.extraIngress`.
+Destinations beyond the defaults, such as upstream services on other ports, need `server.networkPolicy.extraEgress`.
+Set `server.networkPolicy.create: false` to manage the vault policy yourself.
+
+```yaml
+workers:
+  kubernetes:
+    agentVault:
+      server:
+        enabled: true
+        networkPolicy:
+          extraIngress:
+            - from:
+                - podSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: vault-ui-proxy
+              ports:
+                - protocol: TCP
+                  port: 14321
+```
+
 ### Agent Vault Access Grants
 
 Agent Vault has two separate access questions.

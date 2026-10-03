@@ -487,6 +487,20 @@ workers:
             drop:
               - ALL
         resources: {}
+        # NetworkPolicy for the vault server pod.
+        # The API port admits only chart-managed clients: dedicated workers when agentVault.enabled,
+        # the control plane when accessTool.enabled, and the bootstrap and access-grants Jobs.
+        # The proxy port admits approved egress pods when approvedEgress.parentProxy is enabled,
+        # and dedicated workers when approvedEgress is disabled.
+        # Egress allows DNS, TCP 80/443, and smtp.port when smtp.enabled.
+        networkPolicy:
+          create: true
+          # Leave empty to reuse the server name.
+          name: ""
+          # Raw Kubernetes NetworkPolicyIngressRule entries, for example a deployer-managed UI proxy in front of the API port.
+          extraIngress: []
+          # Raw Kubernetes NetworkPolicyEgressRule entries, for example upstream ports beyond 80/443 or an external database.
+          extraEgress: []
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the
       # root CA into workerCaConfigMapName so worker pods trust the vault's TLS
