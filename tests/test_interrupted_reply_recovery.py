@@ -22,11 +22,23 @@ from mindroom.constants import (
 from mindroom.event_journal import DeliveryStage
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, TEAM_PROGRESS_PLACEHOLDER, unfinished_streamed_reply
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.turn_record import TurnRecord
+from tests.ai_user_id_helpers import (
+    _build_response_runner,
+    _config_with_team_matrix_message,
+    _install_inert_post_response_effects,
+    _make_bot,
+    _response_request,
+    _runtime_paths,
+    _team_orchestrator,
+    bind_runtime_paths,
+)
 from tests.conftest import unwrap_extracted_collaborator
+from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_runner_focused import _admit_approval_source
 
@@ -301,19 +313,47 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_reply_is_passed_on_without_its_display_chrome(tmp_path: Path) -> None:
-    """The team header and no-consensus note are presentation, not what the stopped attempt said."""
-    bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
+async def test_a_stopped_team_reply_reaches_the_leader_without_its_display_chrome(tmp_path: Path) -> None:
+    """The team path carries the account too, minus the header and no-consensus note it was displayed with."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    contexts: list[ResponseTurnContext] = []
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        contexts.append(cast("ResponseTurnContext", kwargs["ctx"]))
+        return "Team answer"
+
     visible = _streamed(
         f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}\n\n\n*No team consensus - showing individual responses only*",
     )
+    with (
+        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        _install_inert_post_response_effects(coordinator)
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                existing_event_id=REPLY_ID,
+                existing_event_is_placeholder=True,
+                existing_event_is_recovered=True,
+            ),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
 
-    with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-        answered = await runner._with_interrupted_attempt(request, resolved_target=request.response_envelope.target)
-
-    (instruction,) = [item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"]
+    ((instruction,),) = [_attempt_context(context) for context in contexts]
     assert "\n\nHalf of the report\n\n(turn stopped before completion" in instruction
     assert "Team Response" not in instruction
     assert "consensus" not in instruction

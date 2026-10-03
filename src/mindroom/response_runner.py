@@ -237,9 +237,10 @@ _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Your previous attempt at replying to the current message was interrupted, and this reply replaces "
     "everything it showed. What it had shown before stopping is below: tool calls it lists as finished already "
-    "ran, and those it lists as still running may have finished too, so reuse those results instead of repeating "
-    "the calls. Calls hidden from the conversation or made just before it stopped may be missing, so before "
-    "repeating any tool call with side effects, check whether it already took effect."
+    "ran, and those it lists as still running may have finished too, so do not repeat those that have side effects; "
+    "a read-only call whose shortened result is not enough may run again. Calls hidden from the conversation or "
+    "made just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
+    "it already took effect."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "

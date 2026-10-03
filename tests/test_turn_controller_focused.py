@@ -4172,45 +4172,6 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
 
 @pytest.mark.asyncio
-async def test_replayed_interactive_selection_answers_through_its_recovered_acknowledgement(
-    config: Config,
-    tmp_path: Path,
-) -> None:
-    """A selection replayed after a stop adopts its earlier acknowledgement and marks it recovered."""
-    ack_event_id = "$ack:localhost"
-    harness = _build_harness(config, tmp_path)
-    room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
-    selection = interactive.InteractiveSelection(
-        question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
-        thread_id="$thread-root:localhost",
-    )
-    target = harness.controller._interactive_selection_target(room.room_id, selection)
-    pending_turn = harness.turn_store.attach_response_context(
-        TurnRecord.create(["$selection:localhost"], response_event_id=ack_event_id, completed=False),
-        history_scope=harness.turn_store.response_history_scope(ResponseAction(kind="individual")),
-        conversation_target=target,
-    )
-    await harness.turn_store.record_pending_turn(pending_turn)
-
-    await harness.controller._handle_interactive_selection(
-        room,
-        selection=selection,
-        transport_sender_id=_SENDER,
-        requester_user_id=_SENDER,
-        source_event_id="$selection:localhost",
-    )
-
-    (request,) = harness.runner.requests
-    assert request.existing_event_id == ack_event_id
-    assert request.existing_event_is_placeholder is True
-    assert request.existing_event_is_recovered is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_interactive_selection_waits_for_reload_and_rechecks_authorization(
     tmp_path: Path,
@@ -4401,7 +4362,9 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
 
     assert len(harness.gateway.sent) == 1
     assert len(harness.runner.requests) == 2
+    assert harness.runner.requests[0].existing_event_is_recovered is False
     assert harness.runner.requests[1].existing_event_id == "$sent-1:localhost"
+    assert harness.runner.requests[1].existing_event_is_recovered is True
     assert harness.turn_store.is_handled(selection.question_event_id) is True
 
 
