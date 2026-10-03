@@ -892,6 +892,16 @@ def test_upload_reports_unparseable_bodies_as_400_and_missing_files_as_422(tmp_p
     assert not (tmp_path / "docs").exists()
 
 
+def test_upload_documents_its_multipart_files_body() -> None:
+    """The API docs still offer the file input that the handler parses itself."""
+    operation = main.app.openapi()["paths"]["/api/knowledge/bases/{base_id}/upload"]["post"]
+
+    schema = operation["requestBody"]["content"]["multipart/form-data"]["schema"]
+    assert operation["requestBody"]["required"] is True
+    assert schema["required"] == ["files"]
+    assert schema["properties"]["files"]["items"]["contentMediaType"] == "application/octet-stream"
+
+
 def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: Path) -> None:
     """Uploads must match the same semantic filters used by listing and indexing."""
     client = _test_client(tmp_path)
