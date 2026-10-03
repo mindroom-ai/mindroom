@@ -1343,7 +1343,7 @@ class TestFileToolFileAccess:
         assert [match["file"] for match in result["files"]] == ["docs/inside.txt"]
 
     def test_file_tool_search_content_matches_multiline_queries_in_crlf_and_cr_files(self, tmp_path: Path) -> None:
-        """Workspace content search translates line endings as Agno's search does, so `\\n` queries match."""
+        """Workspace content search translates line endings as Agno's search does, so multiline queries match."""
         base_dir = tmp_path / "base"
         base_dir.mkdir()
         (base_dir / "crlf.txt").write_bytes(b"first line\r\nsecond line\r\n")
