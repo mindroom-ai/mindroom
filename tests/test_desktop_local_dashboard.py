@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -190,6 +191,27 @@ async def test_dashboard_configuration_does_not_wait_for_lifecycle_lock(tmp_path
     finally:
         host._lock.release()
     assert result == {"url": "http://127.0.0.1:8765", "api_key": None}
+
+
+@pytest.mark.asyncio
+async def test_dashboard_port_check_keeps_the_helper_loop_running(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The port-owner check runs subprocesses, so the bridge tasks on the helper's loop must keep running meanwhile."""
+    loop_ran = threading.Event()
+    monkeypatch.setattr(local_dashboard, "_service_owns_port", lambda _port: loop_ran.wait(timeout=5))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={"MINDROOM_API_KEY": "test-key"})
+    host = NativeDesktopHost(paths, helper_version="test")
+
+    async def bridge_work() -> None:
+        await asyncio.sleep(0)
+        loop_ran.set()
+
+    bridge_task = asyncio.create_task(bridge_work())
+    result = await host.handle(NativeRequest(str(uuid4()), "dashboard_configuration", {}))
+    await bridge_task
+    assert result == {"url": "http://127.0.0.1:8765", "api_key": "test-key"}
 
 
 def test_dashboard_configuration_bypasses_saturated_regular_stdio_lane() -> None:
