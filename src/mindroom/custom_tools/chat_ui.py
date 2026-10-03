@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 from typing import Literal, get_args
 
 import nio
@@ -29,20 +30,28 @@ _SidePanel = Literal["members", "computer"]
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
-_CANVAS_TITLE_MAX_CHARS = 120
+# Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
+_CANVAS_TITLE_MAX_UNITS = 120
 # Every canvas must stay editable, so creation and updates share the edit envelope ceiling.
 # That plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 _CANVAS_SIZE_PROBE_EVENT_ID = "$" + "x" * 64
 
 
 def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], body: str) -> dict[str, object]:
-    """Replace a canvas; the page travels once, in m.new_content, with plain text as the fallback."""
+    """Replace a canvas; the page travels once, in m.new_content, with plain text as the fallback.
+
+    The generic edit envelope copies the replacement into the fallback, which would carry the page twice.
+    """
     return {
         "msgtype": "m.notice",
         "body": f"* {body}",
         "m.new_content": replacement,
         "m.relates_to": {"rel_type": "m.replace", "event_id": canvas_event_id},
     }
+
+
+def _canvas_title_is_valid(title: str) -> bool:
+    return bool(title) and title.isprintable() and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
 
 
 class ChatUITools(Toolkit):
@@ -162,7 +171,7 @@ class ChatUITools(Toolkit):
     @classmethod
     async def _send_action(
         cls,
-        action: Literal["show_computer", "open_settings", "open_panel", "show_canvas"],
+        action: Literal["show_computer", "open_settings", "open_panel"],
         body: str,
         **action_fields: object,
     ) -> str:
@@ -170,6 +179,19 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
+        return await cls._send_validated_action(context, requester_id, action, body, action_fields)
+
+    @classmethod
+    async def _send_validated_action(
+        cls,
+        context: ToolRuntimeContext,
+        requester_id: str,
+        action: str,
+        body: str,
+        action_fields: dict[str, object],
+        *,
+        formatted_body: str | None = None,
+    ) -> str:
         thread_id = context.resolved_thread_id
         latest_thread_event_id = context.reply_to_event_id
         if thread_id is not None and latest_thread_event_id is None:
@@ -188,6 +210,7 @@ class ChatUITools(Toolkit):
         metadata = cls._action_metadata(context, requester_id, action, action_fields)
         content = build_message_content(
             body,
+            formatted_body=formatted_body,
             thread_event_id=thread_id,
             reply_to_event_id=context.reply_to_event_id if thread_id is not None else None,
             latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
@@ -282,20 +305,22 @@ class ChatUITools(Toolkit):
         Use a canvas when the user should choose, fill in, rank, or adjust something
         instead of typing: menus, forms, pickers, sliders, multi-step flows.
         Write self-contained HTML with inline CSS and JavaScript. It runs in a
-        sandbox without network access or external resources (inline SVG and data:
-        URLs work) and cannot see the user's account or messages.
+        sandbox that blocks network requests and external resources (inline SVG and
+        data: URLs work) and cannot see the user's account or messages.
 
         Keep interactivity inside the page; nothing reaches you until the user
         commits. To commit, call ``window.mindroom.submit(data, {label: "short
         summary"})`` with JSON data under 8 KB, or use a ``<form>`` (its fields are
-        submitted automatically). Chat shows the user what will be sent and asks them
-        to confirm. The answer arrives as the user's next message, formatted as
+        submitted automatically; its ``data-mindroom-label`` attribute sets the label).
+        Chat shows the user what will be sent and asks them to confirm. The answer
+        arrives as the user's next message, formatted as
         ``Canvas response (<canvas_event_id>, revision <event_id>): <label>``
         followed by the JSON data.
 
         For the next step of the same flow, call show_canvas again with
         ``canvas_event_id`` set to that canvas ID: the panel updates in place instead
-        of posting another one. Keep each canvas under about 20 KB.
+        of posting another one. A canvas must fit in about 24,000 bytes of JSON: quotes,
+        backslashes, and newlines count twice and non-ASCII characters count six bytes or more.
         Success means the request was sent, not that the user opened or answered it.
 
         Args:
@@ -308,53 +333,78 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        prepared = self._prepare_canvas(context, requester_id, title, html, canvas_event_id)
-        if isinstance(prepared, str):
-            return prepared
-        body, canvas_fields, replacement = prepared
+        # Models often send an empty string for an omitted optional argument.
+        canvas_event_id = canvas_event_id or None
+        title = title.strip() if isinstance(title, str) else ""
+        if input_error := self._canvas_input_error(title, html, canvas_event_id):
+            return input_error
+        body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
+        canvas_fields: dict[str, object] = {"canvas": {"title": title, "html": html}}
         if canvas_event_id is None:
-            return await self._send_action("show_canvas", body, **canvas_fields)
-        return await self._update_canvas(context, requester_id, canvas_event_id, replacement, body)
+            return await self._create_canvas(context, requester_id, body, canvas_fields)
+        return await self._update_canvas(context, requester_id, canvas_event_id, body, canvas_fields)
 
     @classmethod
-    def _prepare_canvas(
+    def _canvas_input_error(cls, title: str, html: object, canvas_event_id: object) -> str | None:
+        if canvas_event_id is not None and (
+            not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$")
+        ):
+            return cls._canvas_error(
+                "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+                canvas_event_id=canvas_event_id,
+            )
+        if not _canvas_title_is_valid(title):
+            return cls._canvas_error(f"Canvas title must be a single line of 1-{_CANVAS_TITLE_MAX_UNITS} characters.")
+        if not isinstance(html, str) or not html.strip():
+            return cls._canvas_error("Canvas HTML must not be empty.")
+        return None
+
+    @staticmethod
+    def _canvas_replacement(body: str, metadata: dict[str, object]) -> dict[str, object]:
+        """Return the notice content shared by a new canvas and an edit's m.new_content."""
+        return {
+            "msgtype": "m.notice",
+            "body": body,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html_lib.escape(body),
+            _UI_ACTION_CONTENT_KEY: metadata,
+        }
+
+    @classmethod
+    async def _create_canvas(
         cls,
         context: ToolRuntimeContext,
         requester_id: str,
-        title: str,
-        html: str,
-        canvas_event_id: str | None,
-    ) -> tuple[str, dict[str, object], dict[str, object]] | str:
-        """Validate a canvas and return its fallback body, action fields, and replacement content."""
-        title = title.strip() if isinstance(title, str) else ""
-        if not title or len(title) > _CANVAS_TITLE_MAX_CHARS or "\n" in title:
-            return cls._payload(
-                "error",
-                action="show_canvas",
-                message=f"Canvas title must be a single line of 1-{_CANVAS_TITLE_MAX_CHARS} characters.",
-            )
-        if not isinstance(html, str) or not html.strip():
-            return cls._payload("error", action="show_canvas", message="Canvas HTML must not be empty.")
-        canvas_fields: dict[str, object] = {"canvas": {"title": title, "html": html}}
-        body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        replacement: dict[str, object] = {
-            "msgtype": "m.notice",
-            "body": body,
-            _UI_ACTION_CONTENT_KEY: cls._action_metadata(context, requester_id, "show_canvas", canvas_fields),
-        }
-        size = calculate_event_size(
-            _canvas_edit_content(canvas_event_id or _CANVAS_SIZE_PROBE_EVENT_ID, replacement, body),
+        body: str,
+        canvas_fields: dict[str, object],
+    ) -> str:
+        metadata = cls._action_metadata(context, requester_id, "show_canvas", canvas_fields)
+        probe = _canvas_edit_content(_CANVAS_SIZE_PROBE_EVENT_ID, cls._canvas_replacement(body, metadata), body)
+        if size_error := cls._canvas_size_error(probe):
+            return size_error
+        return await cls._send_validated_action(
+            context,
+            requester_id,
+            "show_canvas",
+            body,
+            canvas_fields,
+            formatted_body=html_lib.escape(body),
         )
-        if size > EDIT_MESSAGE_SIZE_LIMIT:
-            return cls._payload(
-                "error",
-                action="show_canvas",
-                message=(
-                    f"Canvas is too large ({size} bytes as a Matrix event; the limit is {EDIT_MESSAGE_SIZE_LIMIT}). "
-                    "Shorten the HTML, CSS, or JavaScript and try again."
-                ),
-            )
-        return body, canvas_fields, replacement
+
+    @classmethod
+    def _canvas_error(cls, message: str, **fields: object) -> str:
+        return cls._payload("error", action="show_canvas", message=message, **fields)
+
+    @classmethod
+    def _canvas_size_error(cls, edit_content: dict[str, object]) -> str | None:
+        """Reject a canvas whose serialized edit would not fit, so every canvas can be updated."""
+        size = calculate_event_size(edit_content)
+        if size <= EDIT_MESSAGE_SIZE_LIMIT:
+            return None
+        return cls._canvas_error(
+            f"Canvas is too large ({size} bytes as a Matrix event; the limit is {EDIT_MESSAGE_SIZE_LIMIT}). "
+            "Shorten the HTML, CSS, or JavaScript and try again.",
+        )
 
     @classmethod
     async def _update_canvas(
@@ -362,16 +412,26 @@ class ChatUITools(Toolkit):
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str,
-        replacement: dict[str, object],
         body: str,
+        canvas_fields: dict[str, object],
     ) -> str:
         """Edit one of this agent's canvases in place so the timeline keeps a single card."""
-        if target_error := await cls._canvas_target_error(context, requester_id, canvas_event_id):
-            return target_error
+        metadata = cls._action_metadata(context, requester_id, "show_canvas", canvas_fields)
+        # The original's thread is this thread or none, so this check never undercounts the edit.
+        if size_error := cls._canvas_size_error(
+            _canvas_edit_content(canvas_event_id, cls._canvas_replacement(body, metadata), body),
+        ):
+            return size_error
+        original = await cls._canvas_target(context, requester_id, canvas_event_id)
+        if isinstance(original, str):
+            return original
+        # Chat accepts an edit only when its authority fields equal the original request's.
+        metadata["thread_id"] = original.get("thread_id")
+        edit_content = _canvas_edit_content(canvas_event_id, cls._canvas_replacement(body, metadata), body)
         delivered = await send_message_result(
             context.client,
             context.room_id,
-            _canvas_edit_content(canvas_event_id, replacement, body),
+            edit_content,
             operation="chat_ui_canvas_update",
         )
         if delivered is None:
@@ -393,39 +453,44 @@ class ChatUITools(Toolkit):
         )
 
     @classmethod
-    async def _canvas_target_error(
+    async def _canvas_target(
         cls,
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str,
-    ) -> str | None:
-        """Allow updates only to this agent's own canvas for the same requester and conversation."""
+    ) -> dict[str, object] | str:
+        """Return the original request of this agent's own canvas for the same requester and room."""
 
         def error(message: str) -> str:
-            return cls._payload("error", action="show_canvas", canvas_event_id=canvas_event_id, message=message)
+            return cls._canvas_error(message, canvas_event_id=canvas_event_id)
 
-        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
-            return error("canvas_event_id must be the event ID returned by an earlier show_canvas call.")
         response = await context.client.room_get_event(context.room_id, canvas_event_id)
         if not isinstance(response, nio.RoomGetEventResponse) or isinstance(response.event, nio.MegolmEvent):
             return error("The canvas to update could not be read in this room.")
         source = response.event.source if isinstance(response.event.source, dict) else {}
-        content = source.get("content")
         unsigned = source.get("unsigned")
+        if isinstance(unsigned, dict) and "redacted_because" in unsigned:
+            return error("That canvas was deleted; call show_canvas without canvas_event_id instead.")
+        content = source.get("content")
         metadata = content.get(_UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
         relation = content.get("m.relates_to") if isinstance(content, dict) else None
         if (
             response.event.sender != context.client.user_id
-            or (isinstance(unsigned, dict) and "redacted_because" in unsigned)
+            or not isinstance(content, dict)
+            or content.get("msgtype") != "m.notice"
             or not isinstance(metadata, dict)
+            or metadata.get("version") != 1
             or metadata.get("action") != "show_canvas"
+            or metadata.get("agent_user_id") != context.client.user_id
             or (isinstance(relation, dict) and relation.get("rel_type") == "m.replace")
         ):
             return error("Only your own canvases can be updated; call show_canvas without canvas_event_id instead.")
+        # A room-level canvas is answered by a reply that starts a thread, so any thread of the room may update it.
+        thread_id = metadata.get("thread_id")
         if (
             metadata.get("requester_id") != requester_id
             or metadata.get("room_id") != context.room_id
-            or metadata.get("thread_id") != context.resolved_thread_id
+            or (thread_id is not None and thread_id != context.resolved_thread_id)
         ):
             return error("That canvas belongs to another conversation; show a new canvas here instead.")
-        return None
+        return metadata

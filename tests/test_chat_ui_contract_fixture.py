@@ -27,6 +27,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             *(f"open_settings/{section}" for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])),
             *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
             "show_canvas",
+            "show_canvas/update",
         )
     }
 
@@ -50,6 +51,15 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         if case["id"].endswith("/show_canvas"):
             assert metadata["canvas"]["title"] == "Choose a plan"
             assert "<form" in metadata["canvas"]["html"]
+        if case["id"].endswith("/show_canvas/update"):
+            replacement = case["replacement"]["content"]
+            assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}
+            new_metadata = replacement["m.new_content"]["io.mindroom.ui_action"]
+            # Chat accepts an edit only when every authority field equals the original request's.
+            assert {key: value for key, value in new_metadata.items() if key != "canvas"} == {
+                key: value for key, value in metadata.items() if key != "canvas"
+            }
+            assert "Seats chosen" in new_metadata["canvas"]["html"]
 
 
 @pytest.mark.asyncio

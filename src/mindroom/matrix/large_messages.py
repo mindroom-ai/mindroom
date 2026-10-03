@@ -46,7 +46,6 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_SIZE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
-_EDIT_MESSAGE_LIMIT = EDIT_MESSAGE_SIZE_LIMIT
 _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
@@ -314,7 +313,7 @@ def should_send_oversized_nonterminal_streaming_edit(
         return True
 
     event_size = calculate_event_size(edit_content)
-    if event_size <= _EDIT_MESSAGE_LIMIT:
+    if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
         return True
 
     key = (room_id, original_event_id)
@@ -869,7 +868,7 @@ async def prepare_large_message(
     """
     content = without_inline_final_result(content)
     is_edit = is_edit_message(content)
-    size_limit = _EDIT_MESSAGE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
     encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery

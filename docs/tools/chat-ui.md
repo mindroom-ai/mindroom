@@ -111,7 +111,8 @@ chat_ui.show_canvas(
 ### How the answer reaches the agent
 
 Everything the user does inside the canvas stays there: typing, toggling, dragging, and moving between steps send nothing.
-When the page calls `window.mindroom.submit(data, {label})`, or the user submits a `<form>` (its fields become the data), MindRoom Chat shows what will be sent and the user confirms with **Send**.
+When the page calls `window.mindroom.submit(data, {label})`, or the user submits a `<form>` (its fields become the data and its `data-mindroom-label` attribute the label), MindRoom Chat shows what will be sent and the user confirms with **Send**.
+While an answer waits for confirmation, the page cannot change it; the user discards it to choose again.
 The answer is an ordinary threaded message from the user that mentions the agent, so it starts the agent's next turn like any reply:
 
 ```text
@@ -128,11 +129,13 @@ MindRoom Chat displays that message as a one-line receipt (expandable to the exa
 To show the next step of the same flow, call `show_canvas` again with `canvas_event_id` set to that ID.
 MindRoom sends a Matrix edit of the original notice, so the timeline keeps one card and an open panel switches to the new page.
 If the user has been working in the panel and has not sent anything since, Chat asks before replacing it.
-An agent can update only its own canvases in the same room, thread, and conversation partner.
+An agent can update only its own canvases for the same person in the same room and thread.
+A canvas shown outside a thread can be updated from any thread of that room, because the user's answer to it starts a thread.
 
 ### Size
 
-The whole canvas is carried inside the Matrix event, so it must fit within the edit size limit (27,000 bytes of serialized event, about 23 KB of plain ASCII HTML); non-ASCII characters count at their escaped JSON size.
+The whole canvas is carried inside the Matrix event, so it must fit within the edit size limit: 27,000 bytes of serialized event, about 24,000 characters of plain ASCII HTML.
+Quotes, backslashes, and newlines count twice, and non-ASCII characters count at their escaped JSON size (six bytes for most characters, twelve for most emoji).
 The tool rejects a larger canvas with an error that reports the measured size.
 
 ### Sandbox and limits
@@ -140,12 +143,12 @@ The tool rejects a larger canvas with an error that reports the measured size.
 MindRoom Chat runs the page in a sandboxed frame with its own opaque origin:
 
 - It cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate Chat.
-- Its Content Security Policy blocks network requests and external resources; use inline CSS, inline JavaScript, inline SVG, and `data:` URLs.
+- Its Content Security Policy blocks ordinary network requests (fetch, images, scripts, styles) and external resources; use inline CSS, inline JavaScript, inline SVG, and `data:` URLs.
 - Chat blocks the frame from navigating to other sites.
-- Nothing is sent without the user's explicit **Send**.
+- Nothing is posted to the conversation without the user's explicit **Send**.
 
 These protections do not make a canvas a safe place for secrets.
-Browsers do not let a page block WebRTC, so a malicious canvas in Chromium- or WebKit-based browsers could still leak what the user types into it.
+Browsers do not let a page block WebRTC, so a malicious canvas could still leak what the user types into it.
 Chat therefore shows which agent made each canvas and reminds the user that what they enter may leave the panel.
 
 ### Turning canvases on in MindRoom Chat
