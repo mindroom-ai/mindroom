@@ -144,9 +144,12 @@ def _download_target_path(workspace_root: Path, filename: str, extension: str) -
 
 @contextmanager
 def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[MediaIoBaseUpload]:
-    """Stream the authorized file as an upload body, opened without following links swapped in after the check."""
+    """Stream the authorized file in resumable chunks, opened without following links swapped in after the check.
+
+    Non-resumable uploads would read the whole file into memory to build the request body.
+    """
     with authorized.open() as file:
-        yield MediaIoBaseUpload(file, mimetype=mime_type)
+        yield MediaIoBaseUpload(file, mimetype=mime_type, resumable=True)
 
 
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
