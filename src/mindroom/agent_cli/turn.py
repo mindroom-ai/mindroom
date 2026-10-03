@@ -132,8 +132,8 @@ class LiveTurnTools(TurnToolBridge):
     """Own call receipts separately from admitted operation lifetimes.
 
     The outer mutex spans canonical hooks. Admission opens only inside the
-    shell leaf; tool calls and describes arriving outside an active
-    Bash call are rejected. Each admitted lifetime gets its own task so a nested
+    shell leaf; tool calls and describes arriving outside their own open
+    Bash window are rejected. Each admitted lifetime gets its own task so a nested
     shell can wait on another CLI call without blocking its parent window.
     """
 
@@ -271,7 +271,7 @@ class LiveTurnTools(TurnToolBridge):
             msg = "mindroom-agent did not name its shell command; use the mindroom-agent of this MindRoom release"
             raise CliBashWindowRequiredError(msg)
         if window not in self._windows:
-            msg = "Agent CLI tool commands require an active Bash call"
+            msg = "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running"
             raise CliBashWindowRequiredError(msg)
         return window
 

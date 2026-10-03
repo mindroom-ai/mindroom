@@ -190,7 +190,9 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
         outside = await client.post("/api/agent-cli/operations", headers=window_headers, json=payload)
         assert (outside.status_code, outside.json()) == (
             409,
-            {"detail": "Agent CLI tool commands require an active Bash call"},
+            {
+                "detail": "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running",
+            },
         )
         async with owner._window("parent-bash"):
             lost = asyncio.create_task(

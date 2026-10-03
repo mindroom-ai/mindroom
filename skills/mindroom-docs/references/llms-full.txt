@@ -4960,8 +4960,7 @@ Team members, call agents, workflow participants, and OpenAI-compatible requests
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
-Calls are admitted only while the shell call that started them is running; shell commands still run in parallel, and each keeps its own calls and their media.
-A command left running in the background loses CLI access when its shell call returns.
+Calls are admitted only while the shell command that makes them is running or its earlier calls are finishing; shell commands still run in parallel, and each keeps its own calls and their media.
 Media returned by those calls reaches the model with the shell command's result.
 Calls through the CLI count against their own `max_tool_calls_per_turn` budget, separate from the agent's ordinary tool calls.
 Streamed responses show calls made through the CLI as their own tool-trace entries.
@@ -5013,7 +5012,7 @@ Use `calls wait` when the result is still queued, running, or waiting for a deci
 It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
 Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
 Waiting pauses that shell command and its owning response; other conversations can continue.
-New tool calls and schema preparation require an active Bash call.
+New tool calls and schema preparation must come from a Bash call that is still running.
 Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
 
 Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
@@ -5066,7 +5065,7 @@ Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
 The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call returns; `calls wait` on earlier receipts works until the response ends.
+Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call has returned and its calls have finished; `calls wait` on earlier receipts works until the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.

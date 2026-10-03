@@ -149,9 +149,9 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     assert hooks == [("before", "outer"), ("before", "nested"), ("after", "nested"), ("after", "outer")]
     assert catalog.run_context.session_state["count"] == 1
     late = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate")
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(window="outer-1", operation=late)
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
             window="outer-1",
             operation=ToolDescribeOperation(operation="tools.describe", toolkit="state", function="mutate"),
@@ -203,7 +203,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         assert await owner.run_native_shell(command) == "shell done"
     assert catalog.run_context.session_state["count"] == 1
     assert current_agent_cli_shell_env() is None
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
             window=windows[0],
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
@@ -482,8 +482,8 @@ async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_anoth
     try:
         for window, message in (
             (None, "did not name its shell command"),
-            ("closed", "active Bash"),
-            ("unknown", "active Bash"),
+            ("closed", "Bash call has ended"),
+            ("unknown", "Bash call has ended"),
         ):
             with pytest.raises(CliBashWindowRequiredError, match=message):
                 await owner.operation(
@@ -872,7 +872,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     await owner.retire_binding()
     with pytest.raises(CliOperationError, match="being rebuilt"):
         await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
             window="bash",
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
@@ -1038,7 +1038,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     await window
     assert called == ["old", "later"]
     assert (await owner.get_call(old["call_id"]))["parent_bash_call_id"] == "old-bash"
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
             window="old-bash",
             operation=ToolCallOperation(
@@ -1105,7 +1105,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     )
     assert [item["toolkit"] for item in search["items"]] == ["tool12"]
     operation = ToolDescribeOperation(operation="tools.describe", toolkit="tool12", function="selected")
-    with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
+    with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(window="describe-bash", operation=operation)
     assert loaded == []
     async with owner._window("describe-bash"):
