@@ -730,8 +730,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     `InstanceClaimLostError`.
     Runs that claim the instance without a condition may each create a key, but only the first one recorded is
     kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying. Such a run can
-    still revoke a key that another run recorded but has not published yet, so the lifecycle claims with
-    `expected_status`.
+    still revoke a key that another run recorded but has not published yet. The lifecycle claims with the status it
+    read to avoid that, but a claim expecting `provisioning` still succeeds while another run holds the instance, so a
+    lifecycle resume that read the instance as `provisioning` can overlap that run the same way.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
