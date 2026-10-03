@@ -837,12 +837,8 @@ def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> Non
             return
         results = _completed_trailing_tool_results(messages, context.response_turn_id, after_tool_batch=True)
         if results is None:
-            _append_queued_notice_if_needed(
-                messages=messages,
-                function_call_results=(),
-                notice_text=notice_text,
-                judged=True,
-            )
+            # Calls paused for approval or delegation leave the batch unresolved; the resumed
+            # response judges the completed batch or reuses an earlier decision.
             return
         await _judge_queued_notice(
             messages,
