@@ -797,6 +797,7 @@ agents:
 
 Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
 Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
+The names `router`, `user`, and `_shared` are reserved for MindRoom's own accounts and storage.
 
 ## Defaults
 

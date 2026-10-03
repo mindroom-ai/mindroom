@@ -78,7 +78,7 @@ Git commands the primary runs in a workspace, for knowledge checkouts and the `c
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
-An agent or team that another entity's reply mentions acts for the human who requested that reply, so a human cannot reach an entity whose `access` excludes them by asking a different entity to mention it.
+An agent or team that another entity's reply mentions acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 
 ## Hosted tenant isolation
 
