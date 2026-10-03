@@ -1752,8 +1752,9 @@ class TestSidecarResolution:
             None,
             '{"body": "x", "a": ' + "[" * 100_000 + "]" * 100_000 + "}",
             '{"body": "x", "a": ' + "1" * 5_000 + "}",
+            r'{"body": "x \ud800"}',
         ],
-        ids=["missing", "nested_past_recursion_limit", "integer_over_digit_limit"],
+        ids=["missing", "nested_past_recursion_limit", "integer_over_digit_limit", "unpaired_surrogate"],
     )
     async def test_an_unreadable_attachment_is_marked_incomplete_and_never_fetched_again(
         self,
