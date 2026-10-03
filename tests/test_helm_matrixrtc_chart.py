@@ -130,7 +130,10 @@ def test_network_policy_admits_selected_proxies_and_open_media() -> None:
             ("auth.livekitUrl=https://matrix.example.com/livekit/sfu",),
             "auth.livekitUrl must be a ws:// or wss:// URL",
         ),
-        (None, ("livekit.extraConfig.keys.leaked=secret",), "livekit.extraConfig must not set keys or key_file"),
+        (None, ("livekit.extraConfig.keys.leaked=secret",), "livekit.extraConfig must not set keys;"),
+        (None, ("livekit.extraConfig.rtc.node_ip=198.51.100.7",), "livekit.extraConfig must not set rtc.node_ip;"),
+        (None, ("livekit.extraConfig.room.auto_create=true",), "livekit.extraConfig must not set room.auto_create;"),
+        (None, ("livekit.extraConfig.rtc=replaced",), "livekit.extraConfig.rtc must be a map"),
         (None, ("networkPolicy.enabled=true",), "networkPolicy.enabled requires networkPolicy.clientPodSelector"),
     ],
 )

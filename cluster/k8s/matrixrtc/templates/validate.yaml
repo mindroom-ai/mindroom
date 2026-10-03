@@ -4,8 +4,29 @@
 {{- if or (not .Values.keys.apiKeyKey) (not .Values.keys.apiSecretKey) -}}
 {{- fail "keys.apiKeyKey and keys.apiSecretKey are required" -}}
 {{- end -}}
-{{- if or (hasKey .Values.livekit.extraConfig "keys") (hasKey .Values.livekit.extraConfig "key_file") -}}
-{{- fail "livekit.extraConfig must not set keys or key_file; API keys come from keys.existingSecret" -}}
+{{- /* Settings the Services, probes, policies, and room access rules depend on stay chart-owned. */ -}}
+{{- $chartOwned := dict
+  "port" "set livekit.port instead"
+  "keys" "API keys come from keys.existingSecret"
+  "key_file" "API keys come from keys.existingSecret"
+  "rtc.node_ip" "set livekit.media.loadBalancerIP instead"
+  "rtc.use_external_ip" "LiveKit advertises livekit.media.loadBalancerIP"
+  "rtc.tcp_port" "set livekit.media.ports.tcp instead"
+  "rtc.udp_port" "set livekit.media.ports.udp instead"
+  "room.auto_create" "rooms are only created through the authorization service"
+-}}
+{{- range $path, $reason := $chartOwned -}}
+{{- $parts := splitList "." $path -}}
+{{- $section := $.Values.livekit.extraConfig -}}
+{{- if eq (len $parts) 2 -}}
+{{- $section = get $.Values.livekit.extraConfig (first $parts) -}}
+{{- if and (hasKey $.Values.livekit.extraConfig (first $parts)) (not (kindIs "map" $section)) -}}
+{{- fail (printf "livekit.extraConfig.%s must be a map" (first $parts)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (kindIs "map" $section) (hasKey $section (last $parts)) -}}
+{{- fail (printf "livekit.extraConfig must not set %s; %s" $path $reason) -}}
+{{- end -}}
 {{- end -}}
 {{- if not .Values.livekit.media.loadBalancerIP -}}
 {{- fail "livekit.media.loadBalancerIP is required; reserve a static public IP for WebRTC media" -}}

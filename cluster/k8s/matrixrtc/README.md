@@ -102,7 +102,8 @@ The policies select only ingress; egress stays unrestricted because the authoriz
 
 ## Customization
 
-- `livekit.extraConfig` is merged over the rendered LiveKit `config.yaml` for options such as `webhook`, `turn`, `limit`, or `prometheus`; it cannot set `keys` or `key_file`.
+- `livekit.extraConfig` is merged over the rendered LiveKit `config.yaml` for options such as `webhook`, `limit`, `prometheus`, or `rtc.turn_servers`.
+  It cannot set the chart-owned `port`, `keys`, `key_file`, `rtc.node_ip`, `rtc.use_external_ip`, `rtc.tcp_port`, `rtc.udp_port`, or `room.auto_create`, because the Services, probes, NetworkPolicies, and room access rules depend on them.
 - `livekit.extraEnv` and `auth.extraEnv` append raw environment variables, for example `LIVEKIT_CS_API_URL_OVERRIDES` or `LIVEKIT_REDIS_URL` for the authorization service.
 - Both pods run as an unprivileged user with a read-only root filesystem and no service account token; adjust `podSecurityContext` and `securityContext` to match your policy.
 
