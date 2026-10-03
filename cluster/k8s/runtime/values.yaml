@@ -84,6 +84,16 @@ runtime:
   timezone: ""
   timing: false
 
+# Optional gateway-only listener for background scripts on dedicated Kubernetes workers.
+# MindRoom serves only /api/script-gateway on this port, and script workers reach it
+# through a dedicated ClusterIP Service instead of the general API port.
+# Requires workers.backend=kubernetes and the chart's worker egress NetworkPolicy
+# (egressProxy or approvedEgress with egressProxy.networkPolicy.create), which keeps
+# workers off every other control-plane port.
+scriptGateway:
+  enabled: false
+  port: 8767
+
 config:
   # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.

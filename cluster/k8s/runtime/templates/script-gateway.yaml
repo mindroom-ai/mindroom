@@ -1,0 +1,91 @@
+{{- if .Values.scriptGateway.enabled }}
+{{- if ne .Values.workers.backend "kubernetes" }}
+{{- fail "scriptGateway.enabled requires workers.backend=kubernetes" }}
+{{- end }}
+{{- if not (and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create) }}
+{{- fail "scriptGateway.enabled requires the worker egress NetworkPolicy (egressProxy.enabled or approvedEgress.enabled, with egressProxy.networkPolicy.create=true) so workers cannot reach the general API port" }}
+{{- end }}
+{{- if eq (int .Values.scriptGateway.port) (int .Values.runtime.apiPort) }}
+{{- fail "scriptGateway.port must differ from runtime.apiPort" }}
+{{- end }}
+{{- $name := include "mindroom-runtime.scriptGatewayName" . -}}
+{{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.scriptGateway.port }}
+      targetPort: script-gateway
+      protocol: TCP
+      name: script-gateway
+  selector:
+    {{- include "mindroom-runtime.selectorLabels" . | nindent 4 }}
+---
+# Additive to the worker egress policy: workers may also open the gateway listener port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-workers" $name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $workerNamespace }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      mindroom.ai/component: worker
+      app.kubernetes.io/managed-by: mindroom
+      app.kubernetes.io/name: mindroom-worker
+      {{- with .Values.workers.kubernetes.extraLabels }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.scriptGateway.port }}
+{{- if .Values.networkPolicy.create }}
+---
+# Additive to the control-plane ingress policy: admit workers to the gateway listener port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mindroom-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $workerNamespace | quote }}
+          podSelector:
+            matchLabels:
+              mindroom.ai/component: worker
+              app.kubernetes.io/managed-by: mindroom
+              app.kubernetes.io/name: mindroom-worker
+              {{- with .Values.workers.kubernetes.extraLabels }}
+              {{- toYaml . | nindent 14 }}
+              {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.scriptGateway.port }}
+{{- end }}
+{{- end }}

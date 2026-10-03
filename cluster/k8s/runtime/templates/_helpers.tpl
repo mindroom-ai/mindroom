@@ -357,6 +357,14 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.scriptGatewayName" -}}
+{{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.scriptGatewayHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "mindroom-runtime.scriptGatewayName" .) .Release.Namespace -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
 {{- $extraEnv := dict -}}
 {{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.injectWorkerProxyEnv -}}
@@ -367,7 +375,11 @@ matchLabels:
 {{- $_ := set $extraEnv "http_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
-{{- with .Values.egressProxy.noProxy -}}
+{{- $noProxyHosts := .Values.egressProxy.noProxy -}}
+{{- if .Values.scriptGateway.enabled -}}
+{{- $noProxyHosts = concat (default (list) $noProxyHosts) (list (include "mindroom-runtime.scriptGatewayHost" .)) -}}
+{{- end -}}
+{{- with $noProxyHosts -}}
 {{- $noProxy := join "," . -}}
 {{- $_ := set $extraEnv "NO_PROXY" $noProxy -}}
 {{- $_ := set $extraEnv "no_proxy" $noProxy -}}
