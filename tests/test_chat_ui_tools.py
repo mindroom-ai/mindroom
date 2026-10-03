@@ -628,6 +628,7 @@ async def test_empty_canvas_event_id_shows_a_new_canvas(tmp_path: Path) -> None:
         ("x" * 121, "<p></p>", None, "one line"),
         ("\U0001f600" * 61, "<p></p>", None, "one line"),
         ("Bell\x07", "<p></p>", None, "control characters"),
+        ("Lone \ud800 surrogate", "<p></p>", None, "valid text"),
         ("Plans", "   ", None, "must not be empty"),
         ("Plans", "<p></p>", "canvas" * 6000, "earlier show_canvas call"),
     ],

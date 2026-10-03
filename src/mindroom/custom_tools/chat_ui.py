@@ -67,8 +67,9 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_computer": (
-        "show_computer() shows the Computer panel, a live view of your own worker browser; it is the same as "
-        "open_panel(panel='computer')."
+        "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
+        "browser_control drives with target='host'. Use it to let the user watch you on a real website, or take "
+        "over, for example to log in."
     ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
@@ -80,6 +81,13 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
     ),
 }
+
+
+# Lines that name another function; each is added only when every function it names is enabled.
+_SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
+_REAL_WEBSITE_HINT = (
+    "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
+)
 
 
 def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], body: str) -> dict[str, object]:
@@ -96,10 +104,11 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
 
 
 def _canvas_title_is_valid(title: str) -> bool:
-    # Emoji sequences, no-break spaces, and soft hyphens are fine; line breaks and control characters are not.
+    # Emoji sequences, no-break spaces, and soft hyphens are fine; line breaks, control characters,
+    # and lone surrogates (which cannot be encoded) are not.
     return (
         bool(title)
-        and not any(unicodedata.category(char) == "Cc" or char in "\u2028\u2029" for char in title)
+        and not any(unicodedata.category(char) in {"Cc", "Cs"} or char in "\u2028\u2029" for char in title)
         and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
     )
 
@@ -127,7 +136,13 @@ class ChatUITools(Toolkit):
     def instructions(self) -> str:
         """Map only the functions this agent has; include_tools and exclude_tools remove the others."""
         enabled = {*self.functions, *self.async_functions}
-        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        lines = [
+            _SHOW_COMPUTER_ALIAS if name == "show_computer" and "open_panel" in enabled else line
+            for name, line in _FUNCTION_INSTRUCTIONS.items()
+            if name in enabled
+        ]
+        if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
+            lines.append(_REAL_WEBSITE_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @instructions.setter
@@ -316,10 +331,12 @@ class ChatUITools(Toolkit):
     async def show_computer(self) -> str:
         """Show the user the Computer panel: a live view of your own worker browser.
 
-        Identical to open_panel(panel='computer'), which describes it fully; kept so
-        older prompts keep working. Does not navigate, send a prompt to ChatGPT, or
-        take control. Success means the request was sent, not that the client opened
-        the panel.
+        That is the browser browser_control drives with target='host'. The user starts
+        out watching. They can take control, for example to log in; while they have it
+        your browser calls are blocked, and when they hand it back you get a message.
+        Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
+        and it never opens or controls the user's own browser. Success means the
+        request was sent, not that the client opened the panel.
         """
         return await self._send_action(
             "show_computer",
@@ -391,8 +408,7 @@ class ChatUITools(Toolkit):
 
         Use a canvas when seeing or clicking beats reading or typing: dashboards,
         reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
-        cannot load any website; to show the user a real website, open it with
-        browser_control and use open_panel(panel='computer') instead. Pass the
+        cannot load any website, so it cannot show the user a real website. Pass the
         page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
         to an HTML file, which suits pages you build and refine such as slides. Pages up
         to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
@@ -493,7 +509,7 @@ class ChatUITools(Toolkit):
             )
         if not _canvas_title_is_valid(title):
             return cls._canvas_error(
-                f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters without control characters.",
+                f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters.",
             )
         given = [value for value in (html, path) if value is not None and value != ""]
         if len(given) != 1:

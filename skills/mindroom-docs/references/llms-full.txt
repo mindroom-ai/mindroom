@@ -10030,7 +10030,7 @@ The toolkit adds the same map to the agent's instructions on every turn, listing
   `computer` and `members` are the only supported panel values; `browser` is not a panel value.
 - `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
 - `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
-- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases). It is available only when the agent's `chat_ui` entry sets `enable_show_canvas: true`.
+- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases). It is available only when `enable_show_canvas` is true for the agent; see [Turning canvases on](#turning-canvases-on).
 
 Each call sends an `m.room.message` notice in the current conversation; a canvas update sends an `m.replace` edit of the canvas's notice instead.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
@@ -10191,7 +10191,8 @@ Chat does not run canvases during a call, because call frames listen to the page
 
 Canvases need two switches, and both are off by default.
 
-The agent gets `show_canvas` only when its `chat_ui` entry enables it; without it the agent neither has the function nor sees it in its instructions:
+The agent gets `show_canvas` only when `enable_show_canvas` is true for it; otherwise it neither has the function nor sees it in its instructions.
+Set it in the agent's `chat_ui` entry:
 
 ```yaml
 agents:
@@ -10200,6 +10201,9 @@ agents:
       - chat_ui:
           enable_show_canvas: true
 ```
+
+Like other tool options, it can also be set in the `chat_ui` tool's saved settings, which apply to every agent that uses `chat_ui`.
+An agent's own entry wins, so `enable_show_canvas: false` there keeps canvases away from that agent even when the saved setting is on.
 
 MindRoom Chat shows canvases only when the deployment enables them in its runtime `config.json`:
 

@@ -1471,6 +1471,34 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     assert "open_panel(panel='members') shows the Members panel" in prompt
 
 
+@pytest.mark.parametrize(
+    ("options", "available"),
+    [
+        ({"include_tools": ["show_computer"]}, "show_computer"),
+        ({"enable_show_canvas": True, "include_tools": ["show_canvas"]}, "show_canvas"),
+    ],
+)
+def test_chat_ui_instructions_never_point_at_a_missing_function(
+    tmp_path: Path,
+    options: dict[str, object],
+    available: str,
+) -> None:
+    """With one function left, neither the map nor the function's own description names another."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
+    instructions = toolkit.instructions
+    description = toolkit.async_functions[available].entrypoint.__doc__
+
+    for name in set(TOOL_METADATA["chat_ui"].function_names) - {available}:
+        assert f"{name}(" not in instructions
+        assert f"{name}(" not in description
+    assert f"- {available}(" in _render_system_prompt(agent)
+
+
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
 def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
     tmp_path: Path,
