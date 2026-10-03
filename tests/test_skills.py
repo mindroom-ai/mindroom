@@ -7,7 +7,7 @@ import os
 import platform
 import threading
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -968,6 +968,34 @@ def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Pa
     warnings = [entry for entry in logs if entry["log_level"] == "warning"]
     assert any(str(entry.get("path", "")).endswith("huge/SKILL.md") for entry in warnings)
     assert any("budget" in entry["event"] for entry in warnings)
+
+
+def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each SKILL.md is charged before it is parsed, so planted files cannot make one build parse without bound."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    for index in range(20):
+        broken = workspace_skills / f"broken-{index:02d}"
+        broken.mkdir()
+        (broken / "SKILL.md").write_text("---\n- not a mapping\n---\n" + "x" * (900 << 10), encoding="utf-8")
+    _write_skill(workspace_skills, "valid", "Sorted after every broken skill")
+    parse = skills_module._parse_skill_frontmatter
+    parsed_paths: set[str] = set()
+
+    def recording_parse(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
+        parsed_paths.add(path)
+        return parse(content, path=path, allow_missing=allow_missing)
+
+    monkeypatch.setattr(skills_module, "_parse_skill_frontmatter", recording_parse)
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == []
+    assert len(parsed_paths) < 10
+    assert any("budget" in entry["event"] for entry in logs if entry["log_level"] == "warning")
 
 
 def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp_path: Path) -> None:
