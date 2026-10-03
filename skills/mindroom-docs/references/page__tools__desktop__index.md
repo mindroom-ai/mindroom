@@ -458,7 +458,7 @@ An open app refreshes externally saved settings while stopped and preserves unsa
 Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
 Repeating setup for the same controller preserves existing browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 Setup for a different controller starts without saved folders or shell access.
-Setup also replaces a malformed local configuration, or one readable by group or other users, with fresh private settings; choose apps, folders, and shell access again afterward.
+Setup also replaces a malformed local configuration, or one readable by group or other users, with fresh private settings; choose apps, folders, shell, and browser access again afterward.
 If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
