@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class HumanMessageSignal:
-    """Release a reply's waits once its agent starts answering a newer human message in the conversation."""
+    """Release a reply's waits once its agent starts a newer reply in the conversation."""
 
     _subscribers: set[Callable[[], None]] = field(default_factory=set)
     # Newer replies of this agent queued in the conversation that have not started yet.

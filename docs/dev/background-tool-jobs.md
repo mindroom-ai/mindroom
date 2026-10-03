@@ -9,7 +9,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  When the agent starts answering a newer human message in the conversation, that wait is released while accepted work continues.
+  When the agent starts a newer reply in the conversation, that wait is released while accepted work continues.
   Neither action pauses a job or authorizes a protected tool.
 - One `job` tool provides scoped list, wait and cancel.
   Complete registered toolkits can be excluded, including plugins.
@@ -92,5 +92,8 @@ Subagent follow-ups use reusable sessions after the previous child turn finishes
 A reply holds only the work of its own requester, so when the agent answers another requester in the conversation, the first requester's work waits for their next message.
 A config reload waits for holding replies like any active reply, applying after at most 10 minutes.
 A newer reply takes the work over before its participation check decides, so when that check keeps the agent silent, the work waits for the requester's next answered message.
+A silent schedule cannot hold visible work, so it queues behind the reply holding that work, and the requester's later messages queued behind it wait until the work finishes or Stop ends it.
+A newer visible reply cannot hold a silent schedule's work, so taking the conversation over leaves that work for the next silent turn.
+Approving a card of an earlier paused reply resumes that reply only once the holding reply's work finishes or a newer reply takes it over.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
