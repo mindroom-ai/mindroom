@@ -58,12 +58,14 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
     phase: str,
     interruption: str,
 ) -> None:
-    """A cancelled call keeps its slot, identity, and close owner until native work exits."""
+    """A cancelled call keeps its slot, identity, and close owner until native work exits on the gateway pool."""
     started, release = threading.Event(), threading.Event()
     close_started, close_release, closed = threading.Event(), threading.Event(), threading.Event()
     bodies: list[str] = []
+    threads: dict[str, str] = {}
 
     def block(stage: str) -> None:
+        threads[stage] = threading.current_thread().name
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
         worker = get_worker_runtime_context()
@@ -129,6 +131,8 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             # The original typed request ID becomes reusable only after its owner exits.
             response = await client.post("/mcp", json=_call(12))
             assert response.json()["result"]["structuredContent"] == {"result": "done"}
+            assert sorted(threads) == ["body", "build", "close", "connect"]
+            assert all(name.startswith("mindroom-mcp-gateway-tool") for name in threads.values())
         finally:
             release.set()
             close_release.set()
