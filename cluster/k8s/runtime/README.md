@@ -106,10 +106,8 @@ Set `config.source: file` when another init container or content bundle places `
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
-Dedicated Kubernetes workers and the `static_runner` sidecar also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
-That subtree is the first path component below `storage.mountPath`, and tool code can read all of it, so keep the config in its own directory away from credentials and Matrix state.
+Nothing is mounted at that path: neither dedicated Kubernetes workers nor the `static_runner` sidecar mount the config file or its directory, and each request carries the allowlisted config fields they resolve.
 With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
-A config directly in `storage.mountPath` is mounted into the sidecar as a single file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Use a content bundle as the source of truth for the runtime config:
 
