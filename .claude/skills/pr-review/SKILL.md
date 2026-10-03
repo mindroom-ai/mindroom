@@ -63,7 +63,7 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **Deferred imports**: Are these explicit (`from x import Y`), annotated with `# noqa: PLC0415` where needed, and consistent with `tests/test_import_graph.py`?
 - **User experience**: Does it provide a good user experience?
 - **PR**: Is the PR description and title clear and informative?
-- **Docs**: Are docs updated anywhere the change affects users, operators, developers, configuration, tooling, workflows, or behavior that someone would need to learn later? Missing required docs is a blocker.
+- **Docs**: Do docs changes follow the Documentation Policy in @AGENTS.md? Missing docs for a change to configuration, user-visible behavior, or an operator procedure is a blocker, and so is docs text that describes implementation mechanics or documents a bug fix that only restores documented behavior.
 - **Tests**: Are there tests, and do they cover the changes adequately? Are they testing something meaningful or are they just trivial? On NixOS, run them inside `nix-shell shell.nix` (or use `nix-shell shell.nix --run 'uv run pytest -x -n 0 --no-cov -v'`). If `<nixpkgs>` is unresolved, retry with `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
 - **Live tests**: If feasible, test the changes with a local Matrix stack (`just local-matrix-up`) and the Matty CLI to verify agent behavior end-to-end.
 - **Rules**: Does the code follow the project's coding standards and guidelines as laid out in @AGENTS.md?
