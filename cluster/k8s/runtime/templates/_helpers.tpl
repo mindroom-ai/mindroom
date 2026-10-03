@@ -481,9 +481,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 {{- end -}}
 
 {{/*
-Agent Vault Job name from (list root baseName renderedInputs). jobNaming=contentHash
-appends a hash of the rendered inputs, so a plain `kubectl apply` creates a new Job
-when they change and leaves the existing Job alone otherwise.
+Agent Vault Job (or grants ConfigMap) name from (list root baseName renderedInputs).
+jobNaming=contentHash appends a hash of the rendered inputs, so a plain `kubectl apply`
+creates a new object when they change and leaves the existing one alone otherwise.
 */}}
 {{- define "mindroom-runtime.agentVaultJobName" -}}
 {{- $root := index . 0 -}}

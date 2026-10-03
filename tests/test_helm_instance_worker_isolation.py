@@ -2703,33 +2703,43 @@ def test_runtime_chart_agent_vault_content_hash_jobs_skip_helm_hooks(tmp_path: P
         assert job["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] == base_name
     grants_pod = grants_job["spec"]["template"]["spec"]
     assert grants_pod["automountServiceAccountToken"] is False
-    assert grants_pod["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
-    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    config_map_name = grants_pod["volumes"][0]["configMap"]["name"]
+    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", config_map_name)
+    assert _resource(docs, "ConfigMap", config_map_name)
     assert bootstrap_job["spec"]["template"]["spec"]["serviceAccountName"] == "agent-vault-bootstrap"
 
 
 def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path: Path) -> None:
-    """Only the Job whose rendered inputs changed gets a new name."""
+    """Only the Job whose rendered inputs changed gets a new name, and each grants Job mounts its own config."""
 
-    def names(**overrides: str) -> tuple[str, str]:
-        _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
-        return grants_job["metadata"]["name"], bootstrap_job["metadata"]["name"]
+    def names(**overrides: str) -> tuple[str, str, str]:
+        docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
+        config_map_name = grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"]
+        grants = yaml.safe_load(_resource(docs, "ConfigMap", config_map_name)["data"]["access-grants.yaml"])["grants"]
+        assert grants[0]["email"] == overrides.get("grant_email", "maintainer@example.test")
+        return grants_job["metadata"]["name"], config_map_name, bootstrap_job["metadata"]["name"]
 
-    grants_name, bootstrap_name = names()
-    assert names() == (grants_name, bootstrap_name)
-    changed_grants_name, same_bootstrap_name = names(grant_email="second@example.test")
+    grants_name, config_map_name, bootstrap_name = names()
+    assert names() == (grants_name, config_map_name, bootstrap_name)
+    changed_grants_name, changed_config_map_name, same_bootstrap_name = names(grant_email="second@example.test")
     assert changed_grants_name != grants_name
+    assert changed_config_map_name != config_map_name
     assert same_bootstrap_name == bootstrap_name
-    same_grants_name, changed_bootstrap_name = names(kubectl_image="registry.example.test/kubectl:2")
+    same_grants_name, same_config_map_name, changed_bootstrap_name = names(
+        kubectl_image="registry.example.test/kubectl:2",
+    )
     assert same_grants_name == grants_name
+    assert same_config_map_name == config_map_name
     assert changed_bootstrap_name != bootstrap_name
 
 
 def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path: Path) -> None:
     """The default keeps stable Job names and the Helm hook on the grants Job."""
-    _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
+    docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
 
     assert grants_job["metadata"]["name"] == "agent-vault-access-grants"
+    assert grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
+    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
     assert grants_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
     assert bootstrap_job["metadata"]["name"] == "agent-vault-bootstrap"
     assert "annotations" not in bootstrap_job["metadata"]

@@ -7,7 +7,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $name }}
+  name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
   labels:
     {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
 data:
@@ -53,10 +53,16 @@ grants:
   {{- end }}
 {{- end }}
 
+{{- /* With jobNaming=contentHash, each grants config gets its own ConfigMap,
+     so each Job reads the grants it was created for, not a later apply's. */ -}}
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfigMapName" -}}
+{{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
+{{- include "mindroom-runtime.agentVaultJobName" (list . $name (include "mindroom-runtime.agentVaultAccessGrantsConfig" .)) -}}
+{{- end }}
+
 {{- define "mindroom-runtime.agentVaultAccessGrantsJobSpec" -}}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
 {{- $accessGrants := $av.accessGrants -}}
-{{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
 spec:
   ttlSecondsAfterFinished: 86400
   template:
@@ -99,7 +105,7 @@ spec:
       volumes:
         - name: access-grants-config
           configMap:
-            name: {{ $name }}
+            name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
         - name: access-grants-admin-token
           secret:
             secretName: {{ $accessGrants.adminTokenSecret.name }}

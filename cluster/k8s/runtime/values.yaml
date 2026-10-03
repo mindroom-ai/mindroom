@@ -494,7 +494,9 @@ workers:
       # deleted first. contentHash drops the hook and appends a hash of each
       # Job's rendered pod spec (and grants config) to its name, so applying
       # rendered manifests with plain `kubectl apply` creates a fresh Job when
-      # those inputs change and leaves the existing Job alone otherwise.
+      # those inputs change and leaves the existing Job alone otherwise. The
+      # grants ConfigMap name gets a hash of its config, so each grants Job
+      # reads the config it was created for.
       jobNaming: fixed
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the
