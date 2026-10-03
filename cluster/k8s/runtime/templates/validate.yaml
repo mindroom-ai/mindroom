@@ -44,6 +44,34 @@
 {{- if not (kindIs "string" .Values.config.bootstrapBundleRevision) -}}
 {{- fail "config.bootstrapBundleRevision must be a string" -}}
 {{- end -}}
+{{- $bootstrapKey := "config.bootstrapBundlePath" -}}
+{{- $bootstrapContentBundle := .Values.config.bootstrapContentBundle -}}
+{{- if not (and (kindIs "string" $bootstrapContentBundle.name) (kindIs "string" $bootstrapContentBundle.subPath)) -}}
+{{- fail "config.bootstrapContentBundle.name and .subPath must be strings" -}}
+{{- end -}}
+{{- if $bootstrapContentBundle.name -}}
+{{- $bootstrapKey = "config.bootstrapContentBundle" -}}
+{{- if or .Values.config.bootstrapBundlePath .Values.config.bootstrapBundleRevision -}}
+{{- fail "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath or config.bootstrapBundleRevision" -}}
+{{- end -}}
+{{- $selectedBundle := dict -}}
+{{- range $bundle := .Values.contentBundles -}}
+{{- if eq (toString $bundle.name) $bootstrapContentBundle.name -}}
+{{- $selectedBundle = $bundle -}}
+{{- end -}}
+{{- end -}}
+{{- if not $selectedBundle -}}
+{{- fail (printf "config.bootstrapContentBundle.name %q must match a contentBundles entry" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- if and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- if or (hasPrefix "/" $bootstrapContentBundle.subPath) (has ".." (splitList "/" $bootstrapContentBundle.subPath)) -}}
+{{- fail "config.bootstrapContentBundle.subPath must be a relative path without .. segments" -}}
+{{- end -}}
+{{- else if $bootstrapContentBundle.subPath -}}
+{{- fail "config.bootstrapContentBundle.subPath requires config.bootstrapContentBundle.name" -}}
+{{- end -}}
 {{- if .Values.config.bootstrapBundleRevision -}}
 {{- if not .Values.config.bootstrapBundlePath -}}
 {{- fail "config.bootstrapBundleRevision requires config.bootstrapBundlePath" -}}
@@ -52,21 +80,25 @@
 {{- fail "config.bootstrapBundleRevision must be nonempty, at most 128 bytes, and contain no control characters" -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.config.bootstrapBundlePath -}}
+{{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
+{{- if $bootstrap.path -}}
 {{- if eq .Values.workers.backend "static_runner" -}}
-{{- fail "config.bootstrapBundlePath cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" -}}
+{{- fail (printf "%s cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" $bootstrapKey) -}}
+{{- end -}}
+{{- if gt (int64 .Values.replicaCount) 1 -}}
+{{- fail (printf "%s requires replicaCount 0 or 1; concurrent pods would install into the same config directory at once" $bootstrapKey) -}}
 {{- end -}}
 {{- $storageRoot := clean .Values.storage.mountPath -}}
 {{- $target := dir (clean .Values.config.path) -}}
 {{- if or (ne $configSource "file") (not (hasPrefix (printf "%s/" $storageRoot) $target)) -}}
-{{- fail "config.bootstrapBundlePath requires config.source=file and a config directory below storage.mountPath" -}}
+{{- fail (printf "%s requires config.source=file and a config directory below storage.mountPath" $bootstrapKey) -}}
 {{- end -}}
-{{- if not (hasPrefix "/" .Values.config.bootstrapBundlePath) -}}
-{{- fail "config.bootstrapBundlePath must be absolute" -}}
+{{- if not (hasPrefix "/" $bootstrap.path) -}}
+{{- fail (printf "%s must be absolute" $bootstrapKey) -}}
 {{- end -}}
-{{- $source := clean .Values.config.bootstrapBundlePath -}}
+{{- $source := clean $bootstrap.path -}}
 {{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
-{{- fail "config.bootstrapBundlePath must not overlap the config.path directory" -}}
+{{- fail (printf "%s must not overlap the config.path directory" $bootstrapKey) -}}
 {{- end -}}
 {{- $mountPaths := list (clean .Values.storage.mountPath) -}}
 {{- if .Values.stateStorage.enabled -}}

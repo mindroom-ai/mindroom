@@ -138,6 +138,26 @@ The static runner sidecar mounts the agents and private_instances directories, s
 {{- if eq $targetPath "/" -}}/{{- else -}}{{ $targetPath | trimSuffix "/" }}{{- end -}}
 {{- end -}}
 
+{{/*
+Native bootstrap source as JSON: the explicit config.bootstrapBundlePath and revision,
+or the target path plus subPath and image digest of the selected content bundle.
+*/}}
+{{- define "mindroom-runtime.bootstrapBundle" -}}
+{{- $bootstrap := dict "path" (default "" .Values.config.bootstrapBundlePath) "revision" (default "" .Values.config.bootstrapBundleRevision) -}}
+{{- $selected := .Values.config.bootstrapContentBundle.name -}}
+{{- if $selected -}}
+{{- $bootstrap = dict "path" "" "revision" "" -}}
+{{- range $bundle := $.Values.contentBundles -}}
+{{- if eq (toString $bundle.name) (toString $selected) -}}
+{{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+{{- $_ := set $bootstrap "path" (clean (printf "%s/%s" $targetPath (default "" $.Values.config.bootstrapContentBundle.subPath))) -}}
+{{- $_ := set $bootstrap "revision" (trimPrefix "@sha256:" (regexFind "@sha256:[a-f0-9]{64}$" (toString $bundle.image))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $bootstrap -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSeedCommand" -}}
 {{- $bundle := index . 0 -}}
 {{- range $argIndex, $arg := $bundle.seed.command -}}

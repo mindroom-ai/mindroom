@@ -10,6 +10,7 @@
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
 apiVersion: apps/v1
@@ -177,13 +178,13 @@ spec:
             - {{ .Values.runtime.apiHost | quote }}
             - --api-port
             - {{ .Values.runtime.apiPort | quote }}
-            {{- if .Values.config.bootstrapBundlePath }}
+            {{- if $bootstrap.path }}
             - --bootstrap-config-bundle
-            - {{ .Values.config.bootstrapBundlePath | quote }}
+            - {{ $bootstrap.path | quote }}
             {{- end }}
-            {{- if .Values.config.bootstrapBundleRevision }}
+            {{- if $bootstrap.revision }}
             - --bootstrap-config-bundle-revision
-            - {{ .Values.config.bootstrapBundleRevision | quote }}
+            - {{ $bootstrap.revision | quote }}
             {{- end }}
           ports:
             - name: api

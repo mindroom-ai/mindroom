@@ -672,6 +672,138 @@ def test_runtime_chart_checks_bootstrap_path_boundaries(source: str, allowed: bo
         assert "overlap" in result.stderr
 
 
+_BOOTSTRAP_BUNDLE_DIGEST = "3" * 64
+_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
+    "workers.backend=kubernetes",
+    "config.source=file",
+    "config.path=/app/agent_data/active/config.yaml",
+    "contentBundles[0].name=policy-pack",
+    "contentBundles[0].image=registry.example.org/team/policy@sha256:" + "2" * 64,
+    "contentBundles[1].name=team-config",
+    f"contentBundles[1].image=registry.example.org/team/config:v1@sha256:{_BOOTSTRAP_BUNDLE_DIGEST}",
+    "contentBundles[1].targetPath=/app/agent_data/config-source",
+    "config.bootstrapContentBundle.name=team-config",
+)
+
+
+@pytest.mark.parametrize(
+    ("sub_path", "source"),
+    [
+        ("", "/app/agent_data/config-source"),
+        ("environments/prod/", "/app/agent_data/config-source/environments/prod"),
+    ],
+)
+def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, source: str) -> None:
+    """The chart derives the bootstrap source from the bundle target and the revision from its digest."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+        release_name="mindroom-runtime",
+        set_string_args=(f"config.bootstrapContentBundle.subPath={sub_path}",),
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert command[command.index("--bootstrap-config-bundle") + 1] == source
+    assert command[command.index("--bootstrap-config-bundle-revision") + 1] == _BOOTSTRAP_BUNDLE_DIGEST
+    transport = _init_container(deployment, "content-bundle-team-config")
+    assert '"/app/agent_data/config-source/"' in transport["args"][0]
+
+
+def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> None:
+    """A bundle without targetPath bootstraps from its default copy location."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        *(setting for setting in _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS if "targetPath" not in setting),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert command[command.index("--bootstrap-config-bundle") + 1] == "/app/agent_data/content-bundles/team-config"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            ("config.bootstrapContentBundle.name=missing",),
+            'config.bootstrapContentBundle.name "missing" must match a contentBundles entry',
+        ),
+        (
+            ("config.bootstrapBundlePath=/app/agent_data/incoming",),
+            "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath",
+        ),
+        (
+            ("config.bootstrapBundleRevision=deploy-2",),
+            "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath",
+        ),
+        (
+            ("contentBundles[1].image=registry.example.org/team/config:v1",),
+            "contentBundles[1].image must be pinned by full sha256 digest",
+        ),
+        (
+            ("contentBundles[1].overwrite=false",),
+            'contentBundles entry "team-config" to keep overwrite enabled',
+        ),
+        (
+            ("config.bootstrapContentBundle.subPath=/environments/prod",),
+            "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
+        ),
+        (
+            ("config.bootstrapContentBundle.subPath=environments/../../active",),
+            "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
+        ),
+        (
+            ("contentBundles[1].targetPath=/app/agent_data/active/incoming",),
+            "config.bootstrapContentBundle must not overlap the config.path directory",
+        ),
+        (
+            ("workers.backend=static_runner",),
+            "config.bootstrapContentBundle cannot be combined with workers.backend=static_runner",
+        ),
+        (
+            ("config.bootstrapContentBundle.name=", "config.bootstrapContentBundle.subPath=environments/prod"),
+            "config.bootstrapContentBundle.subPath requires config.bootstrapContentBundle.name",
+        ),
+    ],
+)
+def test_runtime_chart_rejects_invalid_bootstrap_content_bundle(settings: tuple[str, ...], message: str) -> None:
+    """A derived bootstrap must name one digest-pinned, fully replaced bundle and a contained subPath."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+        *settings,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(("replicas", "allowed"), [(0, True), (1, True), (2, False)])
+@pytest.mark.parametrize(
+    "bootstrap",
+    [
+        ("config.bootstrapBundlePath=/app/agent_data/incoming",),
+        _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+    ],
+)
+def test_runtime_chart_rejects_bootstrap_with_multiple_replicas(
+    bootstrap: tuple[str, ...],
+    replicas: int,
+    allowed: bool,
+) -> None:
+    """Concurrent pods would install into the same config directory at once."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        *bootstrap,
+        f"replicaCount={replicas}",
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if not allowed:
+        assert "requires replicaCount 0 or 1" in result.stderr
+
+
 def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
     """Generated init container names must stay unique."""
     completed = _run_helm_template(

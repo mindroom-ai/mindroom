@@ -89,11 +89,19 @@ config:
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
-  # Optional source directory for native initialize-only installation before run.
+  # Optional native initialize-only installation before run, sourced from one contentBundles entry.
   # Requires source: file and path inside its own directory below storage.mountPath.
-  # contentBundles can transport files here; initialization runs in the runtime image.
+  # The chart derives the source directory from the bundle's targetPath plus subPath
+  # and the revision from the bundle image's sha256 digest, so a new image installs the candidate.
+  bootstrapContentBundle:
+    # contentBundles[].name to bootstrap from.
+    name: ""
+    # Directory inside the bundle root holding the config tree; empty means the bundle root.
+    subPath: ""
+  # Optional explicit source directory for a bootstrap tree that contentBundles does not transport.
+  # Cannot be combined with bootstrapContentBundle; initialization runs in the runtime image.
   bootstrapBundlePath: ""
-  # Optional opaque revision; a new value validates and installs the bootstrap bundle.
+  # Optional opaque revision for bootstrapBundlePath; a new value validates and installs the bootstrap bundle.
   bootstrapBundleRevision: ""
   create: true
   existingConfigMap: ""
