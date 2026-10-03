@@ -737,9 +737,9 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
-A thread whose file would exceed 64 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
-A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, with a logged warning.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.

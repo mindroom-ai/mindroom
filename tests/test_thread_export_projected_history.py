@@ -620,24 +620,29 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     assert messages[1].reply_to_event_id == ROOT
 
 
-async def test_a_thread_past_the_export_file_cap_fails_as_too_large(
+@pytest.mark.parametrize("character", ["x", "€"])
+async def test_a_thread_fails_as_too_large_once_it_holds_twice_the_read_cap(
     router: PrincipalStore,
     monkeypatch: pytest.MonkeyPatch,
+    character: str,
 ) -> None:
-    """Pages of three messages each fit the cap, and the thread still fails once what it holds passes it."""
+    """Pages of three messages each fit, and a thread past the read cap exports until its UTF-8 content passes twice that."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
         raw(ROOT, "root", ts=1_000),
         [
-            raw(f"$reply-{index:02d}:example.org", "x" * 1_000, ts=1_000 + index, thread_id=ROOT)
+            raw(f"$reply-{index:02d}:example.org", character * 1_000, ts=1_000 + index, thread_id=ROOT)
             for index in range(1, 12)
         ],
     )
     reader = reader_for(router, homeserver)
+    messages = await export(reader, page_messages=3)
+    held = sum(len(json.dumps(message.to_dict(), ensure_ascii=False).encode()) for message in messages)
 
+    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", held * 2 // 3)
     assert len(await export(reader, page_messages=3)) == 12
-    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", 8_000)
+    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", held // 3)
     with pytest.raises(ThreadExportIncompleteError, match="too large to export"):
         await export(reader, page_messages=3)
 

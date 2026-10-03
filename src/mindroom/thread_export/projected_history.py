@@ -229,7 +229,7 @@ async def fetch_projected_thread_history(
     A page budget bounds one page, not the thread, and anyone who can post can
     make every message resolve to a large sidecar. So each message keeps only
     the content its export writes, and the thread fails as too large once what
-    it keeps passes the thread-export file cap, rather than holding all of it.
+    it keeps passes twice the read cap, rather than holding all of it.
     """
     page = await projection.reader.read_strict(room_id=room_id, thread_id=thread_id, limit=page_messages)
     if not await projection.completeness.conversation_is_complete(room_id=room_id, thread_id=thread_id):
@@ -240,18 +240,18 @@ async def fetch_projected_thread_history(
         raise ThreadExportIncompleteError(msg)
 
     messages: list[ResolvedVisibleMessage] = []
-    retained_chars = 0
+    # A memory guard, not a file cap: JSON at most doubles what YAML writes for a character, so every thread whose
+    # file fits the read cap passes, and larger threads keep exporting until what they hold passes twice that cap.
+    max_retained_bytes = 2 * MAX_READ_BYTES
+    retained_bytes = 0
     while True:
         visible = projected_visible_messages(page)
         for message in visible:
             message.content = exported_content(message)
-            # About what the message adds to the file; the writer still checks the exact size.
-            retained_chars += len(json.dumps(message.to_dict(), ensure_ascii=False))
-        if retained_chars > MAX_READ_BYTES:
-            msg = (
-                f"Thread {thread_id} in {room_id} is too large to export: its messages pass the "
-                f"{MAX_READ_BYTES >> 20} MiB thread-export file limit"
-            )
+            # Bytes rather than characters, since one character can take up to four bytes in memory.
+            retained_bytes += len(json.dumps(message.to_dict(), ensure_ascii=False).encode("utf-8"))
+        if retained_bytes > max_retained_bytes:
+            msg = f"Thread {thread_id} in {room_id} is too large to export: its messages pass {max_retained_bytes >> 20} MiB"
             raise ThreadExportIncompleteError(msg)
         messages[:0] = visible
         if page.next_cursor is None:

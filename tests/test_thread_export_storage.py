@@ -574,32 +574,43 @@ def test_thread_too_long_to_parse_whole_stays_indexed_and_is_not_rewritten(
         write_room_index(output_dir, room)
 
 
-def test_a_thread_export_above_the_read_cap_fails_and_keeps_its_previous_file(
+def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file every export reader would refuse is never written, so it is not rewritten each pass or left out of the index."""
+    """A thread file above the read cap is still written, indexed from its header, and left alone while unchanged."""
     monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", 4_096)
+    # `_read_text_at` binds the cap as its default, so it is lowered there too.
+    monkeypatch.setitem(thread_export_storage._read_text_at.__kwdefaults__, "max_bytes", 4_096)
     output_dir = tmp_path / "thread_exports"
+    room = _room()
 
-    def payload(body: str) -> dict[str, object]:
+    def payload(exported_at: str) -> dict[str, object]:
         return {
             "version": 1,
-            "thread": {"id": "$grown:localhost", "source": "matrix", "message_count": 1},
-            "messages": [{"event_id": "$event:localhost", "sender": "@user:localhost", "timestamp": 1, "body": body}],
+            "room": {"key": "lobby", "id": "!lobby:localhost", "name": "Lobby", "alias": "#lobby:localhost"},
+            "thread": {"id": "$long:localhost", "source": "matrix", "exported_at": exported_at, "message_count": 1},
+            "messages": [
+                {"event_id": "$e:localhost", "sender": "@user:localhost", "timestamp": 1, "body": "x" * 5_000},
+            ],
         }
 
-    assert write_thread_payload(output_dir, _room(), "$grown:localhost", payload("short")) is True
-    exported = output_dir / "lobby" / _thread_filename("$grown:localhost")
-    previous = exported.read_text(encoding="utf-8")
+    assert (
+        write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00.123456+00:00")) is True
+    )
+    write_room_index(output_dir, room)
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry == {
+        "file": _thread_filename("$long:localhost"),
+        "thread_id": "$long:localhost",
+        "message_count": 1,
+        "participants": [],
+    }
 
-    with pytest.raises(ValueError, match="too large to export"):
-        write_thread_payload(output_dir, _room(), "$grown:localhost", payload("x" * 5_000))
-    assert exported.read_text(encoding="utf-8") == previous
-
-    with pytest.raises(ValueError, match="too large to export"):
-        write_thread_payload(output_dir, _room("other"), "$grown:localhost", payload("x" * 5_000))
-    assert not (output_dir / "other").exists()
+    # The new export is shorter than the existing file by its timestamp alone, and the comparison still reads all of it.
+    with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
+        assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
+        write_room_index(output_dir, room)
 
 
 def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
@@ -661,27 +672,44 @@ def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
     """Thread files added to a room cannot make one rebuild read without end, and the newest threads stay indexed."""
     output_dir = tmp_path / "thread_exports"
     room = _room()
-    paths = []
-    for index in range(3):
+
+    def write(index: int) -> Path:
         thread_id = f"$thread-{index}:localhost"
         payload = {"version": 1, "thread": {"id": thread_id, "source": "matrix", "message_count": 0}, "messages": []}
         write_thread_payload(output_dir, room, thread_id, payload)
-        path = output_dir / "lobby" / _thread_filename(thread_id)
+        return output_dir / "lobby" / _thread_filename(thread_id)
+
+    paths = [write(index) for index in range(3)]
+    for index, path in enumerate(paths):
         os.utime(path, ns=(index * 1_000_000_000, index * 1_000_000_000))
-        paths.append(path)
     monkeypatch.setattr(
         thread_export_storage,
         "_MAX_ROOM_INDEX_BYTES",
         paths[1].stat().st_size + paths[2].stat().st_size,
     )
 
+    def indexed() -> tuple[list[str], list[str]]:
+        index = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))
+        return sorted(entry["thread_id"] for entry in index["threads"]), index.get("unindexed_files", [])
+
     with patch("mindroom.thread_export.storage.logger.warning") as warning:
         write_room_index(output_dir, room)
+        assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [paths[0].name])
+        assert paths[0].exists()
 
-    threads = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
-    assert sorted(entry["thread_id"] for entry in threads) == ["$thread-1:localhost", "$thread-2:localhost"]
-    warning.assert_called_once()
-    assert paths[0].exists()
+        # The files the budget left out are not drift, so an unchanged pass skips the rebuild.
+        with patch.object(thread_export_storage, "_thread_index_entry", side_effect=AssertionError("reparsed")):
+            write_room_index(output_dir, room, thread_files_changed=False)
+        warning.assert_called_once()
+
+        # An added or deleted file still rebuilds the index.
+        added = write(3)
+        write_room_index(output_dir, room, thread_files_changed=False)
+        assert indexed() == (["$thread-2:localhost", "$thread-3:localhost"], sorted([paths[0].name, paths[1].name]))
+        paths[0].unlink()
+        added.unlink()
+        write_room_index(output_dir, room, thread_files_changed=False)
+        assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [])
 
 
 @pytest.mark.parametrize("filename", ["marker", "index"])
