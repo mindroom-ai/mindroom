@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 class MindRoomAirflowTools(AirflowTools):
     """Resolve DAG files from a ``dags_dir`` relative to the agent workspace, where the agent's ``file_access`` allows.
 
-    Reads go through capped no-follow descriptor reads; writes replace it atomically without following links below the workspace.
+    Reads open the file through no-follow descriptors and refuse it above the shared read cap; writes replace it atomically without following links below the workspace.
     """
 
     def __init__(

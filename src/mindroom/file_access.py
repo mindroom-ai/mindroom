@@ -27,7 +27,7 @@ class AuthorizedFile:
 
     ``root`` is the caller's workspace spelling, so a workspace root replaced by a link
     is refused, or the filesystem anchor in unrestricted mode; ``relative`` is the
-    canonical path below it. Read the file through :meth:`open`. The object carries no
+    canonical path below it. Read the file through :meth:`open` or ``read_regular_file_within_root(root, relative)``. The object carries no
     reopenable full path on purpose: ``display_path`` is for messages and receipts only.
     """
 
