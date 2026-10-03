@@ -89,7 +89,8 @@ jobs:
           push: ${{ github.event_name == 'workflow_dispatch' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
+          # Any job on main can write the Actions cache, so release images import none.
+          cache-from: ${{ github.event_name == 'pull_request' && 'type=gha' || '' }}
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1

@@ -14,6 +14,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+BUILD_PLATFORM_WORKFLOW = ROOT / ".github" / "workflows" / "build-platform.yml"
 README = ROOT / "README.md"
 MACOS_APP_DOC = ROOT / "docs" / "installation" / "macos-app.md"
 MACOS_BUILD_SCRIPT = ROOT / "macos" / "build-macos-app.sh"
@@ -127,6 +128,19 @@ def test_macos_helper_builds_in_a_job_without_secrets(release_workflow: str) -> 
     assert not any("build-desktop-helper" in step.get("run", "") for step in app_steps)
     assert download["with"]["name"] == upload["with"]["name"]
     assert app["env"]["SKIP_DESKTOP_HELPER_BUILD"] == "1"
+
+
+def test_release_publishers_restore_no_actions_cache(release_workflow: str) -> None:
+    """Any job on main can write the Actions cache, so jobs that ship output or hold release secrets restore none."""
+    steps = [step for job in yaml.safe_load(release_workflow)["jobs"].values() for step in job["steps"]]
+    setup_uv = [step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")]
+    platform_job = yaml.safe_load(BUILD_PLATFORM_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build-and-push"]
+    image_build = next(step for step in platform_job["steps"] if "cache-from" in step.get("with", {}))
+
+    assert setup_uv
+    assert all(step.get("with", {}).get("enable-cache") is False for step in setup_uv)
+    assert not any(str(step.get("uses", "")).startswith("actions/cache") for step in steps)
+    assert image_build["with"]["cache-from"] == "${{ github.event_name == 'pull_request' && 'type=gha' || '' }}"
 
 
 @pytest.mark.parametrize("include_matching_pr", [False, True])
