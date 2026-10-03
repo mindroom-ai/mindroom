@@ -46,7 +46,7 @@ The chart renders LiveKit with `room.auto_create: false`, so rooms are only crea
 Both components read the key and secret from `keys.existingSecret` through `keys.apiKeyKey` and `keys.apiSecretKey`.
 The authorization service receives them as `LIVEKIT_KEY` and `LIVEKIT_SECRET`.
 LiveKit receives `LIVEKIT_KEYS` built from the same two values through Kubernetes dependent environment variable expansion, so the Secret needs no separate keys file and the key material never lands in the ConfigMap.
-Use letters and digits only, because LiveKit parses the combined value as a YAML `key: secret` pair, and use a secret of at least 32 characters.
+Use letters and digits only, because LiveKit parses the combined value as a quoted YAML `"key": "secret"` pair, and use a secret of at least 32 characters.
 Secret changes do not roll the pods; restart both Deployments after rotating keys.
 
 ## Media Networking
@@ -103,7 +103,7 @@ The policies select only ingress; egress stays unrestricted because the authoriz
 ## Customization
 
 - `livekit.extraConfig` is merged over the rendered LiveKit `config.yaml` for options such as `webhook`, `limit`, `prometheus`, or `rtc.turn_servers`.
-  It cannot set the chart-owned `port`, `keys`, `key_file`, `rtc.node_ip`, `rtc.use_external_ip`, `rtc.tcp_port`, `rtc.udp_port`, or `room.auto_create`, because the Services, probes, NetworkPolicies, and room access rules depend on them.
+  It cannot set the chart-owned `port`, `keys`, `key_file`, `rtc.node_ip`, `rtc.use_external_ip`, `rtc.tcp_port`, `rtc.udp_port`, `rtc.port_range_start`, `rtc.port_range_end`, or `room.auto_create`, because the Services, probes, NetworkPolicies, and room access rules depend on them.
 - `livekit.extraEnv` and `auth.extraEnv` append raw environment variables, for example `LIVEKIT_CS_API_URL_OVERRIDES` or `LIVEKIT_REDIS_URL` for the authorization service.
 - Both pods run as an unprivileged user with a read-only root filesystem and no service account token; adjust `podSecurityContext` and `securityContext` to match your policy.
 

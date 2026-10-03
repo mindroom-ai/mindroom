@@ -60,7 +60,7 @@ livekit:
       tcp: 7881
       udp: 7882
   # Raw LiveKit config merged over the chart-rendered config.yaml, for example webhook, limit, or rtc.turn_servers settings.
-  # Chart-owned settings (port, keys, key_file, rtc.node_ip, rtc.use_external_ip, rtc.tcp_port, rtc.udp_port, room.auto_create) cannot be set here.
+  # Chart-owned settings (port, keys, key_file, rtc.node_ip, rtc.use_external_ip, rtc.tcp_port, rtc.udp_port, rtc.port_range_start, rtc.port_range_end, room.auto_create) cannot be set here.
   extraConfig: {}
   resources:
     requests:

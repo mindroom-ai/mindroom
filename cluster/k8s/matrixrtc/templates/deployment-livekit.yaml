@@ -45,9 +45,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.keys.existingSecret | quote }}
                   key: {{ .Values.keys.apiSecretKey | quote }}
-            # Kubernetes expands the references at container start; LiveKit parses the "key: secret" pair.
+            # Kubernetes expands the references at container start; LiveKit parses the "key: secret" pair as YAML.
+            # The inner quotes keep a numeric-looking secret a string, which LiveKit would otherwise drop.
             - name: LIVEKIT_KEYS
-              value: "$(MATRIXRTC_API_KEY): $(MATRIXRTC_API_SECRET)"
+              value: '"$(MATRIXRTC_API_KEY)": "$(MATRIXRTC_API_SECRET)"'
             {{- with .Values.livekit.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

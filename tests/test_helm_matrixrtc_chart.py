@@ -59,7 +59,11 @@ def test_both_components_share_one_secret_without_putting_keys_in_the_config() -
     assert names.index("MATRIXRTC_API_KEY") < names.index("LIVEKIT_KEYS")
     assert names.index("MATRIXRTC_API_SECRET") < names.index("LIVEKIT_KEYS")
     assert livekit_env[names.index("MATRIXRTC_API_KEY")]["valueFrom"]["secretKeyRef"] == secret_ref
-    assert livekit_env[names.index("LIVEKIT_KEYS")]["value"] == "$(MATRIXRTC_API_KEY): $(MATRIXRTC_API_SECRET)"
+    livekit_keys = livekit_env[names.index("LIVEKIT_KEYS")]["value"]
+    assert livekit_keys == '"$(MATRIXRTC_API_KEY)": "$(MATRIXRTC_API_SECRET)"'
+    # LiveKit keeps only string secrets, so a digits-only secret must not parse as a number.
+    expanded = livekit_keys.replace("$(MATRIXRTC_API_KEY)", "12345678").replace("$(MATRIXRTC_API_SECRET)", "1" * 32)
+    assert yaml.safe_load(expanded) == {"12345678": "1" * 32}
     assert auth_env["LIVEKIT_KEY"]["valueFrom"]["secretKeyRef"] == secret_ref
     assert auth_env["LIVEKIT_SECRET"]["valueFrom"]["secretKeyRef"] == {
         "name": "matrixrtc-keys",
@@ -133,6 +137,11 @@ def test_network_policy_admits_selected_proxies_and_open_media() -> None:
         (None, ("livekit.extraConfig.keys.leaked=secret",), "livekit.extraConfig must not set keys;"),
         (None, ("livekit.extraConfig.rtc.node_ip=198.51.100.7",), "livekit.extraConfig must not set rtc.node_ip;"),
         (None, ("livekit.extraConfig.room.auto_create=true",), "livekit.extraConfig must not set room.auto_create;"),
+        (
+            None,
+            ("livekit.extraConfig.rtc.port_range_start=50000", "livekit.extraConfig.rtc.port_range_end=60000"),
+            "livekit.extraConfig must not set rtc.port_range_",
+        ),
         (None, ("livekit.extraConfig.rtc=replaced",), "livekit.extraConfig.rtc must be a map"),
         (None, ("networkPolicy.enabled=true",), "networkPolicy.enabled requires networkPolicy.clientPodSelector"),
     ],

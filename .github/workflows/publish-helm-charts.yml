@@ -460,7 +460,7 @@ jobs:
             > "$render_dir/default.yaml"
           grep -F 'node_ip: 203.0.113.10' "$render_dir/default.yaml"
           grep -F 'loadBalancerIP: "203.0.113.10"' "$render_dir/default.yaml"
-          grep -F 'value: "$(MATRIXRTC_API_KEY): $(MATRIXRTC_API_SECRET)"' "$render_dir/default.yaml"
+          grep -F "value: '\"\$(MATRIXRTC_API_KEY)\": \"\$(MATRIXRTC_API_SECRET)\"'" "$render_dir/default.yaml"
           helm template matrixrtc "$MATRIXRTC_CHART_DIR" \
             --namespace mindroom \
             --values "$render_dir/required-values.yaml" \

@@ -13,6 +13,8 @@
   "rtc.use_external_ip" "LiveKit advertises livekit.media.loadBalancerIP"
   "rtc.tcp_port" "set livekit.media.ports.tcp instead"
   "rtc.udp_port" "set livekit.media.ports.udp instead"
+  "rtc.port_range_start" "UDP media is multiplexed on livekit.media.ports.udp"
+  "rtc.port_range_end" "UDP media is multiplexed on livekit.media.ports.udp"
   "room.auto_create" "rooms are only created through the authorization service"
 -}}
 {{- range $path, $reason := $chartOwned -}}
