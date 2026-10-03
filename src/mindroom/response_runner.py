@@ -135,6 +135,7 @@ from mindroom.teams import (
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
+    strip_team_header,
     team_response,
     team_response_stream,
 )
@@ -3628,7 +3629,7 @@ class ResponseRunner:
         )
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
-            assistant_text=unfinished.partial_text,
+            assistant_text=strip_team_header(unfinished.partial_text),
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )

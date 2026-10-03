@@ -253,6 +253,10 @@ class _TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
+_TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
+_TEAM_HEADER_END = "):\n\n"
+
+
 def _format_team_header(agent_names: list[str]) -> str:
     """Format the team response header.
 
@@ -263,7 +267,15 @@ def _format_team_header(agent_names: list[str]) -> str:
         Formatted header string
 
     """
-    return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+    return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
+
+
+def strip_team_header(text: str) -> str:
+    """Remove the display-only header ``_format_team_header`` puts before a visible team reply."""
+    if not text.startswith(_TEAM_HEADER_PREFIX):
+        return text
+    _header, separator, body = text.partition(_TEAM_HEADER_END)
+    return body if separator else text
 
 
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
@@ -4115,6 +4127,7 @@ __all__ = [
     "resolve_team_turn_models",
     "select_ad_hoc_team_mode",
     "select_model_for_team",
+    "strip_team_header",
     "team_response",
     "team_response_stream",
 ]
