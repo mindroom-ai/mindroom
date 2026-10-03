@@ -57,7 +57,7 @@ A native watcher thread, not a task on the loop, logs one summary for every comp
 | `gc_collections_total` | Cumulative garbage collections per generation since process start |
 
 An idle or lightly loaded loop reports a `p50_ms` of a few milliseconds or less.
-A sustained high median means the loop is saturated, so replies slow down and Matrix ingestion falls behind long before `/api/health` reports anything, because liveness only fails on stale Matrix sync.
+A sustained high median means the loop is saturated and replies slow down, which can happen while `/api/health` still reports healthy, because liveness tracks Matrix sync and durable ingestion progress rather than loop latency.
 
 ```text
 metric  = distribution of p50_ms
@@ -66,7 +66,7 @@ alert if  median(metric) over 10 minutes > 20
           for 30 minutes
 ```
 
-When it fires, look for `event_loop_stall_detected` records, which include the loop thread's stack when one stall exceeds the stall threshold (5 seconds by default).
+When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the loop thread's stack when one stall exceeds the stall threshold (5 seconds by default) unless `stack_capture_suppressed` is true.
 Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
 
@@ -84,8 +84,9 @@ It does not change watchdog, liveness, or readiness behavior, as described in [H
 | `generation` | Durable ingestion progress generation, or `null` when none is reported |
 | `snapshots` | Up to four task snapshots for the entity's sync, ingestion runner, ingestion pump, and delivery recovery tasks, each with `task_name`, `await_chain`, `await_boundary`, and `truncated` |
 
-A homeserver interruption that lasts a little over 90 seconds logs one report per entity.
-Each report covers at least 90 seconds without progress, so five reports for one entity within 15 minutes mean at least seven and a half minutes in which that entity picked up no new Matrix events and so did not respond in its rooms.
+A homeserver interruption that lasts a little over 90 seconds without a receive-loop restart logs one report per entity.
+Each restart starts a fresh 90-second timer, so with `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` below 90, first syncs that keep timing out never log this report.
+Each report covers its own 90 seconds without sync or durable ingestion progress, so five reports for one entity within 15 minutes mean at least seven and a half minutes, not necessarily continuous, without that progress.
 
 ```text
 metric  = count of logs where event = "matrix_sync_stall_diagnostics"
@@ -114,4 +115,5 @@ notify    at most once per hour
 ```
 
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
-Raise `max_tool_calls_per_turn` for that entity only for legitimate long work, as described in [Agents](../configuration/agents.md).
+Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
+For legitimate long work in an agent or team turn, raise that entity's `max_tool_calls_per_turn`, as described in [Agents](../configuration/agents.md).
