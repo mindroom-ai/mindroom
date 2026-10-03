@@ -18,7 +18,6 @@ from tests.conftest import make_conversation_reader_mock, make_matrix_client_moc
 from tests.scheduling_helpers import (
     SCHEDULE_WRITER_ID,
     persist_schedule_writer,
-    room_create_state_response,
     schedule_runtime_paths,
     scheduled_task_state_event,
     serve_task_state_events,

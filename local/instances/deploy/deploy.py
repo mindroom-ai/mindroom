@@ -270,7 +270,7 @@ def _restrict_to_container_user(path: Path) -> None:
     if not restricted:
         console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
         # A sudo chown or chmod of this path would follow a link the container swaps in before it runs.
-        console.print("  Run deploy.py start for this instance as root, which changes the file without following links.")
+        console.print("  Run deploy.py start for this instance as root; it changes the file without following links.")
 
 
 def _protect_synapse_config(config_path: Path) -> None:

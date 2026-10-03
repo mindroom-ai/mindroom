@@ -165,15 +165,8 @@ def load_plugins(
                 skill_roots.extend(plugin.skill_dirs)
 
             # Agent builds and runner requests load plugins every time, so log only loads that read a changed file.
-            if plugins and cached_files != (plugin_imports._PLUGIN_CACHE, plugin_imports._MODULE_IMPORT_CACHE):
-                logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
-                for plugin in plugins:
-                    if plugin.discovered_hooks:
-                        logger.info(
-                            "Discovered plugin hooks",
-                            plugin_name=plugin.name,
-                            hook_names=[_hook_display_name(hook) for hook in plugin.discovered_hooks],
-                        )
+            if cached_files != (plugin_imports._PLUGIN_CACHE, plugin_imports._MODULE_IMPORT_CACHE):
+                _log_loaded_plugins(plugins)
 
             _sync_loaded_plugin_tools(plugins)
 
@@ -184,6 +177,19 @@ def load_plugins(
             raise
 
         return plugins
+
+
+def _log_loaded_plugins(plugins: list[_Plugin]) -> None:
+    if not plugins:
+        return
+    logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+    for plugin in plugins:
+        if plugin.discovered_hooks:
+            logger.info(
+                "Discovered plugin hooks",
+                plugin_name=plugin.name,
+                hook_names=[_hook_display_name(hook) for hook in plugin.discovered_hooks],
+            )
 
 
 @contextmanager
