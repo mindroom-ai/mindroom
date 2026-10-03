@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
+_WARNED_PLUGIN_MESSAGES: set[tuple[str, frozenset[tuple[str, str]]]] = set()
 _PreparedPluginModule = tuple[ModuleType, Any, dict[str, ModuleType | None]] | None
 
 
@@ -69,13 +69,13 @@ _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 _MODULE_IMPORT_CACHE: dict[Path, _ModuleCacheEntry] = {}
 
 
-def _warn_once(message: str, *, path: Path) -> None:
-    """Emit one plugin-path warning once per process for the same message/path pair."""
-    warning_key = (message, path)
+def _warn_once(message: str, **log_fields: str) -> None:
+    """Emit one plugin warning once per process for the same message and log fields."""
+    warning_key = (message, frozenset(log_fields.items()))
     if warning_key in _WARNED_PLUGIN_MESSAGES:
         return
     _WARNED_PLUGIN_MESSAGES.add(warning_key)
-    logger.warning(message, path=str(path))
+    logger.warning(message, **log_fields)
 
 
 def _collect_plugin_bases(
@@ -117,13 +117,13 @@ def _log_skipped_plugin_entry(
 ) -> None:
     """Log one broken plugin entry without aborting the rest of startup."""
     if root is not None and (not root.exists() or not root.is_dir()):
-        _warn_once("Plugin path does not exist, skipping", path=root)
+        _warn_once("Plugin path does not exist, skipping", path=str(root))
         return
 
     if isinstance(exc, PluginValidationError) and str(exc).startswith(
         "Configured plugin module could not be resolved:",
     ):
-        logger.warning("Plugin module could not be resolved, skipping", spec=plugin_path)
+        _warn_once("Plugin module could not be resolved, skipping", spec=plugin_path)
         return
 
     log_kwargs: dict[str, object] = {"plugin_path": plugin_path, "error": str(exc)}
@@ -237,7 +237,7 @@ def _load_plugin_base(root: Path) -> _PluginBase:
         raise PluginValidationError(msg)
 
     if not root.is_relative_to(_REPO_ROOT):
-        _warn_once("Loading non-bundled plugin", path=root)
+        _warn_once("Loading non-bundled plugin", path=str(root))
 
     try:
         manifest_mtime = manifest_path.stat().st_mtime
