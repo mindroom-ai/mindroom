@@ -9,6 +9,7 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import inspect
 import json
 import os
 import signal
@@ -104,7 +105,7 @@ from tests.conftest import (
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
@@ -1310,6 +1311,57 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     assert entrypoint is not None
     result = entrypoint(1, 2)
     assert '"result": 3' in result
+
+
+@pytest.mark.asyncio
+async def test_sync_function_placed_on_the_primary_runs_locally_through_its_async_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync function's async proxy still runs calls its toolkit places on the primary, without the worker."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=calls,
+            responder=lambda _url, _payload: {"ok": True, "result": "worker"},
+        ),
+    )
+    caller_threads: list[int] = []
+
+    class PlacedTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.where])
+
+        def where(self, place: str) -> str:
+            """Report where the call ran."""
+            caller_threads.append(threading.get_ident())
+            return f"ran {place}"
+
+        def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+            return function_name == "where" and arguments.get("place") == "primary"
+
+    toolkit = sandbox_proxy_module.maybe_wrap_toolkit_for_sandbox_proxy(
+        "calculator",
+        PlacedTools(),
+        runtime_paths=runtime_paths,
+        credentials_manager=None,
+        worker_target=None,
+    )
+    entrypoint = toolkit.get_async_functions()["where"].entrypoint
+    assert entrypoint is not None
+
+    assert await entrypoint(place="primary") == "ran primary"
+    assert calls == []
+    # The sync function ran off the event loop thread.
+    assert caller_threads != [threading.get_ident()]
+    assert await entrypoint(place="worker") == "worker"
+    assert [url for url, _payload in calls] == ["http://sandbox-runner:8765/api/sandbox-runner/execute"]
 
 
 def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5630,6 +5682,7 @@ def _forward_proxy_to_seeded_runner(
     tmp_path: Path,
     *,
     runner_execution_mode: str = "inprocess",
+    proxy_tools: frozenset[str] = frozenset({"shell"}),
 ) -> tuple[RuntimePaths, Path, list[dict[str, Any]]]:
     """Forward the primary's proxy calls to a real runner app whose seed config lacks the live `mind` agent."""
     storage_root = tmp_path / "storage"
@@ -5651,7 +5704,7 @@ def _forward_proxy_to_seeded_runner(
         monkeypatch,
         proxy_url="http://sandbox-runner:8766",
         execution_mode="selective",
-        proxy_tools={"shell"},
+        proxy_tools=set(proxy_tools),
     )
     sent_payloads: list[dict[str, Any]] = []
 
@@ -5751,39 +5804,56 @@ async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
     assert "response-grant" not in json.dumps(sent_payloads[-1])
 
 
+def _shell_call(pid_file: Path) -> tuple[str, str, tuple[object, ...], dict[str, object]]:
+    return "shell", "run_shell_command", (["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"],), {"timeout": 60}
+
+
+def _python_call(pid_file: Path) -> tuple[str, str, tuple[object, ...], dict[str, object]]:
+    code = f"import os, pathlib, time\npathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\ntime.sleep(30)"
+    return "python", "run_python_code", (code,), {}
+
+
 @requires_linux()
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runner_execution_mode", ["inprocess", "subprocess", "forkserver"])
-async def test_cancelling_a_worker_shell_call_stops_its_command(
+@pytest.mark.parametrize("worker_call", [_shell_call, _python_call], ids=["async-shell", "sync-python"])
+async def test_cancelling_a_worker_call_stops_its_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     runner_execution_mode: str,
+    worker_call: Callable[[Path], tuple[str, str, tuple[object, ...], dict[str, object]]],
 ) -> None:
-    """Stopping a response stops the command its worker shell call started, not only the primary's wait."""
+    """Stopping a response stops the work its worker call started, whether the tool function is async or sync."""
+    pid_file = tmp_path / "work.pid"
+    tool_name, function_name, args, kwargs = worker_call(pid_file)
     primary_paths, workspace, _sent_payloads = _forward_proxy_to_seeded_runner(
         monkeypatch,
         tmp_path,
         runner_execution_mode=runner_execution_mode,
+        proxy_tools=frozenset({tool_name}),
     )
     live_config = _live_primary_config(primary_paths)
     workspace.mkdir(parents=True)
     tool = get_tool_by_name(
-        "shell",
+        tool_name,
         primary_paths,
         runtime_config=live_config,
         tool_init_overrides={"base_dir": str(workspace)},
         worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
     )
-    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    # Agno's async runs use get_async_functions, which prefers an async variant.
+    entrypoint = tool.get_async_functions()[function_name].entrypoint
     assert entrypoint is not None
-    pid_file = tmp_path / "command.pid"
+    assert inspect.iscoroutinefunction(entrypoint)
 
     with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
-        call = asyncio.create_task(entrypoint(["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"], timeout=60))
+        call = asyncio.create_task(entrypoint(*args, **kwargs))
         async with asyncio.timeout(30):
             while not pid_file.exists() or not pid_file.read_text().strip():  # noqa: ASYNC110 - the worker command signals only through its pid file
                 await asyncio.sleep(0.05)
         pid = int(pid_file.read_text())
+        # Work that ran inside this test process could not be killed separately.
+        assert pid != os.getpid()
         call.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await call

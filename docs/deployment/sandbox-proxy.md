@@ -570,11 +570,12 @@ Handles are owned by a small worker-local shell supervisor process that the runn
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
-Stopping a response stops its async worker calls too, such as `run_shell_command`.
+Stopping a response stops its worker calls too, such as `run_shell_command` and `python`.
 Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
 The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
 A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
-Synchronous worker calls, such as the `python` and `file` tools, still run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`.
+Synchronous tool functions get the same asynchronous proxy, so a stop reaches them as well.
+In the runner's `inprocess` execution mode, a synchronous tool that runs inside the runner itself, such as `file`, finishes before the stop takes effect.
 Persistent browser actions also finish on their own: they are short, and interrupting one would close the worker's shared browser and its tabs.
 
 ## Workspace home contract

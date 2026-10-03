@@ -1108,7 +1108,9 @@ def _wrap_async_function(
             function_name,
             inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
         ):
-            return await entrypoint(*args, **kwargs)
+            if inspect.iscoroutinefunction(entrypoint):
+                return await entrypoint(*args, **kwargs)
+            return await _run_in_worker_proxy_executor(functools.partial(entrypoint, *args, **kwargs))
         cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
@@ -1204,6 +1206,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             worker_target=worker_target,
             primary_placement=primary_placement,
         )
-        for function_name, function in original_async_functions.items()
+        # Sync functions get an async proxy too, so stopping an async run stops their worker call.
+        for function_name, function in {**original_functions, **original_async_functions}.items()
     }
     return toolkit
