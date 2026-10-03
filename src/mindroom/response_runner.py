@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections import Counter
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -237,15 +238,23 @@ _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Your previous attempt at replying to the current message was interrupted, and this reply replaces "
     "everything it showed. What it had shown before stopping is below: tool calls it lists as finished already "
-    "ran, and those it lists as still running may have finished too, so do not repeat those that have side effects; "
-    "a read-only call whose shortened result is not enough may run again. Calls hidden from the conversation or "
-    "made just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
+    "ran, and those it lists as still running may have finished too. Calls hidden from the conversation or made "
+    "just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
     "it already took effect."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Before repeating any tool call with side effects, check whether it already took effect."
 )
+
+
+def _already_called_line(tools: Sequence[ToolTraceEntry]) -> str | None:
+    """Name the stopped attempt's calls in one closing line, which models follow even when the message asks for them."""
+    counts = Counter(tool.tool_name for tool in tools)
+    if not counts:
+        return None
+    listed = ", ".join(f"`{name}` ({count} call{'' if count == 1 else 's'})" for name, count in counts.items())
+    return f"Already called for the current message, so do not repeat: {listed}."
 
 
 async def _cancel_pending_responses(
@@ -3606,7 +3615,10 @@ class ResponseRunner:
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
-            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+            already_called = _already_called_line((*completed_tools, *interrupted_tools))
+            instruction = "\n\n".join(
+                part for part in (_INTERRUPTED_ATTEMPT_INSTRUCTION, attempt, already_called) if part is not None
+            )
         elif message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
             # Unreadable, or stopped before showing anything (an acknowledgement,
             # hidden or non-streamed tool calls): unknown work, not absent work.

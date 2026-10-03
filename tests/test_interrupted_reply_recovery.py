@@ -249,6 +249,38 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("trace", "closing_line"),
+    [
+        (
+            (
+                *TRACE,
+                ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="2"),
+            ),
+            "Already called for the current message, so do not repeat: `counter` (2 calls), `report` (1 call).",
+        ),
+        ((), None),
+    ],
+    ids=["calls_listed", "text_only"],
+)
+async def test_the_new_attempt_is_told_which_calls_not_to_repeat(
+    tmp_path: Path,
+    trace: tuple[ToolTraceEntry, ...],
+    closing_line: str | None,
+) -> None:
+    """A closing line counts every listed call, because models follow it even when the message asks for the call again."""
+    bot = _bot(tmp_path)
+
+    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed("Half of the report", trace=trace))
+
+    (instruction,) = _attempt_context(context)
+    if closing_line is None:
+        assert "Already called" not in instruction
+    else:
+        assert instruction.endswith(closing_line)
+
+
+@pytest.mark.asyncio
 async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path) -> None:
     """The streaming path receives the same context and still delivers through the adopted reply."""
     bot = _bot(tmp_path)
