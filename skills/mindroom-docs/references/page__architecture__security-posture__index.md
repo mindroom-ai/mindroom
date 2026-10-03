@@ -29,7 +29,8 @@ The config the primary sends to runners with each request, and the config file i
 Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so the records the primary acts on as authority live below the primary-only `tracking/` directory instead: invited-room and pending-invite ledgers, personal-room records, and conversation modes, each at its state root's storage-relative path.
+The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so the records the primary acts on as authority live below the primary-only `tracking/` directory instead: invited-room and pending-invite ledgers, personal-room records, conversation modes, and the primary's copy of each private-instance owner record, each at its state root's storage-relative path.
+The thread exporter writes into a private instance only for the requester that copy names, so an owner record planted in `private_instances` gets no export.
 Their locks and the lock that serializes private-instance owner records live outside both directories too, and startup stops scanning `private_instances` once the private-storage migration has finished its verified moves, leaving any invalid entry there untouched instead of failing.
 The session recovery lock stays beside the sessions it guards, so it is opened without following links or blocking, and a holder that keeps it past SQLite's busy timeout fails session storage creation instead of stalling it.
 Which workspaces a worker mounts follows its scope.
@@ -57,6 +58,7 @@ Reads through those descriptors are capped per surface.
 | Scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
+| `moviepy_video_tools` staged inputs | 1 GiB per video; 64 MiB per caption file | The call fails with an error before staging more than the cap |
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
 A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.
