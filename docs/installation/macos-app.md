@@ -112,8 +112,10 @@ A saved setup shows **Connection saved · Access off** and opens the next incomp
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
 2. In **Connect**, paste it into **Setup data** and select **Import Setup**.
-3. Review the controller fingerprint, requester, and agent. The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
-4. Confirm the displayed identities and select **Save and Connect**.
+3. Review the homeserver, Matrix account, controller fingerprint, requester, and agent, and confirm them before signing in, because pasted setup data chooses which server receives your sign-in.
+   The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
+   Replacing a saved login names both the saved and the new homeserver before it signs in.
+4. Confirm the displayed values again if signing in changed the saved login, and select **Save and Connect**.
 5. Copy the displayed confirmation command into the same agent chat. After the agent confirms pairing, select **I’ve Confirmed in Chat**.
 6. In **Access**, choose **Applications**, **Read-only folders**, or **Shell commands**, and save each choice.
    For applications, search and check the applications to allow, then select **Save App Access** above the list.

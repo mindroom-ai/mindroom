@@ -302,8 +302,49 @@ final class DesktopControlStoreTests: XCTestCase {
 
         store.saveAndConnect()
 
-        XCTAssertEqual(store.errorMessage, "Confirm the displayed controller, requester, and agent before saving.")
+        XCTAssertEqual(store.errorMessage, "Confirm the displayed homeserver, account, controller, requester, and agent before saving.")
         XCTAssertNil(store.recovery)
+    }
+
+    func testImportedHomeserverMustBeConfirmedBeforeSignInAndEditsResetConfirmation() async throws {
+        let helper = DesktopBridgeProcess()
+        let saved = configuredStatus(revision: 1, apps: [], homeserver: "https://saved.example.org", userID: "@person:example.org")
+        let descriptor: [String: Any] = [
+            "v": 1, "kind": "mindroom_desktop_setup", "homeserver": "https://other.example.net", "user_id": "@person:example.org",
+            "code": "one-time", "controller_user_id": "@controller:example.org", "controller_device_id": "DEVICE",
+            "controller_ed25519": "key", "requester_id": "@person:example.org", "agent_name": "assistant", "cloudflare_access": false,
+        ]
+        var actions: [String] = []
+        let store = DesktopControlStore(helper: helper, request: { action, _, _ in
+            actions.append(action)
+            return action == "import_setup" ? descriptor : try self.response(status: saved)
+        })
+        try await publish(saved, through: helper, to: store)
+        store.setupDescriptor = String(decoding: try JSONSerialization.data(withJSONObject: descriptor), as: UTF8.self)
+        store.importSetupDescriptor()
+        await waitUntilIdle(store)
+
+        store.login(replace: true)
+        await waitUntilIdle(store)
+        XCTAssertEqual(actions, ["import_setup"])
+        XCTAssertTrue(store.identityConfirmationLabel.contains("https://other.example.net"))
+        XCTAssertTrue(store.identityConfirmationLabel.contains("@person:example.org"))
+        XCTAssertTrue(store.replaceSessionMessage.contains("https://saved.example.org"))
+        XCTAssertTrue(store.replaceSessionMessage.contains("https://other.example.net"))
+
+        store.identityConfirmed = true
+        store.homeserver = "https://edited.example.net"
+        store.homeserver = "https://other.example.net"
+        XCTAssertFalse(store.identityConfirmed)
+        store.identityConfirmed = true
+        store.matrixUserID = "@edited:example.org"
+        store.matrixUserID = "@person:example.org"
+        XCTAssertFalse(store.identityConfirmed)
+
+        store.identityConfirmed = true
+        store.login(replace: true)
+        await waitUntilIdle(store)
+        XCTAssertEqual(actions, ["import_setup", "login"])
     }
 
     func testCancelImportedSetupRestoresSavedIdentitiesButKeepsAppAndBrowserDrafts() async throws {
