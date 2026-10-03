@@ -74,9 +74,9 @@ matrixRTC:
   proxy:
     # Proxy the conventional /livekit/jwt and /livekit/sfu paths through nginx.
     enabled: false
-    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-auth:8080.
+    # Internal MatrixRTC authorization service URL, for example http://matrixrtc-mindroom-matrixrtc-auth:8080.
     jwtServiceUpstream: ""
-    # Internal LiveKit SFU URL, for example http://livekit:7880.
+    # Internal LiveKit SFU URL, for example http://matrixrtc-mindroom-matrixrtc-livekit:7880.
     sfuUpstream: ""
 
 serviceWorker:

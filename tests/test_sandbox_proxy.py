@@ -5730,17 +5730,24 @@ async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
-    command = ["bash", "-c", 'printf "%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN"']
+    command = [
+        "bash",
+        "-c",
+        'printf "%s|%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN" "$MINDROOM_AGENT_CLI_WINDOW"',
+    ]
 
     with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
-        with bound_agent_cli_shell_env(AgentCliShellEnv("http://host.docker.internal:8765", "response-grant")):
+        with bound_agent_cli_shell_env(
+            AgentCliShellEnv("http://host.docker.internal:8765", "response-grant"),
+            window="bash-1",
+        ):
             minimal = await entrypoint(command)
         ordinary = await entrypoint(command)
 
     assert isinstance(minimal, str)
-    assert minimal.endswith("http://host.docker.internal:8765|response-grant")
+    assert minimal.endswith("http://host.docker.internal:8765|response-grant|bash-1")
     assert isinstance(ordinary, str)
-    assert ordinary.endswith("|")
+    assert ordinary.endswith("||")
     assert "response-grant" not in json.dumps(sent_payloads[-1])
 
 

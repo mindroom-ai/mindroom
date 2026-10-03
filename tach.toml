@@ -444,6 +444,7 @@ visibility = [
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
+    "mindroom.api.agent_cli",
     "mindroom.minimal_agent",
     "mindroom.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
@@ -456,6 +457,8 @@ from = ["mindroom.agent_cli.shell_contract"]
 expose = [
     "AGENT_CLI_TOKEN_ENV",
     "AGENT_CLI_URL_ENV",
+    "AGENT_CLI_WINDOW_ENV",
+    "AGENT_CLI_WINDOW_HEADER",
     "AgentCliShellEnv",
     "SHELL_OPERATION_NAMES",
     "bound_agent_cli_shell_env",
@@ -6766,7 +6769,7 @@ depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom
 
 [[modules]]
 path = "mindroom.cli.config_bundle"
-depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
+depends_on = ["mindroom.cli.config", "mindroom.cli.config_reload", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.api.config_schema"
@@ -7591,6 +7594,7 @@ depends_on = [
     "mindroom.agent_cli.json_io",
     "mindroom.agent_cli.protocol",
     "mindroom.agent_cli.session",
+    "mindroom.agent_cli.shell_contract",
     "mindroom.api.config_lifecycle",
 ]
 

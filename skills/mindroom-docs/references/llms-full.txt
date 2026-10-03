@@ -4966,7 +4966,7 @@ Team members, call agents, workflow participants, and OpenAI-compatible requests
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
-Calls are admitted only while one of the response's shell commands is running; shell commands still run in parallel, and when they overlap, a call is attributed to the most recently started one.
+Calls are admitted only while the shell command that makes them is running or its earlier calls are finishing; shell commands still run in parallel, and each keeps its own calls and their media.
 Media returned by those calls reaches the model with the shell command's result.
 Calls through the CLI count against their own `max_tool_calls_per_turn` budget, separate from the agent's ordinary tool calls.
 Streamed responses show calls made through the CLI as their own tool-trace entries.
@@ -5018,8 +5018,7 @@ Use `calls wait` when the result is still queued, running, or waiting for a deci
 It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
 Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
 Waiting pauses that shell command and its owning response; other conversations can continue.
-New tool calls and schema preparation require an active Bash call.
-Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
+New tool calls and schema preparation must come from a Bash call that is still running or whose earlier calls are still finishing; later ones are rejected instead of being queued for a later call.
 
 Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
 These JSON inputs are mutually exclusive and require a JSON object.
@@ -5071,7 +5070,7 @@ Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
 The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background commands behave like the agent's ordinary shell commands, but their `mindroom-agent` calls stop working when the response ends.
+Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call has returned and its calls have finished; `calls wait` on earlier receipts works until the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
@@ -13794,7 +13793,7 @@ Kubernetes background scripts are disabled by default because a general primary 
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
 Set `MINDROOM_SCRIPT_GATEWAY_PORT` to have the primary serve that listener itself on a second port that answers only `/api/script-gateway` routes and returns 404 for every other primary API route.
 The main API port is unchanged, so network policy must still keep workers off it; the environment flag does not create network isolation by itself.
-The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in `cluster/k8s/runtime/README.md`.
+The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its `<fullname>-script-gateway` ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway).
 When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
 Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
 Direct network clients started by the script process do not receive Agent Vault credential injection.
@@ -13817,7 +13816,7 @@ For Kubernetes, configure the dedicated backend, the gateway-only listener, and 
 ```bash
 export MINDROOM_WORKER_BACKEND=kubernetes
 export MINDROOM_SCRIPT_GATEWAY_PORT=8767
-export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
@@ -20913,7 +20912,7 @@ MindRoom's architecture consists of several key components working together.
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
-| `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
+| `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
@@ -22725,7 +22724,7 @@ Existing deployments moving from the previous Nio integration must follow the [N
 | [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
 | [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
 | Direct | Development, simple setups |
 
@@ -25592,6 +25591,20 @@ workers:
 See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
 For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/).
 
+### Chart Reference
+
+Each chart's README documents its values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).
+Optional features are described in these sections:
+
+- [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](https://docs.mindroom.chat/tools/background-scripts/).
+- [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
+- [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files.
+- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
+- Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
+- The [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md) runs the [voice call](https://docs.mindroom.chat/voice-calls/) backend, which the client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy.
+- [Operational log events](https://docs.mindroom.chat/deployment/operational-log-events/) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through the runtime chart's `env.extra`.
+
 ## Worker Backends
 
 The runtime chart supports two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
@@ -27460,6 +27473,8 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │                   runtime reload.                                                      │
 │ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
 │                   changes, 2 error.                                                    │
+│ apply-bundle      Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2    │
+│                   failed, 3 rolled back, 4 unconfirmed, 5 restart.                     │
 │ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
 │                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -27592,9 +27607,11 @@ mindroom config install-bundle ./candidate --target ./active --json
 mindroom config install-bundle ./candidate --target ./active --initialize-only
 mindroom config install-bundle ./candidate --target ./active --revision deploy-2
 mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
-# Keep each installation receipt; pin rollback to the previous revision's digest:
-mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
+# Pin rollback to the digest of the tree the installation moved aside:
+mindroom config install-bundle ./active.previous --target ./active --expected-digest <receipt-previous-digest> --json
 ```
+
+To install, confirm, and roll back in one step, use [`config apply-bundle`](#config-apply-bundle).
 
 `--config` selects a relative file inside the bundle (default `config.yaml`).
 The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
@@ -27628,7 +27645,7 @@ Mounts at or inside active and recovery trees are rejected before rotation or cl
 Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
 
 Rollback uses the same validated installation operation with `TARGET.previous` as its source.
-Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
+Pass the installation receipt's `previous_digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
 The rejected active revision then becomes the new previous tree.
 Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
 The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
@@ -27662,8 +27679,9 @@ If retired cleanup deletes some files before failing, its content no longer matc
 A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
 The target must be a directory below a writable mount, not the mount point itself.
 
-JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`.
+JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, `recovery_pending`, and `previous_digest`.
 The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
+`previous_digest` is the whole-tree digest of the tree this installation moved to `TARGET.previous`, or `null` when it replaced nothing.
 Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
 An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
 A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
@@ -27693,6 +27711,32 @@ The command only reads both trees, and its results list paths, never file conten
 
 JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
 Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
+
+### config apply-bundle
+
+Hot-apply a source-only change to the directory a running MindRoom loads, wait for the runtime to apply it, and optionally restore the previous tree when the runtime rejects it:
+
+```bash
+mindroom config apply-bundle ./candidate --target ./active --rollback-on-failure --wait 300 --json
+```
+
+The command first reads `GET /api/config/reload-status` and installs nothing unless the runtime reports a reload status, with the same `--url`, `--timeout`, `MINDROOM_API_KEY`, and HTTPS rules as `check-applied`.
+It then runs an ordinary installation without `--force`, honoring `--config` and `--expected-digest`, and waits up to `--wait` seconds (default 300) for the runtime result of the installed fingerprint.
+The installation always uses `--source-only`, because the runtime fingerprint covers only YAML/include sources; changes to `.env`, plugins, or other files that config reload does not reread are refused before anything is installed, so install those with `install-bundle` instead.
+With `--rollback-on-failure`, only a `failed` runtime result for the exact fingerprint of a changed installation restores `TARGET.previous`, pinned to the receipt's `previous_digest`, and then waits again for that tree's fingerprint.
+A reload already pending or failed before installation, for the same or a not-yet-known fingerprint, does not count, and pending, unreadable, or restart-required results never roll back.
+
+| Status | Exit code | Meaning |
+| --- | --- | --- |
+| `applied` | `0` | The runtime applied the candidate fingerprint. |
+| `pending` | `1` | The candidate is installed, but the runtime had not settled its fingerprint within `--wait`; confirm later with `check-applied`. |
+| `failed` | `2` | Nothing was installed, or the runtime rejected the candidate and no rollback was requested or possible, so the candidate stays installed. |
+| `rolled_back` | `3` | The runtime rejected the candidate, and the restored previous tree was applied. |
+| `unconfirmed` | `4` | The runtime result could not be read or proven, or restoring or confirming the previous tree failed; inspect before retrying. |
+| `restart_required` | `5` | The runtime adopted the candidate, but part of it needs a restart. |
+
+The JSON receipt contains `status`, `detail`, the candidate `install` receipt and its `runtime_status`, and the `rollback` receipt and its `rollback_runtime_status`.
+`install` is `null` when nothing was installed, and `rollback` is `null` unless the previous tree was restored.
 
 ### config fingerprint and config check-applied
 

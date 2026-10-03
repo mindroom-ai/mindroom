@@ -46,6 +46,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     ScriptedProvider,
     agent_cli_api,
+    cli_window,
     install_scripted_shell,
     shell_cli_owner,
 )
@@ -594,11 +595,12 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert args == "discover"
         owner = shell_cli_owner(registry)
         owners.append(owner)
-        listing = await owner.operation(ToolListOperation(operation="tools.list"))
+        listing = await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
         assert "calculator" in str(listing)
         call_id = uuid4()
         await owner.operation(
-            ToolCallOperation(
+            window=cli_window(),
+            operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="calculator",
                 function="add",
@@ -612,7 +614,8 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         if switch_model:
             switch_id = uuid4()
             await owner.operation(
-                ToolCallOperation(
+                window=cli_window(),
+                operation=ToolCallOperation(
                     operation="tools.call",
                     toolkit="thread_model",
                     function="switch_thread_model",

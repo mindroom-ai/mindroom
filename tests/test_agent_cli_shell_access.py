@@ -167,7 +167,7 @@ def test_worker_shells_call_back_through_the_address_workers_reach(
 
     assert minimal_shell_problems(config, paths, "helper") == []
     shell_env = agent_cli_shell_env(config, paths, "helper", "grant")
-    assert shell_env.env() == {"MINDROOM_AGENT_CLI_URL": expected, "MINDROOM_AGENT_CLI_TOKEN": "grant"}
+    assert (shell_env.api_url, shell_env.token) == (expected, "grant")
     assert shell_env.bin_dir is None
 
 
@@ -230,7 +230,7 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     run = shell.async_functions["run_shell_command"].entrypoint
     assert run is not None
 
-    with bound_agent_cli_shell_env(shell_env):
+    with bound_agent_cli_shell_env(shell_env, window="bash"):
         output = await run("command -v mindroom-agent")
 
     assert output.strip() == f"{shell_env.bin_dir}/mindroom-agent"
