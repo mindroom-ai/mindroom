@@ -392,6 +392,7 @@ def test_platform_administrator_reads_redacted_agent_config(tmp_path: Path) -> N
             "/default_headers",
         ),
         ({"op": "add", "path": "/models/default/host", "value": "https://ops:***@ollama.example.org"}, ""),
+        ({"op": "add", "path": "/models/default/host", "value": "https://me@corp.com:***@ollama.example.org"}, ""),
         ({"op": "replace", "path": "/mcp_servers/remote/url", "value": "https://***@mcp.example.org/mcp"}, ""),
     ],
 )

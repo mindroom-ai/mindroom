@@ -13,7 +13,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # Display redaction shows a URL password as ``user:***@host`` instead of the marker.
-_MASKED_URL_USERINFO = re.compile(r"://[^/@\s]*\*\*\*@")
+# The username may itself contain ``@``, so match anywhere in the authority.
+_MASKED_URL_USERINFO = re.compile(r"://[^/?#\s]*\*\*\*@")
 
 # The dashboard's configSchema.ts mirrors these kinds and the hint key.
 type _ReferenceKind = Literal["model", "agent", "room", "tool"]
