@@ -148,24 +148,22 @@ async def test_concurrent_headless_calls_share_profile_and_keep_tabs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("headless_client", ["user_agent"], indirect=True)
-async def test_cancelled_browser_call_stops_its_running_operation(
+async def test_stopped_browser_action_finishes_and_keeps_the_shared_browser(
     headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
     browser_processes: list[BrowserProcess],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stopping a response interrupts a persistent-browser operation instead of letting it finish."""
+    """Stopping a response lets a browser action finish, because interrupting it would close every tab."""
     client, payload, _root, _config = headless_client
-    opened = await _call(client, payload, action="open", targetUrl="https://1.1.1.1/cancel")
+    kept = await _call(client, payload, action="open", targetUrl="https://1.1.1.1/kept")
+    opened = await _call(client, payload, action="open", targetUrl="https://1.1.1.1/stopped")
     entered = asyncio.Event()
-    exited = asyncio.Event()
+    release = asyncio.Event()
 
     async def capture(**_kwargs: object) -> bytes:
         entered.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            exited.set()
-        return b"never"
+        await release.wait()
+        return b"image"
 
     monkeypatch.setattr(browser_processes[0].pages[-1], "screenshot", capture, raising=False)
     request_id = uuid4().hex
@@ -178,11 +176,14 @@ async def test_cancelled_browser_call_stops_its_running_operation(
     async with asyncio.timeout(10):
         await entered.wait()
         cancel = await client.post("/api/sandbox-runner/execute/cancel", json={"request_id": request_id})
+        release.set()
         response = await running
-        await exited.wait()
 
     assert cancel.json() == {"cancelled": True}
-    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert response.json()["ok"] is True
+    tabs = await _call(client, payload, action="tabs")
+    assert kept["targetId"] in {tab["targetId"] for tab in tabs["tabs"]}
+    assert len(browser_processes) == 1
 
 
 @pytest.mark.asyncio

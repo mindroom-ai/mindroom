@@ -267,7 +267,7 @@ def test_timeout_kills_child_and_keeps_template_alive(
     stub_manager: tuple[_SandboxForkserver, list[str]],
     tmp_path: Path,
 ) -> None:
-    """A timed-out request must SIGKILL the fork child without recycling the template."""
+    """A timed-out request must end the fork child without recycling the template."""
     manager, spawned = stub_manager
     pid_file = tmp_path / "child.pid"
     # Warm the template first so the short deadline below covers only the

@@ -301,6 +301,23 @@ def execute_worker_proxy_request(
             else f"{config.proxy_url}{_SANDBOX_PROXY_LEASE_PATH}"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
+            if cancellation is not None:
+                payload["request_id"] = cancellation.request_id
+                cancel_url = (
+                    worker_api_endpoint(worker_handle, "execute-cancel")
+                    if worker_handle is not None
+                    else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}/cancel"
+                )
+                # Arm before leasing credentials, so an abandoned call leases none.
+                cancellation._arm(
+                    functools.partial(
+                        _post_execute_cancel,
+                        client_factory,
+                        cancel_url,
+                        headers,
+                        cancellation.request_id,
+                    ),
+                )
             lease_id = _create_credential_lease(
                 client,
                 config=config,
@@ -314,22 +331,6 @@ def execute_worker_proxy_request(
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
-            if cancellation is not None:
-                payload["request_id"] = cancellation.request_id
-                cancel_url = (
-                    worker_api_endpoint(worker_handle, "execute-cancel")
-                    if worker_handle is not None
-                    else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}/cancel"
-                )
-                cancellation._arm(
-                    functools.partial(
-                        _post_execute_cancel,
-                        client_factory,
-                        cancel_url,
-                        headers,
-                        cancellation.request_id,
-                    ),
-                )
 
             response = client.post(execute_url, json=payload, headers=headers)
             try:

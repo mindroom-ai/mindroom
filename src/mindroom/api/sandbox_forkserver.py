@@ -372,7 +372,6 @@ class _SandboxForkserver:
             ).encode("utf-8")
             + b"\n"
         )
-        child_pid: int | None = None
         try:
             conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         except OSError as exc:
@@ -391,16 +390,16 @@ class _SandboxForkserver:
                 raise ForkserverError(msg) from exc
             reader = _SocketLineReader(conn, deadline)
             try:
-                child_pid = int(json.loads(reader.read_line())["pid"])
-                # The template reaps children as they exit, so stopping never signals
-                # a PID another process may reuse: it hangs up, and the child exits.
+                # The child's PID line says it exists. The template reaps children as they exit,
+                # so stopping never signals that PID, which another process may reuse: it hangs up.
+                reader.read_line()
                 bind_stop(functools.partial(_hang_up, conn))
                 response = json.loads(reader.read_line())
                 returncode = int(response["returncode"])
                 stdout_text = str(response["stdout"])
                 stderr_text = str(response["stderr"])
             except TimeoutError as exc:
-                self._kill_child(child_pid)
+                # Closing the connection below makes the child exit, like a stop.
                 raise ForkserverTimeoutError from exc
             except (_ConnectionClosedError, OSError, ValueError, KeyError, TypeError) as exc:
                 if template.process.poll() is not None:
@@ -415,15 +414,6 @@ class _SandboxForkserver:
             stdout=stdout_text,
             stderr=stderr_text,
         )
-
-    @staticmethod
-    def _kill_child(child_pid: int | None) -> None:
-        # The pid is deserialized from the child's socket message; never let a
-        # degenerate value reach os.kill, where 0 targets the process group.
-        if child_pid is None or child_pid <= 0:
-            return
-        with suppress(OSError):
-            os.kill(child_pid, signal.SIGKILL)
 
 
 def _hang_up(conn: socket.socket) -> None:
@@ -537,8 +527,8 @@ def _run_child_request(
     request: _ChildRequest,
     run_payload: Callable[[str], tuple[int, str, str]],
 ) -> int:
-    # Self-destruct backstop for the rare case where the runner never learned
-    # this child's pid; the grace keeps the runner-side SIGKILL primary.
+    # Self-destruct backstop for a child too busy to notice the runner hanging
+    # up; the grace keeps the hang-up primary.
     signal.alarm(max(1, math.ceil(request.timeout_seconds + _CHILD_TIMEOUT_GRACE_SECONDS)))
     if request.env is not None:
         os.environ.clear()

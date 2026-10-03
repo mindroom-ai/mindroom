@@ -2086,15 +2086,15 @@ async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branch
             except AttributeError:
                 computer = None
         if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
-            return await _run_cancellable(
-                _execute_worker_browser(
-                    computer,
-                    payload,
-                    runtime_paths,
-                    config,
-                    prepared_worker,
-                    runner_token,
-                ),
+            # Not cancellable: the browser runtime treats cancellation as closing the shared
+            # browser, and on computer workers its display, while its actions are short.
+            return await _execute_worker_browser(
+                computer,
+                payload,
+                runtime_paths,
+                config,
+                prepared_worker,
+                runner_token,
             )
     if sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
