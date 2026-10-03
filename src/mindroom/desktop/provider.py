@@ -345,14 +345,14 @@ class PyAutoGuiDesktopProvider:
     ) -> None:
         """Scroll at the center of one current semantic element."""
         self._check_emergency_stop()
-        element = self._accessibility.element_for_action(app_id, state_id, element_index)
+        element, process_id = self._accessibility.element_for_action(app_id, state_id, element_index)
         if element.bounds is None:
             msg = f"Accessibility element {element_index} has no scrollable screen bounds."
             raise DesktopProviderError(msg)
         clicks = _scroll_clicks(direction, pages)
         x, y = _rect_center(element.bounds)
         self._mapped_display(DesktopRect(x, y, 1, 1))
-        self._scroll_input(direction, clicks, x, y, process_id=None)
+        self._scroll_input(direction, clicks, x, y, process_id=process_id)
 
     def perform_action(
         self,

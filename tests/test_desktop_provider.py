@@ -14,6 +14,7 @@ from PIL import Image
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityCapture,
+    AccessibilityElement,
     AccessibilityError,
     AccessibilityState,
     DesktopRect,
@@ -25,6 +26,7 @@ from mindroom.desktop.provider import (
     PyAutoGuiDesktopProvider,
     _capture_macos_primary_screen,
     _capture_macos_window,
+    _normalized_point,
     _pillow_image_from_macos_capture,
     _type_macos_unicode,
     request_macos_desktop_permissions,
@@ -145,6 +147,7 @@ class FakeAccessibilityBackend:
     """Return one state-bound app window for provider fallback tests."""
 
     window: DesktopRect = field(default_factory=lambda: DesktopRect(100, 50, 800, 600))
+    element_bounds: DesktopRect | None = None
     calls: list[tuple[str, object]] = field(default_factory=list)
     keyboard_focus_checks_left: int | None = None
 
@@ -162,6 +165,29 @@ class FakeAccessibilityBackend:
         """Record validation and return the current app window and its process."""
         self.calls.append(("prepare_fallback", (app_id, state_id)))
         return AccessibilityCapture(AccessibilityState(state_id, app_id, "Editor", self.window, (), False), 42)
+
+    def element_for_action(
+        self,
+        app_id: str,
+        state_id: str,
+        element_index: int,
+    ) -> tuple[AccessibilityElement, int | None]:
+        """Record validation and return one element at the configured bounds and its process."""
+        self.calls.append(("element_for_action", (app_id, state_id, element_index)))
+        element = AccessibilityElement(
+            index=element_index,
+            depth=0,
+            parent_index=None,
+            role="AXScrollArea",
+            subrole=None,
+            name=None,
+            value=None,
+            enabled=True,
+            settable=False,
+            bounds=self.element_bounds,
+            actions=(),
+        )
+        return element, 42
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Record validation and return a focus guard that fails once its allowed checks run out."""
@@ -528,7 +554,7 @@ def test_secondary_macos_click_uses_global_quartz_points(monkeypatch: pytest.Mon
     assert pointer.calls == []
 
 
-@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "drag"])
+@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
 def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
@@ -537,7 +563,7 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
 
     Input covered before its first event sends nothing, so only a drag that moves under the window partway is unknown.
     """
-    provider, _, _ = _provider()
+    provider, _, accessibility = _provider()
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
 
@@ -587,6 +613,10 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
             provider.drag(**target, start_x=0, start_y=0, end_x=x, end_y=0)
         elif action == "scroll":
             provider.scroll(**target, direction="down", pages=1, x=x, y=0)
+        elif action == "scroll_element":
+            # The element is centered where the coordinate actions point.
+            accessibility.element_bounds = DesktopRect(*_normalized_point(accessibility.window, x=x, y=0), 1, 1)
+            provider.scroll_element(**target, element_index=0, direction="down", pages=1)
         elif action == "click":
             provider.click(**target, x=x, y=0, button="left")
         else:
