@@ -290,6 +290,7 @@ class TestStreamingBehavior:
         persist_entity_accounts(self.config, runtime_paths_for(self.config))
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "not_streamed"])
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
@@ -301,10 +302,11 @@ class TestStreamingBehavior:
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
+        streaming: bool,
     ) -> None:
-        """Test complete flow of one agent streaming and mentioning another."""
+        """Test complete flow of one agent replying, streamed or not, and mentioning another."""
 
-        # Configure streaming - helper will stream, calculator won't
+        # Configure streaming - the helper streams when enabled, the calculator never does
         def side_effect(
             client: object,
             room_id: str,
@@ -323,7 +325,7 @@ class TestStreamingBehavior:
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=True,
+            enable_streaming=streaming,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -363,8 +365,8 @@ class TestStreamingBehavior:
         helper_bot.client.room_send.return_value = mock_send_response
         calc_bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI responses
-        mock_ai_response.return_value = "4"
+        # Mock AI responses: the helper's reply when it does not stream, then the calculator's
+        mock_ai_response.return_value = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
 
         # Create a generator that yields the streaming response
         async def streaming_generator() -> AsyncIterator[str]:
@@ -397,11 +399,14 @@ class TestStreamingBehavior:
             await helper_bot._on_message(mock_room, user_event)
             await drain_coalescing(helper_bot)
 
-        # The helper posted a placeholder, streamed into it, and delivered its final text as an edit.
-        placeholder_content, streaming_edit_content, final_edit_content = (
+        # The helper posted a placeholder, streamed into it if streaming, and delivered its final text as an edit.
+        placeholder_content, *streaming_edit_contents, final_edit_content = (
             call.kwargs["content"] for call in helper_bot.client.room_send.call_args_list
         )
+        assert len(streaming_edit_contents) == int(streaming)
         assert final_edit_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+        mock_ai_response.reset_mock()
+        mock_ai_response.return_value = "4"
 
         def helper_event(event_id: str, content: dict[str, object]) -> nio.RoomMessageText:
             return nio.RoomMessageText.from_dict(
@@ -420,7 +425,7 @@ class TestStreamingBehavior:
         mock_room.invited_users = {}
         for event in (
             helper_event("$helper_response_123", placeholder_content),
-            helper_event("$helper_streaming_edit", streaming_edit_content),
+            *(helper_event("$helper_streaming_edit", content) for content in streaming_edit_contents),
         ):
             await calc_bot._on_message(mock_room, event)
             await drain_coalescing(calc_bot)
