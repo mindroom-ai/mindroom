@@ -1038,6 +1038,13 @@ async def drive_delegations(  # noqa: C901, PLR0912
     )
     while response.status == RunStatus.paused:
         external = _external_requirements(response)
+        # Worker code can write the stored run, and one approval binds a call ID, so a copied call must not start twice.
+        call_keys = [
+            (item.member_agent_id, cast("ToolExecution", item.tool_execution).tool_call_id) for item in external
+        ]
+        if len(set(call_keys)) < len(call_keys):
+            msg = "Paused run holds the same delegation call more than once; retry the request"
+            raise RuntimeError(msg)
         ordinary = [requirement for requirement in response.requirements or () if requirement.needs_confirmation]
         if ordinary:
             state.pending_requirements = [requirement.to_dict() for requirement in ordinary]

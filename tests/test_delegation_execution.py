@@ -14,6 +14,7 @@ from agno.metrics import RunMetrics
 from agno.models.response import ModelResponse
 from agno.run.agent import RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
 from agno.team import Team
 from agno.tools import Toolkit
@@ -772,5 +773,82 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path) -> None
             assert "child was not executed" in next(
                 message.content for message in response.messages if message.tool_call_id == "policy-gated"
             )
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_copied_delegation_call_never_starts_twice_from_one_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker code that copies the pending call in the stored run cannot make one approval start two children."""
+    child_model = DelegationModel(id="child", responses=[ModelResponse(content="Report written")] * 2)
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: child_model)
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval={"default": "require_approval"},
+        ),
+        "code",
+        users=["@alice:example.org"],
+    )
+    identity = ToolExecutionIdentity(
+        "matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent"
+    )
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    storage = create_session_storage("leader", config, paths, identity)
+    parent = Agent(
+        name="leader",
+        db=storage,
+        tools=[toolkit],
+        model=DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("run_subagent", "gated", agent_name="code", task="Write report")]),
+                ModelResponse(content="Parent done"),
+            ],
+        ),
+    )
+    options = {
+        "run_child": run_delegated_child_response,
+        "agent_name": "leader",
+        "config": config,
+        "runtime_paths": paths,
+        "execution_identity": identity,
+    }
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
+            response = await drive_delegations(parent, response, **options)
+            state = DelegationState.from_metadata(response.metadata)
+            stored = storage.get_run(response.run_id)
+            assert isinstance(stored, RunOutput)
+            copy = RunRequirement.from_dict(stored.requirements[0].to_dict())
+            copy.id = str(uuid4())
+            stored.requirements.append(copy)
+            storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
+            stored = storage.get_run(response.run_id)
+            assert isinstance(stored, RunOutput)
+
+            with pytest.raises(RuntimeError, match="same delegation call more than once"):
+                await drive_delegations(
+                    parent,
+                    stored,
+                    **options,
+                    decisions={"gated": True},
+                    denial_reasons={"gated": None},
+                    approval_calls=_saved_approval_calls(state),
+                )
+
+        assert DelegationState.from_metadata(storage.get_run(response.run_id).metadata).children == []
+        assert not list(tmp_path.glob("agents/code/workspace/.mindroom/delegations/*/*/run.json"))
     finally:
         storage.close()
