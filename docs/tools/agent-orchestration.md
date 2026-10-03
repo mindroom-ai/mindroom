@@ -251,7 +251,7 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
 Calls wait for the child's response by default.
-With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below, unless `delegate` is excluded.
+With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or until the agent starts answering a newer message in the conversation, and expose the shared waiting controls below, unless `delegate` is excluded.
 In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
@@ -321,7 +321,7 @@ background_tool_jobs:
 The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
 Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
-The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls on human input.
+The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls when the agent answers a newer message.
 A tool's own argument named `wait_timeout` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 

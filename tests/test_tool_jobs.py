@@ -816,14 +816,13 @@ async def test_recent_outcome_order_and_timestamps_survive_restart(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_failed_admission_leaves_no_subscription_or_execution(
+async def test_failed_admission_leaves_no_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A write that never publishes a record must leave a safely retryable exact job ID."""
     runtime = tool_job_runtime(tmp_path)
     try:
-        signal = HumanMessageSignal()
         original = runtime_module.write_json_file_durable
         calls = 0
 
@@ -838,7 +837,7 @@ async def test_failed_admission_leaves_no_subscription_or_execution(
             return BackgroundOutcome("completed", "once")
 
         monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
-        with pytest.raises(OSError, match="disk unavailable"), human_message_signal_context(signal):
+        with pytest.raises(OSError, match="disk unavailable"):
             await start_job(
                 runtime,
                 "retry",
@@ -848,7 +847,6 @@ async def test_failed_admission_leaves_no_subscription_or_execution(
                 owner=job_owner(),
                 operation=operation,
             )
-        assert not signal.has_subscribers
         assert await runtime.list_jobs(owner=job_owner(), depth=0) == []
         assert calls == 0
         monkeypatch.setattr(runtime_module, "write_json_file_durable", original)
@@ -938,18 +936,18 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
         return BackgroundOutcome("completed", "done")
 
     try:
-        with human_message_signal_context(signal):
-            job = await start_job(
-                runtime,
-                "work",
-                tool_name="tool",
-                depth=0,
-                adapter={},
-                owner=job_owner(),
-                operation=operation,
-            )
+        job = await start_job(
+            runtime,
+            "work",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
         await running.wait()
-        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+        with human_message_signal_context(signal):
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
         await asyncio.sleep(0)
         signal.notify()
         signal.clear()
@@ -1225,7 +1223,6 @@ async def test_failed_cancellation_persistence_can_be_retried(
     """A failed cancellation write cannot poison retry or publish an undurable terminal result."""
     runtime = tool_job_runtime(tmp_path)
     started = asyncio.Event()
-    human_signal = HumanMessageSignal()
     cleanup_calls = 0
 
     async def operation() -> BackgroundOutcome:
@@ -1237,17 +1234,16 @@ async def test_failed_cancellation_persistence_can_be_retried(
         nonlocal cleanup_calls
         cleanup_calls += 1
 
-    with human_message_signal_context(human_signal):
-        job = await start_job(
-            runtime,
-            "retry-cancel",
-            tool_name="tool",
-            depth=0,
-            adapter={},
-            owner=job_owner(),
-            operation=operation,
-            cancel=cleanup,
-        )
+    job = await start_job(
+        runtime,
+        "retry-cancel",
+        tool_name="tool",
+        depth=0,
+        adapter={},
+        owner=job_owner(),
+        operation=operation,
+        cancel=cleanup,
+    )
     await started.wait()
     original_publish = runtime._publish
     writes = 0
@@ -1273,7 +1269,6 @@ async def test_failed_cancellation_persistence_can_be_retried(
         assert settled.status == "cancelled"
         assert saved["status"] == "cancelled"
         assert cleanup_calls == 1
-        assert not human_signal.has_subscribers
     finally:
         runtime._publish = original_publish
         task = runtime._entries[job.job_id].task
@@ -1719,7 +1714,7 @@ async def test_terminal_operation_stays_pending_until_cancellation_cleanup_settl
 @pytest.mark.asyncio
 @pytest.mark.parametrize("continuation", [False, True])
 @pytest.mark.parametrize("published", [False, True])
-async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # noqa: PLR0915
+async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     continuation: bool,
@@ -1727,7 +1722,6 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
 ) -> None:
     """Parent cancellation must not hide writer failure or leave a failed admission half-published in memory."""
     runtime = tool_job_runtime(tmp_path)
-    human = HumanMessageSignal()
     original_writer = runtime_module.write_json_file_durable
     writing, release_writer = asyncio.Event(), threading.Event()
     loop = asyncio.get_running_loop()
@@ -1742,16 +1736,15 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
         return BackgroundOutcome("completed", "once")
 
     if continuation:
-        with human_message_signal_context(human):
-            await start_job(
-                runtime,
-                "failed",
-                tool_name="tool",
-                depth=0,
-                adapter={},
-                owner=job_owner(),
-                operation=approval,
-            )
+        await start_job(
+            runtime,
+            "failed",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=approval,
+        )
         waiting = await runtime.wait("failed", owner=job_owner(), depth=0)
         await runtime.release_wait("failed", waiting.claim)
 
@@ -1764,19 +1757,18 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
         raise OSError(msg)
 
     monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_writer)
-    with human_message_signal_context(human):
-        accepting = asyncio.create_task(
-            runtime.continue_job(
-                "failed",
-                owner=job_owner(),
-                depth=0,
-                expected_generation=0,
-                operation=operation,
-                adapter={},
-            )
-            if continuation
-            else runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation),
+    accepting = asyncio.create_task(
+        runtime.continue_job(
+            "failed",
+            owner=job_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=operation,
+            adapter={},
         )
+        if continuation
+        else runtime.start("failed", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation),
+    )
     try:
         await writing.wait()
         accepting.cancel()
@@ -1789,7 +1781,6 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
         if continuation:
             # The failed continuation never became current, so the approval can still continue exactly once.
             assert [(job.status, job.generation) for job in jobs] == [("awaiting_approval", 0)]
-            assert human.has_subscribers
             await runtime.continue_job(
                 "failed",
                 owner=job_owner(),
@@ -1800,7 +1791,6 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
             )
         else:
             assert jobs == []
-            assert not human.has_subscribers
             if published:
                 # The landed record keeps its identity from running; recovery reports it interrupted.
                 with pytest.raises(ValueError, match="already exists"):
@@ -1918,19 +1908,19 @@ async def test_repeated_human_followups_release_each_wait_and_clear_allows_waiti
         return BackgroundOutcome("completed", "saved")
 
     try:
-        with human_message_signal_context(signal):
-            job = await start_job(
-                runtime,
-                "repeat",
-                tool_name="tool",
-                depth=0,
-                adapter={},
-                owner=job_owner(),
-                operation=operation,
-            )
+        job = await start_job(
+            runtime,
+            "repeat",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
         for _ in range(2):
             signal.clear()
-            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
+            with human_message_signal_context(signal):
+                waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(waiter), 0.02)
             signal.notify()

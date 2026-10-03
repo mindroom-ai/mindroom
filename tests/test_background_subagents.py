@@ -28,8 +28,6 @@ from mindroom.delegation.background import (
 )
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.hooks import HookRegistry
-from mindroom.message_target import MessageTarget
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.tool_jobs import runtime as background
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
@@ -42,7 +40,6 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
 from tests.conftest import test_runtime_paths
-from tests.test_queued_message_notify import _envelope
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     job_child,
@@ -264,11 +261,11 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
         return BackgroundOutcome("completed", "finished")
 
     try:
-        with human_message_signal_context(human):
-            job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
+        job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
         await started.wait()
         human.notify()
-        assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
+        with human_message_signal_context(human):
+            assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         proceed.set()
         await asyncio.wait_for(next_tool.wait(), JOB_TEST_TIMEOUT)
         human.clear()
@@ -392,37 +389,12 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
         return BackgroundOutcome("completed")
 
     try:
+        job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
         with human_message_signal_context(human):
-            job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
-        assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
+            assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
     finally:
         finish.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_idle_parent_human_ingress_releases_active_job_wait(tmp_path: Path) -> None:
-    """Background jobs retain their conversation signal after parent lifecycle completion."""
-    runtime = tool_job_runtime(tmp_path)
-    try:
-        coordinator = ResponseLifecycleCoordinator()
-        target = MessageTarget.resolve("!room:test", "$root", "$human")
-        signal = coordinator._get_or_create_queued_signal(target)
-
-        async def operation() -> BackgroundOutcome:
-            await asyncio.Event().wait()
-            raise AssertionError
-
-        with human_message_signal_context(signal.human_signal):
-            job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
-        assert not coordinator.has_active_response_for_target(target)
-        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
-        await asyncio.sleep(0)
-        coordinator.reserve_waiting_human_message(target=target, response_envelope=_envelope(target=target))
-        result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
-        assert result.job.status == "running"
-    finally:
         await runtime.shutdown()
 
 
@@ -849,8 +821,8 @@ async def test_restart_adopts_native_completion_found_by_reconciliation(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restart_again", [False, True])
-async def test_recovered_approval_continues_after_human_followup(tmp_path: Path, restart_again: bool) -> None:
-    """Recovered approval authority survives human input and later explicit approval."""
+async def test_recovered_approval_continues_after_restart(tmp_path: Path, restart_again: bool) -> None:
+    """Recovered approval authority survives restarts until explicit approval."""
     owner = replace(job_owner(), transport_agent_name="team")
     runtime = tool_job_runtime(tmp_path)
 
@@ -871,9 +843,6 @@ async def test_recovered_approval_continues_after_human_followup(tmp_path: Path,
 
     try:
         await restored.recover()
-        signal = restored.human_signal_for("team", "!room:test", "$root")
-        signal.notify()
-        signal.clear()
         if restart_again:
             await restored.shutdown()
             restored = tool_job_runtime(tmp_path)

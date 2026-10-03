@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from dataclasses import fields, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,16 +28,14 @@ from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.matrix import state as matrix_state
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
-from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
 from mindroom.tool_jobs.authorization import (
     authority_snapshot,
     bind_actor_authority,
     bind_toolkit_authority,
     function_authority,
 )
-from mindroom.tool_jobs.control import JobControl, human_message_signal_context, job_checkpoint, job_control_context
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.disabled import ParkedWork
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
@@ -57,7 +55,6 @@ from mindroom.tool_system.worker_routing import serialize_tool_execution_identit
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
-from tests.test_queued_message_notify import _envelope
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
@@ -414,71 +411,6 @@ def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_pa
     second = delivery_coordinator(tmp_path, config)
     assert first is not second
     assert not (first.runtime_paths.storage_root / "tool_jobs").exists()
-
-
-@pytest.mark.asyncio
-async def test_replaced_response_runner_releases_wait_without_pausing_job(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A replacement transport must signal jobs launched by its retired runner."""
-    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
-    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
-    await coordinator.initialize()
-    runtime = coordinator.runtime
-    register_background_runtime(coordinator.runtime_paths, runtime)
-    deps = MagicMock(spec=[definition.name for definition in fields(ResponseRunnerDeps)])
-    deps.runtime_paths = coordinator.runtime_paths
-    deps.agent_name = "team"
-    original = ResponseRunner(deps)
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$human")
-    signal = original._lifecycle_coordinator._get_or_create_queued_signal(target).human_signal
-    advance, checkpoint_reached, tool_executed = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-    async def operation() -> BackgroundOutcome:
-        await advance.wait()
-        checkpoint_reached.set()
-        job_checkpoint()
-        tool_executed.set()
-        return BackgroundOutcome("completed", "Executed")
-
-    fixture = completed_delegation_job()
-    with human_message_signal_context(signal):
-        job = await start_delegation_job(runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
-    waiting = asyncio.create_task(runtime.wait(job.job_id, owner=fixture.owner, depth=0))
-    await asyncio.sleep(0)
-    replacement = ResponseRunner(deps)
-    unrelated_thread = target.with_thread_root("$unrelated")
-    replacement._lifecycle_coordinator.reserve_waiting_human_message(
-        target=unrelated_thread,
-        response_envelope=_envelope(target=unrelated_thread),
-    )
-    other_deps = MagicMock(spec=[definition.name for definition in fields(ResponseRunnerDeps)])
-    other_deps.runtime_paths = coordinator.runtime_paths
-    other_deps.agent_name = "lead"
-    other_transport = ResponseRunner(other_deps)
-    other_transport._lifecycle_coordinator.reserve_waiting_human_message(
-        target=target,
-        response_envelope=_envelope(target=target),
-    )
-    assert (await runtime.lookup(job.job_id, owner=fixture.owner, depth=0)).status == "running"
-    assert not waiting.done()
-    replacement._lifecycle_coordinator.reserve_waiting_human_message(
-        target=target,
-        response_envelope=_envelope(target=target),
-    )
-    released = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
-    assert released.job.status == "running"
-    advance.set()
-    await checkpoint_reached.wait()
-    signal.clear()
-    completed = await runtime.wait(job.job_id, owner=fixture.owner, depth=0)
-    try:
-        assert completed.job.status == "completed"
-        assert tool_executed.is_set()
-    finally:
-        await runtime.release_wait(job.job_id, completed.claim)
-        await coordinator.stop()
 
 
 def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) -> None:

@@ -14,24 +14,19 @@ if TYPE_CHECKING:
 
 @dataclass
 class HumanMessageSignal:
-    """Wake foreground waits and retain live conversation subscriptions."""
+    """Release a reply's waits once its agent starts answering a newer human message in the conversation."""
 
     _subscribers: set[Callable[[], None]] = field(default_factory=set)
     _pending: bool = False
 
-    @property
-    def has_subscribers(self) -> bool:
-        """Return whether background work still depends on this conversation."""
-        return bool(self._subscribers)
-
     def subscribe(self, callback: Callable[[], None]) -> None:
-        """Subscribe one owned job to subsequent admitted human messages."""
+        """Subscribe one wait, releasing it at once while a newer reply is still queued."""
         self._subscribers.add(callback)
         if self._pending:
             callback()
 
     def unsubscribe(self, callback: Callable[[], None]) -> None:
-        """Release a terminal job's subscription."""
+        """Release a finished wait's subscription."""
         self._subscribers.discard(callback)
 
     def notify(self) -> None:
@@ -41,13 +36,8 @@ class HumanMessageSignal:
             callback()
 
     def clear(self) -> None:
-        """Consume queued input so later waits can remain attached."""
+        """Consume the queued reply so later waits can remain attached."""
         self._pending = False
-
-    def pulse(self) -> None:
-        """Release current waits for input no reply will queue, so later waits stay attached."""
-        self.notify()
-        self.clear()
 
 
 @dataclass
@@ -73,13 +63,13 @@ _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None
 
 
 def current_human_message_signal() -> HumanMessageSignal | None:
-    """Return the live canonical conversation signal, without notice persistence state."""
+    """Return the signal of the reply this task belongs to; background work has none."""
     return _human_signal.get()
 
 
 @contextmanager
 def human_message_signal_context(signal: HumanMessageSignal | None) -> Iterator[None]:
-    """Bind the human signal for jobs launched by one response lifecycle."""
+    """Bind the human signal of one response lifecycle, or clear it for background work."""
     token = _human_signal.set(signal)
     try:
         yield

@@ -14,7 +14,6 @@ from functools import partial
 from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
-from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import (
     run_blocking_until_complete,
@@ -25,7 +24,6 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import (
-    HumanMessageSignal,
     JobControl,
     current_human_message_signal,
     human_message_signal_context,
@@ -239,7 +237,6 @@ class JobWait:
 class _Entry:
     job: BackgroundJob
     control: JobControl = field(default_factory=JobControl)
-    human_signal: HumanMessageSignal | None = None
     task: asyncio.Task[None] | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     claim: JobClaim | None = None
@@ -350,7 +347,6 @@ class ToolJobRuntime:
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
-        self._human_signals = WeakValueDictionary[tuple[str, str, str | None], HumanMessageSignal]()
         # Jobs whose approval cards can never apply again: cancelled during a pause, or recovered already terminal.
         self._withdrawn_approvals: set[str] = set()
 
@@ -358,10 +354,6 @@ class ToolJobRuntime:
         """Return and forget the jobs whose approval cards were withdrawn since the last call."""
         withdrawn, self._withdrawn_approvals = self._withdrawn_approvals, set()
         return withdrawn
-
-    def human_signal_for(self, transport_agent_name: str, room_id: str, thread_id: str | None) -> HumanMessageSignal:
-        """Retain one conversation signal while a runner or background job uses it."""
-        return self._human_signals.setdefault((transport_agent_name, room_id, thread_id), HumanMessageSignal())
 
     def _path(self, job_id: str, generation: int | None = None) -> Path:
         """Locate a job's metadata, or the payload of one of its generations."""
@@ -452,8 +444,7 @@ class ToolJobRuntime:
                 self._withdrawn_approvals.add(job.job_id)
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
-                self._unsubscribe_human_signal(entry)
-                entry.human_signal, entry.cancel, entry.task = None, None, None
+                entry.cancel, entry.task = None, None
             entry.notify_changed()
             self.changed.set()
 
@@ -515,11 +506,6 @@ class ToolJobRuntime:
                 if entry.job.status in TERMINAL_STATUSES:
                     # A crash can separate a cancelled pause from withdrawing the card that presented it.
                     self._withdrawn_approvals.add(entry.job.job_id)
-                owner = entry.job.owner
-                if entry.job.status == "awaiting_approval" and owner.room_id is not None:
-                    # Observe future human ingress while the recovered approval awaits reattachment.
-                    entry.human_signal = self.human_signal_for(owner.recipient, owner.room_id, owner.resolved_thread_id)
-                    entry.human_signal.subscribe(entry.notify_changed)
             # A crash can leave a payload no saved metadata references, such as one whose metadata save never landed.
             jobs = [entry.job for entry in self._entries.values() if entry.job.has_result_payload]
             referenced = {self._root / _payload_name(job.job_id, job.generation) for job in jobs}
@@ -578,10 +564,6 @@ class ToolJobRuntime:
         """Publish accepted ownership, then launch it; callers finish this before propagating cancellation."""
         await self._publish(entry, job)
         self._add_entry(entry)
-        signal = current_human_message_signal()
-        if entry.human_signal is None and signal is not None:
-            entry.human_signal = signal
-            signal.subscribe(entry.notify_changed)
         entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{job.job_id}")
 
     def owns_execution(self, job_id: str, adapter: dict[str, Any]) -> bool:
@@ -600,7 +582,8 @@ class ToolJobRuntime:
         try:
             try:
                 with (
-                    human_message_signal_context(entry.human_signal),
+                    # Human follow-ups release replies, never the background work they wait for.
+                    human_message_signal_context(None),
                     job_control_context(entry.control),
                     queued_message_signal_context(None) as notice,
                 ):
@@ -629,13 +612,6 @@ class ToolJobRuntime:
             # Runtime-owned cancellation and shutdown settle with this outcome; external teardown leaves it to recovery.
             if entry.control.cancelled:
                 entry.stopped_outcome = outcome
-            if entry.job.status in TERMINAL_STATUSES:
-                self._unsubscribe_human_signal(entry)
-
-    @staticmethod
-    def _unsubscribe_human_signal(entry: _Entry) -> None:
-        if entry.human_signal is not None:
-            entry.human_signal.unsubscribe(entry.notify_changed)
 
     async def lookup(
         self,
@@ -700,7 +676,8 @@ class ToolJobRuntime:
                 human_notified.set()
                 entry.notify_changed()
 
-            human_signal = entry.human_signal
+            # Only the waiting reply's own conversation releases it, when its agent answers a newer message there.
+            human_signal = current_human_message_signal()
             if human_signal is not None:
                 human_signal.subscribe(notify_human)
         try:
@@ -1116,7 +1093,6 @@ class ToolJobRuntime:
                 if entry.job.status not in READY_STATUSES:
                     # A Stop that arrived while shutdown refused new cancellations remains a cancellation.
                     entry.control.cancel(shutdown=entry.job.user_stop_receipt_order is None)
-                self._unsubscribe_human_signal(entry)
                 if entry.drain is not None:
                     # The cancellation request already cancelled execution; its drain settles it.
                     tasks.append(entry.drain)

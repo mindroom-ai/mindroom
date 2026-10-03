@@ -145,7 +145,6 @@ from mindroom.tool_jobs.completion import (
     recovered_jobs_note,
     reported_wait_presentation,
 )
-from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime, parse_completion_event_id
 from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -924,7 +923,6 @@ class ResponseRunner:
 
     def __post_init__(self) -> None:
         """Bind response-side approval collaborators to the event journal."""
-        self._lifecycle_coordinator.human_signal_provider = self._human_signal_for_target
         self._approval_responses = ApprovalResponseCoordinator(
             config=lambda: self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
@@ -946,13 +944,6 @@ class ResponseRunner:
             knowledge_access=self.deps.knowledge_access,
             refresh_scheduler=self._knowledge_refresh_scheduler,
         )
-
-    def _human_signal_for_target(self, target: MessageTarget) -> HumanMessageSignal:
-        """Keep human wait-release signals attached to the transport across bot replacements."""
-        runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is None:
-            return HumanMessageSignal()
-        return runtime.human_signal_for(self.deps.agent_name, target.room_id, target.resolved_thread_id)
 
     def _knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
         """Return the current orchestrator scheduler when this runner is managed."""

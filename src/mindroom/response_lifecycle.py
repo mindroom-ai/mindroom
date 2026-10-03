@@ -180,7 +180,6 @@ class _QueuedMessageState:
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
         self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
-        self.human_signal.notify()
         return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
@@ -234,7 +233,6 @@ class QueuedHumanNoticeReservation:
 class ResponseLifecycleCoordinator:
     """Serialize response turns and signal active turns about queued human ingress."""
 
-    human_signal_provider: Callable[[MessageTarget], HumanMessageSignal] | None = None
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
 
@@ -291,9 +289,7 @@ class ResponseLifecycleCoordinator:
                 # lock state alone silently drops user input.
                 candidate_signal = self._thread_queued_signals.get(candidate)
                 if candidate_signal is not None and (
-                    candidate_signal.has_pending_human_messages()
-                    or candidate_signal.has_active_response_turn()
-                    or candidate_signal.human_signal.has_subscribers
+                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
                 ):
                     continue
                 self._response_lifecycle_locks.pop(candidate, None)
@@ -335,9 +331,7 @@ class ResponseLifecycleCoordinator:
         signal = self._thread_queued_signals.get(lifecycle_key)
         if signal is not None:
             return signal
-        signal = _QueuedMessageState(
-            human_signal=self.human_signal_provider(target) if self.human_signal_provider else HumanMessageSignal(),
-        )
+        signal = _QueuedMessageState()
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
@@ -372,10 +366,9 @@ class ResponseLifecycleCoordinator:
         self._assert_target_matches_envelope(target, response_envelope)
         if not self._should_signal_queued_message(response_envelope):
             return None
-        queued_signal = self._get_or_create_queued_signal(target)
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
-            queued_signal.human_signal.pulse()
             return None
+        queued_signal = self._get_or_create_queued_signal(target)
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
@@ -395,8 +388,9 @@ class ResponseLifecycleCoordinator:
         if not signal_queued_message or not self._should_signal_queued_message(response_envelope):
             return None
         if not (existing_turn or lifecycle_lock.locked()):
-            queued_signal.human_signal.pulse()
             return None
+        # This agent answers a newer human message here, so the reply holding the conversation's jobs hands them over.
+        queued_signal.human_signal.notify()
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
