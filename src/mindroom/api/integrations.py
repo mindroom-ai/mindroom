@@ -18,6 +18,7 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
+from mindroom.spotify_tokens import current_spotify_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -110,6 +111,11 @@ async def get_spotify_status(
 
     status.connected = True
     try:
+        creds = current_spotify_credentials(
+            creds,
+            target.runtime_paths,
+            lambda renewed: _save_spotify_credentials(renewed, target),
+        )
         spotify_cls, _ = _ensure_spotify_packages(target.runtime_paths)
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()

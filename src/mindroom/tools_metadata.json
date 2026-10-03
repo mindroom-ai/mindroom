@@ -7095,6 +7095,7 @@
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"

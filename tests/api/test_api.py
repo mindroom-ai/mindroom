@@ -2888,6 +2888,53 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
     assert disconnected_status.json()["connected"] is False
 
 
+def test_spotify_status_renews_an_expiring_token(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Status renews a token that expires within a minute and saves it with Spotify's rotated refresh token."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app)
+    agent_store = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general")
+    agent_store.save_credentials(
+        "spotify",
+        {
+            "access_token": "expired-token",
+            "refresh_token": "old-refresh",
+            "expires_at": int(time.time()),
+            "_source": "ui",
+        },
+    )
+    renewals: list[dict[str, object]] = []
+
+    def _post(url: str, **kwargs: object) -> httpx.Response:
+        renewals.append({"url": url, **kwargs})
+        token = {"access_token": "renewed-token", "refresh_token": "new-refresh", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            assert self.auth == "renewed-token"
+            return {"display_name": "Listener"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener"
+    assert renewals == [
+        {
+            "url": "https://accounts.spotify.com/api/token",
+            "data": {"grant_type": "refresh_token", "refresh_token": "old-refresh"},
+            "auth": ("client-id", "client-secret"),
+            "timeout": 30.0,
+        },
+    ]
+    saved = agent_store.load_credentials("spotify")
+    assert saved is not None
+    assert (saved["access_token"], saved["refresh_token"]) == ("renewed-token", "new-refresh")
+    assert saved["expires_at"] >= int(time.time()) + 3500
+
+
 def test_spotify_reconnect_saves_the_newly_authorized_account(
     test_client: TestClient,
     tmp_path: Path,
