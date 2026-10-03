@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
+import threading
 from typing import get_type_hints
 
 import httpx
@@ -329,3 +331,33 @@ def test_server_fetch_http_transport_rejects_private_request_url_without_network
         transport.handle_request(request)
 
     assert exc_info.value.reason == "private_address"
+
+
+@pytest.mark.asyncio
+async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow DNS lookup for one connection must not stall other work on the event loop."""
+    lookup_started = threading.Event()
+    loop_kept_running = threading.Event()
+    lookup_saw_loop_running: list[bool] = []
+
+    def slow_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        lookup_started.set()
+        # Only the event loop sets this, so the wait succeeds only while the loop keeps running.
+        lookup_saw_loop_running.append(loop_kept_running.wait(timeout=2))
+        raise socket.gaierror
+
+    async def mark_loop_running_once_lookup_starts() -> None:
+        while not lookup_started.is_set():
+            await asyncio.sleep(0.01)
+        loop_kept_running.set()
+
+    monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", slow_getaddrinfo)
+    watcher = asyncio.create_task(mark_loop_running_once_lookup_starts())
+
+    async with httpx.AsyncClient(transport=ServerFetchAsyncHTTPTransport()) as client:
+        with pytest.raises(ServerFetchUrlError) as exc_info:
+            await client.get("https://slow-dns.example/")
+    await watcher
+
+    assert exc_info.value.reason == "dns_resolution_failed"
+    assert lookup_saw_loop_running == [True]
