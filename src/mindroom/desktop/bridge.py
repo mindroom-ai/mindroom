@@ -630,10 +630,8 @@ class DesktopBridge:
         except DesktopEmergencyStopError as exc:
             self._control_revoked = True
             return self._error_response(command, str(exc))
-        except AccessibilityActionOutcomeUnknownError:
-            return self._unknown_control_response(command)
-        except PlaywrightActionOutcomeUnknownError:
-            return self._unknown_control_response(command)
+        except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
+            return self._unknown_control_response(command, reason=str(exc))
         except (
             AccessibilityError,
             DesktopProviderError,
@@ -964,7 +962,7 @@ class DesktopBridge:
             result={**result, "warning": warning, "follow_up_screenshot": "failed"},
         )
 
-    def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
+    def _unknown_control_response(self, command: DesktopCommand, *, reason: str | None = None) -> DesktopResponse:
         if command.action in DESKTOP_SHELL_ACTIONS:
             warning = (
                 "The shell command outcome is unknown and it may have completed; do not repeat it automatically. "
@@ -981,12 +979,15 @@ class DesktopBridge:
                 "do not repeat the action automatically. "
                 f"Request {recovery_action} before deciding the next step."
             )
+        if reason is not None:
+            warning = f"{reason} {warning}"
         logger.warning(
             "desktop_control_outcome_unknown",
             request_id=command.request_id,
             action=command.action,
             requester_id=command.requester_id,
             agent_name=command.agent_name,
+            error=reason,
         )
         return success_response(
             command,
