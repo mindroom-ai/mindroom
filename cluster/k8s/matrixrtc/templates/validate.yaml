@@ -1,0 +1,24 @@
+{{- if not .Values.keys.existingSecret -}}
+{{- fail "keys.existingSecret is required" -}}
+{{- end -}}
+{{- if or (not .Values.keys.apiKeyKey) (not .Values.keys.apiSecretKey) -}}
+{{- fail "keys.apiKeyKey and keys.apiSecretKey are required" -}}
+{{- end -}}
+{{- if or (hasKey .Values.livekit.extraConfig "keys") (hasKey .Values.livekit.extraConfig "key_file") -}}
+{{- fail "livekit.extraConfig must not set keys or key_file; API keys come from keys.existingSecret" -}}
+{{- end -}}
+{{- if not .Values.livekit.media.loadBalancerIP -}}
+{{- fail "livekit.media.loadBalancerIP is required; reserve a static public IP for WebRTC media" -}}
+{{- end -}}
+{{- if not .Values.auth.livekitUrl -}}
+{{- fail "auth.livekitUrl is required, for example wss://matrix.example.com/livekit/sfu" -}}
+{{- end -}}
+{{- if not (or (hasPrefix "wss://" .Values.auth.livekitUrl) (hasPrefix "ws://" .Values.auth.livekitUrl)) -}}
+{{- fail "auth.livekitUrl must be a ws:// or wss:// URL" -}}
+{{- end -}}
+{{- if not .Values.auth.fullAccessHomeservers -}}
+{{- fail "auth.fullAccessHomeservers must list at least one Matrix server name" -}}
+{{- end -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.clientPodSelector) (not .Values.networkPolicy.extraFrom) -}}
+{{- fail "networkPolicy.enabled requires networkPolicy.clientPodSelector or networkPolicy.extraFrom" -}}
+{{- end -}}
