@@ -233,6 +233,101 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     await owner.close()
 
 
+async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools:
+    catalog = await _catalog(tmp_path, [Toolkit(name="calls", tools=tools)])
+    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+    return owner
+
+
+async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
+    queued = await owner.operation(
+        ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
+    )
+    while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
+        await asyncio.sleep(0.001)
+    return receipt
+
+
+@pytest.mark.asyncio
+async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path: Path) -> None:
+    """Media a failed command's CLI calls returned is dropped with it, not attached to the next command."""
+
+    async def produce() -> ToolResult:
+        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [produce], authorize)
+
+    async def failing() -> str:
+        assert (await _settled_receipt(owner, "produce"))["status"] == "completed"
+        msg = "worker failed"
+        raise RuntimeError(msg)
+
+    async def plain() -> str:
+        return "plain"
+
+    async with asyncio.timeout(3):
+        with pytest.raises(RuntimeError, match="worker failed"):
+            await owner.run_native_shell(failing)
+        assert await owner.run_native_shell(plain) == "plain"
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_path: Path) -> None:
+    """An earlier command that finishes first keeps its output when a later command's CLI call fails internally."""
+
+    async def explode() -> str:
+        return "never runs"
+
+    async def authorize(key, arguments) -> None:
+        if key.function == "explode":
+            msg = "internal"
+            raise RuntimeError(msg)
+
+    owner = await _native_owner(tmp_path, [explode], authorize)
+    first_open = asyncio.Event()
+    second_failed = asyncio.Event()
+
+    async def first() -> str:
+        first_open.set()
+        await second_failed.wait()
+        return "first output"
+
+    async def second() -> str:
+        assert (await _settled_receipt(owner, "explode"))["status"] == "failed"
+        second_failed.set()
+        # The first command drains before this one, while the failed call is still in flight to its owner.
+        while not first_task.done():
+            await asyncio.sleep(0.001)
+        return "second output"
+
+    async with asyncio.timeout(3):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        await first_open.wait()
+        second_result, first_result = await asyncio.gather(
+            owner.run_native_shell(second),
+            first_task,
+            return_exceptions=True,
+        )
+
+    assert first_result == "first output"
+    assert isinstance(second_result, ExceptionGroup)
+    await owner.close()
+
+
 @pytest.mark.asyncio
 async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end() -> None:
 

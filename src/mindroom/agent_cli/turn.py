@@ -160,7 +160,8 @@ class LiveTurnTools(TurnToolBridge):
         self._authorize = authorize
         self._context = dict(context or {})
         self._output_file_policy = output_file_policy
-        self._media: list[ModelResponse] = []
+        # Media from admitted calls, kept per owning Bash window until that window's result is built.
+        self._media: dict[str, list[ModelResponse]] = {}
         self._run_child = run_child
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
@@ -169,11 +170,13 @@ class LiveTurnTools(TurnToolBridge):
         self._admission = asyncio.Lock()
         self._calls: dict[str, _Call] = {}
         self._schema_documents: dict[ToolKey, str] = {}
-        self._active: set[asyncio.Task[None]] = set()
+        # Each admitted task belongs to the Bash window that was current when it was admitted.
+        self._active: dict[asyncio.Task[None], str] = {}
         self._parent: str | None = None
         self._window_context: Context | None = None
         # Standard-mode shell calls can overlap; admission stays open while any of them runs.
         self._open_parents: list[str] = []
+        self._closing_parents: set[str] = set()
         self._closed = False
         self._binding_retired = False
         self.control_executions: list[ToolExecution] = []
@@ -311,13 +314,14 @@ class LiveTurnTools(TurnToolBridge):
         if call is not None:
             call.receipt = call.receipt.model_copy(update={"parent_bash_call_id": self._parent})
         assert self._window_context is not None
+        assert self._parent is not None
         task = asyncio.create_task(
             self._dispatch(queued),
             name="agent-cli-admitted",
             context=self._window_context.copy(),
         )
         task.add_done_callback(queued.settle_waiter)
-        self._active.add(task)
+        self._active[task] = self._parent
 
     @asynccontextmanager
     async def _window(self, parent: str) -> AsyncIterator[None]:
@@ -343,27 +347,38 @@ class LiveTurnTools(TurnToolBridge):
         for task in self._active:
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
+    def _reattribute(self) -> None:
+        """Admit later calls under the newest still-running window, or a closing one while it drains."""
+        if self._parent is None:
+            # Closed or fenced after a control execution; never reopen admission here.
+            return
+        running = [parent for parent in self._open_parents if parent not in self._closing_parents]
+        self._parent = (running or self._open_parents)[-1]
+
     async def _drain_window(self, parent: str) -> None:
         failures: list[Exception] = []
-        settled = False
+        async with self._admission:
+            # A finished shell makes no more calls of its own; later ones belong to the shells still running.
+            self._closing_parents.add(parent)
+            self._reattribute()
         while True:
             async with self._admission:
-                tasks = tuple(self._active)
-                # Another open shell keeps admission open and drains the calls that arrive after this one.
-                if not tasks or (settled and len(self._open_parents) > 1):
+                tasks = tuple(task for task, owner in self._active.items() if owner == parent)
+                if not tasks:
                     self._open_parents.remove(parent)
-                    if not self._open_parents:
+                    self._closing_parents.discard(parent)
+                    if self._open_parents:
+                        self._reattribute()
+                    else:
                         # Recursive children may join while their admitted shell
                         # settles. Only quiescence closes admission for the last Bash.
                         self._parent = None
                         self._window_context = None
-                    elif self._parent is not None:
-                        self._parent = self._open_parents[-1]
                     break
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            self._active.difference_update(tasks)
+            for task in tasks:
+                self._active.pop(task, None)
             failures.extend(result for result in results if isinstance(result, Exception))
-            settled = True
         if failures:
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
@@ -433,7 +448,7 @@ class LiveTurnTools(TurnToolBridge):
         requirement: RunRequirement | None = None,
     ) -> AsyncIterator[AgentToolCallEvent]:
         """Drain shell work and nested media for both live Bash and exact recovery."""
-        self._media = []
+        self._media.pop(parent, None)
 
         async def leaf(values: dict[str, object]) -> object:
             async with self._window(parent):
@@ -452,7 +467,7 @@ class LiveTurnTools(TurnToolBridge):
             async for event in events:
                 self._check_control(event)
                 yield event
-        for media in self._media:
+        for media in self._media.pop(parent, []):
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
@@ -464,11 +479,14 @@ class LiveTurnTools(TurnToolBridge):
         if self.shell_env is None:
             msg = "Native shell has no CLI environment"
             raise RuntimeError(msg)
-        async with self._window(f"native-{uuid4().hex}"):
-            with bound_agent_cli_shell_env(self.shell_env):
-                result = await run()
-        # Media returned by CLI calls reaches the model with the shell result, as in minimal Bash.
-        media, self._media = self._media, []
+        parent = f"native-{uuid4().hex}"
+        try:
+            async with self._window(parent):
+                with bound_agent_cli_shell_env(self.shell_env):
+                    result = await run()
+        finally:
+            media = self._media.pop(parent, [])
+        # Media returned by its CLI calls reaches the model with the shell result, as in minimal Bash.
         return _with_media(result, media) if media else result
 
     async def _invoke_shell(self, binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> object:
@@ -733,7 +751,9 @@ class LiveTurnTools(TurnToolBridge):
                 async for event in events:
                     self._check_control(event)
                     if event.media is not None:
-                        self._media.append(event.media)
+                        owner = call.receipt.parent_bash_call_id
+                        assert owner is not None
+                        self._media.setdefault(owner, []).append(event.media)
                         media_results.append(event.media)
                     if event.kind == "started":
                         started = True
