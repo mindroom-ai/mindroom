@@ -21,6 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.event_journal import DeliveryStage
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
@@ -40,19 +41,21 @@ from tests.ai_user_id_helpers import (
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_response_runner_focused import _admit_approval_source
+from tests.test_response_runner_focused import _admit_approval_source, _preparation
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.response_turn import ResponseTurnContext
 
 ROOM_ID = "!room:localhost"
 REPLY_ID = "$reply"
 PARTIAL = "🔧 `counter` [1]\n\nHalf of the report"
+HOOK_CONTEXT = EnrichmentItem(key="hook", text="From a hook.", persist=False)
 TRACE = (
     ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
     ToolTraceEntry(type="tool_call_started", tool_name="report", args_preview='{"pages": 3}'),
@@ -166,14 +169,31 @@ async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
     )
     await bot._turn_store.record_pending_turn(record)
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$answer-edit", room_id=ROOM_ID)
+    request = _plain_request(target, source_event_id="$source")
     return replace(
-        _plain_request(target, source_event_id="$source"),
+        request,
         prompt="CRASHTEST write the report",
+        payload_preparation=_preparation(target, request.response_envelope),
         sources=sources,
         existing_event_id=REPLY_ID,
         existing_event_is_placeholder=True,
         existing_event_is_recovered=True,
         matrix_run_metadata=bot._turn_store.build_run_metadata(record),
+    )
+
+
+def _hooks_prepare(runner: ResponseRunner) -> AbstractContextManager[AsyncMock]:
+    """Prepare the payload as a live turn does, which replaces the transient items with the hooks' own."""
+    return patch.object(
+        runner.deps.request_preparer,
+        "prepare",
+        new=AsyncMock(
+            side_effect=lambda request: replace(
+                request,
+                payload_preparation=None,
+                transient_enrichment_items=(HOOK_CONTEXT,),
+            ),
+        ),
     )
 
 
@@ -194,6 +214,7 @@ async def _replay(
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=fetch),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        _hooks_prepare(runner),
     ):
         await runner.generate_response(request)
     return contexts, fetch
@@ -210,6 +231,7 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 
     (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
 
+    assert HOOK_CONTEXT in context.transient_enrichment_items
     (instruction,) = _attempt_context(context)
     assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
     assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in instruction
@@ -242,6 +264,7 @@ async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path)
         patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
+        _hooks_prepare(runner),
     ):
         await runner.generate_response(request)
 
@@ -292,12 +315,12 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing_event_id", [None, REPLY_ID], ids=["fresh_reply", "edit_regeneration"])
+@pytest.mark.parametrize("existing_event_id", [None, REPLY_ID], ids=["fresh_reply", "adopted_unrecovered_reply"])
 async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
     existing_event_id: str | None,
 ) -> None:
-    """A reply this attempt sends itself, or an answer an edit re-drives, has no stopped attempt behind it."""
+    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery (as an edit regeneration does), is not read."""
     bot = _bot(tmp_path)
     request = replace(
         await _crashed_turn(bot),
@@ -313,7 +336,7 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_reply_reaches_the_leader_without_its_display_chrome(tmp_path: Path) -> None:
+async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_chrome(tmp_path: Path) -> None:
     """The team path carries the account too, minus the header and no-consensus note it was displayed with."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
