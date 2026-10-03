@@ -136,7 +136,9 @@ class SelfConfigTools(Toolkit):
         authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
-        marker_error = redaction_marker_error({"display_name": display_name, "role": role, "instructions": instructions})
+        marker_error = redaction_marker_error(
+            {"display_name": display_name, "role": role, "instructions": instructions},
+        )
         if marker_error is not None:
             return marker_error
 

@@ -748,7 +748,7 @@ class ConfigManagerTools(Toolkit):
             logger.exception("config_info_lookup_failed", info_type=info_type)
             return f"Error getting {info_type}: {e}"
 
-    def manage_agent(
+    def manage_agent(  # noqa: PLR0911
         self,
         operation: Literal["create", "update", "validate"],
         agent_name: str,
@@ -802,7 +802,9 @@ class ConfigManagerTools(Toolkit):
         authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
-        marker_error = redaction_marker_error({"display_name": display_name, "role": role, "instructions": instructions})
+        marker_error = redaction_marker_error(
+            {"display_name": display_name, "role": role, "instructions": instructions},
+        )
         if marker_error is not None:
             return marker_error
 
