@@ -672,6 +672,45 @@ def test_run_command_preserves_unexpected_environment_errors(
     assert isinstance(result.exception, PermissionError)
 
 
+@pytest.mark.parametrize("app_id", ["chat.mindroom.menubar", "chat.mindroom.desktophelper"])
+def test_run_refuses_mindroom_itself_as_a_one_run_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    app_id: str,
+) -> None:
+    """MindRoom's windows grant shell auto-approval and control, so `--allow-app` cannot name them for a run."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    bridge = AsyncMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            "@cloud:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "fingerprint",
+            "--allow-requester",
+            "@alice:example.org",
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.example.Editor",
+            "--allow-app",
+            app_id,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert f"control MindRoom itself ({app_id})" in " ".join(result.output.split())
+    bridge.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
