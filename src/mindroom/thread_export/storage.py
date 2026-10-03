@@ -36,6 +36,9 @@ _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
 _EXPORTED_AT_LINE = re.compile(r"^  exported_at: .*$", re.MULTILINE)
+# Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
+# so one rebuild reads at most this much; four full-size exports is far beyond an ordinary room.
+_MAX_ROOM_INDEX_BYTES = 256 << 20
 
 
 logger = get_logger(__name__)
@@ -530,11 +533,8 @@ def _load_export_mapping(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[str, object]] | None:
-    """Return one index pair from a thread file below a pinned room directory."""
-    text = _read_text_at(directory_fd, filename)
-    if text is None:
-        return None
+def _thread_index_entry(filename: str, text: str) -> tuple[int, dict[str, object]] | None:
+    """Return one index pair from the text of a thread file."""
     payload = _load_export_mapping(text)
     if payload is None:
         # Parsing is bounded, so a thread too long to parse whole is indexed from the header before its messages.
@@ -569,15 +569,33 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
     return last_timestamp, entry
 
 
-def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, object]:
-    """Build one room index document from the recognizable thread files on disk."""
-    indexed = [
-        indexed_entry
-        for filename in sorted(
-            name for name in os.listdir(room_fd) if _is_thread_export_filename(name) and _regular_file_at(room_fd, name)
-        )
-        if (indexed_entry := _thread_index_entry_at(room_fd, filename)) is not None
-    ]
+def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) -> dict[str, object]:
+    """Build one room index document from the recognizable thread files on disk, newest first within the read budget."""
+    candidates: list[tuple[int, str]] = []
+    for name in os.listdir(room_fd):
+        if not _is_thread_export_filename(name):
+            continue
+        with suppress(FileNotFoundError):
+            status = os.stat(name, dir_fd=room_fd, follow_symlinks=False)
+            if stat.S_ISREG(status.st_mode):
+                candidates.append((status.st_mtime_ns, name))
+    indexed: list[tuple[int, dict[str, object]]] = []
+    read_bytes = 0
+    for _, filename in sorted(candidates, reverse=True):
+        text = _read_text_at(room_fd, filename)
+        if text is None:
+            continue
+        # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
+        read_bytes += len(text.encode("utf-8"))
+        if read_bytes > _MAX_ROOM_INDEX_BYTES:
+            logger.warning(
+                "Thread export files exceed the room index budget; leaving older threads out",
+                output_dir=str(output_dir),
+                room_key=room.key,
+            )
+            break
+        if (indexed_entry := _thread_index_entry(filename, text)) is not None:
+            indexed.append(indexed_entry)
     indexed.sort(key=lambda item: item[0], reverse=True)
     entries = [entry for _, entry in indexed]
     return {
@@ -650,7 +668,7 @@ def write_room_index(
     try:
         if not thread_files_changed and _room_index_filename_set_matches(room_fd):
             return
-        payload = _room_index_payload(room_fd, room)
+        payload = _room_index_payload(room_fd, output_dir, room)
         text = f"{json.dumps(payload, indent=2)}\n"
         if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) != text:
             _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)

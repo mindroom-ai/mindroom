@@ -654,6 +654,36 @@ def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
     ]
 
 
+def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread files added to a room cannot make one rebuild read without end, and the newest threads stay indexed."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    paths = []
+    for index in range(3):
+        thread_id = f"$thread-{index}:localhost"
+        payload = {"version": 1, "thread": {"id": thread_id, "source": "matrix", "message_count": 0}, "messages": []}
+        write_thread_payload(output_dir, room, thread_id, payload)
+        path = output_dir / "lobby" / _thread_filename(thread_id)
+        os.utime(path, ns=(index * 1_000_000_000, index * 1_000_000_000))
+        paths.append(path)
+    monkeypatch.setattr(
+        thread_export_storage,
+        "_MAX_ROOM_INDEX_BYTES",
+        paths[1].stat().st_size + paths[2].stat().st_size,
+    )
+
+    with patch("mindroom.thread_export.storage.logger.warning") as warning:
+        write_room_index(output_dir, room)
+
+    threads = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert sorted(entry["thread_id"] for entry in threads) == ["$thread-1:localhost", "$thread-2:localhost"]
+    warning.assert_called_once()
+    assert paths[0].exists()
+
+
 @pytest.mark.parametrize("filename", ["marker", "index"])
 def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
     """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""
