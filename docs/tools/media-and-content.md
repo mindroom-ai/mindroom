@@ -270,6 +270,7 @@ search_by_brand("OpenAI")
 `spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
 The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
+Before a tool call or dashboard status check, MindRoom renews an access token that expires within a minute with the stored `refresh_token`, `SPOTIFY_CLIENT_ID`, and `SPOTIFY_CLIENT_SECRET`, and saves the new `access_token`, `expires_at`, and any rotated `refresh_token`, so connections keep working past Spotify's one-hour token lifetime.
 The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
 Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
 `get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
@@ -304,6 +305,7 @@ get_currently_playing()
 ### Notes
 
 - `spotify` is shared-only in MindRoom, so agents using `worker_scope=user` or `worker_scope=user_agent` will see it marked unsupported and the dashboard status/connect routes will reject that scope.
+- `spotify` always runs in the primary process, even when listed in `worker_tools`, because renewing its token needs `SPOTIFY_CLIENT_SECRET`, which never reaches workers.
 - The redirect URI defaults to the API callback URL, but `SPOTIFY_REDIRECT_URI` can override it when the dashboard is behind a different public URL.
 - `play_track()` requires an active Spotify device and returns a specific `NO_ACTIVE_DEVICE` error when playback cannot start anywhere.
 - The current OAuth helper marks saved Spotify credentials as UI-managed so unscoped and shared execution can mirror them correctly.

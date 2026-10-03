@@ -444,9 +444,8 @@ Some integrations require `worker_scope` unset or `shared` because their credent
 That list includes `spotify` and `homeassistant`.
 Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
 For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
-Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+Both of those shared-scope integrations always stay local regardless of `worker_tools` and are never proxied to the sandbox.
 Credential-backed integrations that declare `requires_primary_runtime=True` also always stay local.
-`spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:

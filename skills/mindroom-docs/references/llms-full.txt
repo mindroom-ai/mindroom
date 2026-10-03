@@ -3162,9 +3162,8 @@ Some integrations require `worker_scope` unset or `shared` because their credent
 That list includes `spotify` and `homeassistant`.
 Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
 For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
-Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
+Both of those shared-scope integrations always stay local regardless of `worker_tools` and are never proxied to the sandbox.
 Credential-backed integrations that declare `requires_primary_runtime=True` also always stay local.
-`spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
@@ -9216,6 +9215,7 @@ search_by_brand("OpenAI")
 `spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
 The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
+Before a tool call or dashboard status check, MindRoom renews an access token that expires within a minute with the stored `refresh_token`, `SPOTIFY_CLIENT_ID`, and `SPOTIFY_CLIENT_SECRET`, and saves the new `access_token`, `expires_at`, and any rotated `refresh_token`, so connections keep working past Spotify's one-hour token lifetime.
 The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
 Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
 `get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
@@ -9250,6 +9250,7 @@ get_currently_playing()
 ### Notes
 
 - `spotify` is shared-only in MindRoom, so agents using `worker_scope=user` or `worker_scope=user_agent` will see it marked unsupported and the dashboard status/connect routes will reject that scope.
+- `spotify` always runs in the primary process, even when listed in `worker_tools`, because renewing its token needs `SPOTIFY_CLIENT_SECRET`, which never reaches workers.
 - The redirect URI defaults to the API callback URL, but `SPOTIFY_REDIRECT_URI` can override it when the dashboard is behind a different public URL.
 - `play_track()` requires an active Spotify device and returns a specific `NO_ACTIVE_DEVICE` error when playback cannot start anywhere.
 - The current OAuth helper marks saved Spotify credentials as UI-managed so unscoped and shared execution can mirror them correctly.
@@ -14320,7 +14321,7 @@ MindRoom validates inline overrides against the declared `config_fields`, and `t
 Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`.
 `homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths.
 `homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`.
-Like the Google OAuth tools and unlike `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
+Like the Google OAuth tools and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`google_maps`]
@@ -14520,6 +14521,7 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 - `homeassistant`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `google_tasks` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
 - The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
 - That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
+- When Home Assistant rejects an expired OAuth access token, MindRoom renews it once with the stored `refresh_token`, saves it, and retries the request; it asks you to reconnect only when that renewal fails.
 - Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
 - The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
 
@@ -22311,6 +22313,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | CalculatorTools computes `factorial` for any argument, although `json.dumps` refuses results above 4300 digits, so one call can hold the GIL for minutes. | Tracking gap: refuse factorial arguments whose result cannot be serialized; no matching issue or PR has been verified. | `CalculatorTools.factorial` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_factorial_rejects_arguments_whose_result_cannot_be_returned`. |
 | CalculatorTools trial-divides `is_prime` up to the square root of any argument, so one large prime checks for hours. | Tracking gap: bound prime-check work; no matching issue or PR has been verified. | `CalculatorTools.is_prime` in `custom_tools/calculator.py`; `tests/test_calculator_tool.py::test_is_prime_rejects_numbers_beyond_cheap_trial_division`. |
 | SleepTools blocks a thread in `time.sleep` for any requested duration, so parallel calls exhaust the primary's default executor. | Tracking gap: bound and await the pause; no matching issue or PR has been verified. | `custom_tools/sleep.py`; `tests/test_sleep_tool.py`. |
+| SpotifyTools sends one fixed access token on every request and never renews it, so every call fails once Spotify's one-hour token expires. | Tracking gap: accept a token provider or refresh credentials and renew expiring tokens; no matching issue or PR has been verified. | `SpotifyTools._make_request` in `custom_tools/spotify.py`; `tests/test_spotify_tools.py::test_tool_renews_an_expiring_token_before_calling_spotify`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
 | DaytonaTools treats a null `verify_ssl` like `false` and then disables certificate checks by patching `daytona_api_client.Configuration.__init__` for the whole process until it restarts. | Tracking gap: disable verification only for an explicit `False` and scope it to the toolkit's own client configuration; no matching issue or PR identified. | `tools/daytona.py` passes only an explicit `false` upstream; `tests/test_tool_config_sync.py` covers unset, null, true, and false values. |
 | Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
@@ -22415,6 +22418,7 @@ Small owner-adjacent boundaries use the same source records:
 | `custom_tools/calculator.py` (`factorial`) | Refuse `factorial()` above 1558 before Agno computes it. | The cap is MindRoom policy for the process shared by every agent; the result shape stays upstream. |
 | `custom_tools/calculator.py` (`is_prime`) | Refuse `is_prime()` above 10**12 before Agno's trial division. | The cap is MindRoom policy for the process shared by every agent; the other calculator functions stay upstream. |
 | `custom_tools/sleep.py` | Refuse `sleep()` durations outside 0 to 300 seconds and await the pause with `asyncio.sleep` instead of Agno's `time.sleep`. | The cap is MindRoom policy for the process shared by every agent; the toolkit's name and configuration stay upstream. |
+| `custom_tools/spotify.py` | Load the stored token before each `_make_request()`, renewing it within a minute of expiry. | `spotify_tokens.py` owns renewal, the scoped credential store owns the saved token, and the toolkit's functions and request format stay upstream. |
 | `tools/daytona.py` | Map an unset or null `verify_ssl` to `True` before the upstream constructor sees it. | The tool configuration default stays `true`, and the one-time `legacy_tool_credentials.py` cleanup drops `false` values saved with the former default. |
 | `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
@@ -25169,7 +25173,7 @@ Run matching MindRoom revisions in the primary and workers so both use the same 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Credential-backed tools that declare `requires_primary_runtime=True` always stay local regardless of `worker_tools`.
-Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+These include `spotify` and `homeassistant`, which are also shared-only integrations that require `worker_scope` unset or `shared`.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 You can set `worker_scope` per agent or in `defaults`:
