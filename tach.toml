@@ -2353,6 +2353,7 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.history.storage",
+    "mindroom.history.types",
     "mindroom.prompt_message_tags",
     "mindroom.tool_system.events",
 ]

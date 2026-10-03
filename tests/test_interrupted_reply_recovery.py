@@ -376,7 +376,7 @@ async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path) -> None:
-    """Rereading an archived attempt is not new, and a later attempt gets a record compaction keeps."""
+    """Rereading an attempt compaction archived, even one folded into an older record, is not new."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -407,7 +407,9 @@ async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path
         finally:
             storage.close()
 
+    second = _streamed("A second try", trace=(), latest_edit="$edit-b")
     await fold(_streamed())
+    await fold(second)
     storage = runner.deps.state_writer.create_storage(identity)
     try:
         session = get_agent_session(storage, target.session_id)
@@ -423,9 +425,9 @@ async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path
     finally:
         storage.close()
 
-    assert "is unknown" in await fold(_streamed())
+    assert "is unknown" in await fold(second)
     assert live_runs() == []
-    assert "is unknown" not in await fold(_streamed("A new start", trace=(), latest_edit="$edit-b"))
+    assert "is unknown" not in await fold(_streamed("A new start", trace=(), latest_edit="$edit-c"))
     (record,) = live_runs()
     assert cast("str", record.content).startswith("A new start")
 

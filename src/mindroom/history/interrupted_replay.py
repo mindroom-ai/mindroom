@@ -14,8 +14,13 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session, save_runs
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import is_archived_run, new_scope_session
+from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+)
+from mindroom.history.storage import new_scope_session, read_scope_seen_event_ids
+from mindroom.history.types import HistoryScope
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import (
@@ -328,45 +333,60 @@ def persist_stopped_attempt_snapshot(
     A turn that stops again before its new attempt shows the earlier work
     would otherwise lose that work's account, so each newly read attempt is
     appended to the record its reply already has. One record per turn keeps
-    every attempt inside even the smallest history window. ``run_id`` names a
-    new record only, after the attempt that starts it: once compaction archives
-    the live record, its summary holds those attempts, so rereading one of them
-    is not new and a later attempt starts a record compaction has not seen.
+    every attempt inside even the smallest history window. ``attempt`` is the
+    attempt's last visible edit, which the record then lists among the events
+    its history represents; an attempt the scope's history, live or compacted,
+    already represents is not new. ``run_id`` names a new record only, after
+    the attempt that starts it, so a record started after compaction archived
+    the last one is never mistaken for that one.
     """
     session = _load_persisted_session(storage=storage, session_id=session_id, is_team=is_team)
+    scope = HistoryScope(kind="team" if is_team else "agent", scope_id=scope_id)
+    if session is not None and attempt in read_scope_seen_event_ids(storage, session, scope):
+        return False
     response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     earlier = next(
         (
             run
             for run in (session.runs if session is not None else None) or ()
             if isinstance(run.metadata, dict)
-            and _STOPPED_ATTEMPT_KEY in run.metadata
+            and run.metadata.get(_STOPPED_ATTEMPT_KEY) is True
             and run.metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id
         ),
         None,
     )
+    seen_event_ids = _seen_event_ids(snapshot.run_metadata)
     if earlier is not None:
-        assert isinstance(earlier.metadata, dict)
-        if earlier.metadata.get(_STOPPED_ATTEMPT_KEY) == attempt:
-            return False
         run_id = earlier.run_id or run_id
+        seen_event_ids += _seen_event_ids(earlier.metadata)
         if isinstance(earlier.content, str) and earlier.content:
             snapshot = replace(
                 snapshot,
                 partial_text="\n\n".join(text for text in (earlier.content, snapshot.partial_text) if text),
             )
-    elif is_archived_run(storage, session_id=session_id, run_id=run_id):
-        return False
     persist_interrupted_replay_snapshot(
         storage=storage,
         session=session,
         session_id=session_id,
         scope_id=scope_id,
         run_id=run_id,
-        snapshot=replace(snapshot, run_metadata={**snapshot.run_metadata, _STOPPED_ATTEMPT_KEY: attempt}),
+        snapshot=replace(
+            snapshot,
+            run_metadata={
+                **snapshot.run_metadata,
+                _STOPPED_ATTEMPT_KEY: True,
+                MATRIX_SEEN_EVENT_IDS_METADATA_KEY: list(dict.fromkeys([*seen_event_ids, attempt])),
+            },
+        ),
         is_team=is_team,
     )
     return True
+
+
+def _seen_event_ids(metadata: Mapping[str, object] | None) -> list[str]:
+    """Return the seen event ids one run's metadata lists."""
+    raw = (metadata or {}).get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
+    return [event_id for event_id in raw if isinstance(event_id, str) and event_id] if isinstance(raw, list) else []
 
 
 def persist_interrupted_replay(
