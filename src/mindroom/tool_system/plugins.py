@@ -138,6 +138,7 @@ def load_plugins(
             return []
         plugins: list[_Plugin] = []
         skill_roots: list[Path] = []
+        cached_files = (dict(plugin_imports._PLUGIN_CACHE), dict(plugin_imports._MODULE_IMPORT_CACHE))
         plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
             plugin_entries,
             runtime_paths,
@@ -163,8 +164,16 @@ def load_plugins(
                 plugins.append(plugin)
                 skill_roots.extend(plugin.skill_dirs)
 
-            if plugins:
+            # Agent builds and runner requests load plugins every time, so log only loads that read a changed file.
+            if plugins and cached_files != (plugin_imports._PLUGIN_CACHE, plugin_imports._MODULE_IMPORT_CACHE):
                 logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
+                for plugin in plugins:
+                    if plugin.discovered_hooks:
+                        logger.info(
+                            "Discovered plugin hooks",
+                            plugin_name=plugin.name,
+                            hook_names=[_hook_display_name(hook) for hook in plugin.discovered_hooks],
+                        )
 
             _sync_loaded_plugin_tools(plugins)
 
@@ -397,12 +406,6 @@ def _materialize_plugin(
     if hooks_module is None and plugin.hooks_module_path is None:
         hooks_module = tools_module
     discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
-    if discovered_hooks:
-        logger.info(
-            "Discovered plugin hooks",
-            plugin_name=plugin.name,
-            hook_names=[_hook_display_name(hook) for hook in discovered_hooks],
-        )
     return _Plugin(
         name=plugin.name,
         root=plugin.root,

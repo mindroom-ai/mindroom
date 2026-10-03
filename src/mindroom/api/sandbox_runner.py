@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -333,26 +333,14 @@ def initialize_sandbox_runner_app(
         config=committed_config,
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
-    _ensure_request_tool_registry(context, committed_config)
+    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = context
 
 
-def _ensure_request_tool_registry(context: _SandboxRunnerContext, config: Config) -> None:
-    """Register one request config's plugin tools, reloading only when its plugin entries change.
-
-    Snapshots carry no MCP servers, and MCP tools never run on a runner, so only plugin entries key the reload.
-    """
-    plugins = tuple((entry.path, entry.enabled) for entry in config.plugins)
-    if context.tool_registry.loaded_plugins == plugins:
-        return
-    _ensure_registry_loaded_with_config(context.runtime_paths, config)
-    context.tool_registry.loaded_plugins = plugins
-
-
 def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
-    """Load config from env and ensure the tool registry is populated.
+    """Ensure the tool registry holds the given config's plugin tools.
 
-    Used by both the FastAPI startup and the subprocess worker so that
+    Used at startup, for each request, and by the subprocess worker so that
     plugin tools are registered even in fresh processes.
     """
     ensure_tool_registry_loaded(runtime_paths, config)
@@ -578,19 +566,11 @@ class SandboxRunnerViewFileResponse(BaseModel):
     failure_kind: Literal["tool", "worker"] | None = None
 
 
-@dataclass
-class _SandboxRunnerToolRegistryState:
-    """Plugin entries this runner process last loaded, so repeated snapshots do not reload plugins."""
-
-    loaded_plugins: tuple[tuple[str, bool], ...] | None = None
-
-
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
     runner_token: str | None
-    tool_registry: _SandboxRunnerToolRegistryState = field(default_factory=_SandboxRunnerToolRegistryState)
 
 
 @dataclass(frozen=True)
@@ -1971,7 +1951,8 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
     # Plugin tools come from the request's config, not from a startup config runners never receive.
-    _ensure_request_tool_registry(context, config)
+    # The loader re-runs only plugin modules edited since their last load.
+    _ensure_registry_loaded_with_config(runtime_paths, config)
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=TOOL_METADATA)
