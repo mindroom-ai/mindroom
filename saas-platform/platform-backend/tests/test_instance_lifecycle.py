@@ -27,6 +27,7 @@ from backend.services.instance_lifecycle import (
 from backend.services.provisioner_service import (
     InstanceClaimLostError,
     provision_instance,
+    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
 )
 from backend.tasks.cleanup import run_cleanup_job
@@ -405,6 +406,29 @@ async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_me
     assert [key_call.kwargs for key_call in platform.set_key_disabled.await_args_list] == [{"disabled": True}]
     assert platform.instance()["status"] == "stopped"
     assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_replacement_key_another_run_recorded_after_the_old_one_vanished(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+
+    async def key_gone(_instance_row: dict[str, Any], *, disabled: bool) -> None:
+        if not disabled:
+            # Another run that found the key gone too recorded its replacement and claimed the redeploy first.
+            platform.instance()["openrouter_key_hash"] = "hash_other"
+            msg = "OpenRouter key not found"
+            raise OpenRouterKeyNotFoundError(msg)
+
+    platform.set_key_disabled.side_effect = key_gone
+    platform.provision.side_effect = InstanceClaimLostError
+
+    await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    assert platform.instance()["openrouter_key_hash"] == "hash_other"
 
 
 def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:
@@ -1288,6 +1312,20 @@ async def test_a_recorded_key_whose_secret_publication_fails_is_deleted_and_forg
     assert alive == set()
     assert db.row("instances", instance_id=7)["openrouter_key_hash"] == expected_hash
     helm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_revoking_a_key_keeps_the_replacement_another_run_recorded_meanwhile() -> None:
+    db = FakeSupabase({"instances": [_instance("running", openrouter_key_hash="hash_old")]})
+
+    def delete_key(*, management_api_key: str, key_hash: str) -> None:  # noqa: ARG001
+        # Another provision, which also found the old key gone, records its replacement while this delete runs.
+        db.row("instances", instance_id=7)["openrouter_key_hash"] = "hash_new"
+
+    with patch("backend.services.provisioner_service.delete_openrouter_key", delete_key):
+        await revoke_instance_openrouter_key(db, 7)
+
+    assert db.row("instances", instance_id=7)["openrouter_key_hash"] == "hash_new"
 
 
 @pytest.mark.asyncio

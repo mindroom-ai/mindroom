@@ -548,8 +548,14 @@ async def _resume(
     try:
         await set_instance_openrouter_key_disabled(current, disabled=False)
     except OpenRouterKeyNotFoundError:
-        # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one.
-        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+        # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one, unless another run
+        # recorded a replacement meanwhile.
+        update_instance(
+            sb,
+            instance_id,
+            CLEARED_OPENROUTER_KEY_METADATA,
+            expected_openrouter_key_hash=current["openrouter_key_hash"],
+        )
         await _reprovision(sb, current, subscription, resume_lifecycle_hold=True)
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1

@@ -567,7 +567,7 @@ async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, 
 
 
 async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
-    """Delete the platform-paid OpenRouter key of one instance and forget its metadata."""
+    """Delete the platform-paid OpenRouter key of one instance and forget it, unless another run recorded a new one."""
     key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
     if key_hash is None:
         return
@@ -576,7 +576,7 @@ async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> Non
         await anyio.to_thread.run_sync(delete_key)
     except OpenRouterKeyNotFoundError:
         logger.info("OpenRouter key %s for instance %s was already deleted", key_hash, instance_id)
-    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=key_hash)
 
 
 async def _delete_resources_outside_release(instance_id: str | int) -> None:
