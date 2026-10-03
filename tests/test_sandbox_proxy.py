@@ -560,6 +560,60 @@ def test_worker_proxy_client_records_worker_success() -> None:
     assert manager.failures == []
 
 
+def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
+    """A dedicated worker's call is stopped at that worker, with the worker's own token."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    stopped = threading.Event()
+
+    def responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/cancel"):
+            stopped.set()
+            return {"cancelled": True}
+        cancellation.cancel()
+        assert stopped.wait(10)
+        return {"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+    cancellation = sandbox_proxy_module.WorkerCallCancellation()
+    last_post: dict[str, Any] = {}
+    client_class = _recording_client_class(captured=last_post, captured_calls=calls, responder=responder)
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=7.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            credentials_manager=None,
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_target=None,
+            worker_handle=handle,
+            worker_manager=_TrackingWorkerManager(),
+            client_factory=client_class,
+            cancellation=cancellation,
+        )
+
+    (_, execute), (cancel_url, cancel) = calls
+    assert cancel_url == "http://worker/api/sandbox-runner/execute/cancel"
+    assert cancel == {"request_id": execute["request_id"]}
+    assert last_post["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
+
+
 def _run_worker_proxy_request_with_exception(
     exception_factory: Callable[[httpx.Request], Exception],
 ) -> _TrackingWorkerManager:

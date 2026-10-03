@@ -24961,7 +24961,7 @@ When the supervisor exits (runner shutdown, worker restart, or orphaning), it ki
 
 Stopping a response stops its async worker calls too, such as `run_shell_command`.
 Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
-The runner then kills the request's subprocess (or cancels its in-process task), and the shell supervisor kills the command's process group once its relay is gone.
+The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
 A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
 Synchronous worker calls, such as the `python` and `file` tools, still run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`.
 Persistent browser actions also finish on their own: they are short, and interrupting one would close the worker's shared browser and its tabs.

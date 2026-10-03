@@ -390,8 +390,8 @@ class _SandboxForkserver:
                 raise ForkserverError(msg) from exc
             reader = _SocketLineReader(conn, deadline)
             try:
-                # The child's PID line says it exists. The template reaps children as they exit,
-                # so stopping never signals that PID, which another process may reuse: it hangs up.
+                # The child's first line says it exists. The template reaps children as they
+                # exit, so stopping never signals a PID another process may reuse: it hangs up.
                 reader.read_line()
                 bind_stop(functools.partial(_hang_up, conn))
                 response = json.loads(reader.read_line())
@@ -488,7 +488,8 @@ def _child_main(conn: socket.socket, run_payload: Callable[[str], tuple[int, str
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     exit_code = 1
     try:
-        _send_json(conn, {"pid": os.getpid()})
+        # Tells the runner this child exists; it never signals the child, whose PID the template may reap.
+        _send_json(conn, {"started": True})
         reader = _SocketLineReader(conn, time.monotonic() + _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
         try:
             request_line = reader.read_line()
