@@ -842,7 +842,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if call is None or not call.binds_arguments(tool.tool_args):
             msg = "Saved delegation approval no longer matches its pending arguments; retry the request"
             raise RuntimeError(msg)
-    if requirement.id not in state.hooks:
+    # Hook records live in storage worker code can write, so only a started child may reuse its stored gate.
+    if retained is None or requirement.id not in state.hooks:
         state.hooks[requirement.id] = await before_delegation(
             execution_identity=caller_identity,
             arguments=args,
