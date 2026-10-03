@@ -27365,7 +27365,7 @@ This covers `.env` and files outside the YAML include graph too.
 An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
 `--force` cannot be combined with `--initialize-only`.
 `--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
-The comparison uses the staged candidate under the installer lock, and refusal leaves active and previous trees untouched.
+The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
 
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
@@ -27434,7 +27434,7 @@ Every other difference is reported as `other`, including `.env`, plugins, script
 Config reload only rereads sources, so `other` changes need a runtime restart.
 Each `--config` entrypoint (default `config.yaml`) must load in both trees.
 Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
-The command only reads both trees and reports paths, never file contents.
+The command only reads both trees, and its results list paths, never file contents.
 
 JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
 Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
