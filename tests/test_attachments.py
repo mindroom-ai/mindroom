@@ -334,6 +334,40 @@ async def test_thread_history_media_that_failed_is_not_downloaded_again_every_tu
 
 
 @pytest.mark.asyncio
+async def test_one_turn_downloads_a_bounded_number_of_thread_history_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A history full of failing media costs one turn a fixed number of downloads, not one per item.
+
+    The failure memory only stops repeats of media it still remembers, so the
+    turn itself must stop. Media left over waits for a later turn.
+    """
+    limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(side_effect=lambda *_args, **_kwargs: FakeMediaResponse(b"x" * 4096))
+    history = [
+        make_visible_message(
+            event_id=f"$huge{index}",
+            content={"msgtype": "m.file", "body": "huge.bin", "url": "mxc://localhost/huge"},
+        )
+        for index in range(limit + 3)
+    ]
+
+    for expected_downloads in (limit, limit + 3):
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        assert attachment_ids == []
+        assert client.send.await_count == expected_downloads
+
+
+@pytest.mark.asyncio
 async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) -> None:
     """Each event keeps its own record, but events naming one upload share its single copy."""
     client = make_matrix_client_mock()
@@ -1630,8 +1664,9 @@ async def test_cached_history_attachment_does_not_block_event_loop(
                 room_id="!room:example.org",
                 thread_id="$thread",
                 event=event,
+                may_download=True,
             )
-            assert loaded == record
+            assert loaded == (record, False)
         else:
             attachment_ids = await resolve_thread_attachment_ids(
                 AsyncMock(),

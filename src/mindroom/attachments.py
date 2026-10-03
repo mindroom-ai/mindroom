@@ -68,6 +68,9 @@ _ATTACHMENT_CLEANUP_TASK_OWNER = object()
 _FAILED_HISTORY_MEDIA_RETRY_SECONDS = 3600.0
 _MAX_FAILED_HISTORY_MEDIA = 10_000
 _failed_history_media_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+# Thread-history media one turn downloads at most; the rest waits for a later turn. The failure memory
+# alone cannot bound a turn, because anyone who can post can fill a thread with media that fails.
+_MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN = 10
 
 
 @dataclass(frozen=True)
@@ -1219,7 +1222,9 @@ async def _register_thread_history_media_attachment(
     room_id: str,
     thread_id: str | None,
     event: FileOrVideoMessageEvent | ImageMessageEvent,
-) -> AttachmentRecord | None:
+    may_download: bool,
+) -> tuple[AttachmentRecord | None, bool]:
+    """Return the event's attachment record, if any, and whether it was downloaded for it."""
     existing_record = await run_blocking_until_complete(
         partial(
             _load_existing_context_attachment,
@@ -1230,12 +1235,12 @@ async def _register_thread_history_media_attachment(
         ),
     )
     if existing_record is not None:
-        return existing_record
+        return existing_record, False
 
     failure_key = (str(storage_path), event.event_id)
     retry_at = _failed_history_media_retry_at.get(failure_key)
-    if retry_at is not None and retry_at > time.monotonic():
-        return None
+    if not may_download or (retry_at is not None and retry_at > time.monotonic()):
+        return None, False
     record = await register_matrix_media_attachment(
         client,
         storage_path,
@@ -1250,7 +1255,7 @@ async def _register_thread_history_media_attachment(
             _failed_history_media_retry_at.popitem(last=False)
     else:
         _failed_history_media_retry_at.pop(failure_key, None)
-    return record
+    return record, True
 
 
 async def register_thread_history_media_attachments(
@@ -1264,19 +1269,22 @@ async def register_thread_history_media_attachments(
     """Register unannotated image/file/video events visible in thread history."""
     attachment_ids: list[str] = []
     seen_attachment_ids: set[str] = set()
+    downloads = 0
     for message in thread_history:
         if not _thread_history_message_in_scope(message, thread_id):
             continue
         event = _media_event_from_thread_history_message(room_id, message)
         if event is None:
             continue
-        attachment_record = await _register_thread_history_media_attachment(
+        attachment_record, downloaded = await _register_thread_history_media_attachment(
             client,
             storage_path,
             room_id=room_id,
             thread_id=thread_id,
             event=event,
+            may_download=downloads < _MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN,
         )
+        downloads += downloaded
         if attachment_record is None or attachment_record.attachment_id in seen_attachment_ids:
             continue
         seen_attachment_ids.add(attachment_record.attachment_id)
