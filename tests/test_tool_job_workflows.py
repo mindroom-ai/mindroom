@@ -54,7 +54,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     context.config.agents["general"].tools = [
         ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]}),
     ]
-    runtime = tool_job_runtime(context.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
     if managed:
         pin_background_tool_jobs(context.config, context.runtime_paths)
         register_background_runtime(context.runtime_paths, runtime)
@@ -119,7 +119,7 @@ async def test_workflow_participant_tools_run_under_the_enclosing_grant(
             msg = "Tool execution is no longer authorized for this caller."
             raise JobAccessError(msg)
 
-    runtime = tool_job_runtime(context.runtime_paths.storage_root, authorize_execution=authorize_execution)
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root, authorize_execution=authorize_execution)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     child_model = DelegationModel(
@@ -174,7 +174,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     context = _make_context(tmp_path)
     context.config.background_tool_jobs.enabled = True
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(context.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(context.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     loop = asyncio.get_running_loop()

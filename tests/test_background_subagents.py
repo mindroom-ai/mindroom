@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
-import threading
 import weakref
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
@@ -40,15 +39,19 @@ from tests.conftest import test_runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     awaiting_approval,
+    intercept_job_saves,
     job_child,
     job_owner,
     keep_child,
     lookup,
     pending_outcome,
     pending_outcomes,
+    saved_jobs,
+    saved_payload,
     start_delegation_job,
     tool_job_runtime,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -60,7 +63,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_consumed_native_result_releases_live_child_and_discovery_payload(tmp_path: Path) -> None:
     """Consumption releases native objects while the exact formatted result remains readable."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     raw = "native output " * 65536
     delivered = raw + "\n\nSaved native receipt"
 
@@ -95,7 +98,7 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
 @pytest.mark.asyncio
 async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path) -> None:
     """A recovered native result stays small in discovery and expiry deletes its metadata and payload files."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     child = job_child()
     raw = "native output " * 65536
     delivered = raw + "\n\nSaved native receipt"
@@ -109,8 +112,7 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
     waited = await runtime.wait(child.delegation_id, owner=job_owner(), depth=0)
     await runtime.acknowledge_wait(child.delegation_id, waited.claim)
     await runtime.shutdown()
-    directory = tmp_path / "tool_jobs"
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
 
     async def source_finished(_job: background.BackgroundJob) -> bool:
         return True
@@ -126,7 +128,8 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
             source_finished=source_finished,
         )
         assert child.delegation_id not in restored._entries
-        assert not list(directory.glob(f"{child.delegation_id}.*"))
+        assert child.delegation_id not in await saved_jobs(tmp_path)
+        assert await saved_payload(tmp_path, child.delegation_id) is None
     finally:
         await restored.shutdown()
 
@@ -134,7 +137,7 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
 @pytest.mark.asyncio
 async def test_cancellation_after_native_settlement_keeps_its_outcome(tmp_path: Path) -> None:
     """Cancellation after native settlement preserves an outcome the generic job never published."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     child = job_child()
     settled = asyncio.Event()
 
@@ -158,7 +161,7 @@ async def test_cancellation_after_native_settlement_keeps_its_outcome(tmp_path: 
 @pytest.mark.asyncio
 async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path) -> None:
     """Foreground abandonment must never cancel or restart an owned operation."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     started, finish = asyncio.Event(), asyncio.Event()
     calls = 0
 
@@ -199,7 +202,7 @@ async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path
 @pytest.mark.asyncio
 async def test_wait_claim_released_without_ack_keeps_outcome_pending(tmp_path: Path) -> None:
     """An abandoned result lease remains eligible for a later serialized consumer."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "done")
@@ -224,7 +227,7 @@ async def test_wait_claim_released_without_ack_keeps_outcome_pending(tmp_path: P
 @pytest.mark.asyncio
 async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
     """Human input cannot block later tools inside an accepted subagent turn."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     human = HumanMessageSignal()
     started, proceed, next_tool = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -263,7 +266,7 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
 )
 async def test_scope_mismatch_cannot_inspect_or_cancel(tmp_path: Path, change: dict[str, str]) -> None:
     """Knowledge of a job ID conveys no authority in another execution scope."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         finish = asyncio.Event()
 
@@ -284,7 +287,7 @@ async def test_scope_mismatch_cannot_inspect_or_cancel(tmp_path: Path, change: d
 @pytest.mark.asyncio
 async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: Path) -> None:
     """Restart returns stored exact outcomes without executing abandoned work again."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
 
         async def completed() -> BackgroundOutcome:
@@ -300,7 +303,7 @@ async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: 
         second = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=running)
     finally:
         await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         assert (await lookup(restored, first.job_id, owner=job_owner(), depth=0)).result == "durable"
@@ -313,7 +316,7 @@ async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: 
 @pytest.mark.asyncio
 async def test_existing_queued_human_releases_wait_without_blocking_first_tool(tmp_path: Path) -> None:
     """Pending input is observed on subscription while accepted work still starts."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     human = HumanMessageSignal()
     human.notify()
     entered, finish = asyncio.Event(), asyncio.Event()
@@ -337,7 +340,7 @@ async def test_existing_queued_human_releases_wait_without_blocking_first_tool(t
 @pytest.mark.asyncio
 async def test_cancelled_active_wait_releases_result_claim(tmp_path: Path) -> None:
     """Cancellation after wait admission must release its lease without killing the child."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         running, finish = asyncio.Event(), asyncio.Event()
 
@@ -365,7 +368,7 @@ async def test_cancelled_active_wait_releases_result_claim(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) -> None:
     """A terminal job must never leave its child conversation locked in a paused approval."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         cleaning, cleaned = asyncio.Event(), asyncio.Event()
 
@@ -397,7 +400,7 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
 @pytest.mark.parametrize("stopped", [False, True])
 async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stopped: bool) -> None:
     """A Stop saved while shutdown refused new cancellations still stops the job as a cancellation."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     started = asyncio.Event()
     by_shutdown: list[bool] = []
 
@@ -422,7 +425,7 @@ async def test_shutdown_keeps_a_saved_stop_a_cancellation(tmp_path: Path, stoppe
 @pytest.mark.asyncio
 async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_path: Path) -> None:
     """Work a crash left running settles as interrupted by the restart; a saved or later cancel stays a cancellation."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     release = asyncio.Event()
 
     async def blocked() -> BackgroundOutcome:
@@ -451,9 +454,8 @@ async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_
         # A requested cancellation is saved before its cleanup finishes.
         cancelling = asyncio.create_task(runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0))
         await wait_for_status(runtime, cancelled.job_id, "cancel_requested")
-        # The process dies: its storage lease goes away without an orderly shutdown.
-        runtime._lease.close()
-        restored = tool_job_runtime(tmp_path, cancel=cleanup)
+        # The process dies without an orderly shutdown, and the next one takes its jobs over.
+        restored = await tool_job_runtime(tmp_path, cancel=cleanup)
         await restored.recover()
         assert by_restart == {running.job_id: True, cancelled.job_id: False}
     finally:
@@ -503,19 +505,15 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled parent cannot strand a durably accepted job between its write and launch."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     child = job_child()
-    written, executing, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    release_writer = threading.Event()
-    owner_loop = asyncio.get_running_loop()
-    original_writer = background.write_json_file_durable
+    written, executing, finish, release_writer = (asyncio.Event() for _ in range(4))
 
-    def blocked_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
-        original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
-        owner_loop.call_soon_threadsafe(written.set)
-        release_writer.wait()
+    async def blocked_writer(_job: dict[str, object], _payload: object) -> None:
+        written.set()
+        await release_writer.wait()
 
-    monkeypatch.setattr(background, "write_json_file_durable", blocked_writer)
+    intercept_job_saves(monkeypatch, before=blocked_writer)
     calls = 0
 
     async def operation() -> BackgroundOutcome:
@@ -549,7 +547,7 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
 @pytest.mark.asyncio
 async def test_shutdown_keeps_native_result_committed_before_outcome_publication(tmp_path: Path) -> None:
     """Shutdown cannot replace a committed native answer with an interruption notice."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         child = job_child()
         committed = asyncio.Event()
@@ -565,15 +563,15 @@ async def test_shutdown_keeps_native_result_committed_before_outcome_publication
         await committed.wait()
     finally:
         await runtime.shutdown()
-    saved = json.loads((tmp_path / "tool_jobs" / f"{job.job_id}.json").read_text())
-    assert saved["status"] == "completed"
-    assert saved["result"] == "Exact durable completed answer"
+    saved = (await saved_jobs(tmp_path))[job.job_id]
+    assert saved.status == "completed"
+    assert saved.result == "Exact durable completed answer"
 
 
 @pytest.mark.asyncio
 async def test_restart_adopts_native_completion_found_by_reconciliation(tmp_path: Path) -> None:
     """Startup reconciliation is authoritative when native storage proves completion."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     child = job_child()
 
     async def operation() -> BackgroundOutcome:
@@ -582,17 +580,14 @@ async def test_restart_adopts_native_completion_found_by_reconciliation(tmp_path
 
     await start_delegation_job(runtime, child, owner=job_owner(), operation=operation)
     await runtime.shutdown()
-    path = tmp_path / "tool_jobs" / f"{child.delegation_id}.json"
-    snapshot = json.loads(path.read_text())
-    snapshot["status"] = "running"
-    snapshot["result"] = None
-    background.write_json_file_durable(path, snapshot)
+    snapshot = asdict(replace((await saved_jobs(tmp_path))[child.delegation_id], status="running", result=None))
+    await write_saved_job(tmp_path, child.delegation_id, json.dumps(snapshot))
 
     async def reconcile(retained: DelegationChild) -> None:
         retained.status = "completed"
         retained.result = "Exact durable completed answer"
 
-    restored = tool_job_runtime(tmp_path, cancel=partial(reconcile_delegation, cleanup=reconcile))
+    restored = await tool_job_runtime(tmp_path, cancel=partial(reconcile_delegation, cleanup=reconcile))
     try:
         await restored.recover()
         job = await lookup(restored, child.delegation_id, owner=job_owner(), depth=0)
@@ -604,11 +599,11 @@ async def test_restart_adopts_native_completion_found_by_reconciliation(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_shutdown_waiter", [False, True])
-async def test_shutdown_drains_accepted_cancellation_before_releasing_storage(
+async def test_shutdown_drains_accepted_cancellation(
     tmp_path: Path,
     cancel_shutdown_waiter: bool,
 ) -> None:
-    """A replacement runtime cannot acquire storage while the previous owner still writes cleanup."""
+    """Shutdown waits until an accepted cancellation's cleanup has saved its outcome."""
     cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
 
     async def cleanup(child: DelegationChild) -> None:
@@ -616,7 +611,7 @@ async def test_shutdown_drains_accepted_cancellation_before_releasing_storage(
         await release_cleanup.wait()
         child.status = "cancelled"
 
-    runtime = tool_job_runtime(tmp_path, cancel=partial(reconcile_delegation, cleanup=cleanup))
+    runtime = await tool_job_runtime(tmp_path, cancel=partial(reconcile_delegation, cleanup=cleanup))
     child = job_child()
 
     async def approval() -> BackgroundOutcome:
@@ -636,8 +631,6 @@ async def test_shutdown_drains_accepted_cancellation_before_releasing_storage(
         with pytest.raises(TimeoutError):
             async with asyncio.timeout(0.1):
                 await asyncio.shield(stopping)
-        with pytest.raises(BlockingIOError):
-            tool_job_runtime(tmp_path)
     finally:
         release_cleanup.set()
         await cancelling
@@ -646,7 +639,7 @@ async def test_shutdown_drains_accepted_cancellation_before_releasing_storage(
                 await stopping
         else:
             await stopping
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         assert (await lookup(restored, job.job_id, owner=job_owner(), depth=0)).status == "cancelled"
@@ -661,7 +654,7 @@ async def test_shutdown_drains_accepted_cancellation_before_releasing_storage(
 )
 async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, operation_name: str) -> None:
     """Old response callbacks cannot write after a replacement acquires runtime storage."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "Saved")
@@ -672,7 +665,7 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
     second_wait = await runtime.wait(second.job_id, owner=job_owner(), depth=0)
     await runtime.release_wait(second.job_id, second_wait.claim)
     await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         operations = {
@@ -691,7 +684,7 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
 @pytest.mark.asyncio
 async def test_shutdown_rejects_new_cancel_while_draining_execution(tmp_path: Path) -> None:
     """Shutdown's task drain cannot be bypassed by a newly admitted public cancellation."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     executing, draining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -723,7 +716,7 @@ async def test_shutdown_rejects_new_cancel_while_draining_execution(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_shutdown_does_not_cancel_an_existing_execution_cleanup_twice(tmp_path: Path) -> None:
     """An accepted cancel already owns execution cancellation; shutdown only drains it."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     executing, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))
 
     async def operation() -> BackgroundOutcome:
@@ -754,7 +747,7 @@ async def test_shutdown_does_not_cancel_an_existing_execution_cleanup_twice(tmp_
 async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path) -> None:
     """The generic registry cannot repair native records while another native executor owns them."""
     paths = test_runtime_paths(tmp_path)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     child = job_child()
 
     async def operation() -> BackgroundOutcome:
@@ -769,10 +762,8 @@ async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path)
     await runtime.release_wait(earlier.job_id, waiting.claim)
     await start_delegation_job(runtime, child, owner=job_owner(), operation=operation)
     await runtime.shutdown()
-    path = paths.storage_root / "tool_jobs" / f"{child.delegation_id}.json"
-    payload = json.loads(path.read_text())
-    payload["status"] = "running"
-    background.write_json_file_durable(path, payload)
+    snapshot = asdict(replace((await saved_jobs(paths.storage_root))[child.delegation_id], status="running"))
+    await write_saved_job(paths.storage_root, child.delegation_id, json.dumps(snapshot))
     calls = 0
 
     async def cleanup(retained: DelegationChild) -> None:
@@ -781,7 +772,7 @@ async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path)
         retained.status = "completed"
         retained.result = "Native durable answer"
 
-    restored = tool_job_runtime(
+    restored = await tool_job_runtime(
         paths.storage_root,
         cancel=partial(reconcile_delegation, cleanup=cleanup, runtime_paths=paths),
     )

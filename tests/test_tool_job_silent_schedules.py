@@ -81,7 +81,7 @@ async def _run_silent_turn(
     paths = _runtime_paths(tmp_path)
     context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     database = str(tmp_path / "silent.db")
@@ -303,7 +303,7 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
     )
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
@@ -368,7 +368,7 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
     )
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
@@ -415,7 +415,7 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
     )
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
     release = asyncio.Event()
@@ -450,7 +450,7 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
             waited = await runtime.wait(job_id, owner=owner, depth=0)
             await runtime.release_wait(job_id, waited.claim)
         await runtime.shutdown()
-        runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+        runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
         await runtime.recover()
         restored = pending_outcome(runtime, job_id)
         assert restored is not None

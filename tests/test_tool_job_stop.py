@@ -33,10 +33,12 @@ from tests.test_user_stop_convergence import _CountingGateway
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     awaiting_approval,
+    intercept_job_saves,
     job_owner,
     lookup,
     pending_outcome,
     pending_outcomes,
+    saved_jobs,
     start_job,
     tool_job_runtime,
     user_stopped,
@@ -118,7 +120,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
         "other-room": (replace(owner, room_id="!elsewhere:example.org"), "$first"),
         "other-thread": (replace(owner, resolved_thread_id="$other", session_id="other"), "$first"),
     }
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -155,7 +157,7 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
 @pytest.mark.asyncio
 async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tmp_path: Path) -> None:
     """Stop returns after cancellation admission while uncooperative cleanup still owns the job."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
@@ -197,7 +199,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         release.set()
         await runtime.shutdown()
 
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         saved = await lookup(restored, "active", owner=job_owner(), depth=0)
@@ -241,7 +243,7 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
         latest_edit_receipt_order=new.receipt_order,
         user_stop_receipt_order=old.receipt_order,
     )
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -305,7 +307,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
             completed=False,
         ),
     )
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
     instance = pin_background_tool_jobs(config, paths)
     if enabled:
         # A disabled instance never publishes a runtime; the job only stands in for saved work.
@@ -337,8 +339,8 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
                 lambda: config,
                 lambda name: bot if name == "general" else None,
                 runner.deps.runtime.agent_reply_memberships,
+                lambda: bot._journal_store,
             )
-            await coordinator.initialize(bot._journal_store)
             await coordinator.sync()
             if enabled:
                 runtime = coordinator.runtime
@@ -370,13 +372,11 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
 ) -> None:
     """Applying the same Stop again, or an older one, at every startup neither rewrites the job nor moves its update time."""
     writes: list[str] = []
-    writer = runtime_module.write_json_file_durable
 
-    def counting_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
-        writes.append(path.name)
-        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+    def counting_writer(job: dict[str, object], _payload: object) -> None:
+        writes.append(str(job["job_id"]))
 
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         await start_job(
             runtime,
@@ -389,21 +389,21 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
         )
         waited = await runtime.wait("ready", owner=job_owner(), depth=0)
         await runtime.release_wait("ready", waited.claim)
-        monkeypatch.setattr(runtime_module, "write_json_file_durable", counting_writer)
+        intercept_job_saves(monkeypatch, before=counting_writer)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
         stopped = await lookup(runtime, "ready", owner=job_owner(), depth=0)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
         await runtime.stop_jobs(receipt_order=50, matches=_every_job)
     finally:
         await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         await restored.stop_jobs(receipt_order=100, matches=_every_job)
         replayed = await lookup(restored, "ready", owner=job_owner(), depth=0)
     finally:
         await restored.shutdown()
-    assert writes == ["ready.json"]
+    assert writes == ["ready"]
     assert replayed.user_stop_receipt_order == 100
     assert replayed.updated_at == stopped.updated_at
 
@@ -411,7 +411,7 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
 @pytest.mark.asyncio
 async def test_slow_stop_matching_leaves_jobs_accessible(tmp_path: Path) -> None:
     """Stop judges jobs outside the runtime lock, so its journal reads cannot stall other job access."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     judging, release = asyncio.Event(), asyncio.Event()
 
     async def slow_match(_job: BackgroundJob) -> bool:
@@ -439,14 +439,14 @@ async def test_slow_stop_matching_leaves_jobs_accessible(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_stop_on_a_closed_runtime_raises_without_saving_a_mark(tmp_path: Path) -> None:
     """A closed runtime refuses a Stop, so its unsettled reaction replays after restart instead of being lost."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     try:
         await start_job(runtime, "done", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=_completed)
     finally:
         await runtime.shutdown()
     with pytest.raises(runtime_module.JobAccessError, match="closed"):
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-    assert runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "done.json").user_stop_receipt_order is None
+    assert (await saved_jobs(tmp_path))["done"].user_stop_receipt_order is None
 
 
 def _conversation_owner(target: MessageTarget) -> ToolExecutionIdentity:
@@ -487,7 +487,7 @@ async def test_stop_during_shutdown_marks_jobs_without_failing(tmp_path: Path) -
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = _conversation_owner(target)
     await _stoppable_reply(bot, runner.deps.approval_store, target)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
     started, draining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -542,7 +542,7 @@ async def test_saved_stop_reaches_jobs_of_a_bot_that_appears_after_startup(tmp_p
     target = MessageTarget.resolve(ROOM, "$thread", "$thread")
     owner = _conversation_owner(target)
     await _stoppable_reply(bot, runner.deps.approval_store, target)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
     try:
         await start_job(
             runtime,
@@ -566,9 +566,9 @@ async def test_saved_stop_reaches_jobs_of_a_bot_that_appears_after_startup(tmp_p
         lambda: config,
         bots.get,
         runner.deps.runtime.agent_reply_memberships,
+        lambda: bot._journal_store,
     )
     try:
-        await coordinator.initialize(bot._journal_store)
         await coordinator.sync()
         assert not user_stopped(coordinator.runtime, "ready")
         bots["general"] = bot
@@ -650,7 +650,7 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
             completed=False,
         ),
     )
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -723,7 +723,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
             completed=False,
         ),
     )
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
 

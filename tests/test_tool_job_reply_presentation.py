@@ -100,7 +100,7 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
         requester_id=request.response_envelope.requester_id,
         session_id=request.response_envelope.target.session_id,
     )
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 

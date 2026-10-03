@@ -7,7 +7,7 @@ import base64
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Never
 
 import pytest
@@ -53,7 +53,7 @@ from mindroom.tool_jobs.results import (
     encode_tool_result,
     read_result_payload,
 )
-from mindroom.tool_jobs.runtime import read_job_snapshot, register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -63,6 +63,8 @@ from tests.tool_job_helpers import (
     assembled_function,
     lookup,
     pending_outcomes,
+    saved_jobs,
+    saved_payload,
     tool_job_runtime,
     wait_for_status,
 )
@@ -104,7 +106,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -154,7 +156,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -199,11 +201,10 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                 release.set()
                 await stopping
                 assert closed.is_set()
-                saved = read_job_snapshot(tmp_path / "tool_jobs" / f"{job_id}.json")
+                saved = (await saved_jobs(tmp_path))[job_id]
                 assert (saved.status, saved.result) == ("completed", "completed before cancellation")
-                # Shutdown has closed the runtime, so decode the saved payload file itself.
-                payload_file = tmp_path / "tool_jobs" / f"{job_id}.result.json"
-                assert _decode_result_payload(json.loads(payload_file.read_text())).state_delta == {
+                # Shutdown has closed the runtime, so decode the saved payload itself.
+                assert _decode_result_payload(await saved_payload(tmp_path, job_id)).state_delta == {
                     "changed": {"before_present": False, "before": None, "present": True, "value": "encoded state"},
                 }
     finally:
@@ -227,7 +228,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
     )
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     if managed:
         pin_background_tool_jobs(context.config, paths)
         register_background_runtime(paths, runtime)
@@ -289,7 +290,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -348,7 +349,7 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -369,9 +370,9 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
         job = (await runtime.list_jobs(owner=owner, depth=0))[0]
         assert job.result == text[:500]
         assert job.summary_truncated
-        files = sorted((tmp_path / "tool_jobs").glob(f"{job.job_id}.*"))
-        assert [path.name for path in files] == [f"{job.job_id}.json", f"{job.job_id}.result.json"]
-        saved = "".join(path.read_text() for path in files)
+        payload = await saved_payload(tmp_path, job.job_id)
+        assert payload is not None
+        saved = json.dumps(asdict((await saved_jobs(tmp_path))[job.job_id])) + json.dumps(payload)
         for marker in ("chunk 0060 ", "chunk 0100 ", "chunk 0180 "):
             assert saved.count(marker) == 1
         assert saved.count(base64.b64encode(b"image").decode()) == 1
@@ -389,7 +390,7 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -463,7 +464,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -524,7 +525,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -575,7 +576,7 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -618,7 +619,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), membership_turn_id="$original-request")
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -686,7 +687,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         assert jobs[0].consumed is not save_fails
         assert len(pending_outcomes(runtime)) == int(save_fails)
         await runtime.shutdown()
-        restored = tool_job_runtime(tmp_path)
+        restored = await tool_job_runtime(tmp_path)
         try:
             await restored.recover()
             saved = await lookup(restored, jobs[0].job_id, owner=owner, depth=0)
@@ -718,7 +719,7 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_brid
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -777,7 +778,7 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path, *, structured
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
@@ -814,7 +815,7 @@ async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_pat
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -889,7 +890,7 @@ async def test_saved_result_reread_preserves_later_session_state(
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -932,7 +933,7 @@ async def test_saved_result_reread_preserves_later_session_state(
         assert job.consumed
         if restart:
             await runtime.shutdown()
-            runtime = tool_job_runtime(tmp_path)
+            runtime = await tool_job_runtime(tmp_path)
             await runtime.recover()
             register_background_runtime(paths, runtime)
         model = DelegationModel(
@@ -976,7 +977,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -1027,7 +1028,7 @@ async def test_streamed_state_conflict_notice_reaches_sdk_tool_message(tmp_path:
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -1078,7 +1079,7 @@ async def test_sdk_cache_and_post_hook_never_receive_job_handles(tmp_path: Path)
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -1112,7 +1113,7 @@ async def test_saved_control_exception_keeps_stop_semantics(tmp_path: Path) -> N
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")

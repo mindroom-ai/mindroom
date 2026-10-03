@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
 from tests.tool_job_fuzz import Action, JobFuzzRunner, Script
+from tests.tool_job_helpers import run_journal_statements_inline
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -47,12 +49,15 @@ async def _inline(function: object, /, *args: object, **kwargs: object) -> objec
 
 @pytest.fixture
 def inline_blocking_work(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the runtime's blocking file work on the event loop, so an idle loop means every step has settled."""
+    """Run the runtime's blocking work and journal statements on the event loop, so an idle loop means a settled step."""
     monkeypatch.setattr(asyncio, "to_thread", _inline)
+    run_journal_statements_inline(monkeypatch)
 
 
 async def _runner(root: Path) -> JobFuzzRunner:
-    return JobFuzzRunner(root)
+    runner = JobFuzzRunner(root)
+    await runner.open()
+    return runner
 
 
 class JobLifecycles(RuleBasedStateMachine):
@@ -197,7 +202,7 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
         ),
         pytest.param(
             [Action("start", script=Script(payload=True, block=True)), Action("die_on_write"), Action("release")],
-            id="death-between-payload-and-metadata",
+            id="death-on-the-outcome-save",
         ),
         pytest.param(
             [Action("start", script=_PARKED, cleanup="classify"), Action("cancel"), Action("restart")],
@@ -207,7 +212,7 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
 )
 async def test_job_lifecycle_regressions(tmp_path: Path, actions: list[Action]) -> None:
     """Interleavings that once broke an invariant keep holding it."""
-    runner = JobFuzzRunner(tmp_path)
+    runner = await _runner(tmp_path)
     try:
         await runner.run(actions)
     finally:
@@ -216,16 +221,16 @@ async def test_job_lifecycle_regressions(tmp_path: Path, actions: list[Action]) 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("inline_blocking_work")
-@pytest.mark.parametrize("corruption", ["disk", "outcome", "replay", "consumption"])
+@pytest.mark.parametrize("corruption", ["saved", "outcome", "replay", "consumption"])
 async def test_job_fuzz_oracle_detects_corruption(tmp_path: Path, corruption: str) -> None:
     """The fuzzer must fail when saved state, outcomes, execution counts, or consumption lie."""
-    runner = JobFuzzRunner(tmp_path)
+    runner = await _runner(tmp_path)
     try:
         await runner.step(Action("start", script=_AWAITING))
         await runner.step(Action("start", job=1))
-        entries, root = runner.runtime._entries, tmp_path / "tool_jobs"
-        if corruption == "disk":
-            (root / "job1.json").write_text((root / "job0.json").read_text().replace('"job0"', '"job1"'))
+        entries = runner.runtime._entries
+        if corruption == "saved":
+            await runner.runtime._store.save("job1", json.dumps(asdict(replace(entries["job0"].job, job_id="job1"))))
         elif corruption == "outcome":
             entries["job1"].job = replace(entries["job1"].job, status="interrupted")
             runner.jobs["job1"].observed = None

@@ -37,6 +37,8 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         locally_allowed,
     )
     from mindroom.tool_jobs.provenance import function_provenance
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal_open import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.metadata import get_tool_by_name
@@ -111,13 +113,15 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             return None
 
         statuses = {}
+        journal = EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))
         if action == "create":
             runtime = ToolJobRuntime(
-                storage_root,
+                journal.tool_jobs(action),
                 authorize=lambda job: True,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
             )
+            await runtime.recover()
 
             async def completed():
                 return BackgroundOutcome("completed", "saved")
@@ -149,7 +153,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             await runtime.shutdown()
         elif action == "recover":
             runtime = ToolJobRuntime(
-                storage_root,
+                journal.tool_jobs(action),
                 authorize=authorized,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
@@ -160,6 +164,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 for job in await runtime.list_jobs(owner=owner, depth=0)
             }
             await runtime.shutdown()
+        await journal.close()
 
         print("PLUGIN_RESULT=" + json.dumps({"identity": identity, "statuses": statuses}, sort_keys=True))
 

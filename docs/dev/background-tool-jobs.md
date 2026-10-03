@@ -56,8 +56,8 @@ That re-run replaces the interrupted reply, as it does for any recovered request
 It answers the original request, with a nonpersistent note naming the accepted jobs whose stored outcomes it retrieves instead of repeating their calls.
 
 Shutdown first stops the coordinator's worker and drains execution.
-Receipt access and the storage lease remain available until response finalizers finish.
-Only then may a replacement process acquire the job store.
+Receipt access remains available until response finalizers finish.
+A starting process takes the saved jobs over in the event journal before dispatch starts, and the journal refuses every later write of the runtime it replaced.
 
 ## Results and recovery
 
@@ -69,17 +69,16 @@ Each job stores its full result once, in one typed payload whose durable envelop
 Managed generator events retain their SDK family, serialized fields, and captured result text.
 Custom events replay as fixed SDK subclasses; plugin class identity and methods are not restored from saved data.
 
-Job metadata stays in memory, while the outcome's payload is a separate file that retrieval reads on demand.
-A payload file is written before the metadata that references it, so a crash in between leaves the job running for recovery to interrupt.
+Jobs live in the event journal's `tool_jobs` table, so they share the journal's database and backend.
+Job metadata stays in memory, while the outcome's payload is saved with that outcome in one statement and retrieval reads it on demand.
 Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation or Stop saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
 `tests/test_tool_job_fuzz.py`, `tests/test_delegation_job_fuzz.py`, and `tests/test_tool_job_reply_hold_fuzz.py` generate interleaved job, subagent, and conversation lifecycles, including failed saves, follow-ups for this and other agents, Stops, restarts, and crashes, and check these guarantees after every step.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
-Expiry then deletes the job's files; its originating turn has finished, so the call cannot run again.
+Expiry then deletes the job; its originating turn has finished, so the call cannot run again.
 A Stop recorded while the runtime could not receive it, for example while the feature was disabled, is restored at startup only for jobs that the stopped turn itself started.
 Constructor identity is a digest, not a retained settings blob.
 
-Snapshots carry one schema version.
-Enabled recovery fails on a snapshot with any other version and names the file to remove.
+Enabled recovery fails on a snapshot it cannot read and names its job.
 A disabled instance never opted in, so it logs a warning and skips unreadable snapshots while parking the others.
 
 ## Limits

@@ -110,7 +110,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
@@ -238,7 +238,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         assert len(pending_outcomes(runtime)) == 1
         await runtime.shutdown()
 
-        restored = tool_job_runtime(paths.storage_root)
+        restored = await tool_job_runtime(paths.storage_root)
         await restored.recover()
         register_background_runtime(paths, restored)
         recovered = await lookup(restored, job_id, owner=owner, depth=0)
@@ -329,7 +329,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         transport_agent_name="general",
         membership_turn_id="$approval-source",
     )
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
     instance = pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
@@ -448,8 +448,9 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
             lambda: config,
             lambda _: None,
             AgentReplyMembershipIndex(),
+            lambda: bot._journal_store,
         )
-        await disabled.initialize(bot._journal_store)
+        await disabled.initialize()
         source_event_id = "$approval-source"
         event = await store.load_event(source_event_id)
         assert event is not None

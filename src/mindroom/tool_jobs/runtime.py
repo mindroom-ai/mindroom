@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
-import re
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
@@ -21,7 +19,6 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import (
     JobControl,
@@ -36,11 +33,11 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_too
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
-    from pathlib import Path
 
     from agno.tools.function import Function
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import SavedToolJob, ToolJobStore
 
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
 # A running job that waits for human decisions on the approval cards it posted is `awaiting_approval`.
@@ -50,9 +47,6 @@ TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "in
 _RUNNING_STATUSES = frozenset({"running", "awaiting_approval"})
 _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
-_SNAPSHOT_SCHEMA_VERSION = 8
-_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-_PAYLOAD_SUFFIX = ".result.json"
 # A reattaching call must name exactly the operation its job was admitted for.
 _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_event_id", "source_kind", "adapter")
 # Consumed jobs are deleted this long after their last change, once their originating turn has finished.
@@ -67,10 +61,6 @@ type _Cleanup = Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]
 
 class JobAccessError(ValueError):
     """The requested job is unavailable to this caller or runtime."""
-
-
-class UnsupportedToolJobSnapshotError(ValueError):
-    """A saved job uses a snapshot schema this runtime does not read."""
 
 
 class JobRecoveryBlockedError(RuntimeError):
@@ -127,36 +117,23 @@ def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
     return replace(job, **changes, updated_at=datetime.now(UTC).isoformat())
 
 
-def _payload_name(job_id: str) -> str:
-    return f"{job_id}{_PAYLOAD_SUFFIX}"
-
-
-def _unlink(paths: Iterable[Path]) -> None:
-    for path in paths:
-        path.unlink(missing_ok=True)
-
-
-def saved_job_paths(root: Path) -> list[Path]:
-    """List saved job metadata, leaving out the payload files it references."""
-    return sorted(path for path in root.glob("*.json") if not path.name.endswith(_PAYLOAD_SUFFIX))
-
-
-def read_job_snapshot(path: Path) -> BackgroundJob:
-    """Validate one existing snapshot without claiming or changing its execution."""
-    if path.is_symlink() or _JOB_ID.fullmatch(path.stem) is None:
-        raise JobAccessError(_UNAVAILABLE)
-    payload = json.loads(path.read_text())
-    version = payload.pop("schema_version", None) if isinstance(payload, dict) else None
-    if version != _SNAPSHOT_SCHEMA_VERSION:
-        msg = f"Unsupported tool job snapshot {path} (schema_version={version}); remove it to continue."
-        raise UnsupportedToolJobSnapshotError(msg)
-    if payload["job_id"] != path.stem or not all(
-        isinstance(payload.get(key), str | None) for key in ("source_event_id", "source_kind")
-    ):
-        msg = "Invalid tool job snapshot."
+def parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
+    """Validate one saved snapshot without claiming or changing its execution."""
+    msg = f"Invalid tool job snapshot {saved.job_id!r}."
+    try:
+        payload = json.loads(saved.job_json)
+        payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
+        job = BackgroundJob(**payload)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(msg) from error
+    sources = (job.source_event_id, job.source_kind)
+    if job.job_id != saved.job_id or not all(isinstance(value, str | None) for value in sources):
         raise ValueError(msg)
-    payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
-    return BackgroundJob(**payload)
+    return job
+
+
+def _encoded(job: BackgroundJob, payload: EncodedResultPayload | None) -> tuple[str, str | None]:
+    return json.dumps(asdict(job)), None if payload is None else json.dumps(payload)
 
 
 def job_summary(job: BackgroundJob) -> dict[str, Any]:
@@ -265,23 +242,14 @@ class ToolJobRuntime:
 
     def __init__(
         self,
-        storage_root: Path,
+        store: ToolJobStore,
         *,
         authorize: Callable[[BackgroundJob], bool],
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
     ) -> None:
-        self._root = storage_root / "tool_jobs"
-        if self._root.is_symlink():
-            msg = "Tool job storage must not use symlinks."
-            raise ValueError(msg)
-        create_directory_durable(self._root, mode=0o700)
-        self._lease = (self._root / "runtime.lock").open("a")
-        try:
-            fcntl.flock(self._lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BaseException:
-            self._lease.close()
-            raise
+        # Saves land only while this runtime's generation owns the jobs, which `recover` takes first.
+        self._store = store
         self._authorize = authorize
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
@@ -295,13 +263,6 @@ class ToolJobRuntime:
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
-
-    def _path(self, job_id: str, *, payload: bool = False) -> Path:
-        """Locate a job's metadata, or the payload of its outcome."""
-        path = self._root / (_payload_name(job_id) if payload else f"{job_id}.json")
-        if _JOB_ID.fullmatch(job_id) is None or path.is_symlink():
-            raise JobAccessError(_UNAVAILABLE)
-        return path
 
     @staticmethod
     def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
@@ -347,24 +308,28 @@ class ToolJobRuntime:
             raise JobAccessError(_UNAVAILABLE)
         return entry
 
-    async def _publish(self, entry: _Entry, job: BackgroundJob, payload: EncodedResultPayload | None = None) -> None:
-        """Durably save the job, then make it current; a failed write leaves memory unchanged.
+    async def _publish(
+        self,
+        entry: _Entry,
+        job: BackgroundJob,
+        payload: EncodedResultPayload | None = None,
+        *,
+        accepted: bool = False,
+    ) -> None:
+        """Durably save the job, with its new or still unsaved payload, then make it current.
 
-        Its payload, new or still unsaved, lands before the metadata referencing it.
+        `accepted` saves a newly accepted job, which the journal refuses if its ID was ever accepted before.
+        A failed write leaves memory unchanged.
         """
         if payload is None and job.has_result_payload:
             payload = entry.unsaved_payload
-        path = self._path(job.job_id)
-        payload_path = self._path(job.job_id, payload=True) if payload is not None else None
-
-        def write() -> None:
-            if payload_path is not None:
-                write_json_file_durable(payload_path, payload, strict_atomic_replace=True)
-            snapshot = {"schema_version": _SNAPSHOT_SCHEMA_VERSION, **asdict(job)}
-            write_json_file_durable(path, snapshot, strict_atomic_replace=True)
 
         async def publish() -> None:
-            await asyncio.to_thread(write)
+            job_json, payload_json = await asyncio.to_thread(_encoded, job, payload)
+            if accepted:
+                await self._store.accept(job.job_id, job_json)
+            else:
+                await self._store.save(job.job_id, job_json, payload_json)
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.
@@ -400,20 +365,20 @@ class ToolJobRuntime:
         unsaved = entry.unsaved_payload if entry is not None else None
         if unsaved is not None:
             return await asyncio.to_thread(lambda: deepcopy(unsaved))
-        path = self._path(job.job_id, payload=True)
-        try:
-            return await asyncio.to_thread(lambda: json.loads(path.read_text()))
-        except FileNotFoundError:
-            raise JobAccessError(_UNAVAILABLE) from None
+        payload_json = await self._store.load_payload(job.job_id)
+        if payload_json is None:
+            raise JobAccessError(_UNAVAILABLE)
+        return await asyncio.to_thread(json.loads, payload_json)
 
     async def recover(self) -> None:
-        """Restore outcomes, never automatically replay execution."""
+        """Take the jobs over from any earlier runtime and restore their outcomes, never replaying execution."""
         async with self._lock:
             self._ensure_open()
-            for path in await asyncio.to_thread(saved_job_paths, self._root):
-                if path.stem in self._entries:
+            await self._store.take_ownership()
+            for saved in await self._store.load_all():
+                if saved.job_id in self._entries:
                     continue
-                entry = _Entry(await asyncio.to_thread(read_job_snapshot, path))
+                entry = _Entry(await asyncio.to_thread(parse_saved_job, saved))
                 if entry.job.status not in TERMINAL_STATUSES:
                     # Only work the restart cut short is interrupted by it; a cancellation or Stop saved before it is not.
                     cancelled = entry.job.status == "cancel_requested" or entry.job.user_stop_receipt_order is not None
@@ -423,10 +388,6 @@ class ToolJobRuntime:
                     outcome = await self._cleanup(entry)
                     await self._publish_outcome(entry, self._settled(entry, outcome, default))
                 self._add_entry(entry)
-            # A crash can leave a payload no saved metadata references, such as one whose metadata save never landed.
-            jobs = [entry.job for entry in self._entries.values() if entry.job.has_result_payload]
-            referenced = {self._root / _payload_name(job.job_id) for job in jobs}
-            await asyncio.to_thread(lambda: _unlink(set(self._root.glob(f"*{_PAYLOAD_SUFFIX}")) - referenced))
 
     async def start(
         self,
@@ -467,7 +428,7 @@ class ToolJobRuntime:
                 if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
                     raise JobAccessError(_UNAVAILABLE)
             else:
-                if job_id in self._entries or self._path(job_id).exists():
+                if job_id in self._entries:
                     msg = "Tool job already exists."
                     raise ValueError(msg)
                 if not owner.session_id or depth < 0 or not self._authorize(job):
@@ -479,7 +440,7 @@ class ToolJobRuntime:
 
     async def _admit(self, entry: _Entry, job: BackgroundJob, operation: _Operation) -> None:
         """Publish accepted ownership, then launch it; callers finish this before propagating cancellation."""
-        await self._publish(entry, job)
+        await self._publish(entry, job, accepted=True)
         self._add_entry(entry)
         entry.task = asyncio.create_task(self._run(entry, operation), name=f"tool-job:{job.job_id}")
 
@@ -877,12 +838,9 @@ class ToolJobRuntime:
                 entry = self._entries.get(job.job_id)
                 if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, before):
                     continue
-                files = [self._path(job.job_id)]
-                if entry.job.has_result_payload:
-                    files.append(self._path(job.job_id, payload=True))
+                # A cancelled caller cannot separate the landed deletion from forgetting the job.
+                await run_coroutine_until_complete(self._store.delete(job.job_id))
                 self._remove_entry(job.job_id)
-                # Metadata goes first, so a crash can leave only a payload, which recovery deletes.
-                await run_blocking_until_complete(_unlink, files)
 
     def _expirable(self, entry: _Entry, before: datetime) -> bool:
         job = entry.job
@@ -902,21 +860,20 @@ class ToolJobRuntime:
         await wait_for_future_until_complete(self._shutdown_task)
 
     async def shutdown(self) -> None:
-        """Close storage after execution and all remaining response owners have drained."""
+        """Refuse further calls once execution and all remaining response owners have drained."""
         try:
             await self.quiesce()
         finally:
             await run_coroutine_until_complete(self._close())
 
     async def _close(self) -> None:
-        """Serialize lease release after every admitted write."""
+        """Refuse further calls once every admitted write finished."""
         async with self._lock:
             self._closed = True
             self.changed.set()
-            self._lease.close()
 
     async def _shutdown(self) -> None:
-        """Drain execution and retry unsaved outcomes before releasing storage."""
+        """Drain execution and retry unsaved outcomes before the runtime closes."""
         tasks = []
         failures = []
         async with self._lock:

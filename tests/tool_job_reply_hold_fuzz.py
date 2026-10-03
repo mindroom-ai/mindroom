@@ -24,7 +24,13 @@ from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import message_origin, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
-from tests.tool_job_helpers import completed_delegation_job, managed_team_config, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    managed_team_config,
+    run_journal_statements_inline,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -82,6 +88,7 @@ class ReplyHoldFuzzRunner:
     def __init__(self, root: Path, patch: pytest.MonkeyPatch) -> None:
         # Blocking work runs on the event loop, so an idle loop marks the end of each step.
         patch.setattr(asyncio, "to_thread", _inline)
+        run_journal_statements_inline(patch)
         self._root = root
         self._paths = test_runtime_paths(root)
         self._config = managed_team_config(root)
@@ -97,8 +104,8 @@ class ReplyHoldFuzzRunner:
         self._baseline = asyncio.all_tasks()
 
     async def open(self) -> None:
-        """Start one process over the shared storage."""
-        self.runtime = tool_job_runtime(self._root)
+        """Start one process over the shared storage; the one before it, if any, is gone."""
+        self.runtime = await tool_job_runtime(self._root)
         pin_background_tool_jobs(self._config, self._paths)
         register_background_runtime(self._paths, self.runtime)
         await self.runtime.recover()
@@ -261,10 +268,10 @@ class ReplyHoldFuzzRunner:
     async def _crash(self, _step: Step) -> None:
         """Tear the event loop down between two awaits, then start again over what was saved."""
         await self._end_tasks()
-        self.runtime._lease.close()
         for gate in self.gates.values():
             gate.set()
         self.model.restarted = True
+        await self.runtime.close_journal()
         await self.open()
 
     async def _end_tasks(self) -> None:

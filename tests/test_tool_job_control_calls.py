@@ -57,7 +57,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
         target=replace(context.target, source_thread_id="$thread", resolved_thread_id="$thread", session_id="session"),
     )
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name("thread_model", paths, worker_target=None, disable_sandbox_proxy=True)

@@ -134,7 +134,7 @@ def test_payload_reads_a_growing_artifact_once_within_its_bound(
 @pytest.mark.asyncio
 async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) -> None:
     """A long message the runtime saved only as a summary says it was cut when read as the result."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     message = "failure detail " * 100
 
     async def operation() -> BackgroundOutcome:

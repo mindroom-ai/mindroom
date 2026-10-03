@@ -96,7 +96,6 @@ from tests.conftest import (
     test_runtime_paths,
     write_config_yaml,
 )
-from tests.tool_job_helpers import tool_job_runtime
 
 
 async def _complete_frame(bot: AgentBot, index: int = 0) -> None:
@@ -4192,6 +4191,7 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
     bot.finish_deferred_stop = AsyncMock(side_effect=finish_deferred_stop)
     journal = AsyncMock()
     journal.close = AsyncMock()
+    journal.store.tool_jobs = MagicMock(return_value=AsyncMock())
 
     with patch(
         "mindroom.orchestrator.wait_for_background_tasks",
@@ -4213,16 +4213,12 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
         assert not stopping.done()
         journal.close.assert_not_awaited()
         assert orchestrator._tool_job_runtime.runtime is jobs
-        with pytest.raises(BlockingIOError):
-            tool_job_runtime(orchestrator.storage_path)
 
         release_owner.set()
         await stopping
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
-    restarted = tool_job_runtime(orchestrator.storage_path)
-    await restarted.shutdown()
 
 
 @pytest.mark.asyncio
@@ -4312,6 +4308,7 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
     bot.stop = AsyncMock(side_effect=fail_then_stop)
     journal = AsyncMock()
     journal.close = AsyncMock()
+    journal.store.tool_jobs = MagicMock(return_value=AsyncMock())
 
     with patch(
         "mindroom.orchestrator.wait_for_background_tasks",
@@ -4335,15 +4332,11 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         journal.close.assert_not_awaited()
         assert orchestrator._open_journal is journal
         assert orchestrator._tool_job_runtime.runtime is jobs
-        with pytest.raises(BlockingIOError):
-            tool_job_runtime(orchestrator.storage_path)
 
         await orchestrator.stop()
 
     journal.close.assert_awaited_once()
     assert orchestrator._open_journal is None
-    restarted = tool_job_runtime(orchestrator.storage_path)
-    await restarted.shutdown()
 
 
 @pytest.mark.asyncio

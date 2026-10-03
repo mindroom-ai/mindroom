@@ -65,7 +65,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
         users=["@alice:example.org"],
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     storage = create_session_storage("leader", config, paths, owner)
@@ -147,7 +147,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
                 release_background_tool_jobs(paths, instance)
                 config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["delegate"]
                 instance = pin_background_tool_jobs(config, paths)
-                runtime = tool_job_runtime(tmp_path)
+                runtime = await tool_job_runtime(tmp_path)
                 await runtime.recover()
                 register_background_runtime(paths, runtime)
                 call_id = state.pending_tools[0]["tool_call_id"]

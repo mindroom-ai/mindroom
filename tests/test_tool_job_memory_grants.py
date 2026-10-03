@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -31,6 +32,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import tool_job_journal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,7 +77,13 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
         config.agents["leader"].memory_backend = "file"
     current = config
     owner = build_execution_identity_from_runtime_context(memory_context)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: current, lambda _: None, AgentReplyMembershipIndex())
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: current,
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+        partial(tool_job_journal, paths.storage_root),
+    )
     toolkit = build_agent_toolkit(
         "memory",
         agent_name="leader",

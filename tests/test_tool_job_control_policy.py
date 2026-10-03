@@ -72,7 +72,7 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
     )
     context = replace(_delegate_runtime_context(config, paths), hook_registry=registry)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(

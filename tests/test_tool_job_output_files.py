@@ -100,7 +100,7 @@ async def output_agent(tmp_path: Path) -> AsyncIterator[_OutputAgent]:
     bind_runtime_paths(config, runtime_paths=paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)

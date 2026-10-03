@@ -78,7 +78,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     )
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name(
@@ -310,7 +310,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     paths = test_runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     excluded = excluded_name == "native_plugin"

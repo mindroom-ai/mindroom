@@ -43,8 +43,8 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
         message = "Revoked"
         raise JobAccessError(message)
 
-    first_runtime = tool_job_runtime(first.storage_root, authorize_execution=denied)
-    second_runtime = tool_job_runtime(second.storage_root)
+    first_runtime = await tool_job_runtime(first.storage_root, authorize_execution=denied)
+    second_runtime = await tool_job_runtime(second.storage_root)
     pin_background_tool_jobs(config, first)
     register_background_runtime(first, first_runtime)
     second_instance = pin_background_tool_jobs(config, second)

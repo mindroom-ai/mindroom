@@ -27,6 +27,8 @@ from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
     completed_delegation_job,
     lookup,
+    saved_jobs,
+    saved_payload,
     start_job,
     tool_job_runtime,
 )
@@ -52,9 +54,15 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
     owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: bot, AgentReplyMembershipIndex())
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: bot.config,
+        lambda _: bot,
+        AgentReplyMembershipIndex(),
+        lambda: bot._journal_store,
+    )
     # An authorize-all runtime stands in for the one initialize would create for this bot's stricter grants.
     coordinator._runtime, coordinator._journal = runtime, bot._journal_store
 
@@ -150,11 +158,9 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     try:
         await coordinator._expire_consumed_results()
         expired = source_completed and not approval and not consumer_pending
-        directory = paths.storage_root / "tool_jobs"
         assert ("old" in runtime._entries) is not expired
-        assert {path.name for path in directory.glob("old.*")} == (
-            set() if expired else {"old.json", "old.result.json"}
-        )
+        assert ("old" in await saved_jobs(bot.storage_path)) is not expired
+        assert await saved_payload(bot.storage_path, "old") == (None if expired else {"value": "saved result"})
         if expired:
             with pytest.raises(JobAccessError, match="not available"):
                 await lookup(runtime, "old", owner=owner, depth=0)

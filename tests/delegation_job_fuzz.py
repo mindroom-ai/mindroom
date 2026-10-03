@@ -38,12 +38,12 @@ from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_fro
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import lookup
+from tests.tool_job_helpers import lookup, run_journal_statements_inline, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
+    from tests.tool_job_helpers import ProcessRuntime
 
 _REQUESTER = "@alice:example.org"
 _WRITTEN = "Report written"
@@ -179,7 +180,7 @@ class DelegationFuzzRunner:
         self._sessions: dict[str, int] = {}
         self._storages: list[BaseDb] = []
         pin_background_tool_jobs(self.config, self.paths)
-        self.runtime = self._open()
+        self.runtime: ProcessRuntime
         self.toolkit = DelegateTools("leader", ["code"], self.paths, self.config, execution_identity=self.identity)
         apply_tool_approval_capability(
             self.toolkit,
@@ -195,14 +196,14 @@ class DelegationFuzzRunner:
         # awaits; synchronous session saves skip their thread lane for the same reason.
         monkeypatch.setattr(asyncio, "to_thread", _inline)
         monkeypatch.setattr(session_persistence, "_registered_lane", lambda _database: None)
+        run_journal_statements_inline(monkeypatch)
 
-    def _open(self) -> ToolJobRuntime:
-        runtime = ToolJobRuntime(
-            self.paths.storage_root,
-            authorize=lambda _job: True,
-            authorize_execution=lambda *_args: None,
-            cancel=self._interrupt_child,
-        )
+    async def open(self) -> None:
+        """Start the first process."""
+        self.runtime = await self._open()
+
+    async def _open(self) -> ProcessRuntime:
+        runtime = await tool_job_runtime(self.paths.storage_root, cancel=self._interrupt_child)
         register_background_runtime(self.paths, runtime)
         return runtime
 
@@ -246,7 +247,7 @@ class DelegationFuzzRunner:
         self._crashing = True
         self.gate.set()
         await self._end_tasks()
-        self.runtime._lease.close()
+        await self.runtime.close_journal()
         self.storage.close()
         for storage in self._storages:
             storage.close()
@@ -428,12 +429,13 @@ class DelegationFuzzRunner:
         await self._end_tasks()
         self._crashing = False
         self.turns.clear()
-        self.runtime._lease.close()
         await self._reopen()
 
     async def _reopen(self) -> None:
         runs = [child.runs for child in self.children]
-        self.runtime = self._open()
+        # The previous process is gone, and so is its connection.
+        await self.runtime.close_journal()
+        self.runtime = await self._open()
         await self.runtime.recover()
         # Recovery never runs a child again, and settles every job a restart cut short.
         assert [child.runs for child in self.children] == runs

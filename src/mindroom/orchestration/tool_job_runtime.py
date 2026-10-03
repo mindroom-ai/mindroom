@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.job_approvals import settle_child_approvals
@@ -69,6 +69,8 @@ class ToolJobRuntimeCoordinator:
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
+    # The event journal jobs are kept in; it is read only once a config exists, and outlives this coordinator.
+    journal_provider: Callable[[], EventJournalStore]
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -80,31 +82,30 @@ class ToolJobRuntimeCoordinator:
     # Jobs a restart interrupted whose approval cards still need denying; each pass retries them.
     _unsettled_approvals: set[str] = field(default_factory=set, init=False)
 
-    async def initialize(self, journal: EventJournalStore | None = None) -> None:
-        """Pin execution mode, then claim job storage or index parked ownership, before dispatch can start."""
+    async def initialize(self) -> None:
+        """Pin execution mode, then build the job runtime or index parked ownership, before dispatch can start."""
         if self._initialized:
             return
-        self._journal = journal
         config = self.config_provider()
         if config is None:
             return
+        self._journal = journal = self.journal_provider()
         self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
         if instance.settings.enabled:
-            # The thread itself keeps the runtime, so a cancelled startup leaves its lease for a retry to reuse
-            # and for stop to release.
             if self._runtime is None:
-                await run_blocking_until_complete(self._claim_storage)
+                store = journal.tool_jobs(uuid4().hex)
+                # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
+                # the first sync recovers them.
+                await store.take_ownership()
+                self._runtime = ToolJobRuntime(
+                    store,
+                    authorize=self._authorized,
+                    authorize_execution=self._authorize_execution,
+                    cancel=self._interrupt_child,
+                )
         else:
-            instance.parked = await index_parked_work(self.runtime_paths, journal)
+            instance.parked = await index_parked_work(journal)
         self._initialized = True
-
-    def _claim_storage(self) -> None:
-        self._runtime = ToolJobRuntime(
-            self.runtime_paths.storage_root,
-            authorize=self._authorized,
-            authorize_execution=self._authorize_execution,
-            cancel=self._interrupt_child,
-        )
 
     @property
     def runtime(self) -> ToolJobRuntime:
@@ -246,7 +247,7 @@ class ToolJobRuntimeCoordinator:
 
     async def sync(self) -> None:
         """Recover once, publish the service, and wake it after config changes."""
-        await self.initialize(self._journal)
+        await self.initialize()
         config = self.config_provider()
         if config is None:
             await self.stop()
@@ -261,9 +262,8 @@ class ToolJobRuntimeCoordinator:
                     logger.error("Tool job worker stopped; restarting", error=str(error))
             await runtime.recover()
             self._unrestored_stops = {}
-            if self._journal is not None:
-                for job in await runtime.stoppable_jobs():
-                    self._unrestored_stops.setdefault(job.owner.recipient, []).append(job)
+            for job in await runtime.stoppable_jobs():
+                self._unrestored_stops.setdefault(job.owner.recipient, []).append(job)
             await self._restore_user_stops()
             register_background_runtime(self.runtime_paths, runtime)
             self._task = asyncio.create_task(self._run(), name="tool_job_worker")

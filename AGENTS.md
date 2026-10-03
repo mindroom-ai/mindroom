@@ -132,6 +132,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
 | `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
+| `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
@@ -361,8 +362,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 - `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
 - `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
-- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
-- `tool_jobs/` – Background tool job snapshots, outcomes, and result claims when `background_tool_jobs.enabled` is set
+- `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones; its event journal also keeps background tool jobs when `background_tool_jobs.enabled` is set
 - `credentials/` – JSON secrets synchronized from `.env`
 - `encryption_keys/` – Matrix E2E encryption keys
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences

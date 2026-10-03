@@ -52,7 +52,7 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -95,7 +95,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
@@ -140,7 +140,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -200,7 +200,7 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -255,7 +255,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
@@ -303,7 +303,7 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -344,7 +344,7 @@ async def test_owned_nested_application_cannot_create_detached_job(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
@@ -401,7 +401,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
@@ -560,7 +560,7 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")

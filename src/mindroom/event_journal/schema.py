@@ -431,6 +431,23 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS tool_jobs (
+        -- One accepted background tool job: its JSON snapshot, and the full
+        -- result payload of its outcome once it settled with one.
+        job_id TEXT NOT NULL PRIMARY KEY,
+        job_json TEXT NOT NULL,
+        result_payload_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tool_job_owner (
+        -- The runtime generation that owns every tool job; a newer runtime
+        -- takes over, and writes from an older one are refused.
+        singleton BOOLEAN NOT NULL PRIMARY KEY,
+        runtime_generation TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.

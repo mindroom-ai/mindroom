@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,6 +30,7 @@ from tests.identity_helpers import entity_ids
 from tests.tool_job_helpers import (
     lookup,
     start_delegation_job,
+    tool_job_journal,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +67,13 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
     """Retrieving a deleted delegation is unavailable and never reruns it."""
     config, paths = delegation_context.config, delegation_context.runtime_paths
     owner = build_execution_identity_from_runtime_context(delegation_context)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: config,
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+        partial(tool_job_journal, paths.storage_root),
+    )
     await coordinator.initialize()
     runtime = coordinator.runtime
     register_background_runtime(paths, runtime)

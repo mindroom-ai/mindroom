@@ -483,6 +483,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
+            journal_provider=self._shared_journal_store,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
@@ -1058,7 +1059,6 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
-        await self._tool_job_runtime.initialize(self._shared_journal_store())
         await self._tool_job_runtime.sync()
         self._thread_export_runner.start()
         if self.running:
@@ -1422,7 +1422,7 @@ class _MultiAgentOrchestrator:
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
-        await self._tool_job_runtime.initialize(self._shared_journal_store())
+        await self._tool_job_runtime.initialize()
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()

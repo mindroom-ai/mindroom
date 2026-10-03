@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
-from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import (
@@ -22,19 +21,21 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobClaim,
-    ToolJobRuntime,
-    read_job_snapshot,
-    saved_job_paths,
+    parse_saved_job,
 )
 from tests.tool_job_helpers import (
+    intercept_job_saves,
     job_owner,
     pending_outcomes,
+    tool_job_journal,
     tool_job_runtime,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+    from tests.tool_job_helpers import ProcessRuntime
 
 type Finish = Literal["completed", "failed", "raise", "self_cancel"]
 type Cleanup = Literal["none", "completed", "failed", "cancelled", "raise", "park", "classify"]
@@ -46,10 +47,8 @@ _CLASSIFIED = "Interrupted by a shutdown or restart."
 # Loop iterations one step may take before it counts as livelocked.
 _IDLE_ROUNDS = 10_000
 _LONG_RESULT = "x" * 600
-_WRITE = runtime_module.write_json_file_durable
 # Steps that act on the whole runtime; every other step needs its job to exist, except the one that starts it.
 _RUNTIME_ACTIONS = frozenset({"restart", "restart_stop", "crash", "crash_shutdown", "fail_write", "die_on_write"})
-_PAYLOAD_SUFFIX = ".result.json"
 
 
 @dataclass(frozen=True)
@@ -137,21 +136,27 @@ class JobFuzzRunner:
         self._baseline = asyncio.all_tasks()
         # Each Cancel call with the number of injected faults before it, which may explain its failure.
         self._cancels: list[tuple[asyncio.Task[BackgroundJob], int]] = []
-        # An armed save fault: the next save fails once, or the next metadata save kills the process.
+        # An armed save fault: the next save fails once, or kills the process.
         self._fault: Literal["fail", "die"] | None = None
         self._skip = 0
         self._faults = 0
         self._dead = False
         self._patch = pytest.MonkeyPatch()
-        self._patch.setattr(runtime_module, "write_json_file_durable", self._write)
+        intercept_job_saves(self._patch, before=self._save)
+        # Reads what the processes saved, as the next process will find it.
+        self._saved = tool_job_journal(root)
+        self.runtime: ProcessRuntime
         self.jobs: dict[str, _Job] = {}
         self.admissions: dict[str, _Admission] = {}
         self.claims: dict[str, _Claim] = {}
         self.violations: list[str] = []
-        self.runtime = self._open()
 
-    def _open(self) -> ToolJobRuntime:
-        return tool_job_runtime(self._root, cancel=self._cleanup)
+    async def open(self) -> None:
+        """Start the first process."""
+        self.runtime = await self._open()
+
+    async def _open(self) -> ProcessRuntime:
+        return await tool_job_runtime(self._root, cancel=self._cleanup)
 
     async def run(self, actions: list[Action]) -> None:
         """Apply each step, then settle everything and check that an orderly restart changes nothing."""
@@ -195,22 +200,25 @@ class JobFuzzRunner:
         self._crashing = True
         self._release_all()
         await self._end_tasks()
-        self.runtime._lease.close()
         self._patch.undo()
+        await self.runtime.close_journal()
+        await self._saved.close()
 
-    def _write(self, path: Path, payload: object, **options: object) -> None:
-        """Save through the real writer unless an armed fault fails this save or the process already died."""
-        if not self._recovering and (self._dead or self._fault is not None):
-            eligible = self._dead or self._fault == "fail" or not path.name.endswith(_PAYLOAD_SUFFIX)
-            if eligible and not self._dead and self._skip:
-                self._skip -= 1
-            elif eligible:
-                self._faults += 1
-                self._dead = self._dead or self._fault == "die"
-                self._fault = None
-                msg = "process died" if self._dead else "disk full"
-                raise OSError(msg)
-        _WRITE(path, payload, **options)  # type: ignore[arg-type]
+    def _save(self, _job: dict[str, Any], _payload: object) -> None:
+        """Let a save land unless an armed fault fails it or the process already died."""
+        if self._recovering or (not self._dead and self._fault is None):
+            return
+        if not self._dead and self._skip:
+            self._skip -= 1
+            return
+        self._faults += 1
+        self._dead = self._dead or self._fault == "die"
+        self._fault = None
+        msg = "process died" if self._dead else "disk full"
+        raise OSError(msg)
+
+    async def _saved_jobs(self) -> dict[str, BackgroundJob]:
+        return {saved.job_id: parse_saved_job(saved) for saved in await self._saved.saved_tool_jobs()}
 
     async def _cleanup(self, job: BackgroundJob) -> BackgroundOutcome | None:
         model = self.jobs[job.job_id]
@@ -399,13 +407,13 @@ class JobFuzzRunner:
 
     async def _lose_process(self) -> None:
         """Lose the process between two awaits: no task runs again, and only saved state survives."""
-        root = self._root / "tool_jobs"
+        snapshots = await self._saved_jobs()
         for job_id, model in list(self.jobs.items()):
-            if not (root / f"{job_id}.json").exists():
+            saved = snapshots.get(job_id)
+            if saved is None:
                 # Its admission save never landed, so no process ever owned it.
                 self._forget(job_id)
                 continue
-            saved = read_job_snapshot(root / f"{job_id}.json")
             # Observation resumes from what was saved; memory a failed save never wrote is gone.
             model.observed = saved
             if saved.status not in TERMINAL_STATUSES:
@@ -418,7 +426,6 @@ class JobFuzzRunner:
         self._crashing = True
         await self._end_tasks()
         self._crashing, self._dead, self._fault = False, False, None
-        self.runtime._lease.close()
         await self._reopen()
         self._resync()
 
@@ -457,10 +464,12 @@ class JobFuzzRunner:
 
     async def _reopen(self) -> None:
         """Recover a fresh incarnation: no operation reruns, and ready work keeps its exact saved state."""
-        saved = {path.stem: read_job_snapshot(path) for path in saved_job_paths(self._root / "tool_jobs")}
+        saved = await self._saved_jobs()
         executions = {key: admission.executions for key, admission in self.admissions.items()}
         self._epoch += 1
-        self.runtime = self._open()
+        # The previous process is gone, and so is its connection.
+        await self.runtime.close_journal()
+        self.runtime = await self._open()
         self._recovering = True
         try:
             await self.runtime.recover()
@@ -486,26 +495,20 @@ class JobFuzzRunner:
         raise AssertionError(msg)
 
     async def check(self) -> None:
-        """Compare memory, disk, outcomes, and discovery with what callers observed."""
+        """Compare memory, saved state, outcomes, and discovery with what callers observed."""
         assert not self.violations, self.violations
-        root = self._root / "tool_jobs"
-        for job_id, entry in self.runtime._entries.items():
+        snapshots = await self._saved_jobs()
+        entries = self.runtime._entries
+        for job_id, entry in entries.items():
             job = entry.job
             if entry.saved:
-                assert read_job_snapshot(root / f"{job_id}.json") == job, job_id
+                assert snapshots[job_id] == job, job_id
             self._observe(job)
-        # Saved outcomes' payloads exist; a failed save may leave the payload it wrote before its metadata until a
-        # retry or recovery settles it.
-        payloads = {
-            saved: {
-                f"{entry.job.job_id}{_PAYLOAD_SUFFIX}"
-                for entry in self.runtime._entries.values()
-                if entry.job.has_result_payload and entry.saved is saved
-            }
-            for saved in (True, False)
-        }
-        on_disk = {path.name for path in root.glob(f"*{_PAYLOAD_SUFFIX}")}
-        assert payloads[True] <= on_disk <= payloads[True] | payloads[False], on_disk
+        # A payload is saved with its outcome, which a failed later save cannot take back.
+        payloads = {job_id for job_id in snapshots if await self._saved.tool_jobs("reader").load_payload(job_id)}
+        saved_payloads = {job_id for job_id, entry in entries.items() if entry.saved and entry.job.has_result_payload}
+        known_payloads = {job_id for job_id, entry in entries.items() if entry.job.has_result_payload}
+        assert saved_payloads <= payloads <= known_payloads, payloads
         for admission in self.admissions.values():
             assert admission.executions <= 1
         for task, faults in [item for item in self._cancels if item[0].done()]:

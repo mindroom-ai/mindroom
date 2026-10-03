@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import subprocess
 import sys
 import textwrap
-import threading
 from dataclasses import asdict, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -45,7 +43,6 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
-    ToolJobRuntime,
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
@@ -55,7 +52,13 @@ from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
-from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    start_job,
+    tool_job_journal,
+    tool_job_runtime,
+    write_saved_job,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -132,11 +135,11 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
     )
     try:
         await coordinator.sync()
         assert get_background_runtime(paths) is None
-        assert not (paths.storage_root / "tool_jobs").exists()
     finally:
         await coordinator.stop()
 
@@ -150,9 +153,10 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
     paths = test_runtime_paths(tmp_path)
     disabled = Config()
     enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
-    stale = ToolJobRuntimeCoordinator(paths, lambda: disabled, lambda _: None, AgentReplyMembershipIndex())
+    journal = partial(tool_job_journal, paths.storage_root)
+    stale = ToolJobRuntimeCoordinator(paths, lambda: disabled, lambda _: None, AgentReplyMembershipIndex(), journal)
     await stale.initialize()
-    recreated = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex())
+    recreated = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex(), journal)
     try:
         await recreated.sync()
         # The authored setting is disabled, so only the recreated coordinator's pin can report it enabled.
@@ -163,38 +167,6 @@ async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> Non
         assert get_background_runtime(paths) is not None
     finally:
         await recreated.stop()
-
-
-@pytest.mark.asyncio
-async def test_initialize_retry_after_cancellation_reuses_claimed_storage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A startup cancelled while claiming job storage keeps that claim, so its retry does not claim the store twice."""
-    paths = test_runtime_paths(tmp_path)
-    enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex())
-    claiming, release = threading.Event(), threading.Event()
-
-    def claim_after_release(*args: Any, **kwargs: Any) -> ToolJobRuntime:  # noqa: ANN401
-        claiming.set()
-        release.wait()
-        return ToolJobRuntime(*args, **kwargs)
-
-    monkeypatch.setattr("mindroom.orchestration.tool_job_runtime.ToolJobRuntime", claim_after_release)
-    startup = asyncio.create_task(coordinator.initialize())
-    try:
-        assert await asyncio.to_thread(claiming.wait, 30)
-        startup.cancel()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await startup
-        claimed = coordinator.runtime
-        await coordinator.initialize()
-        assert coordinator.runtime is claimed
-    finally:
-        release.set()
-        await coordinator.stop()
 
 
 @pytest.mark.asyncio
@@ -279,9 +251,15 @@ async def test_disabled_startup_parks_only_explicitly_marked_approvals(tmp_path:
         )
 
     await store._backend.write(remove_ordinary_marker)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: None, AgentReplyMembershipIndex())
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: bot.config,
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+        lambda: bot._journal_store,
+    )
     try:
-        await coordinator.initialize(bot._journal_store)
+        await coordinator.initialize()
 
         assert approval_is_parked(paths, feature.approval_id)
         assert not approval_is_parked(paths, ordinary.approval_id)
@@ -435,7 +413,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["tool", "delegation"])
-async def test_disabled_startup_parks_job_sources_and_completion_without_mutation(  # noqa: PLR0915 - One preserved outcome across three startups.
+async def test_disabled_startup_parks_job_sources_and_completion_without_mutation(
     tmp_path: Path,
     kind: str,
 ) -> None:
@@ -443,7 +421,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     bot = _bot(tmp_path)
     paths = bot.runtime_paths
     owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
 
     executions = 0
 
@@ -466,8 +444,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     waited = await runtime.wait("saved", owner=owner, depth=0)
     await runtime.release_wait("saved", waited.claim)
     await runtime.shutdown()
-    path = paths.storage_root / "tool_jobs" / "saved.json"
-    original = path.read_bytes()
+    original = await bot._journal_store.saved_tool_jobs()
     record = TurnRecord.create(("$saved", "$sibling"), anchor_event_id="$saved", completed=False)
     await bot._journal_store.turn_records("general").upsert(
         index_event_ids=record.indexed_event_ids,
@@ -479,6 +456,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         config_provider=lambda: bot.config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=lambda: bot._journal_store,
     )
     reached: list[str] = []
 
@@ -491,22 +469,26 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     dispatcher.release_turn_replay()
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
     try:
-        await coordinator.initialize(bot._journal_store)
         await coordinator.sync()
         assert not await dispatcher._run_event(replace(event, event_id="$sibling"))
         assert not await dispatcher._run_event(event)
         assert dispatcher._deferral_is_live(event)
         assert await dispatcher._run_event(replace(event, event_id="$new-human"))
         assert reached == ["$new-human"]
-        assert path.read_bytes() == original
+        assert await bot._journal_store.saved_tool_jobs() == original
         assert get_background_runtime(paths) is None
     finally:
         await coordinator.stop()
 
     bot.config.background_tool_jobs.enabled = True
-    restarted = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: None, AgentReplyMembershipIndex())
+    restarted = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: bot.config,
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+        lambda: bot._journal_store,
+    )
     try:
-        await restarted.initialize(bot._journal_store)
         await restarted.sync()
         # Current grants no longer cover this parked job, so read it through the unauthorized ownership lookup.
         [recovered] = await restarted.runtime.source_jobs(
@@ -529,18 +511,13 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
 @pytest.mark.parametrize(
     "unreadable",
     [
-        '{"schema_version": 4, "job_id": "retired"}',
         '{"job_id": "retired"}',
         "[]",
-        '{"schema_version": 7, "job_id": "trunc',
-        '{"schema_version": 7, "job_id": "another"}',
+        '{"job_id": "trunc',
+        pytest.param(json.dumps(asdict(replace(completed_delegation_job(), job_id="another"))), id="other-job-id"),
         pytest.param(
             json.dumps(
-                {
-                    "schema_version": 7,
-                    **asdict(replace(completed_delegation_job(), job_id="retired")),
-                    "source_event_id": ["$saved"],
-                },
+                {**asdict(replace(completed_delegation_job(), job_id="retired")), "source_event_id": ["$saved"]},
             ),
             id="non-string-source",
         ),
@@ -549,9 +526,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
 async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unreadable: str) -> None:
     """A disabled instance never opted in, so an unreadable snapshot cannot block parking the others."""
     paths = test_runtime_paths(tmp_path)
-    directory = paths.storage_root / "tool_jobs"
-    directory.mkdir(parents=True)
-    (directory / "retired.json").write_text(unreadable)
+    await write_saved_job(paths.storage_root, "retired", unreadable)
     owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
     saved = BackgroundJob(
         job_id="saved",
@@ -562,12 +537,14 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
         status="completed",
         has_result_payload=True,
     )
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 8, **asdict(saved)}))
-    # Payload files are not job metadata, so parking neither reads nor warns about them.
-    (directory / "saved.result.json").write_text("{}")
+    await write_saved_job(paths.storage_root, "saved", json.dumps(asdict(saved)))
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
     instance = pin_background_tool_jobs(Config(), paths)
-    with capture_logs() as logs:
-        instance.parked = await index_parked_work(paths)
-    assert [entry["path"] for entry in logs if entry["log_level"] == "warning"] == [str(directory / "retired.json")]
+    journal = tool_job_journal(paths.storage_root)
+    try:
+        with capture_logs() as logs:
+            instance.parked = await index_parked_work(journal)
+    finally:
+        await journal.close()
+    assert [entry["job_id"] for entry in logs if entry["log_level"] == "warning"] == ["retired"]
     assert event_is_parked(Config(), paths, "general", event)

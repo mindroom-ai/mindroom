@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import asdict, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from agno.tools.function import Function
 
@@ -18,9 +21,18 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
+from mindroom.event_journal import EventJournalStore, ToolJobStore
+from mindroom.event_journal.offloading import ThreadOffload
+from mindroom.event_journal_open import event_journal_sqlite_path
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, BackgroundJob, BackgroundOutcome, ToolJobRuntime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    BackgroundJob,
+    BackgroundOutcome,
+    ToolJobRuntime,
+    parse_saved_job,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -28,6 +40,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
     from datetime import datetime
     from pathlib import Path
+
+    import pytest
 
 
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
@@ -46,15 +60,143 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
 
 
-def tool_job_runtime(
+def tool_job_journal(storage_root: Path) -> EventJournalStore:
+    """Open the event journal of one storage root, as one process does; another open is another process."""
+    return EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))
+
+
+class ProcessRuntime(ToolJobRuntime):
+    """One process's runtime over its own journal connection, which shutting down closes as the process exit would."""
+
+    def __init__(
+        self,
+        journal: EventJournalStore,
+        *,
+        authorize: Callable[[BackgroundJob], bool],
+        authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
+        cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
+    ) -> None:
+        super().__init__(
+            journal.tool_jobs(uuid4().hex),
+            authorize=authorize,
+            authorize_execution=authorize_execution,
+            cancel=cancel,
+        )
+        self._journal = journal
+
+    async def shutdown(self) -> None:
+        """Shut down in order, then close this process's journal connection."""
+        try:
+            await super().shutdown()
+        finally:
+            await self.close_journal()
+
+    async def close_journal(self) -> None:
+        """Close this process's journal connection, as its exit does with or without an orderly shutdown."""
+        await self._journal.close()
+
+
+async def tool_job_runtime(
     storage_root: Path,
     *,
     authorize: Callable[[BackgroundJob], bool] = _authorize_all,
     authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
-) -> ToolJobRuntime:
-    """Build a runtime whose current grants allow every job and call and whose adapters need no extra cleanup."""
-    return ToolJobRuntime(storage_root, authorize=authorize, authorize_execution=authorize_execution, cancel=cancel)
+) -> ProcessRuntime:
+    """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
+
+    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`.
+    """
+    runtime = ProcessRuntime(
+        tool_job_journal(storage_root),
+        authorize=authorize,
+        authorize_execution=authorize_execution,
+        cancel=cancel,
+    )
+    await runtime._store.take_ownership()
+    return runtime
+
+
+def _inline_statement[Result](_offload: ThreadOffload, call: Callable[[], Result]) -> asyncio.Future[Result]:
+    work = asyncio.get_running_loop().create_future()
+    try:
+        work.set_result(call())
+    except Exception as error:
+        work.set_exception(error)
+    return work
+
+
+def run_journal_statements_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run journal statements on the event loop, so an idle loop means every save has landed or failed."""
+    monkeypatch.setattr(ThreadOffload, "submit", _inline_statement)
+
+
+# The journal's own saves, which every interception wraps however often a test intercepts them.
+_JOURNAL_ACCEPT, _JOURNAL_SAVE = ToolJobStore.accept, ToolJobStore.save
+# Runs around one job save with its decoded snapshot and payload; raising fails the save, before or after it lands.
+type SaveHook = Callable[[dict[str, Any], object | None], Awaitable[None] | None]
+
+
+def intercept_job_saves(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    before: SaveHook | None = None,
+    after: SaveHook | None = None,
+) -> None:
+    """Run hooks around every journal save of a job, as a failing or slow database would; no hooks restores saving."""
+    original_accept, original_save = _JOURNAL_ACCEPT, _JOURNAL_SAVE
+
+    async def hook(callback: SaveHook | None, job_json: str, payload_json: str | None) -> None:
+        if callback is not None:
+            result = callback(json.loads(job_json), None if payload_json is None else json.loads(payload_json))
+            if result is not None:
+                await result
+
+    async def accept(store: ToolJobStore, job_id: str, job_json: str) -> None:
+        await hook(before, job_json, None)
+        await original_accept(store, job_id, job_json)
+        await hook(after, job_json, None)
+
+    async def save(store: ToolJobStore, job_id: str, job_json: str, result_payload_json: str | None = None) -> None:
+        await hook(before, job_json, result_payload_json)
+        await original_save(store, job_id, job_json, result_payload_json)
+        await hook(after, job_json, result_payload_json)
+
+    monkeypatch.setattr(ToolJobStore, "accept", accept)
+    monkeypatch.setattr(ToolJobStore, "save", save)
+
+
+async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
+    """Read every job the journal of one storage root holds, as the next process would recover it."""
+    journal = tool_job_journal(storage_root)
+    try:
+        return {saved.job_id: parse_saved_job(saved) for saved in await journal.saved_tool_jobs()}
+    finally:
+        await journal.close()
+
+
+async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> None:
+    """Save one snapshot as is, as an earlier process might have left it; the writer takes the jobs over."""
+    journal = tool_job_journal(storage_root)
+    try:
+        store = journal.tool_jobs(uuid4().hex)
+        await store.take_ownership()
+        if job_id in {saved.job_id for saved in await journal.saved_tool_jobs()}:
+            await store.save(job_id, job_json)
+        else:
+            await store.accept(job_id, job_json)
+    finally:
+        await journal.close()
+
+
+async def saved_payload(storage_root: Path, job_id: str) -> object:
+    """Read the outcome payload saved for one job, or None."""
+    journal = tool_job_journal(storage_root)
+    try:
+        payload = await journal.tool_jobs("reader").load_payload(job_id)
+    finally:
+        await journal.close()
+    return None if payload is None else json.loads(payload)
 
 
 async def lookup(runtime: ToolJobRuntime, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
@@ -207,11 +349,13 @@ def team_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinato
     """A coordinator whose only bot is the `team` transport."""
     bot = MagicMock(spec=AgentBot)
     bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
+    paths = test_runtime_paths(tmp_path)
     return ToolJobRuntimeCoordinator(
-        runtime_paths=test_runtime_paths(tmp_path),
+        runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: bot if name == "team" else None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
     )
 
 

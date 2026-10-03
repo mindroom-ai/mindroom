@@ -83,7 +83,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 ) -> None:
     """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -143,7 +143,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 @pytest.mark.asyncio
 async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> None:
     """Transient ready-result claims cannot hide an unsaved outcome after release."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     owner = completed_delegation_job().owner
 
     async def operation() -> BackgroundOutcome:
@@ -171,7 +171,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
     """Turn-end waiting is visible, interruptible, and does not cancel the operation."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -220,7 +220,7 @@ async def test_revocation_during_the_reply_wait_finishes_the_reply(  # noqa: PLR
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
     allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda job: allowed or job.job_id == "kept")
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda job: allowed or job.job_id == "kept")
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -292,7 +292,7 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
 ) -> None:
     """Both shared drivers continue once at the safe boundary even if the model ignores retrieval."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -364,7 +364,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         session_id=request.response_envelope.target.session_id,
     )
     allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
@@ -458,7 +458,7 @@ def test_blocking_wait_preserves_formatted_mention_on_recovery(tmp_path: Path) -
 async def test_join_holds_a_job_awaiting_approval_until_its_outcome(tmp_path: Path) -> None:
     """A job waiting for its approval cards keeps the reply waiting, says so, and is retrieved once it finishes."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -495,7 +495,7 @@ async def test_join_holds_a_job_awaiting_approval_until_its_outcome(tmp_path: Pa
 async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failure_boundary: str) -> None:  # noqa: PLR0915
     """Joining or retrieving retained work cannot publish top-level completion early."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
@@ -577,7 +577,7 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
     """A resumed approval joins ready results at most `JOB_JOIN_LIMIT` times."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     context = replace(
         _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,

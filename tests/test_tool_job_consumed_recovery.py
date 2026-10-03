@@ -122,7 +122,7 @@ async def test_disabled_startup_parks_consuming_followup_and_its_group(
 ) -> None:
     """Disabling jobs cannot replay a pending consumer through ordinary execution."""
     bot, owner = _completion_bot(tmp_path)
-    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    runtime = await tool_job_runtime(bot.storage_path)
     pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
     coordinator = ToolJobRuntimeCoordinator(
@@ -130,6 +130,7 @@ async def test_disabled_startup_parks_consuming_followup_and_its_group(
         lambda: bot.config,
         lambda _: bot,
         AgentReplyMembershipIndex(),
+        lambda: bot._journal_store,
     )
 
     async def operation() -> BackgroundOutcome:
@@ -170,7 +171,7 @@ async def test_disabled_startup_parks_consuming_followup_and_its_group(
         await _read_saved_job(bot, owner, "$followup")
         await runtime.shutdown()
         bot.config.background_tool_jobs.enabled = False
-        await coordinator.initialize(bot._journal_store)
+        await coordinator.initialize()
         for source, parked in (("$original", True), ("$followup", True), ("$grouped", grouped), ("$unrelated", False)):
             event = await store.load_event(source)
             assert event is not None

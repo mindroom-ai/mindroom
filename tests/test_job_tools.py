@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_outcome
+from mindroom.event_journal import ToolJobStore
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -51,7 +52,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
@@ -99,7 +100,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     bind_runtime_paths(config, runtime_paths=paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
@@ -117,7 +118,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved " * 1000)
@@ -136,7 +137,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     await runtime.acknowledge_wait("durable", waited.claim)
     await runtime.shutdown()
     allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda _: allowed)
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda _: allowed)
     await runtime.recover()
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -169,7 +170,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), agent_name="squad", transport_agent_name="squad")
     owner = replace(build_execution_identity_from_runtime_context(context), agent_name="leader")
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -250,7 +251,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -306,7 +307,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     result = "large result " * 100_000
@@ -349,7 +350,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
@@ -372,17 +373,17 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("interruption", ["cancelled", "deleted"])
+@pytest.mark.parametrize("interruption", ["cancelled", "missing"])
 async def test_interrupted_payload_read_releases_the_wait_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     interruption: str,
 ) -> None:
-    """A job wait whose payload read is cancelled or finds the file gone leaves the result claimable."""
+    """A job wait whose payload read is cancelled or finds the payload gone leaves the result claimable."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     reading, release = asyncio.Event(), asyncio.Event()
@@ -408,7 +409,11 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
                 with pytest.raises(asyncio.CancelledError):
                     await waiting
             else:
-                (tmp_path / "tool_jobs" / "read.result.json").unlink()
+
+                async def missing(_store: ToolJobStore, _job_id: str) -> None:
+                    return None
+
+                monkeypatch.setattr(ToolJobStore, "load_payload", missing)
                 release.set()
                 assert await waiting == "Tool job is not available in this conversation."
         retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
@@ -431,7 +436,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
@@ -496,7 +501,7 @@ async def test_job_errors_return_as_tool_results(
     """Every expected mistake comes back as a message the model can act on, never a traceback."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:

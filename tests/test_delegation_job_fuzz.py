@@ -29,7 +29,9 @@ _INDEXES = st.integers(0, 3)
 
 
 async def _runner(root: Path, monkeypatch: pytest.MonkeyPatch) -> DelegationFuzzRunner:
-    return DelegationFuzzRunner(root, monkeypatch)
+    runner = DelegationFuzzRunner(root, monkeypatch)
+    await runner.open()
+    return runner
 
 
 class SubagentLifecycles(RuleBasedStateMachine):
@@ -157,7 +159,7 @@ async def test_subagent_lifecycle_regressions(
     steps: list[Step],
 ) -> None:
     """Interleavings that once broke an invariant keep holding it."""
-    runner = DelegationFuzzRunner(tmp_path, monkeypatch)
+    runner = await _runner(tmp_path, monkeypatch)
     try:
         await runner.run(steps)
     finally:
@@ -172,7 +174,7 @@ async def test_subagent_fuzz_oracle_detects_corruption(
     corruption: str,
 ) -> None:
     """The fuzzer must fail when an effect runs unapproved or twice, or a card outlives the job that posted it."""
-    runner = DelegationFuzzRunner(tmp_path, monkeypatch)
+    runner = await _runner(tmp_path, monkeypatch)
     try:
         await runner.step(Step("delegate", script=ChildScript(approvals=1)))
         if corruption == "unapproved":

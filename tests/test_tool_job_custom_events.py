@@ -69,7 +69,7 @@ async def test_custom_event_family_and_result_survive_execution(
         paths,
     )
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     model = DelegationModel(
         id="test",
         responses=[
@@ -103,7 +103,7 @@ async def test_custom_event_family_and_result_survive_execution(
                     await runtime.release_wait(job_id, waited.claim)
                     if mode == "recovered":
                         await runtime.shutdown()
-                        runtime = tool_job_runtime(paths.storage_root)
+                        runtime = await tool_job_runtime(paths.storage_root)
                         register_background_runtime(paths, runtime)
                         await runtime.recover()
                     model.responses.extend(

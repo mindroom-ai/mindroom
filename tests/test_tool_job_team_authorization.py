@@ -23,7 +23,6 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     register_background_runtime,
-    saved_job_paths,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -34,6 +33,7 @@ from tests.tool_job_helpers import (
     managed_team_config,
     pending_outcome,
     pending_outcomes,
+    saved_jobs,
     start_delegation_job,
     start_job,
     team_coordinator,
@@ -105,7 +105,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
                 member_owner = replace(owner, agent_name="worker")
                 jobs = await coordinator.runtime.list_jobs(owner=member_owner, depth=0)
                 assert len(jobs) == 1
-                assert len(saved_job_paths(paths.storage_root / "tool_jobs")) == 1
+                assert len(await saved_jobs(paths.storage_root)) == 1
                 waited = await coordinator.runtime.wait(jobs[0].job_id, owner=member_owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result
                 assert json.loads(waited.job.result)["result"] == 5
@@ -122,7 +122,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     owner = replace(completed_delegation_job().owner, agent_name="worker", transport_agent_name="lead")
-    runtime = tool_job_runtime(paths.storage_root)
+    runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     context = replace(

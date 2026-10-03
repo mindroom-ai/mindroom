@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -38,7 +37,6 @@ from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_r
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
-from mindroom.tool_jobs import runtime as background_module
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
@@ -52,9 +50,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
-    read_job_snapshot,
     register_background_runtime,
-    saved_job_paths,
 )
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -68,8 +64,10 @@ from tests.delegation_helpers import (
 )
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    intercept_job_saves,
     job_child,
     lookup,
+    saved_jobs,
     start_delegation_job,
     tool_job_runtime,
     wait_for_status,
@@ -119,7 +117,7 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     if excluded:
         config.background_tool_jobs.exclude_toolkits.append("delegate")
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
@@ -205,7 +203,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         users=["@alice:example.org"],
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
@@ -220,16 +218,12 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
             responses=[ModelResponse(tool_calls=[_call("run_subagent", "call", task="Research", agent_name="code")])],
         ),
     )
-    written, executing = asyncio.Event(), asyncio.Event()
-    release_writer = threading.Event()
-    loop = asyncio.get_running_loop()
-    original_writer = background_module.write_json_file_durable
+    written, executing, release_writer = asyncio.Event(), asyncio.Event(), asyncio.Event()
     children: list[DelegationChild] = []
 
-    def blocked_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
-        original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
-        loop.call_soon_threadsafe(written.set)
-        release_writer.wait()
+    async def blocked_writer(_job: dict[str, object], _payload: object) -> None:
+        written.set()
+        await release_writer.wait()
 
     async def run_child(child: DelegationChild, **_kwargs: object) -> str:
         children.append(child)
@@ -237,7 +231,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         await asyncio.Event().wait()
         raise AssertionError
 
-    monkeypatch.setattr(background_module, "write_json_file_durable", blocked_writer)
+    intercept_job_saves(monkeypatch, before=blocked_writer)
     try:
         with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
             response = await parent.arun("Delegate", session_id="parent", user_id=owner.requester_id)
@@ -332,7 +326,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         None,
         "parent",
     )
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
@@ -600,7 +594,7 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         None,
         "parent",
     )
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
@@ -885,7 +879,7 @@ class _BlockingChild:
 @pytest.mark.parametrize("shutdown", [False, True])
 async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path, shutdown: bool) -> None:
     """Only a cancellation request cancels a running child; shutdown records the restart interruption."""
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
     child = _BlockingChild()
 
     async def stop() -> None:
@@ -896,8 +890,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(tmp_path: Path
             await runtime.cancel(running.delegation_id, owner=_BACKGROUND_PARENT, depth=0)
 
     await _drive_background_child(tmp_path, runtime, child, while_waiting=stop)
-    (path,) = saved_job_paths(tmp_path / "tool_jobs")
-    job = read_job_snapshot(path)
+    (job,) = (await saved_jobs(tmp_path)).values()
     assert (job.status, job.result) == (
         ("failed", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
         if shutdown
@@ -960,7 +953,7 @@ def test_shutdown_during_a_cancellation_keeps_it_a_cancellation() -> None:
 async def test_revoked_child_wait_becomes_the_parent_call_result(tmp_path: Path) -> None:
     """Losing access while the parent waits on its background child ends the call, not the parent's reply."""
     allowed = True
-    runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
     child = _BlockingChild()
 
     async def revoke() -> None:
@@ -1011,7 +1004,7 @@ async def test_waiting_parent_leaves_the_child_liveness_claim_to_its_job(
         return "Child finished"
 
     monkeypatch.setattr(delegation_execution, "subagent_liveness", liveness)
-    response = await _drive_background_child(tmp_path, tool_job_runtime(tmp_path), run_child)
+    response = await _drive_background_child(tmp_path, await tool_job_runtime(tmp_path), run_child)
     assert response.status == RunStatus.completed
 
 
@@ -1038,7 +1031,7 @@ async def test_rejected_background_start_settles_the_child_as_failed(
     monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
     response = await _drive_background_child(
         tmp_path,
-        tool_job_runtime(tmp_path, authorize=lambda _job: False),
+        await tool_job_runtime(tmp_path, authorize=lambda _job: False),
         run_child,
     )
     assert ran == []
@@ -1074,7 +1067,7 @@ async def test_unreadable_background_result_still_runs_the_after_hook(
     monkeypatch.setattr(delegation_execution, "after_delegation", after)
     monkeypatch.setattr(delegation_execution, "delegation_result", unreadable)
     with pytest.raises(RuntimeError, match="result unreadable"):
-        await _drive_background_child(tmp_path, tool_job_runtime(tmp_path), run_child)
+        await _drive_background_child(tmp_path, await tool_job_runtime(tmp_path), run_child)
     assert [type(error) for error in after_errors] == [RuntimeError]
 
 
@@ -1189,7 +1182,7 @@ async def test_native_job_source_survives_restart(
         membership_turn_id=source_event_id,
     )
     child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
-    runtime = tool_job_runtime(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
 
     async def completed() -> BackgroundOutcome:
         child.status = "completed"
@@ -1206,7 +1199,7 @@ async def test_native_job_source_survives_restart(
         await runtime.release_wait(job.job_id, waited.claim)
     finally:
         await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path)
+    restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         saved = await lookup(restored, child.delegation_id, owner=owner, depth=0)

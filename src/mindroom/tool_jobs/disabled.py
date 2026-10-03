@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.instances import tool_job_instance
-from mindroom.tool_jobs.runtime import UnsupportedToolJobSnapshotError, read_job_snapshot, saved_job_paths
+from mindroom.tool_jobs.runtime import parse_saved_job
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 
 if TYPE_CHECKING:
@@ -46,21 +46,16 @@ def approval_is_parked(runtime_paths: RuntimePaths, approval_id: str) -> bool:
     return parked is not None and approval_id in parked.approvals
 
 
-def _saved_sources(runtime_paths: RuntimePaths) -> ParkedWork:
-    root = runtime_paths.storage_root / "tool_jobs"
-    if root.is_symlink():
-        msg = "Tool job storage must not use symlinks."
-        raise ValueError(msg)
+async def _saved_sources(journal: EventJournalStore) -> ParkedWork:
     parked = ParkedWork()
-    for path in saved_job_paths(root):
+    for saved in await journal.saved_tool_jobs():
         try:
-            job = read_job_snapshot(path)
-        except (UnsupportedToolJobSnapshotError, ValueError) as error:
-            # A retired schema, invalid JSON, or rejected contents: this instance never opted in,
-            # and enabled recovery still reports the file loudly.
+            job = await asyncio.to_thread(parse_saved_job, saved)
+        except ValueError as error:
+            # Invalid JSON or rejected contents: this instance never opted in, and enabled recovery still fails loudly.
             logger.warning(
                 "Ignoring unreadable tool job snapshot while background tool jobs are disabled",
-                path=str(path),
+                job_id=saved.job_id,
                 error=str(error),
             )
             continue
@@ -71,27 +66,23 @@ def _saved_sources(runtime_paths: RuntimePaths) -> ParkedWork:
     return parked
 
 
-async def index_parked_work(
-    runtime_paths: RuntimePaths,
-    journal: EventJournalStore | None = None,
-) -> ParkedWork:
+async def index_parked_work(journal: EventJournalStore) -> ParkedWork:
     """Inspect saved ownership once; never recover, acknowledge, or execute it."""
-    parked = await asyncio.to_thread(_saved_sources, runtime_paths)
-    if journal is not None:
-        for entity_name, event_id in tuple(parked.sources):
-            record = await journal.turn_records(entity_name).load(event_id)
-            if record is not None:
-                parked.sources.update((entity_name, source) for source in record.source_event_ids)
-        cursor: tuple[str, str] | None = None
-        while owners := await journal.approval_continuations(limit=100, after=cursor):
-            for _principal_id, continuation in owners:
-                owns_source = any(
-                    (continuation.entity_name, event_id) in parked.sources for event_id in continuation.source_event_ids
+    parked = await _saved_sources(journal)
+    for entity_name, event_id in tuple(parked.sources):
+        record = await journal.turn_records(entity_name).load(event_id)
+        if record is not None:
+            parked.sources.update((entity_name, source) for source in record.source_event_ids)
+    cursor: tuple[str, str] | None = None
+    while owners := await journal.approval_continuations(limit=100, after=cursor):
+        for _principal_id, continuation in owners:
+            owns_source = any(
+                (continuation.entity_name, event_id) in parked.sources for event_id in continuation.source_event_ids
+            )
+            if owns_source or continuation.requires_background_tool_jobs:
+                parked.approvals.add(continuation.approval_id)
+                parked.sources.update(
+                    (continuation.entity_name, event_id) for event_id in continuation.source_event_ids
                 )
-                if owns_source or continuation.requires_background_tool_jobs:
-                    parked.approvals.add(continuation.approval_id)
-                    parked.sources.update(
-                        (continuation.entity_name, event_id) for event_id in continuation.source_event_ids
-                    )
-            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+        cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
     return parked

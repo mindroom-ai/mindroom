@@ -132,7 +132,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             "runtime_paths": paths,
             "execution_identity": identity,
         }
-        runtime = tool_job_runtime(tmp_path) if execution == "excluded" else None
+        runtime = await tool_job_runtime(tmp_path) if execution == "excluded" else None
         if runtime is not None:
             pin_background_tool_jobs(config, paths)
             register_background_runtime(paths, runtime)

@@ -63,7 +63,8 @@ from .models import (
 )
 from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
-from .store import EventJournalStore, PrincipalStore, TurnRecordStore
+from .store import EventJournalStore, PrincipalStore, ToolJobStore, TurnRecordStore
+from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
 from .views import (
     AdmissionView,
     ApprovalDeliveryView,
@@ -130,9 +131,13 @@ __all__ = [
     "ReplayView",
     "RoomHistoryRecovery",
     "RoomMembershipPosition",
+    "SavedToolJob",
     "SemanticConsumer",
     "StoredApprovalCard",
     "TerminalTurnWrite",
+    "ToolJobExistsError",
+    "ToolJobOwnershipLostError",
+    "ToolJobStore",
     "TurnRecordStore",
     "UnreadableApprovalCard",
     "UnreadableMatrixDelivery",

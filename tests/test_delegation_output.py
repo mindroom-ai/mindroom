@@ -93,7 +93,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         None,
         "parent",
     )
-    runtime = tool_job_runtime(tmp_path) if execution != "inline" else None
+    runtime = await tool_job_runtime(tmp_path) if execution != "inline" else None
     pin_background_tool_jobs(config, paths)
     if runtime is not None:
         register_background_runtime(paths, runtime)
@@ -188,7 +188,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                     (workspace / "report.txt").mkdir()
                 if mode.startswith("resumed"):
                     await runtime.shutdown()
-                    runtime = tool_job_runtime(tmp_path)
+                    runtime = await tool_job_runtime(tmp_path)
                     register_background_runtime(paths, runtime)
                     await runtime.recover()
                 wait_model = DelegationModel(

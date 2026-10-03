@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,7 +41,6 @@ from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
-    ToolJobRuntime,
     get_background_runtime,
     register_background_runtime,
 )
@@ -63,6 +62,7 @@ from tests.tool_job_helpers import (
     pending_outcomes,
     start_delegation_job,
     team_coordinator,
+    tool_job_journal,
     tool_job_runtime,
     wait_for_status,
 )
@@ -77,57 +77,6 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_startup", [False, True])
-async def test_runtime_startup_io_keeps_loop_live_and_retains_cancelled_lease(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    cancel_startup: bool,
-) -> None:
-    """Storage setup runs off-loop, and cancellation cannot orphan its newly acquired lease."""
-    config = managed_team_config(tmp_path)
-    config.background_tool_jobs.enabled = True
-    paths = test_runtime_paths(tmp_path)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
-    original_init = ToolJobRuntime.__init__
-    loop = asyncio.get_running_loop()
-    loop_thread = threading.get_ident()
-    ready, release = asyncio.Event(), threading.Event()
-
-    def gated_init(runtime: ToolJobRuntime, *args: object, **kwargs: object) -> None:
-        assert threading.get_ident() != loop_thread, "storage setup blocks the event loop"
-        original_init(runtime, *args, **kwargs)
-        loop.call_soon_threadsafe(ready.set)
-        assert release.wait(30)
-
-    monkeypatch.setattr(ToolJobRuntime, "__init__", gated_init)
-    startup = asyncio.create_task(coordinator.sync())
-    ready_waiter = asyncio.create_task(ready.wait())
-    try:
-        done, _ = await asyncio.wait({startup, ready_waiter}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
-        if startup in done:
-            await startup
-        assert ready_waiter in done
-        if cancel_startup:
-            startup.cancel()
-        release.set()
-        if cancel_startup:
-            with pytest.raises(asyncio.CancelledError):
-                await startup
-        else:
-            await startup
-        monkeypatch.setattr(ToolJobRuntime, "__init__", original_init)
-        with pytest.raises(BlockingIOError):
-            tool_job_runtime(paths.storage_root)
-    finally:
-        release.set()
-        ready_waiter.cancel()
-        await asyncio.gather(startup, ready_waiter, return_exceptions=True)
-        await coordinator.stop()
-    replacement = tool_job_runtime(paths.storage_root)
-    await replacement.shutdown()
-
-
 def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: Path) -> None:
     """A config reload cannot leave completion delivery holding old authority."""
     config = managed_team_config(tmp_path)
@@ -136,6 +85,7 @@ def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: P
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = completed_delegation_job()
     assert coordinator._authorized(job)
@@ -154,6 +104,7 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = completed_delegation_job()
     assert not coordinator._authorized(replace(job, owner=replace(job.owner, requester_id="@stranger:localhost")))
@@ -201,8 +152,9 @@ async def test_revocation_waits_for_resolving_room_membership(tmp_path: Path) ->
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=membership,
+        journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
-    runtime = tool_job_runtime(tmp_path, authorize=coordinator._authorized)
+    runtime = await tool_job_runtime(tmp_path, authorize=coordinator._authorized)
     fixture = completed_delegation_job()
     release = asyncio.Event()
 
@@ -341,15 +293,6 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     await restored.stop()
 
 
-def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_path: Path) -> None:
-    """Only a started service may own the exclusive job-store lease."""
-    config = managed_team_config(tmp_path)
-    first = team_coordinator(tmp_path, config)
-    second = team_coordinator(tmp_path, config)
-    assert first is not second
-    assert not (first.runtime_paths.storage_root / "tool_jobs").exists()
-
-
 def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) -> None:
     """Ordinary job authority tracks tool grant and filters."""
     config = managed_team_config(tmp_path)
@@ -359,6 +302,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
         config_provider=lambda: config,
         bot_provider=lambda _: None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     job = replace(
         completed_delegation_job(),
@@ -725,13 +669,21 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
 
 @pytest.mark.asyncio
-async def test_sync_keeps_the_journal_of_an_initialize_that_ran_before_config(tmp_path: Path) -> None:
-    """Parking indexes the startup journal even when configuration arrived only after the first initialize."""
+async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path) -> None:
+    """An initialize before configuration needs no journal; parking indexes it once configuration arrives."""
     config: Config | None = None
     paths = test_runtime_paths(tmp_path)
-    coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _name: None, AgentReplyMembershipIndex())
     journal = MagicMock()
-    await coordinator.initialize(journal)
+    journal_provider = MagicMock(return_value=journal)
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: config,
+        lambda _name: None,
+        AgentReplyMembershipIndex(),
+        journal_provider,
+    )
+    await coordinator.initialize()
+    journal_provider.assert_not_called()
     config = Config()
     with patch(
         "mindroom.orchestration.tool_job_runtime.index_parked_work",
@@ -739,7 +691,7 @@ async def test_sync_keeps_the_journal_of_an_initialize_that_ran_before_config(tm
     ) as index:
         await coordinator.sync()
     try:
-        index.assert_awaited_once_with(paths, journal)
+        index.assert_awaited_once_with(journal)
     finally:
         await coordinator.stop()
 
@@ -755,8 +707,9 @@ async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
         lambda: managed_team_config(tmp_path),
         lambda _: None,
         AgentReplyMembershipIndex(),
+        partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
-    coordinator._runtime = tool_job_runtime(tmp_path)
+    coordinator._runtime = await tool_job_runtime(tmp_path)
     monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     settled: list[str] = []
     ready = False
@@ -790,6 +743,7 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
         lambda: managed_team_config(tmp_path),
         lambda _: None,
         AgentReplyMembershipIndex(),
+        partial(tool_job_journal, test_runtime_paths(tmp_path).storage_root),
     )
     recorded: list[tuple[str, str]] = []
 
