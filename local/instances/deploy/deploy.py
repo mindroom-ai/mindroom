@@ -983,16 +983,16 @@ def _set_directory_permissions(path: Path, mode: int) -> None:
 def _copy_credentials_to_instance(instance: Instance) -> None:
     """Copy credentials from ~/.mindroom/credentials to instance data directory."""
     source_dir = Path.home() / ".mindroom" / "credentials"
-    if not source_dir.exists():
-        return
-
     target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
 
-    # Copy all credential files; the container user owns them, and nobody else may read them.
     for cred_file in source_dir.glob("*.json"):
         target_file = target_dir / cred_file.name
         if not os.path.lexists(target_file):
             _write_private_file(target_file, cred_file.read_text())
+
+    # The container user owns every copy and nobody else may read it, including copies an earlier
+    # non-root run could not hand over, even when this user has no credentials of their own to copy.
+    for target_file in target_dir.glob("*.json"):
         _restrict_to_container_user(target_file)
 
 

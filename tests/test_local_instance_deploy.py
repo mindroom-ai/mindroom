@@ -1828,6 +1828,27 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
     }
 
 
+def test_root_start_without_source_credentials_hands_over_earlier_copies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root start repairs credentials a non-root start copied but could not give to the container user."""
+    monkeypatch.setattr(deploy.Path, "home", lambda: tmp_path / "root-home")
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+    target_dir.mkdir(parents=True)
+    copied = target_dir / "openai.json"
+    copied.write_text('{"api_key": "secret"}')
+    copied.chmod(0o644)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._copy_credentials_to_instance(instance)
+
+    assert calls == [(copied.stat().st_ino, os.getuid() + 1, -1)]
+    assert _mode(copied) == 0o600
+
+
 def test_copied_config_stays_readable_when_ownership_transfer_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
