@@ -1692,6 +1692,39 @@ class TestSidecarResolution:
 
         assert client.downloads == ["mxc://s/long"]
 
+    async def test_a_strict_read_refetches_no_more_than_its_page_holds(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A message waiting for its attachment costs a page nothing, so the refetch stops at the page's budget.
+
+        Anyone who can post can make every message in a thread name one large
+        attachment. Refetching all of them would download and store it once per
+        message, however few of them the page can hold.
+        """
+        monkeypatch.setattr("mindroom.event_journal.reads.PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        monkeypatch.setattr("mindroom.matrix.conversation_hydration.PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        sources = [
+            self._sidecar_source(f"$long{index}", "preview [continues]", "mxc://s/shared", ts=1_000 + index)
+            for index in range(10)
+        ]
+        await admit_all(alice, sources)
+        client = FakeClient(
+            events={source["event_id"]: source for source in sources},
+            sidecars={"mxc://s/shared": self._payload("x" * 1_000)},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=50)
+
+        assert len(client.downloads) == 3
+        assert [message.logical_event_id for message in page.messages] == ["$long8", "$long9"]
+        assert page.next_cursor is not None
+        older = await reader.read_strict(room_id=ROOM, thread_id=None, limit=50, before=page.next_cursor)
+        assert [message.logical_event_id for message in older.messages] == ["$long6", "$long7"]
+        assert len(client.downloads) == 6
+
     async def test_an_unedited_message_whose_relations_fill_the_walk_reads_whole(
         self,
         alice: PrincipalStore,
@@ -2036,8 +2069,11 @@ class TestPointRefetch:
         await self._redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
-        assert await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            == 0
         )
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert page.messages == ()

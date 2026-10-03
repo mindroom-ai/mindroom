@@ -131,6 +131,10 @@ Such a thread loses what needs its complete history, as one past the row limit d
 
 A page always keeps at least one message, even when that message alone is over the budget.
 
+A message still waiting for its file costs that budget nothing, so a strict read refetches the waiting messages newest first and stops once what it stored passes 16 MiB.
+Without that stop, one read would download and store every file the waiting messages name, even when they all name one large file.
+The page then ends at or before the last message refetched, and the waiting messages behind it are refetched only when a reader asks for that history.
+
 ## Edits
 
 An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.
