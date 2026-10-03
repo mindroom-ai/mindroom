@@ -165,6 +165,7 @@ The room-history-loss repair in contract 7 instead follows request and raw-event
 
 Thread hydration adapts the room bounds rather than copying them: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` bounds the raw relation tree that streaming makes an order of magnitude larger than the message count.
 The thread root is kept over and above the window, because a thread starting at its first reply is missing the message it is about.
+A walk that stops before reaching an edit of the root by its sender then fetches the root's direct edits on their own, because an early root edit sorts behind every newer reply.
 
 **Why early truncation is safe.** The walk asks for `direction=back` explicitly rather than inheriting nio's default.
 Under MSC3981 the server returns relations in the topological order `/messages` would give, and an edit is sent after the message it revises, so every edit arrives *before* its original.

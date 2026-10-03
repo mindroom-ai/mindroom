@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import nio
+from nio.api import RelationshipType
 
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
@@ -921,12 +922,33 @@ class ConversationHydrator:
             window_messages=self.prompt_window_messages,
             unreadable=unreadable,
         )
+        events.extend(relations.events)
+        if (
+            root_projected is not None
+            and not relations.complete
+            and not any(
+                event.replaces_event_id == thread_id and event.sender == root_projected.sender
+                for event in relations.events
+            )
+        ):
+            # The root sits outside the window, but an early edit of it sorts
+            # behind every newer reply, so a walk that stopped short may never
+            # reach it. Its direct edits are fetched on their own, so the root
+            # is not installed at a stale revision.
+            root_edits = await self._fetch_relations(
+                room_id,
+                thread_id,
+                window_messages=None,
+                unreadable=unreadable,
+                edits_only=True,
+            )
+            events.extend(root_edits.events)
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
         # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
-            events=(*events, *relations.events),
+            events=tuple(events),
             complete=relations.complete and readable_root is not None,
             unreadable=relations.unreadable,
         )
@@ -938,6 +960,7 @@ class ConversationHydrator:
         *,
         window_messages: int | None,
         unreadable: _UnreadableHistory | None = None,
+        edits_only: bool = False,
     ) -> _Walk:
         """Walk the relation tree newest first, without filtering by relation type.
 
@@ -963,6 +986,9 @@ class ConversationHydrator:
         ``window_messages`` is ``None`` for a point refetch, which is one logical
         message and has no window: a threaded reply among its relations must not
         end the walk before the edit it came for arrives.
+
+        ``edits_only`` walks just the event's direct edits, for a message whose
+        edits a windowed walk of the whole tree may never reach.
         """
         events: list[ProjectedEvent] = []
         admitted = 0
@@ -972,12 +998,21 @@ class ConversationHydrator:
         if unreadable is None:
             unreadable = _UnreadableHistory()
         client = self._client()
-        relations = client.room_get_event_relations(
-            room_id=room_id,
-            event_id=event_id,
-            direction=nio.MessageDirection.back,
-            recurse=True,
-            minimum_recursion_depth=self.required_recursion_depth,
+        relations = (
+            client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                rel_type=RelationshipType.replacement,
+                direction=nio.MessageDirection.back,
+            )
+            if edits_only
+            else client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                direction=nio.MessageDirection.back,
+                recurse=True,
+                minimum_recursion_depth=self.required_recursion_depth,
+            )
         )
         try:
             # Closed explicitly, because every exit below but exhaustion leaves

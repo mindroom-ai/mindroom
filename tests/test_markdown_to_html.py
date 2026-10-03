@@ -226,6 +226,18 @@ def test_tag_followed_by_long_whitespace_renders_within_a_cpu_budget() -> None:
         assert "&lt;custom   x&gt;" in html
 
 
+def test_many_tag_openers_before_a_closing_bracket_render_within_a_cpu_budget() -> None:
+    """Tag openers closed by a later ``>`` on the same line are classified in linear time."""
+    openers = "<a" * 32_000
+    for text, expected in (
+        (f"<div {openers}>x", "<div>x"),
+        (f'hello <span title="{openers}">x</span>', "<p>hello <span>x</span></p>\n"),
+    ):
+        with cpu_budget(0.5):
+            html = markdown_to_html(text)
+        assert html == expected
+
+
 def test_supported_tags_pass_through() -> None:
     """Known Matrix tags are preserved."""
     html = markdown_to_html("<code>example</code>")
