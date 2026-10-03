@@ -14,6 +14,7 @@ import pytest_asyncio
 
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
 from mindroom.desktop.shell_prompt import (
+    _describe_pending_request,
     _escape_terminal_text,
     _parse_shell_approval,
     _ShellApprovalChoice,
@@ -156,6 +157,29 @@ def test_request_text_escapes_every_space_except_the_ascii_space() -> None:
         _escape_terminal_text("ls #\u034f\u180b\ufe0f\U000e0100\U0001d159x")
         == "ls #\\u034f\\u180b\\ufe0f\\U000e0100\\U0001d159x"
     )
+
+
+def test_request_text_flags_non_ascii_look_alikes_and_shows_an_escaped_command() -> None:
+    """Look-alike letters and punctuation read as ASCII, so any non-ASCII request text adds a warning and escaped copy."""
+
+    def describe(command: str, agent: str = "assistant") -> str:
+        pending = {
+            "request_id": "request-1",
+            "requester_id": "@person:example.org",
+            "agent_name": agent,
+            "cwd": "/Users/test",
+            "command": command,
+            "expires_at_ms": 0,
+        }
+        return _describe_pending_request(pending, now=0)
+
+    spoofed = describe("curl https://\u0430\u0440\u0440\u04cf\u0435.com/x")
+    assert "  Command: curl https://\u0430\u0440\u0440\u04cf\u0435.com/x\n" in spoofed
+    assert "non-ASCII characters that can look like ASCII" in spoofed
+    assert "  curl https://\\u0430\\u0440\\u0440\\u04cf\\u0435.com/x\n" in spoofed
+    assert "look like ASCII" in describe("curl https://apple\u2024com/x")
+    assert "look like ASCII" in describe("ls", agent="\u0430ssistant")
+    assert "look like ASCII" not in describe("curl https://apple.com/x")
 
 
 @pytest.mark.asyncio

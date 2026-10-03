@@ -182,6 +182,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
 The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
+When any of them contains a non-ASCII character, both surfaces warn that it can look like ASCII and repeat the command with every non-ASCII character escaped, so a look-alike host such as one spelled with Cyrillic letters stands out.
 The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.

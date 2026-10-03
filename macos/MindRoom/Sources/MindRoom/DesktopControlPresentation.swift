@@ -125,6 +125,18 @@ extension DesktopShellRequest {
     var hasEscapedCharacters: Bool {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
+    /// Look-alike letters and punctuation, such as Cyrillic U+0430 or U+2024, read as an ASCII host or path.
+    var hasNonASCIICharacters: Bool {
+        [command, cwd, requesterID, agentName].contains { !$0.unicodeScalars.allSatisfy(\.isASCII) }
+    }
+    var asciiEscapedCommand: String { desktopSafePreview(command, escapingNonASCII: true) }
+    var escapeWarning: String? {
+        let clauses = [
+            hasEscapedCharacters ? "control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}" : nil,
+            hasNonASCIICharacters ? "non-ASCII characters that can look like ASCII; the command with them escaped follows" : nil,
+        ].compactMap { $0 }
+        return clauses.isEmpty ? nil : "This request contains \(clauses.joined(separator: ", and "))."
+    }
 
     /// Counted like the helper and the terminal prompt: Unicode scalars, and lines split at newlines.
     var commandSizeLabel: String {
@@ -136,10 +148,10 @@ extension DesktopShellRequest {
 
 /// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
 /// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
-func desktopSafePreview(_ text: String) -> String {
+func desktopSafePreview(_ text: String, escapingNonASCII: Bool = false) -> String {
     var preview = ""
     for scalar in text.unicodeScalars {
-        if isHiddenPreviewScalar(scalar) {
+        if isHiddenPreviewScalar(scalar) || (escapingNonASCII && !scalar.isASCII) {
             preview += "\\u{\(String(scalar.value, radix: 16, uppercase: true))}"
         } else {
             preview.unicodeScalars.append(scalar)
