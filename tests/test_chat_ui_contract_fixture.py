@@ -26,6 +26,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             "show_computer",
             *(f"open_settings/{section}" for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])),
             *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
+            "show_canvas",
         )
     }
 
@@ -46,6 +47,9 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         else:
             assert metadata["thread_id"] is None
             assert "m.relates_to" not in content
+        if case["id"].endswith("/show_canvas"):
+            assert metadata["canvas"]["title"] == "Choose a plan"
+            assert "<form" in metadata["canvas"]["html"]
 
 
 @pytest.mark.asyncio

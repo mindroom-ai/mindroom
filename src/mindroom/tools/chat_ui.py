@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     display_name="Chat UI",
     description=(
         "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel "
-        "with open_panel(panel='computer'), open Settings, or show room members. "
+        "with open_panel(panel='computer'), open Settings, show room members, or show an interactive "
+        "HTML canvas the user can answer with show_canvas. "
         "Sends a UI request; does not navigate or control the user's local browser."
     ),
     category=ToolCategory.COMMUNICATION,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     icon_color="text-violet-500",
     dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/chat-ui/",
-    function_names=("show_computer", "open_settings", "open_panel"),
+    function_names=("show_computer", "open_settings", "open_panel", "show_canvas"),
 )
 def chat_ui_tools() -> type[ChatUITools]:
     """Return bounded MindRoom Chat UI action tools."""

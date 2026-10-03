@@ -39,6 +39,11 @@ REQUESTER_ID = "@alice:example.org"
 CONTRACT_ROOM_ID = "!room:localhost"
 CONTRACT_REQUESTER_ID = "@alice:localhost"
 CONTRACT_THREAD_ID = "$thread"
+CONTRACT_CANVAS_TITLE = "Choose a plan"
+CONTRACT_CANVAS_HTML = (
+    '<form data-mindroom-label="Plan chosen"><label><input type="radio" name="plan" value="pro" checked> Pro</label>'
+    "<button>Choose</button></form>"
+)
 
 
 def make_chat_ui_context(
@@ -121,6 +126,7 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
             _ContractCase(f"open_panel/{panel}", "", "open_panel", panel)
             for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])
         ),
+        _ContractCase("show_canvas", "", "show_canvas"),
     )
     registered_actions = set(ChatUITools().get_async_functions())
     exported_actions = {case.action for case in actions}
@@ -142,6 +148,8 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
         return await tool.show_computer()
     if case.action == "open_settings":
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
+    if case.action == "show_canvas":
+        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=CONTRACT_CANVAS_HTML)
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
 

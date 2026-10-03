@@ -45,7 +45,8 @@ logger = get_logger(__name__)
 
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
-_EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+EDIT_MESSAGE_SIZE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+_EDIT_MESSAGE_LIMIT = EDIT_MESSAGE_SIZE_LIMIT
 _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {

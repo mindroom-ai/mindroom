@@ -7,6 +7,7 @@ import json
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
 
 @pytest.fixture(params=["show_computer", "open_panel"])
 def computer_request(request: pytest.FixtureRequest) -> Callable[[], Awaitable[str]]:
@@ -53,11 +56,17 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     metadata = TOOL_METADATA["chat_ui"]
 
     assert metadata.requires_room_context
-    assert metadata.function_names == ("show_computer", "open_settings", "open_panel")
+    assert metadata.function_names == ("show_computer", "open_settings", "open_panel", "show_canvas")
     assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
     assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
     assert tuple(inspect.signature(ChatUITools.open_panel).parameters) == ("self", "panel")
+    assert tuple(inspect.signature(ChatUITools.show_canvas).parameters) == (
+        "self",
+        "title",
+        "html",
+        "canvas_event_id",
+    )
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
     function = ChatUITools().get_async_functions()["open_panel"]
     function.process_entrypoint(strict=True)
@@ -458,3 +467,219 @@ async def test_members_request_keeps_thread_transport_and_truthful_result(tmp_pa
     }
     assert result["status"] == "ok"
     assert result["message"] == "UI action request sent."
+
+
+CANVAS_HTML = "<button onclick=\"mindroom.submit({plan: 'pro'}, {label: 'Pro'})\">Pro</button>"
+
+
+def _canvas_source(context: ToolRuntimeContext, **metadata: object) -> dict[str, object]:
+    return {
+        "type": "m.room.message",
+        "event_id": "$canvas",
+        "sender": context.client.user_id,
+        "content": {
+            "msgtype": "m.notice",
+            "body": "Interactive panel: Plans. Open it in MindRoom Chat to respond.",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": THREAD_ID},
+            "io.mindroom.ui_action": {
+                "version": 1,
+                "action": "show_canvas",
+                "requester_id": REQUESTER_ID,
+                "agent_user_id": context.client.user_id,
+                "room_id": ROOM_ID,
+                "thread_id": THREAD_ID,
+                "canvas": {"title": "Plans", "html": "<p>1</p>"},
+                **metadata,
+            },
+        },
+    }
+
+
+def _serve_event(context: ToolRuntimeContext, source: dict[str, object], *, sender: str | None = None) -> None:
+    event = MagicMock(spec=nio.RoomMessageNotice)
+    event.event_id = source["event_id"]
+    event.sender = sender or source["sender"]
+    event.source = source
+    response = nio.RoomGetEventResponse()
+    response.event = event
+    context.client.room_get_event = AsyncMock(return_value=response)
+
+
+@pytest.mark.asyncio
+async def test_canvas_request_carries_title_and_html_in_the_ui_action(tmp_path: Path) -> None:
+    """Chat renders exactly what the agent wrote; identities still come from the runtime."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="  Plans  ", html=CANVAS_HTML))
+
+    content = _sent_content(context)
+    assert content["msgtype"] == "m.notice"
+    assert content["body"] == "Interactive panel: Plans. Open it in MindRoom Chat to respond."
+    assert content["io.mindroom.ui_action"] == {
+        "version": 1,
+        "action": "show_canvas",
+        "requester_id": REQUESTER_ID,
+        "agent_user_id": context.client.user_id,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+        "canvas": {"title": "Plans", "html": CANVAS_HTML},
+    }
+    assert content["m.relates_to"]["rel_type"] == "m.thread"
+    assert content["m.relates_to"]["event_id"] == THREAD_ID
+    assert result["status"] == "ok"
+    assert result["event_id"] == "$ui-action"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("title", "html", "message"),
+    [
+        ("", "<p></p>", "single line"),
+        ("Two\nlines", "<p></p>", "single line"),
+        ("x" * 121, "<p></p>", "single line"),
+        ("Plans", "   ", "must not be empty"),
+    ],
+)
+async def test_invalid_canvas_is_rejected_without_sending(
+    tmp_path: Path,
+    title: str,
+    html: str,
+    message: str,
+) -> None:
+    """The agent gets an actionable error instead of an empty or malformed panel."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title=title, html=html))
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("html", ["x" * 26_000, "\U0001f600" * 2_500])
+async def test_oversized_canvas_is_rejected_by_its_serialized_event_size(tmp_path: Path, html: str) -> None:
+    """Escaped non-ASCII counts at its JSON size, so a 10 KB emoji page is still too large."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Big", html=html))
+
+    assert result["status"] == "error"
+    assert "too large" in result["message"]
+    assert "27000" in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canvas_just_under_the_edit_ceiling_is_sent(tmp_path: Path) -> None:
+    """A canvas that fits as a later edit is accepted when it is first shown."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Big", html="x" * 23_000))
+
+    assert result["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_edits_the_agents_own_canvas_in_place(tmp_path: Path) -> None:
+    """A multi-step flow keeps one timeline card; only the replacement carries the new page."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        result = json.loads(
+            await ChatUITools().show_canvas(title="Plans", html="<p>2</p>", canvas_event_id="$canvas"),
+        )
+
+    content = _sent_content(context)
+    assert content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$canvas"}
+    assert content["body"] == "* Interactive panel: Plans. Open it in MindRoom Chat to respond."
+    assert "io.mindroom.ui_action" not in content
+    assert content["m.new_content"]["io.mindroom.ui_action"]["canvas"] == {"title": "Plans", "html": "<p>2</p>"}
+    assert content["m.new_content"]["io.mindroom.ui_action"]["thread_id"] == THREAD_ID
+    assert "m.relates_to" not in content["m.new_content"]
+    assert result == {
+        "action": "show_canvas",
+        "event_id": "$canvas",
+        "message": "Canvas update sent.",
+        "revision_event_id": "$edit",
+        "room_id": ROOM_ID,
+        "status": "ok",
+        "thread_id": THREAD_ID,
+        "tool": "chat_ui",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "sender", "message"),
+    [
+        ({}, "@mindroom_other:example.org", "Only your own canvases"),
+        ({"action": "show_computer"}, None, "Only your own canvases"),
+        ({"requester_id": "@bob:example.org"}, None, "another conversation"),
+        ({"thread_id": "$other"}, None, "another conversation"),
+    ],
+)
+async def test_canvas_update_rejects_targets_outside_this_agents_conversation(
+    tmp_path: Path,
+    metadata: dict[str, object],
+    sender: str | None,
+    message: str,
+) -> None:
+    """An agent cannot rewrite another agent's, another person's, or another thread's panel."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, **metadata), sender=sender)
+
+    with tool_runtime_context(context):
+        result = json.loads(
+            await ChatUITools().show_canvas(title="Plans", html="<p>2</p>", canvas_event_id="$canvas"),
+        )
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_rejects_unreadable_or_redacted_targets(tmp_path: Path) -> None:
+    """Missing, encrypted-but-undecryptable, and redacted canvases are not updated."""
+    context = _context(tmp_path)
+    context.client.room_get_event = AsyncMock(return_value=nio.RoomGetEventError(message="not found"))
+    with tool_runtime_context(context):
+        missing = json.loads(
+            await ChatUITools().show_canvas(title="Plans", html="<p>2</p>", canvas_event_id="$canvas"),
+        )
+    source = _canvas_source(context)
+    source["unsigned"] = {"redacted_because": {"event_id": "$redaction"}}
+    _serve_event(context, source)
+    with tool_runtime_context(context):
+        redacted = json.loads(
+            await ChatUITools().show_canvas(title="Plans", html="<p>2</p>", canvas_event_id="$canvas"),
+        )
+    with tool_runtime_context(context):
+        malformed = json.loads(
+            await ChatUITools().show_canvas(title="Plans", html="<p>2</p>", canvas_event_id="canvas"),
+        )
+
+    assert "could not be read" in missing["message"]
+    assert "Only your own canvases" in redacted["message"]
+    assert "earlier show_canvas" in malformed["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_team_context_cannot_show_a_canvas(tmp_path: Path) -> None:
+    """Canvases keep the same single-agent identity rule as other UI requests."""
+    context = _context(tmp_path, agent_name="research", include_team=True)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Plans", html="<p>1</p>"))
+
+    assert result["status"] == "error"
+    assert "configured agent" in result["message"]
+    context.client.room_send.assert_not_awaited()
