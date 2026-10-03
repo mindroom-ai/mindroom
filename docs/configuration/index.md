@@ -410,6 +410,7 @@ Agent-authored, system-authored, and configured bridge-bot-authored tool calls a
 An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval, so on every channel they are hidden when a required-approval rule or `default: require_approval` applies to them; add an `auto_approve` rule for one to keep it available.
+When this hides `search_knowledge_base`, or all of `get_skill_instructions`, `get_skill_reference`, and `get_skill_script`, the agent's prompt also stops describing knowledge search or its skills, so the model is not told to call functions it cannot see.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
 It does not gate every Slack operation, and the same function names in other toolkits also match.

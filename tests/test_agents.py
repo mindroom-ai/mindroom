@@ -4191,6 +4191,27 @@ async def test_create_agent_hides_agno_generated_functions_an_approval_rule_may_
 
 
 @pytest.mark.asyncio
+async def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(tmp_path: Path) -> None:
+    """The system message never tells the model to call skill or knowledge-search functions it cannot see."""
+    config = _config_with_workspace_skill(tmp_path)
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    agent = _create_agent_for_test("general", config, knowledge=Knowledge(name="docs"))
+    session = AgentSession(session_id="session", agent_id="general", created_at=1, updated_at=1)
+    run_context = RunContext(run_id="run", session_id="session")
+    tools = await agent.aget_tools(
+        RunOutput(run_id="run", agent_id="general", agent_name="GeneralAgent", session_id="session"),
+        run_context,
+        session,
+    )
+
+    message = await agent.aget_system_message(session, run_context, [t for t in tools if isinstance(t, Function)])
+
+    assert message is not None
+    for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
+        assert advertised not in str(message.content)
+
+
+@pytest.mark.asyncio
 async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(tmp_path: Path) -> None:
     """A plugin before-call gate can decline a function Agno adds after agent construction."""
 

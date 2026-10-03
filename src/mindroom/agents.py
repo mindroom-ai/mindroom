@@ -17,8 +17,8 @@ from agno.run.team import TeamRunOutput
 import mindroom.tools  # noqa: F401
 from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
@@ -2089,12 +2089,17 @@ def create_agent(
             ),
         )
     )
+    # Approval rules hide generated functions, so prompts must not advertise skills whose functions are all hidden.
+    skill_functions_hidden = skills is not None and all(
+        tool_may_require_approval(config, function.name) for function in skills.get_tools()
+    )
+    prompt_skills = None if skill_functions_hidden else skills
     instructions = _build_agent_instructions(
         agent_name,
         agent_config,
         config,
         agent_runtime,
-        skills=skills,
+        skills=prompt_skills,
         session_id=session_id,
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
@@ -2117,7 +2122,11 @@ def create_agent(
         instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
-    knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and knowledge is not None
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
@@ -2140,7 +2149,8 @@ def create_agent(
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
-        skills=skills,
+        # Minimal mode presents skill contents as context documents instead of through skill functions.
+        skills=skills if agent_mode == "minimal" else prompt_skills,
         instructions=instructions,
         additional_context=render_session_context(
             render_date_context(
