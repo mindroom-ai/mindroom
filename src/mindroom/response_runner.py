@@ -60,7 +60,11 @@ from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import (
+    InterruptedReplaySnapshot,
+    persist_interrupted_replay_snapshot,
+    persist_stopped_attempt_snapshot,
+)
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -2515,6 +2519,31 @@ class ResponseRunner:
         finally:
             storage.close()
 
+    def _persist_stopped_attempt(
+        self,
+        snapshot: InterruptedReplaySnapshot,
+        *,
+        attempt: str,
+        session_scope: HistoryScope,
+        session_id: str,
+        execution_identity: ToolExecutionIdentity,
+        run_id: str,
+    ) -> None:
+        """Fold one stopped attempt, named by its last visible edit, into the turn's record."""
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
+        try:
+            persist_stopped_attempt_snapshot(
+                storage=storage,
+                session_id=session_id,
+                scope_id=session_scope.scope_id,
+                run_id=run_id,
+                attempt=attempt,
+                snapshot=snapshot,
+                is_team=session_scope.kind == "team",
+            )
+        finally:
+            storage.close()
+
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
         if recorder.outcome == "pending":
@@ -3600,9 +3629,9 @@ class ResponseRunner:
         A process that stops mid-stream, whether it crashes or shuts down in
         order, leaves its reply streaming and its sources pending, so replay
         adopts that reply and answers again in place. Matrix holds the only
-        account of the stopped attempt, so its visible text and tool trace
-        become an interrupted replay record in the turn's history, which keeps
-        the new attempt from repeating finished tools.
+        account of the stopped attempt, so its visible text and tool trace are
+        folded into the turn's interrupted replay record, which keeps the new
+        attempt from repeating finished tools.
         """
         event_id = request.existing_event_id
         if event_id is None or not (request.existing_event_is_placeholder and request.existing_event_is_recovered):
@@ -3633,22 +3662,20 @@ class ResponseRunner:
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )
+        recorder.set_response_event_id(event_id)
         # A failed write raises and leaves the sources pending for retry, since
         # answering without this record could repeat the finished tools. The
         # write finishes before cancellation releases the lifecycle lock.
         await run_blocking_until_complete(
             partial(
-                self._persist_interrupted_turn,
-                recorder=recorder,
+                self._persist_stopped_attempt,
+                recorder.interrupted_snapshot(),
+                attempt=message.latest_event_id,
                 session_scope=history_scope,
                 session_id=resolved_target.session_id,
                 execution_identity=execution_identity,
-                # One record per stopped attempt: its last visible edit names it, so
-                # rereading that attempt rewrites its record while a later stopped
-                # attempt adds its own beside it.
-                run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
-                is_team=history_scope.kind == "team",
-                response_event_id=event_id,
+                # One record per turn, keyed by the reply every attempt adopts.
+                run_id=str(uuid5(NAMESPACE_URL, event_id)),
             ),
         )
         self.deps.logger.info(

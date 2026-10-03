@@ -302,8 +302,8 @@ async def test_only_a_recovered_placeholder_is_read_for_a_stopped_attempt(
 
 
 @pytest.mark.asyncio
-async def test_each_stopped_attempt_keeps_its_own_record(tmp_path: Path) -> None:
-    """A second stop before the new attempt shows the old tools must not erase their record."""
+async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> None:
+    """A second stop before the new attempt shows the old tools keeps them, in one latest run."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -311,7 +311,7 @@ async def test_each_stopped_attempt_keeps_its_own_record(tmp_path: Path) -> None
     identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
     second = _streamed("A new start", trace=(), latest_edit="$edit-b")
 
-    for visible in (_streamed(), _streamed(), second):
+    for visible in (_streamed(), _streamed(), second, second):
         with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
             await runner._with_interrupted_attempt(
                 request,
@@ -320,9 +320,11 @@ async def test_each_stopped_attempt_keeps_its_own_record(tmp_path: Path) -> None
                 execution_identity=identity,
             )
 
-    first_attempt, second_attempt = _recorded_attempts(bot, request)
-    assert "The `counter` tool finished" in first_attempt
-    assert second_attempt.startswith("A new start")
+    (record,) = _recorded_attempts(bot, request)
+    first_account, second_account = record.split("\n\nA new start")
+    assert first_account.startswith("Half of the report")
+    assert "The `counter` tool finished" in first_account
+    assert second_account == "\n\n(turn stopped before completion)"
 
 
 @pytest.mark.asyncio
@@ -333,7 +335,7 @@ async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> 
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
     with (
-        patch.object(runner, "_persist_interrupted_turn", side_effect=RuntimeError("database is locked")),
+        patch.object(runner, "_persist_stopped_attempt", side_effect=RuntimeError("database is locked")),
         pytest.raises(RuntimeError, match="database is locked"),
     ):
         await _replay(bot, request, _streamed())
