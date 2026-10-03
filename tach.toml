@@ -2868,6 +2868,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.response_turn",
     "mindroom.team_exact_members",
+    "mindroom.thread_models",
     "mindroom.tool_call_budget",
     "mindroom.tool_system.events",
     "mindroom.delegation.execution",

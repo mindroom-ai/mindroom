@@ -127,6 +127,7 @@ from mindroom.team_exact_members import (
     resolve_team_materializable_agent_names,
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.events import (
@@ -2387,6 +2388,9 @@ def resolve_team_turn_models(
     active_model_name: str | None = None,
 ) -> TeamTurnModelSelection:
     """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    # A configured team's access reaches its members, so its thread override governs them during its turns.
+    if active_model_name is None and thread_id is not None and team_name in config.teams:
+        active_model_name = resolve_thread_model_override(runtime_paths, thread_id, config=config).active.get(team_name)
     if active_model_name is not None:
         return TeamTurnModelSelection(
             team_model_name=active_model_name,

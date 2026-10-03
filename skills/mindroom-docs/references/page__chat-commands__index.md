@@ -240,6 +240,7 @@ Show or switch the model that the agents, teams, and router you may address use 
 ```
 
 The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
 `!model reset` likewise removes the override only for the entities you may address.
 
 `!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
