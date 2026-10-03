@@ -58,7 +58,7 @@ Reads through those descriptors are capped per surface.
 | Scheduled-run receipts, thread-export files, `file` and `coding` reads | 64 MiB | Refused with a logged error |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
-| `moviepy_video_tools` staged inputs | 1 GiB per video; 64 MiB per caption file | The call fails with an error before staging more than the cap |
+| `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails with an error before staging more than the cap |
 
 Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
 A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.

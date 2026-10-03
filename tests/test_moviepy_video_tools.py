@@ -265,7 +265,6 @@ def test_oversized_inputs_fail_before_staging_past_the_limit(
 
     toolkit, factories = caption_renderer
     monkeypatch.setattr(adapter, "_MAX_STAGED_VIDEO_BYTES", 1 << 20)
-    monkeypatch.setattr(adapter, "MAX_READ_BYTES", 1 << 20)
     for name in ("big.mp4", "big.srt"):
         with (tmp_path / name).open("wb") as sparse:
             sparse.truncate(8 << 20)

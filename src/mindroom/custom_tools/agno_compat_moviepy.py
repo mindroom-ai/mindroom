@@ -16,7 +16,6 @@ from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
@@ -26,7 +25,9 @@ if TYPE_CHECKING:
 
 _STAGING_PREFIX = "mindroom-moviepy-"
 # Worker code can write the workspace, including sparse files whose logical size far exceeds the disk they use.
+# Parsing builds a few hundred bytes of objects per caption word, so captions get a much smaller cap.
 _MAX_STAGED_VIDEO_BYTES = 1 << 30
+_MAX_STAGED_CAPTION_BYTES = 1 << 20
 # FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
 _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav,mp3,flac,aac"
 
@@ -408,7 +409,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             video = VideoFileClip(self._stage_video(video_path, staging))
 
             # Read caption file and parse SRT
-            srt_content = Path(self._stage_input(srt_path, "srt_path", staging, MAX_READ_BYTES)).read_text(
+            srt_content = Path(self._stage_input(srt_path, "srt_path", staging, _MAX_STAGED_CAPTION_BYTES)).read_text(
                 encoding="utf-8",
             )
 

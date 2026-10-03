@@ -7707,7 +7707,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.agno_compat_moviepy"
-depends_on = ["mindroom.file_access", "mindroom.path_confinement"]
+depends_on = ["mindroom.file_access"]
 visibility = ["mindroom.tools.moviepy_video_tools"]
 
 [[interfaces]]
