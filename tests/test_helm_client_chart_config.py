@@ -94,38 +94,25 @@ def test_structured_values_merge_over_the_default_config_across_values_files(tmp
     }
 
 
-def test_structured_values_merge_over_config_data(tmp_path: Path) -> None:
-    """config.data stays the base document, and structured values replace lists and override nested keys."""
+def test_structured_values_override_chart_default_entries(tmp_path: Path) -> None:
+    """Structured values replace default lists and override nested default keys."""
     config = _client_config(
         _render_layered(
             tmp_path,
             """
             config:
-              data: |
-                {
-                  "defaultHomeserver": 0,
-                  "homeserverList": ["https://chat.example.com"],
-                  "sidebar": {"showThreads": false, "showMindRoom": false},
-                  "featuredCommunities": {"rooms": ["#lobby:chat.example.com", "#help:chat.example.com"]}
-                }
               values:
                 homeserverList:
-                  - https://staging.example.com
-                sidebar:
-                  showThreads: true
-                featuredCommunities:
-                  rooms:
-                    - "#lobby:staging.example.com"
+                  - https://chat.example.com
+                  - https://other.example.com
+                hashRouter:
+                  enabled: true
             """,
         ),
     )
 
-    assert config == {
-        "defaultHomeserver": 0,
-        "homeserverList": ["https://staging.example.com"],
-        "sidebar": {"showThreads": True, "showMindRoom": False},
-        "featuredCommunities": {"rooms": ["#lobby:staging.example.com"]},
-    }
+    assert config["homeserverList"] == ["https://chat.example.com", "https://other.example.com"]
+    assert config["hashRouter"] == {"enabled": True, "basename": "/"}
 
 
 @pytest.mark.parametrize(
@@ -134,12 +121,19 @@ def test_structured_values_merge_over_config_data(tmp_path: Path) -> None:
         (
             """
             config:
-              data: not json
+              data: '{"defaultHomeserver": 0}'
               values:
                 auth:
                   allowRegistration: false
             """,
-            "config.data must be a JSON object when config.values is set",
+            "config.values cannot be combined with config.data",
+        ),
+        (
+            """
+            config:
+              values: false
+            """,
+            "config.values must be a map",
         ),
         (
             """
@@ -152,9 +146,9 @@ def test_structured_values_merge_over_config_data(tmp_path: Path) -> None:
             "config.values requires the chart-managed client config",
         ),
     ],
-    ids=["invalid-config-data", "existing-config-map"],
+    ids=["with-config-data", "not-a-map", "existing-config-map"],
 )
-def test_structured_values_reject_configs_they_cannot_merge_into(tmp_path: Path, values: str, error: str) -> None:
+def test_structured_values_reject_inputs_they_cannot_apply(tmp_path: Path, values: str, error: str) -> None:
     """Structured values never disappear silently."""
     completed = _run_helm_template(
         CLIENT_CHART,

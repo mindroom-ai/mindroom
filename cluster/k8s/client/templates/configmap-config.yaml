@@ -1,11 +1,7 @@
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) }}
 {{- $configData := default (include "mindroom-client.defaultClientConfig" .) .Values.config.data -}}
 {{- with .Values.config.values }}
-{{- $base := $configData | fromJson -}}
-{{- if hasKey $base "Error" -}}
-{{- fail "config.data must be a JSON object when config.values is set" -}}
-{{- end -}}
-{{- $configData = mergeOverwrite $base (include "mindroom-client.tplConfigValue" (list $ .) | fromJson).value | toPrettyJson -}}
+{{- $configData = mergeOverwrite (include "mindroom-client.defaultClientConfig" $ | fromJson) (include "mindroom-client.tplConfigValue" (list $ .) | fromJson).value | toPrettyJson -}}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap

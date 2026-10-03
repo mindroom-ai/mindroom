@@ -34,8 +34,8 @@ matrix:
 When `defaultServerName` is set, the login form shows that server name instead of the URL, and the name must publish `/.well-known/matrix/client` pointing at `homeserverUrl`.
 Set `config.data` to a full JSON document when you need client options beyond the homeserver entry, or point `config.existingConfigMap` at a ConfigMap you manage yourself.
 
-`config.values` sets client options as structured values instead.
-The chart deep-merges them over `config.data`, or over the default document above when `config.data` is empty.
+`config.values` sets client options as structured values instead of `config.data`.
+The chart deep-merges them over the default document above, so the homeserver entry still follows the `matrix` values unless `config.values` overrides it.
 Helm merges maps key by key across values files, so an environment overlay can override one nested option without restating the rest; lists replace the earlier list.
 String values are rendered with `tpl`, so shared values can derive environment-specific names from other values.
 
