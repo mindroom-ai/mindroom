@@ -71,9 +71,13 @@ def _ensure_spotify_packages(
     ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
     spotipy_module = importlib.import_module("spotipy")
 
+    def spotify_oauth(**kwargs: str) -> _SpotifyOAuthClientProtocol:
+        # MindRoom stores the tokens itself; spotipy's default file cache would return its first token for every code.
+        return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
+
     return (
         cast("_SpotifyClientFactoryProtocol", spotipy_module.Spotify),
-        cast("_SpotifyOAuthFactoryProtocol", spotipy_module.SpotifyOAuth),
+        spotify_oauth,
     )
 
 

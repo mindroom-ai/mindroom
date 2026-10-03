@@ -2835,6 +2835,69 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
     assert disconnected_status.json()["connected"] is False
 
 
+def test_spotify_reconnect_saves_the_newly_authorized_account(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Spotify callback must exchange its own code instead of reusing a token spotipy cached on disk."""
+    exchanged_codes: list[str] = []
+
+    class _TokenResponse:
+        def __init__(self, code: str) -> None:
+            self._code = code
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"access_token": f"token-{self._code}", "refresh_token": "refresh", "expires_in": 3600}
+
+    def _post(_session: object, _url: str, *, data: dict[str, str], **_kwargs: object) -> _TokenResponse:
+        exchanged_codes.append(data["code"])
+        return _TokenResponse(data["code"])
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"user-{self.auth}"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("requests.Session.post", _post)
+    monkeypatch.setattr("spotipy.Spotify", _FakeSpotify)
+    current_paths = main._app_runtime_paths(test_client.app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=current_paths.config_path,
+        storage_path=current_paths.storage_root,
+        process_env={
+            **dict(current_paths.process_env),
+            "SPOTIFY_CLIENT_ID": "client-id",
+            "SPOTIFY_CLIENT_SECRET": "client-secret",
+        },
+    )
+    _publish_committed_runtime_config(
+        test_client.app,
+        runtime_paths,
+        _config_with_worker_scope("shared").model_dump(),
+    )
+
+    for code in ("account-a", "account-b"):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code={code}&state={state}",
+            follow_redirects=False,
+        )
+        assert callback_response.status_code in {302, 307}
+    status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert exchanged_codes == ["account-a", "account-b"]
+    assert status.json()["details"]["username"] == "user-token-account-b"
+    assert not (tmp_path / ".cache").exists()
+
+
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
     """openclaw_compat should appear as a registered tool in the tools response."""
     response = test_client.get("/api/tools/")
