@@ -1021,8 +1021,15 @@ async def test_active_runs_classify_unfinished_runs_with_the_startup_adoption_ru
         recovery_signature=adoptable.recovery_signature,
     )
     runtime.store.request_cancel(cancelling.run_id, reason="Cancelled by owner.")
+    stale = _stored_run_pinned_to_worker(
+        runtime.store,
+        paths,
+        run_id=f"script-{'e' * 32}",
+        recovery_signature=f"v2:{'0' * 64}",
+    )
     finished = _stored_run_pinned_to_worker(runtime.store, paths, run_id=f"script-{'d' * 32}")
     runtime.store.transition_run(finished.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    await runtime._refresh_worker_backend()
     before = {run.run_id: run for run in runtime.store.list_runs()}
 
     active = await runtime.active_runs()
@@ -1031,10 +1038,38 @@ async def test_active_runs_classify_unfinished_runs_with_the_startup_adoption_ru
         adoptable.run_id: True,
         legacy.run_id: False,
         cancelling.run_id: False,
+        stale.run_id: False,
     }
     assert {(run.responder, run.requester_id) for run in active} == {("watcher", "@alice:example.test")}
     assert {run.run_id: run for run in runtime.store.list_runs()} == before
     assert client.exited is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [False, None])
+async def test_active_runs_treat_unconfirmed_owner_authorization_as_interruptible(
+    tmp_path: Path,
+    authorized: bool | None,
+) -> None:
+    """Startup only adopts a run whose owner is confirmed, so activity must not call it recoverable."""
+    runtime, run, _backend, client = _recovery_scenario(tmp_path)
+    await runtime._refresh_worker_backend()
+    runtime.resolver.authorized = authorized
+
+    active = await runtime.active_runs()
+
+    assert [(info.run_id, info.recoverable) for info in active] == [(run.run_id, False)]
+    assert client.exited is False
+
+
+@pytest.mark.asyncio
+async def test_active_runs_treat_an_unresolved_worker_backend_as_interruptible(tmp_path: Path) -> None:
+    """Without the run's owning backend the recovery signature cannot be verified."""
+    runtime, run, _backend, _client = _recovery_scenario(tmp_path)
+
+    active = await runtime.active_runs()
+
+    assert [(info.run_id, info.recoverable) for info in active] == [(run.run_id, False)]
 
 
 def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:

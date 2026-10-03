@@ -1078,14 +1078,25 @@ class ScriptRuntimeLifecycle:
         self._startup_cleanup_pending = False
 
     async def active_runs(self) -> list[ActiveScriptRunInfo]:
-        """Read unfinished runs and whether this runtime's restart startup would adopt each process."""
+        """Read unfinished runs and whether this runtime's restart startup would adopt each process.
+
+        A run is recoverable only when startup's adoption checks pass now without side effects:
+        its recovery signature matches the current backend, configuration, and gateway, and its
+        owner authorization is confirmed. Anything unresolved stays interruptible.
+        """
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        config = self.config_provider()
         return [
             ActiveScriptRunInfo(
                 run_id=run.run_id,
                 responder=run.agent_name,
                 requester_id=run.owner_user_id,
-                recoverable=self._preserves_process(run),
+                recoverable=(
+                    config is not None
+                    and self._preserves_process(run)
+                    and self._run_matches_recovery_contract(run, config=config)
+                    and self.resolver.is_authorized(run, config=config) is True
+                ),
             )
             for run in runs
         ]

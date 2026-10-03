@@ -26106,7 +26106,7 @@ Detailed rows describe response lifecycles and do not need to match that count; 
 `active_calls` counts [voice calls](https://docs.mindroom.chat/voice-calls/) that an agent has joined or is joining.
 A restart, or a configuration reload that restarts the call agent, drops the agent from its calls, and a rejoined call starts a new call session, so calls count as busy.
 
-`interruptible_script_runs` counts unfinished [background script runs](https://docs.mindroom.chat/tools/background-scripts/) that a restart would interrupt, including Docker, unsafe-local, cancelling, and older runs without a recovery contract.
+`interruptible_script_runs` counts unfinished [background script runs](https://docs.mindroom.chat/tools/background-scripts/) that a restart would interrupt, including Docker, unsafe-local, cancelling, and runs whose recovery contract or owner authorization cannot be confirmed.
 `recoverable_script_runs` counts runs whose worker process restart startup would adopt under the current runtime environment.
 Recoverable runs do not make the runtime busy, because they are designed to survive restarts and may run for hours.
 They survive only while the replacement keeps their recovery contract, so treat them as busy before a change that [interrupts them](https://docs.mindroom.chat/tools/background-scripts/#lifecycle-and-failure-semantics).
@@ -26120,11 +26120,11 @@ For multiple processes, check each process directly.
 `--wait SECONDS` polls every 5 seconds while the runtime is busy and exits as soon as it is idle.
 If work is still active at the deadline, the command exits `1` with the last busy snapshot.
 An unavailable result ends the wait immediately with exit `2`, because work could have been interrupted while the status was unknown.
-Each poll is bounded by `--timeout`, so the total runtime can exceed `--wait` by at most one request timeout.
+A poll still in flight at the deadline is not cut short, so the total runtime can exceed `--wait`.
 Only the final snapshot is printed.
 
 The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound each request (10 seconds by default).
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to set each request's HTTP connect, read, and write timeouts (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
 Redirects are disabled.
 
