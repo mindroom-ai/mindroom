@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 import yaml
@@ -31,6 +32,7 @@ from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integra
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
@@ -2479,6 +2481,48 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
     assert toolkit._load_config() is None
 
 
+def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: TestClient) -> None:
+    """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+    oauth_config = {
+        "instance_url": "http://93.184.216.34:8123",
+        "client_id": "http://dashboard.test",
+        "access_token": "expired-token",
+        "refresh_token": "ha-refresh",
+        "allow_private_url": False,
+        "_source": "ui",
+    }
+    shared_manager.save_credentials("homeassistant", oauth_config)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/token":
+            assert parse_qs(request.content.decode()) == {
+                "grant_type": ["refresh_token"],
+                "refresh_token": ["ha-refresh"],
+                "client_id": ["http://dashboard.test"],
+            }
+            return httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 1800})
+        if request.headers["authorization"] != "Bearer renewed-token":
+            return httpx.Response(401)
+        responses = {"/api/": {"message": "API running"}, "/api/config": {"version": "2026.10"}, "/api/states": []}
+        return httpx.Response(200, json=responses[request.url.path])
+
+    with patch(
+        "mindroom.api.homeassistant_integration.ServerFetchAsyncHTTPTransport",
+        lambda **_kwargs: httpx.MockTransport(handler),
+    ):
+        status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+
+    assert status_response.json()["connected"] is True
+    assert status_response.json()["version"] == "2026.10"
+    assert shared_manager.load_credentials("homeassistant") == {**oauth_config, "access_token": "renewed-token"}
+
+
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup should not probe private URLs unless the user opts in."""
     config = _config_with_worker_scope("shared")
@@ -2545,7 +2589,11 @@ def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_clie
         )
 
     assert response.status_code == 200
-    test_connection.assert_awaited_once_with("http://127.0.0.1:8123", "ha-token", allow_private_url=True)
+    assert test_connection.await_args.args[0] == {
+        "instance_url": "http://127.0.0.1:8123",
+        "long_lived_token": "ha-token",
+        "allow_private_url": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2556,13 +2604,16 @@ async def test_homeassistant_connection_failure_does_not_return_response_body() 
     api_response = MagicMock()
     api_response.status_code = 500
     api_response.text = provider_body
-    async_client.__aenter__.return_value.get.return_value = api_response
+    async_client.__aenter__.return_value.request.return_value = api_response
 
     with (
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await homeassistant_integration._test_connection("http://93.184.216.34:8123", "ha-token")
+        await homeassistant_integration._test_connection(
+            {"instance_url": "http://93.184.216.34:8123", "long_lived_token": "ha-token"},
+            MagicMock(spec=RequestCredentialsTarget),
+        )
 
     assert exc_info.value.status_code == 500
     assert provider_body not in str(exc_info.value.detail)

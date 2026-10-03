@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import httpx
 import pytest
 from httpx import Response
 
@@ -598,3 +599,96 @@ class TestHomeAssistantTools:
         result_dict = json.loads(result)
 
         assert "Invalid JSON in data parameter" in result_dict["error"]
+
+
+_OAUTH_CONFIG = {
+    "instance_url": "http://127.0.0.1:8123",
+    "client_id": "http://dashboard.test",
+    "access_token": "expired-token",
+    "refresh_token": "ha-refresh",
+    "allow_private_url": True,
+}
+
+
+def _fake_homeassistant(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    renewal_status: int,
+) -> list[tuple[str, str, str]]:
+    """Serve Home Assistant through a fake transport that accepts only the renewed token.
+
+    Each recorded request holds its method, path, and bearer token or form body.
+    """
+    requests: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        credential = request.headers.get("authorization", request.content.decode())
+        requests.append((request.method, request.url.path, credential))
+        if request.url.path == "/auth/token":
+            if renewal_status != 200:
+                return httpx.Response(renewal_status, json={"error": "invalid_grant"})
+            return httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 1800})
+        if request.headers["authorization"] != "Bearer renewed-token":
+            return httpx.Response(401)
+        return httpx.Response(200, json=[{"entity_id": "light.kitchen", "state": "on"}])
+
+    monkeypatch.setattr(
+        "mindroom.custom_tools.homeassistant.ServerFetchAsyncHTTPTransport",
+        lambda **_kwargs: httpx.MockTransport(handler),
+    )
+    return requests
+
+
+@pytest.mark.asyncio
+async def test_api_request_renews_an_expired_oauth_token_and_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected OAuth access token is renewed once with the refresh token, saved, and the request retried."""
+    manager = CredentialsManager(base_path=tmp_path / "credentials")
+    manager.save_credentials("homeassistant", _OAUTH_CONFIG)
+    requests = _fake_homeassistant(monkeypatch, renewal_status=200)
+
+    result = await HomeAssistantTools(credentials_manager=manager)._api_request("GET", "/api/states")
+
+    assert result == [{"entity_id": "light.kitchen", "state": "on"}]
+    assert requests == [
+        ("GET", "/api/states", "Bearer expired-token"),
+        (
+            "POST",
+            "/auth/token",
+            "grant_type=refresh_token&refresh_token=ha-refresh&client_id=http%3A%2F%2Fdashboard.test",
+        ),
+        ("GET", "/api/states", "Bearer renewed-token"),
+    ]
+    assert manager.load_credentials("homeassistant") == {**_OAUTH_CONFIG, "access_token": "renewed-token"}
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_paths"),
+    [
+        (_OAUTH_CONFIG, ["/api/states", "/auth/token"]),
+        (
+            {"instance_url": "http://127.0.0.1:8123", "long_lived_token": "ha-token", "allow_private_url": True},
+            ["/api/states"],
+        ),
+    ],
+    ids=["refused-renewal", "long-lived-token"],
+)
+@pytest.mark.asyncio
+async def test_api_request_asks_to_reconnect_when_the_token_cannot_be_renewed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, object],
+    expected_paths: list[str],
+) -> None:
+    """A refused renewal, or a long-lived token that has no renewal, keeps the reconnect error and the stored token."""
+    manager = CredentialsManager(base_path=tmp_path / "credentials")
+    manager.save_credentials("homeassistant", config)
+    requests = _fake_homeassistant(monkeypatch, renewal_status=400)
+
+    result = await HomeAssistantTools(credentials_manager=manager)._api_request("GET", "/api/states")
+
+    assert result == {"error": "Invalid authentication token. Please reconnect Home Assistant."}
+    assert [path for _method, path, _auth in requests] == expected_paths
+    assert manager.load_credentials("homeassistant") == config

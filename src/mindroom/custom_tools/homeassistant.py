@@ -6,12 +6,12 @@ allowing agents to control devices, query states, and execute automations.
 
 import json
 from typing import Any
-from urllib.parse import urljoin
 
 import httpx
 from agno.tools import Toolkit
 
-from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.credentials import CredentialsManager, load_scoped_credentials, save_scoped_credentials
+from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 from mindroom.tool_system.worker_routing import (
@@ -75,6 +75,15 @@ class HomeAssistantTools(Toolkit):
             worker_target=self._worker_target,
         )
 
+    def _save_config(self, config: dict[str, Any]) -> None:
+        """Save Home Assistant configuration with a renewed OAuth access token."""
+        save_scoped_credentials(
+            "homeassistant",
+            config,
+            credentials_manager=self._creds_manager,
+            worker_target=self._worker_target,
+        )
+
     async def _api_request(  # noqa: PLR0911
         self,
         method: str,
@@ -103,12 +112,14 @@ class HomeAssistantTools(Toolkit):
                     allow_private_networks=allow_private_url,
                 ),
             ) as client:
-                response = await client.request(
-                    method=method,
-                    url=urljoin(fetch_url, endpoint),
-                    headers={"Authorization": f"Bearer {token}"},
-                    json=json_data,
-                    timeout=10.0,
+                response = await send_homeassistant_request(
+                    client,
+                    fetch_url,
+                    config,
+                    method,
+                    endpoint,
+                    json_data=json_data,
+                    save_config=self._save_config,
                 )
 
                 if response.status_code == 401:
