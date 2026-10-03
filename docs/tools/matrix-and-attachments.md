@@ -343,6 +343,7 @@ With `after-toolcall`, MindRoom rebuilds the current agent or team with the sele
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
 The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
 Every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
 `get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
 When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
 `reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
