@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import yaml
 
+from mindroom.workers.backends._config_helpers import read_json_mapping_env
 from tests.test_helm_instance_worker_isolation import (
     _container,
     _env_by_name,
@@ -37,7 +38,7 @@ matrix:
 env:
   extra:
     PUBLIC_URL: "https://{{ .Values.matrix.serverName }}"
-    UPLOAD_LIMIT: 104857600
+    UPLOAD_LIMIT: "104857600"
     AUDIENCE:
       value: shared-audience
     API_TOKEN:
@@ -228,7 +229,7 @@ def test_string_env_values_render_templates(tmp_path: Path) -> None:
           kubernetes:
             extraEnv:
               WORKER_API_URL: "http://api.{{ .Release.Namespace }}.svc.cluster.local:8080"
-              WORKER_REMOVED: null
+              all_proxy: null
             agentVault:
               server:
                 extraEnv:
@@ -247,13 +248,17 @@ def test_string_env_values_render_templates(tmp_path: Path) -> None:
     )
     _, container = _runtime(docs)
     env = _env_by_name(container)
-    worker_env = json.loads(env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
+    env_json = {"MINDROOM_KUBERNETES_WORKER_ENV_JSON": env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"]}
+    worker_env = json.loads(env_json["MINDROOM_KUBERNETES_WORKER_ENV_JSON"])
     vault_env = _env_by_name(_container(_resource(docs, "Deployment", "agent-vault"), "agent-vault"))
 
     assert env["API_URL"]["value"] == "http://api.mindroom-staging.svc.cluster.local:8080"
     assert env["LITERAL_BRACES"]["value"] == "{{ literal }}"
     assert worker_env["WORKER_API_URL"] == "http://api.mindroom-staging.svc.cluster.local:8080"
-    assert "WORKER_REMOVED" not in worker_env
+    # The runtime drops null worker env entries, which lets values remove a chart-injected proxy variable.
+    assert worker_env["all_proxy"] is None
+    assert "all_proxy" not in read_json_mapping_env(env_json, "MINDROOM_KUBERNETES_WORKER_ENV_JSON")
+    assert worker_env["ALL_PROXY"].startswith("http://")
     assert worker_env["NO_PROXY"] == "localhost,api.mindroom-staging.svc.cluster.local"
     assert vault_env["AGENT_VAULT_ADDR"]["value"] == "https://chat.example.com/agent-vault"
 
@@ -356,13 +361,29 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         (
             """
             env:
+              extra:
+                UPLOAD_LIMIT: 104857600
+            """,
+            (),
+            "env.extra.UPLOAD_LIMIT must be a string, a map, or null; quote numbers and booleans",
+        ),
+        (
+            """
+            env:
               envFrom: not-a-list
             """,
             (),
             "env.envFrom must be a list or a map",
         ),
     ],
-    ids=["vault-managed-env", "provider-credential-env", "config-mount-overlap", "scalar-volume", "scalar-env-from"],
+    ids=[
+        "vault-managed-env",
+        "provider-credential-env",
+        "config-mount-overlap",
+        "scalar-volume",
+        "unquoted-number-env",
+        "scalar-env-from",
+    ],
 )
 def test_map_forms_keep_chart_validation(
     tmp_path: Path,

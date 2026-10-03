@@ -373,7 +373,7 @@ workers:
     ownerDeploymentName: ""
     nodeName: ""
     colocateWithControlPlaneNode: false
-    # Worker env vars as NAME: value; string values are rendered with tpl and null removes an entry.
+    # Worker env vars as NAME: value; string values are rendered with tpl.
     extraEnv: {}
     extraLabels: {}
     extraAnnotations: {}

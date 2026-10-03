@@ -361,7 +361,7 @@ matchLabels:
 Normalize a list value that may also be written as a map keyed by entry.
 Helm replaces lists wholesale across values files but merges maps key by key, so the map form lets a later file override or remove one entry.
 Map entries render in key order, take nameKey (when set) from their key unless they set it, and drop null entries and null fields.
-Scalar map values become {nameKey: key, scalarKey: value} when scalarKey is set.
+String map values become {nameKey: key, scalarKey: value} when scalarKey is set.
 Arguments: dict "value" <list or map> "path" <values path> "nameKey" <field or ""> "scalarKey" <field or "">.
 Returns a JSON array for fromJsonArray.
 */}}
@@ -381,11 +381,14 @@ Returns a JSON array for fromJsonArray.
 {{- end -}}
 {{- end -}}
 {{- $items = append $items $entry -}}
-{{- else if not (kindIs "invalid" $item) -}}
-{{- if not $.scalarKey -}}
+{{- else if and $.scalarKey (kindIs "string" $item) -}}
+{{- $items = append $items (dict $.nameKey $key $.scalarKey $item) -}}
+{{- else if kindIs "invalid" $item -}}
+{{- /* A null entry removes an entry set by an earlier values file. */ -}}
+{{- else if $.scalarKey -}}
+{{- fail (printf "%s.%s must be a string, a map, or null; quote numbers and booleans" $.path $key) -}}
+{{- else -}}
 {{- fail (printf "%s.%s must be a map or null" $.path $key) -}}
-{{- end -}}
-{{- $items = append $items (dict $.nameKey $key $.scalarKey (ternary $item (toJson $item) (kindIs "string" $item))) -}}
 {{- end -}}
 {{- end -}}
 {{- else if kindIs "slice" .value -}}
@@ -437,9 +440,7 @@ Arguments: list <root context> <list or map> <values path>.
 {{- if kindIs "string" $value -}}
 {{- $value = tpl $value $ -}}
 {{- end -}}
-{{- if not (kindIs "invalid" $value) -}}
 {{- $_ := set $extraEnv $key $value -}}
-{{- end -}}
 {{- end -}}
 {{- if $extraEnv -}}
 {{- toJson $extraEnv -}}

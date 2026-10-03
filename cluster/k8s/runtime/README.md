@@ -311,13 +311,13 @@ Helm replaces lists wholesale when it merges several values files, so an environ
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
 - A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
-- An env map entry may be a plain string or number as shorthand for `value`.
+- An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
 
 String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv`, and `egressProxy.noProxy` entries, are rendered with `tpl`.
 Shared values can therefore reference the release namespace or other values instead of repeating environment-specific names.
 Write `{{ "{{" }}` for a literal `{{`.
-A `null` in `workers.kubernetes.extraEnv` removes an inherited worker variable.
+A `null` in `workers.kubernetes.extraEnv` removes an inherited or chart-injected worker variable.
 
 ```yaml
 # shared-values.yaml
