@@ -27421,7 +27421,7 @@ Preserve `TARGET.previous` until runtime confirmation succeeds.
 
 ### config classify-change
 
-Decide whether a candidate tree differs from the current tree only in sources that a runtime config reload applies:
+Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
 
 ```bash
 mindroom config classify-change ./active ./candidate --json
@@ -27431,7 +27431,8 @@ mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml 
 Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
 Directories that only appear or disappear around those files also count as sources.
 Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
-Config reload only rereads sources, so `other` changes need a runtime restart.
+Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload).
+A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
 Each `--config` entrypoint (default `config.yaml`) must load in both trees.
 Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
 The command only reads both trees, and its results list paths, never file contents.

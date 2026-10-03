@@ -121,7 +121,7 @@ def config_classify_change(
     else:
         typer.echo(f"{len(change.sources)} YAML/include source path(s) changed.")
         if change.other:
-            typer.echo("Changes outside YAML/include sources are not hot-reloadable:")
+            typer.echo("Changes outside YAML/include sources, which config reload does not reread:")
             for name in change.other:
                 typer.echo(f"  {name}")
     raise typer.Exit(1 if change.other else 0)
