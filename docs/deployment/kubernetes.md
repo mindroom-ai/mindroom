@@ -376,9 +376,9 @@ Restore each of these sets together, from the same point in time:
 Per-volume snapshots taken at different times while MindRoom runs are not a consistent restore set for the event journal and the device stores.
 Take them from one quiet point instead:
 
-1. Scale the runtime Deployment to zero, then scale dedicated worker Deployments (label `mindroom.ai/worker-id`) to zero, because workers write agent workspaces to the storage claim.
+1. Scale the runtime Deployment to zero and wait until its Pod has terminated, then scale dedicated worker Deployments (label `mindroom.ai/worker-id`) to zero and wait until their Pods have terminated, because workers write agent workspaces to the storage claim and a terminating Pod can still write.
 2. Snapshot the storage claim, the state claim, and the event journal volume, or dump the journal database with `pg_dump`.
-3. Scale the runtime back up; it recreates workers on demand.
+3. Once the snapshots are taken or the dump has finished, scale the runtime back up; it recreates workers on demand.
 
 A storage-level group snapshot that captures all coupled volumes at the same instant behaves like the whole runtime crashing at that instant, which the journal is designed to recover from: a batch committed before a crash is recognized when the device store delivers it again.
 The Agent Vault volume and the approved egress volume are not coupled to the journal and can be snapshotted on their own schedules.
@@ -388,7 +388,7 @@ For the Tuwunel volume, prefer an offline snapshot or Tuwunel's own database bac
 
 - `knowledge_db/` holds only the knowledge indexes and their metadata.
   When an index is missing, agents report the base as initializing and MindRoom rebuilds it in the background from the knowledge sources the next time the base is used, which repeats every embedding call.
-  The sources themselves, including files uploaded through the dashboard, are not rebuildable unless they come from Git: a Git-backed base fetches its repository again when its folder is missing or empty and its `<storage>/knowledge_git/` directory is missing.
+  The sources themselves, including files uploaded through the dashboard, are not rebuildable unless they come from Git: a Git-backed base restores its files from the configured repository when its folder is missing or empty, reusing `<storage>/knowledge_git/` when it survives and initializing it again when it does not.
 - `logs/` only holds runtime log files.
 - The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`, while static allowlists come from values.
 
