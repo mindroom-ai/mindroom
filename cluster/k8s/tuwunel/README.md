@@ -152,20 +152,20 @@ Raise each hop together with `max_request_size`:
 - any nginx that proxies `/_matrix/`, such as a location added through the client chart's `nginx.serverSnippet`: `client_max_body_size` in that server or location, whose nginx default is 1m
 - any load balancer, CDN, or tunnel in front of the ingress, which may enforce its own request size limit
 
-MindRoom uploads attachments and long-message sidecars to the same homeserver, and when `matrix.homeserverUrl` points at the in-cluster Service as in [Pairing With mindroom-runtime](#pairing-with-mindroom-runtime), only `max_request_size` limits those uploads.
+MindRoom uploads attachments and long-message sidecars to the same homeserver, and when `matrix.homeserverUrl` points at the in-cluster Service as in [Pairing With mindroom-runtime](#pairing-with-mindroom-runtime), those uploads skip the proxies and only `max_request_size` limits them at the homeserver.
 A long message whose sidecar upload Tuwunel rejects is delivered as a truncated preview.
-Agents do not read incoming media larger than 64 MiB whatever the homeserver accepts, as described in [File & Video Attachments](../../../docs/attachments.md).
+MindRoom itself limits incoming media and the files agents attach to 64 MiB whatever the homeserver accepts, as described in [File & Video Attachments](../../../docs/attachments.md).
 
 ## Upgrading Tuwunel
 
 A Tuwunel release can migrate the database on its first start, and Tuwunel runs those migrations before it opens its HTTP listener.
 Current releases log `Database migration in progress` every 15 seconds while they work, honor a stop request between migration steps, and resume from the last finished step on the next start.
-Killing the process mid-migration, for example after a failed probe, an eviction, or an expired termination grace period, can leave the database mid-write and require a restore.
+Killing the process mid-migration, for example after a failed probe, an out-of-memory kill, an eviction, or an expired termination grace period, can leave the database mid-write and require a restore.
 The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a newer release and start an unplanned migration, so pin `image.tag` or `image.digest` and change it only as part of this procedure.
 
 1. Read the release notes of every Tuwunel release between the running and the target version, and note database migrations and supported upgrade paths.
 2. Record the running image tag or digest and the values used to deploy it.
-3. Rehearse when the database is large: restore a recent snapshot into a separate claim, start the target image against it without client or federation traffic, and measure the migration's duration, memory, and disk use.
+3. Rehearse when the database is large: restore a recent snapshot into a separate claim, start the target image against it without client or federation traffic, for example with the one-off maintenance Pod described below, and measure the migration's duration, memory, and disk use.
 4. Scale the paired `mindroom-runtime` Deployment to zero at a quiet time, because its liveness probe restarts it repeatedly once Matrix sync has been stale for a few minutes.
 5. Stop Tuwunel and wait until its pod is gone:
 
@@ -181,11 +181,12 @@ The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a n
    Back up any external media storage providers in the same window.
 7. Give the first start enough time.
    The default startup probe allows 60 failures at 5-second intervals, about 5 minutes, before the kubelet restarts the container, which would interrupt a longer migration.
+   Raise `resources.limits.memory` above the rehearsed peak, and make sure the claim has room for the rehearsed disk growth.
    Raise `probes.startup.failureThreshold` above the rehearsed duration with margin, then deploy the target image:
 
    ```yaml
    image:
-     tag: <target-tag>
+     tag: <target-tag>  # a set image.digest overrides the tag, so change the digest instead when one is pinned
    probes:
      startup:
        periodSeconds: 5
@@ -199,7 +200,7 @@ The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a n
 8. Follow the pod log until the migration finishes and `/_matrix/client/versions` answers, then scale the MindRoom runtime back up and confirm that agents sync, reply, and can read existing media.
    The startup probe can return to its default afterwards.
 
-For a migration too long to supervise through the Deployment, keep the Deployment at zero replicas and run the target image once in a separate Pod with `restartPolicy: Never`, no probes, and the same config, Secret mounts, and data claim, passing the arguments `--maintenance --execute "server shutdown"`.
+For a migration too long to supervise through the Deployment, keep the Deployment at zero replicas and run the target image once in a separate Pod with `restartPolicy: Never`, no probes, and the same container environment, config and Secret mounts, and data claim, passing the arguments `--maintenance --execute "server shutdown"`.
 Maintenance mode keeps the listener closed, and the startup command shuts the server down only after the migrations have finished.
 Check its log for completed migrations, delete the Pod, and then deploy the target image as above.
 
