@@ -133,6 +133,80 @@ When the apex is not routed to Tuwunel, the operator must serve the delegation d
 
 The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` and `tuwunel.wellKnown.server` to `<serverName>:443`; override them when the public routing differs.
 
+## Upload Size
+
+Tuwunel's `max_request_size` caps every request body, including media uploads, and Tuwunel advertises it to clients as `m.upload.size` from `/_matrix/client/v1/media/config`.
+Tuwunel defaults it to 24 MiB and refuses to start with a value below 10,000,000 bytes.
+The chart has no dedicated value, so set it through `tuwunel.extraConfig` or a `TUWUNEL_MAX_REQUEST_SIZE` entry in `env.extra`:
+
+```yaml
+tuwunel:
+  extraConfig: |
+    max_request_size = 104857600  # 100 MiB
+```
+
+Every proxy between clients and Tuwunel must accept a body of at least that size, or uploads that Tuwunel advertises as allowed fail with `413` at the proxy before they reach the homeserver.
+Raise each hop together with `max_request_size`:
+
+- ingress-nginx: the `nginx.ingress.kubernetes.io/proxy-body-size` annotation on the Matrix Ingress, whose controller default is 1m
+- any nginx that proxies `/_matrix/`, such as a location added through the client chart's `nginx.serverSnippet`: `client_max_body_size` in that server or location, whose nginx default is 1m
+- any load balancer, CDN, or tunnel in front of the ingress, which may enforce its own request size limit
+
+MindRoom uploads attachments and long-message sidecars to the same homeserver, and when `matrix.homeserverUrl` points at the in-cluster Service as in [Pairing With mindroom-runtime](#pairing-with-mindroom-runtime), only `max_request_size` limits those uploads.
+A long message whose sidecar upload Tuwunel rejects is delivered as a truncated preview.
+Agents do not read incoming media larger than 64 MiB whatever the homeserver accepts, as described in [File & Video Attachments](../../../docs/attachments.md).
+
+## Upgrading Tuwunel
+
+A Tuwunel release can migrate the database on its first start, and Tuwunel runs those migrations before it opens its HTTP listener.
+Current releases log `Database migration in progress` every 15 seconds while they work, honor a stop request between migration steps, and resume from the last finished step on the next start.
+Killing the process mid-migration, for example after a failed probe, an eviction, or an expired termination grace period, can leave the database mid-write and require a restore.
+The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a newer release and start an unplanned migration, so pin `image.tag` or `image.digest` and change it only as part of this procedure.
+
+1. Read the release notes of every Tuwunel release between the running and the target version, and note database migrations and supported upgrade paths.
+2. Record the running image tag or digest and the values used to deploy it.
+3. Rehearse when the database is large: restore a recent snapshot into a separate claim, start the target image against it without client or federation traffic, and measure the migration's duration, memory, and disk use.
+4. Scale the paired `mindroom-runtime` Deployment to zero at a quiet time, because its liveness probe restarts it repeatedly once Matrix sync has been stale for a few minutes.
+5. Stop Tuwunel and wait until its pod is gone:
+
+   ```bash
+   kubectl -n mindroom scale deployment/matrix-mindroom-tuwunel --replicas=0
+   kubectl -n mindroom wait --for=delete pod \
+     -l app.kubernetes.io/instance=matrix,app.kubernetes.io/component=homeserver --timeout=10m
+   ```
+
+6. Take an offline snapshot of the data PVC (`matrix-mindroom-tuwunel-data` here), for example a CSI `VolumeSnapshot`, and wait until it is ready.
+   The claim holds both the RocksDB database and the `media/` directory under `storage.mountPath`, so one offline snapshot keeps them consistent.
+   Tuwunel's online backups and checkpoints exclude media, and copying the files of a running database does not produce a consistent RocksDB copy; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
+   Back up any external media storage providers in the same window.
+7. Give the first start enough time.
+   The default startup probe allows 60 failures at 5-second intervals, about 5 minutes, before the kubelet restarts the container, which would interrupt a longer migration.
+   Raise `probes.startup.failureThreshold` above the rehearsed duration with margin, then deploy the target image:
+
+   ```yaml
+   image:
+     tag: <target-tag>
+   probes:
+     startup:
+       periodSeconds: 5
+       failureThreshold: 720  # 1 hour
+   ```
+
+   Kubernetes defaults apply to the Deployment's rollout and shutdown timers unless the Deployment sets them.
+   `progressDeadlineSeconds` (default 600 seconds) only marks a slow rollout as failed and does not stop the pod, and `helm upgrade --wait` gives up after its own `--timeout` (default 5 minutes) without stopping the pod either.
+   Do not combine the upgrade with Helm's automatic rollback on failure (`--atomic` in Helm 3), which would replace the migrating pod with the old image when that timeout expires.
+   `terminationGracePeriodSeconds` (default 30 seconds) bounds how long a stopping pod can finish its current migration step before it is killed, so avoid stopping the pod while a migration runs.
+8. Follow the pod log until the migration finishes and `/_matrix/client/versions` answers, then scale the MindRoom runtime back up and confirm that agents sync, reply, and can read existing media.
+   The startup probe can return to its default afterwards.
+
+For a migration too long to supervise through the Deployment, keep the Deployment at zero replicas and run the target image once in a separate Pod with `restartPolicy: Never`, no probes, and the same config, Secret mounts, and data claim, passing the arguments `--maintenance --execute "server shutdown"`.
+Maintenance mode keeps the listener closed, and the startup command shuts the server down only after the migrations have finished.
+Check its log for completed migrations, delete the Pod, and then deploy the target image as above.
+
+Tuwunel normally refuses to open a database whose schema version is newer than it supports, and a newer release can change records or RocksDB files in ways an older release does not expect even when the schema version is unchanged, so switching back to the old image is not a rollback.
+To roll back, stop the pod, restore the pre-upgrade snapshot of the claim and any external media, and redeploy the recorded old image and values.
+Writes accepted after the snapshot are lost.
+
 ## Notes
 
 - The Deployment is pinned to one replica with a `Recreate` strategy because Tuwunel does not support horizontal scaling against one database.
