@@ -683,6 +683,7 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
 
 
 # The handler parses its multipart body after authentication, so the API docs take the body schema from here.
+# Swagger UI renders array items as file pickers only with ``format: binary``.
 _UPLOAD_REQUEST_BODY = {
     "required": True,
     "content": {
@@ -693,7 +694,7 @@ _UPLOAD_REQUEST_BODY = {
                 "properties": {
                     "files": {
                         "type": "array",
-                        "items": {"type": "string", "contentMediaType": "application/octet-stream"},
+                        "items": {"type": "string", "format": "binary", "contentMediaType": "application/octet-stream"},
                     },
                 },
             },

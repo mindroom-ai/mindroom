@@ -899,7 +899,9 @@ def test_upload_documents_its_multipart_files_body() -> None:
     schema = operation["requestBody"]["content"]["multipart/form-data"]["schema"]
     assert operation["requestBody"]["required"] is True
     assert schema["required"] == ["files"]
-    assert schema["properties"]["files"]["items"]["contentMediaType"] == "application/octet-stream"
+    items = schema["properties"]["files"]["items"]
+    assert items["format"] == "binary"
+    assert items["contentMediaType"] == "application/octet-stream"
 
 
 def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: Path) -> None:
