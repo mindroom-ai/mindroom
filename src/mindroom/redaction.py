@@ -117,7 +117,7 @@ _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _PLACEHOLDER_OPEN = "\u27e6"
 _PLACEHOLDER_CLOSE = "\u27e7"
 # Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
-_MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
+MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
@@ -762,7 +762,7 @@ def _review_scalar_value(value: object, *, max_length: int | None, placeholders:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
-        return str(value) if abs(value) > _MAX_CANONICAL_JSON_INTEGER else value
+        return str(value) if abs(value) > MAX_CANONICAL_JSON_INTEGER else value
     return _redact_review_tokens(_safe_repr(value), max_length=max_length, placeholders=placeholders)
 
 

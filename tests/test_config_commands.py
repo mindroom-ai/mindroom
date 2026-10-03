@@ -1788,6 +1788,8 @@ def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
             False,
         ),
         ('set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"', "agents.assistant.role", True),
+        ("set defaults.streaming.update_interval 0.5", "defaults.streaming.update_interval", True),
+        ("set defaults.thread_summary_temperature 0.3", "defaults.thread_summary_temperature", True),
     ],
 )
 async def test_handle_config_command_set_previews_and_applies_ordinary_values(
@@ -1796,7 +1798,7 @@ async def test_handle_config_command_set_previews_and_applies_ordinary_values(
     path: str,
     withheld: bool,
 ) -> None:
-    """Every valid value previews and applies; only values redaction masks are withheld from room state."""
+    """Every valid value previews and applies; values redaction masks or room state cannot carry are withheld."""
     config_path = _write_config_with_secrets(tmp_path)
     runtime_paths = _runtime_paths_for_config(config_path)
 
