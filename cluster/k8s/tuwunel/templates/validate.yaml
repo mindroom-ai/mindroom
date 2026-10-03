@@ -9,6 +9,24 @@
 {{- if not .Values.tuwunel.listenAddresses -}}
 {{- fail "tuwunel.listenAddresses must contain at least one bind address" -}}
 {{- end -}}
+{{- $managedSettings := list "server_name" "address" "port" "database_path" "log" "well_known" -}}
+{{- if .Values.tuwunel.compactEdits -}}
+{{- $managedSettings = append $managedSettings "mindroom_compact_edits_enabled" -}}
+{{- end -}}
+{{- if .Values.tuwunel.registrationToken.existingSecret -}}
+{{- $managedSettings = concat $managedSettings (list "allow_registration" "registration_token_file") -}}
+{{- end -}}
+{{- if .Values.tuwunel.appserviceRegistration.existingSecret -}}
+{{- $managedSettings = append $managedSettings "appservice_dir" -}}
+{{- end -}}
+{{- if .Values.tuwunel.oidc.enabled -}}
+{{- $managedSettings = append $managedSettings "identity_provider" -}}
+{{- end -}}
+{{- range $key, $value := .Values.tuwunel.settings -}}
+{{- if and (has $key $managedSettings) (not (kindIs "invalid" $value)) -}}
+{{- fail (printf "tuwunel.settings.%s is rendered by the chart; use its dedicated value" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.tuwunel.oidc.enabled -}}
 {{- if not .Values.tuwunel.oidc.brand -}}
 {{- fail "tuwunel.oidc.brand is required when tuwunel.oidc.enabled=true" -}}

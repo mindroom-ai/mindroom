@@ -89,6 +89,29 @@ The callback URL defaults to `<clientBaseUrl>/_matrix/client/unstable/login/sso/
 `tuwunel.oidc.extraConfig` appends raw TOML inside the `[[global.identity_provider]]` block for less common options such as `userid_claims`, `trusted`, or `unique_id_fallbacks`.
 For multiple identity providers, use a fully custom config through `config.existingConfigMap`.
 
+## Structured Settings
+
+`tuwunel.settings` renders Tuwunel options into the `[global]` section of the chart-rendered `tuwunel.toml`.
+Unlike the raw `tuwunel.extraConfig` string, Helm merges these maps key by key across values files, so an environment overlay can change one option without restating the others.
+
+```yaml
+tuwunel:
+  serverName: example.com
+  settings:
+    login_with_password: false
+    auto_join_rooms: ["#lobby:{{ .Values.tuwunel.serverName }}"]
+    max_request_size: 104857600
+    default_power_level_content_override:
+      users_default: 50
+```
+
+- Strings, numbers, booleans, and lists of them become TOML values, and integral numbers stay TOML integers.
+- Nested maps become `[global.<key>]` tables, rendered after `tuwunel.extraConfig`.
+- Strings are rendered with `tpl`, so shared values can derive environment-specific names such as room aliases from `tuwunel.serverName`.
+- A `null` value omits an option set by an earlier values file.
+- Options the chart already renders, such as `server_name`, `port`, or `well_known`, are rejected; use their dedicated values.
+- Arrays of tables still belong in `tuwunel.extraConfig`.
+
 ## Custom Config
 
 Operators with a fully custom `tuwunel.toml` can bypass chart rendering entirely:
@@ -139,5 +162,5 @@ The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` a
 - The image defaults to the fork's `latest` tag with `pullPolicy: Always`; pin `image.tag` or `image.digest` for reproducible production deployments.
 - The MindRoom fork's compact-edit collapsing for streaming responses is enabled by default; set `tuwunel.compactEdits: false` to disable it.
 - The release image runs Tuwunel as root, so the chart sets no restrictive container security context by default; tighten `podSecurityContext` and `securityContext` to match your policy.
-- Any Tuwunel option without a dedicated value can be set through `tuwunel.extraConfig` (raw TOML in `[global]`) or `TUWUNEL_*` environment overrides in `env.extra`.
+- Any Tuwunel option without a dedicated value can be set through `tuwunel.settings`, `tuwunel.extraConfig` (raw TOML in `[global]`), or `TUWUNEL_*` environment overrides in `env.extra`.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector, and `storage.existingClaim` when adopting an existing data PVC.
