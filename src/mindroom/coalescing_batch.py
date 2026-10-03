@@ -219,14 +219,13 @@ def tagged_coalesced_prompt(
         metadata = source_event_metadata.get(source_event_id)
         if prompt is None or metadata is None:
             return None
-        speaker = metadata.speaker or metadata.sender
         rendered_messages.append(
             render_msg_tag(
-                sender=speaker,
+                sender=metadata.sender,
                 body=prompt,
                 event_id=source_event_id,
                 ts=timestamp_formatter(metadata.timestamp_ms),
-                display_name=member_display_names.get(speaker),
+                display_name=member_display_names.get(metadata.sender),
             ),
         )
     return _messages_envelope(

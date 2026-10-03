@@ -96,7 +96,7 @@ def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[Ap
         yield
 
 
-def refuse_unapproved_executions(run: RunOutput | TeamRunOutput, calls: Sequence[ApprovalCall]) -> None:
+def _refuse_unapproved_executions(run: RunOutput, calls: Sequence[ApprovalCall]) -> None:
     """Reject a continuation that would run anything except each approved call once with its saved arguments."""
     approved = {call.tool_call_id: call for call in calls}
     # One entry may appear in both lists, but stored copies within either list would each run.
@@ -120,26 +120,12 @@ def refuse_unapproved_executions(run: RunOutput | TeamRunOutput, calls: Sequence
 @contextmanager
 def approved_executions_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
     """Check every run Agno continues on this actor before it executes any stored call."""
-    refusals: list[RuntimeError] = []
 
     def refuse_unapproved(run: RunOutput) -> None:
-        try:
-            refuse_unapproved_executions(run, calls_by_run.get(run.run_id or "", ()))
-        except RuntimeError as error:
-            refusals.append(error)
-            raise
+        _refuse_unapproved_executions(run, calls_by_run.get(run.run_id or "", ()))
 
     with before_tool_lookup(actor, refuse_unapproved):
         yield
-    # AGNO_COMPAT: Team continuation reports a failed member continuation as a completed task.
-    # Reason: When a routed member's continuation fails before yielding its run, Agno tells the leader the
-    # task completed without output and finishes the team run, so a member refusal would not fail it.
-    # Upstream issue: No matching issue identified; tracking gap for propagating member continuation failures.
-    # Upstream PR: None identified.
-    # Remove when: Agno fails the team run when a routed member continuation fails.
-    # Coverage: tests/test_team_approval_dynamic_tools.py::test_real_team_member_pause_reopens_with_exact_toolkit_owner.
-    if refusals:
-        raise refusals[0]
 
 
 def validate_approval_tool_owners(

@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Daytona settings saved with the former `verify_ssl: false` default.
 # Legacy format: a `daytona` credential document whose `verify_ssl` is false; the dashboard pre-fills every boolean with its declared default and saves all fields, so every Daytona setup saved through it stored false.
-# Last legacy release: v2026.9.363, whose Daytona field still defaulted to false, as it had since the tool shipped in v0.1.0; replacement: the next release defaults `verify_ssl` to true.
+# Last legacy release: v2026.9.370, whose Daytona field still defaulted to false, as it had since the tool shipped in v0.1.0; replacement: v2026.9.371 defaults `verify_ssl` to true.
 # Handling: before serving, once per storage root and under a lock shared by every starting process, drop a false `verify_ssl` from the primary store and every existing worker store, then write a receipt so a false saved deliberately afterwards is kept.
 # The receipt waits while any stored Daytona document is unreadable, so one readable again later, for example under the right encryption key, is still cleaned.
 # Coverage: tests/test_legacy_tool_credentials.py::test_startup_drops_saved_daytona_verify_ssl_false_once,
@@ -43,7 +43,7 @@ async def migrate_tool_credential_defaults(runtime_paths: RuntimePaths) -> None:
 
 # LEGACY_COMPAT: Worker-store copies of settings for tools that never run in a worker.
 # Legacy format: `<tool>_credentials.json` in a worker's own store, `workers/<worker>/credentials/`, for a built-in tool that requires the primary runtime or room context; the dashboard saved a scoped agent's tool settings there, where worker code can read them.
-# Last legacy release: v2026.9.399 for tools that require the primary runtime and v2026.9.404 for tools that only require room context; replacement: v2026.9.400 and v2026.9.405 save them in the primary's agent- or requester-scoped stores and never read worker copies.
+# Last legacy release: v2026.9.399 for tools that require the primary runtime, except v2026.10.8 for `homeassistant`, whose dedicated dashboard route kept saving there, and v2026.9.404 for tools that only require room context; replacement: v2026.9.400, v2026.10.9, and v2026.9.405 respectively save them in the primary's agent- or requester-scoped stores and never read worker copies.
 # Handling: before serving, once per storage root, delete those documents from every existing worker's own store without reading them; shared-credential mirrors are left to their per-call sync, and the receipt waits while any worker store cannot be inspected or cleaned.
 # Concurrent starts may both delete; removal is idempotent, so no lock is needed.
 # Coverage: tests/test_legacy_tool_credentials.py::test_startup_deletes_worker_copies_of_primary_only_tool_settings_once,

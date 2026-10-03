@@ -309,8 +309,7 @@ async def update_account_status(
                 raise HTTPException(  # noqa: TRY301
                     status_code=409,
                     detail=(
-                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the "
-                        "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
+                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the deletion."
                     ),
                 )
         result = (

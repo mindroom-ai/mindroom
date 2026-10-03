@@ -395,7 +395,8 @@ This happens when the arguments exceed the 2MB completeness cap, when they nest 
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
 MindRoom's approval record keeps a digest of each paused call's arguments, and the continuation fails without running an approved call whose saved arguments no longer match it.
-The continuation also fails, and runs none of the saved calls, when the saved run would execute any call other than one approved on the card with the arguments it showed.
+Before a saved agent run continues, including a delegated agent's run, MindRoom also checks that the run would execute only calls approved on the card with the arguments it showed, and otherwise fails without running any of that run's calls.
+Saved team runs are kept in storage no worker can write, so they get only the argument check.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
 Current-format pending cards and recorded decisions recover after restart or configuration reload, and an accepted decision resumes the exact paused run through the normal stoppable response lifecycle.
 Legacy, malformed, and orphan approval rows never authorize tool execution.
@@ -406,6 +407,8 @@ Agent-authored, system-authored, and configured bridge-bot-authored tool calls a
 An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval, so on every channel they are hidden when a required-approval rule or `default: require_approval` applies to them; add an `auto_approve` rule for one to keep it available.
+When this hides `search_knowledge_base`, or all of `get_skill_instructions`, `get_skill_reference`, and `get_skill_script`, the agent's prompt also stops describing knowledge search or, for a standard agent, its skill functions, so the model is not told to call functions it cannot see.
+Minimal mode still includes skill contents as context documents.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
 It does not gate every Slack operation, and the same function names in other toolkits also match.

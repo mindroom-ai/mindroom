@@ -325,11 +325,11 @@ def _encode_clip(path: Path) -> None:
             "-f",
             "lavfi",
             "-i",
-            "color=size=16x16:duration=1:rate=1",
+            "color=size=16x16:duration=1:rate=25",
             "-f",
             "lavfi",
             "-i",
-            "anullsrc=r=8000:cl=mono",
+            "anullsrc=r=22050:cl=mono",
             "-t",
             "1",
             str(path),
@@ -337,6 +337,17 @@ def _encode_clip(path: Path) -> None:
         check=True,
         capture_output=True,
     )
+
+
+@pytest.mark.parametrize("suffix", [".mpg", ".vob", ".flv", ".wmv", ".gif"])
+def test_video_inputs_accept_self_contained_formats(tmp_path: Path, suffix: str) -> None:
+    """Common formats whose FFmpeg demuxers read only the opened file stay accepted, as before the plain-media check."""
+    from mindroom.custom_tools.agno_compat_moviepy import _require_plain_media  # noqa: PLC0415
+
+    clip = tmp_path / f"clip{suffix}"
+    _encode_clip(clip)
+
+    _require_plain_media(str(clip))
 
 
 def test_video_inputs_refuse_playlists_and_manifests(

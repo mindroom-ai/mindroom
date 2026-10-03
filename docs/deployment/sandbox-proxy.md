@@ -175,7 +175,6 @@ It never receives the credentials-encryption key.
 The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
 A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
 The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
-A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
 Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
@@ -527,6 +526,7 @@ Workers still need Agent Vault API access (`apiUrl`, usually port `14321`) so th
 When the chart also manages the Agent Vault server, the worker NetworkPolicy includes that API egress automatically.
 For an externally managed Agent Vault server, add an egress rule for the API endpoint only.
 Do not add worker egress directly to the Agent Vault MITM proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants; that bypasses the Squid-first policy path.
+The chart-managed Agent Vault server has its own NetworkPolicy that by default admits only in-chart vault clients and limits vault egress; see `workers.kubernetes.agentVault.server.networkPolicy` in `cluster/k8s/runtime/README.md`.
 
 For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 

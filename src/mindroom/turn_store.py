@@ -727,8 +727,8 @@ class TurnStore:
         # Legacy format: A turn record without a conversation_target whose redacted_source_event_ids
         # names an event tombstoned by a redaction delivered in a room where the journal never admitted
         # that event, written because no turn had recorded a room for it.
-        # Last legacy release: v2026.10.27; replacement: the next release writes a tombstone without a
-        # room only when the journal admitted the event in the redaction's room.
+        # Last legacy release: v2026.10.30; replacement: v2026.10.31 writes a tombstone without a room
+        # only when the journal admitted the event in the redaction's room.
         # Handling: Such a tombstone carries no room, so the ledger cannot tell it apart from one written
         # after the journal admitted its event in the redaction's room, and it is not migrated. It stays
         # in effect until ordinary ledger retention drops it: its event counts as handled, and preparing
@@ -740,19 +740,26 @@ class TurnStore:
             if record is not None and record.conversation_target is not None
         }
         if recorded_rooms:
-            known_in_room = recorded_rooms == {room_id}
+            if recorded_rooms != {room_id}:
+                logger.warning(
+                    "Ignoring redaction of an event recorded in another room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
         else:
             known_in_room, _thread_id = await self.deps.relations.admitted_thread_id(
                 room_id=room_id,
                 event_id=source_event_id,
             )
-        if not known_in_room:
-            logger.warning(
-                "Ignoring redaction of an event not known in this room",
-                room_id=room_id,
-                redacted_event_id=source_event_id,
-            )
-            return None
+            if not known_in_room:
+                # Routine for stickers, polls, undecryptable messages, and history from before the journal.
+                logger.debug(
+                    "Ignoring redaction of an event never admitted in this room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)

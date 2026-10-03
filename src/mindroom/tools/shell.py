@@ -445,7 +445,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             if (cli_env := current_agent_cli_shell_env()) is not None:
                 runtime_env = {**runtime_env, **cli_env.env()}
                 if cli_env.bin_dir is not None:
-                    shell_path_prepend = ",".join(entry for entry in (shell_path_prepend, cli_env.bin_dir) if entry)
+                    # First, so an older `mindroom-agent` on the agent's configured PATH cannot shadow this response's CLI.
+                    shell_path_prepend = ",".join(entry for entry in (cli_env.bin_dir, shell_path_prepend) if entry)
             subprocess_env = _shell_subprocess_env(
                 runtime_env,
                 base_process_env=self._base_process_env,

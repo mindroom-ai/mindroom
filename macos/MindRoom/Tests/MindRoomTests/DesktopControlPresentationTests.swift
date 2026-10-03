@@ -294,10 +294,16 @@ final class DesktopControlPresentationTests: XCTestCase {
         let spoofed = shellRequest(command: command)
 
         XCTAssertEqual(spoofed.displayCommand, command)
-        XCTAssertEqual(spoofed.asciiEscapedCommand, #"curl https://\u{430}\u{440}\u{440}\u{4CF}\u{435}.com/x"#)
+        XCTAssertEqual(spoofed.asciiEscapedFields, #"Command: curl https://\u{430}\u{440}\u{440}\u{4CF}\u{435}.com/x"#)
         XCTAssertTrue(spoofed.escapeWarning?.contains("non-ASCII characters that can look like ASCII") == true)
         XCTAssertNotNil(shellRequest(command: "curl https://apple\u{2024}com/x").escapeWarning)
         XCTAssertNotNil(shellRequest(agent: "\u{430}ssistant").escapeWarning)
+        // The escaped copy shows the field that holds the non-ASCII text, not an unchanged ASCII command.
+        XCTAssertEqual(shellRequest(agent: "\u{430}ssistant").asciiEscapedFields, #"Agent: \u{430}ssistant"#)
+        XCTAssertEqual(
+            shellRequest(command: "ls", cwd: "/Users/test/Caf\u{E9}").asciiEscapedFields,
+            #"Working folder: /Users/test/Caf\u{E9}"#
+        )
         XCTAssertNil(shellRequest(command: "curl https://apple.com/x").escapeWarning)
         XCTAssertEqual(spoofed.command, command, "Execution keeps the original command")
     }

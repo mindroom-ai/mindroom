@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from dotenv import dotenv_values
 from rich.console import Console
 from rich.panel import Panel
 
@@ -196,17 +197,21 @@ def _install_service_runtime(manager: ServiceManager) -> None:
 
 
 def _shell_service_keys(runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Return `MINDROOM_API_KEY` and the provider keys, `NAME` or `NAME_FILE`, that this shell exports with a usable value.
+    """Return `MINDROOM_API_KEY` and provider keys, `NAME` or `NAME_FILE`, with a usable shell value `.env` does not hold.
 
     A dashboard key that protected terminal runs must also protect the service, which listens on every interface.
     """
     candidates = [("MINDROOM_API_KEY", "MINDROOM_API_KEY")] + [
         (env_key, name) for env_key in PROVIDER_ENV_KEYS.values() for name in (env_key, f"{env_key}_FILE")
     ]
+    # `${NAME}` in `.env` expands from this shell's variables here but not in the service, so compare lines as written.
+    written_env_values = dotenv_values(runtime_paths.env_path, interpolate=False)
     return {
         name: value
         for env_key, name in candidates
-        if (value := runtime_paths.process_env.get(name)) and not is_unset_env_value(env_key, value)
+        if (value := runtime_paths.process_env.get(name))
+        and not is_unset_env_value(env_key, value)
+        and written_env_values.get(name) != value
     }
 
 

@@ -697,6 +697,10 @@ class ThreadEditCandidates:
         """Return every original event ID some candidate claims to replace."""
         return list(self._by_original_and_sender)
 
+    def __len__(self) -> int:
+        """Return how many candidates are kept, one per original and sender."""
+        return sum(len(by_sender) for by_sender in self._by_original_and_sender.values())
+
     def winner_for(
         self,
         original_event_id: str,

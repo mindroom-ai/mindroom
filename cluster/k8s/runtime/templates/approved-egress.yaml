@@ -124,14 +124,17 @@ spec:
         {{- with .Values.approvedEgress.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.approvedEgress.podAnnotations .Values.approvedEgress.parentProxy.enabled }}
+      {{- /* The proxy reads its subPath-mounted files only at startup, so content changes must roll the pod. */}}
+      {{- $podAnnotations := deepCopy (default dict .Values.approvedEgress.podAnnotations) }}
+      {{- if not .Values.approvedEgress.allowlist.existingConfigMap }}
+      {{- $_ := set $podAnnotations "checksum/allowlist" ($allowlist | sha256sum) }}
+      {{- end }}
+      {{- if .Values.approvedEgress.parentProxy.enabled }}
+      {{- $_ := set $podAnnotations "checksum/squid-config" (include "mindroom-runtime.approvedEgressSquidConfig" . | sha256sum) }}
+      {{- end }}
+      {{- with $podAnnotations }}
       annotations:
-        {{- with .Values.approvedEgress.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- if .Values.approvedEgress.parentProxy.enabled }}
-        checksum/squid-config: {{ include "mindroom-runtime.approvedEgressSquidConfig" . | sha256sum | quote }}
-        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "mindroom-runtime.approvedEgressServiceAccountName" . }}
