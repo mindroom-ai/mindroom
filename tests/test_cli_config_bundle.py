@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from typing import TYPE_CHECKING
 
 import pytest
@@ -259,3 +260,40 @@ def test_install_bundle_cli_revision_is_stored(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+
+
+def test_classify_change_reports_status_paths_and_exit_code(tmp_path: Path) -> None:
+    """Exit codes separate hot-reloadable source edits, other changes, and unclassifiable trees."""
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "config.yaml").write_text("agents: {}\n")
+    new = tmp_path / "new"
+    shutil.copytree(old, new)
+    (new / "config.yaml").write_text("agents: {}\n# edited\n")
+    args = ["config", "classify-change", str(old), str(new), "--json"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"status": "source_only", "sources": ["config.yaml"], "other": []}
+    (new / ".env").write_text("SECRET_VALUE=redacted\n")
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout) == {"status": "non_source", "sources": ["config.yaml"], "other": [".env"]}
+    assert "redacted" not in result.output
+    result = runner.invoke(app, [*args, "--config", "missing.yaml"])
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["status"] == "failed"
+
+
+def test_install_bundle_source_only_refuses_non_source_change(tmp_path: Path) -> None:
+    """The CLI flag reaches the installer and leaves the active tree untouched."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text("agents: {}\n")
+    target = tmp_path / "active"
+    args = ["config", "install-bundle", str(source), "--target", str(target), "--json"]
+    assert runner.invoke(app, args).exit_code == 0
+    (source / "notes.txt").write_text("not a config source\n")
+    result = runner.invoke(app, [*args, "--source-only"])
+    assert result.exit_code == 2, result.output
+    assert "notes.txt" in json.loads(result.stdout)["detail"]
+    assert not (target / "notes.txt").exists()

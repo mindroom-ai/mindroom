@@ -6745,7 +6745,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.config_bundle"
-depends_on = ["mindroom.config.main", "mindroom.constants", "mindroom.file_locks"]
+depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.constants", "mindroom.file_locks"]
 
 [[modules]]
 path = "mindroom.cli.config_bundle"

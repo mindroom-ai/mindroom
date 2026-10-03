@@ -11,7 +11,7 @@ from typing import TextIO
 import pytest
 
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, load_config
-from mindroom.config_bundle import install_config_bundle
+from mindroom.config_bundle import BundleChange, classify_bundle_change, install_config_bundle
 from mindroom.constants import resolve_runtime_paths
 from mindroom.file_watcher import changed_watched_paths, paths_mtime_snapshot
 
@@ -783,3 +783,115 @@ def test_forced_unmanaged_backup_needs_no_marker_mutation(tmp_path: Path) -> Non
     (source / "prompts/helper.md").write_text("Next prompt")
     assert install_config_bundle(source, target, process_env={}).status == "installed"
     assert (previous / "prompts/helper.md").read_text() == "Installed prompt"
+
+
+def _changed_copy(old: Path, new: Path) -> Path:
+    shutil.copytree(old, new)
+    return new
+
+
+def test_include_edits_and_their_new_or_removed_directories_are_sources(tmp_path: Path) -> None:
+    """Every file the loader reads in either tree, and directories that only hold them, are hot-reloadable."""
+    old = _bundle(tmp_path / "old")
+    new = _changed_copy(old, tmp_path / "new")
+    (new / "agents.yaml").write_text(
+        "helper:\n  display_name: Helper\n  instructions:\n    - !include_text prompts/helper.md\n"
+        "    - !include_text extra/more.md\n",
+    )
+    (new / "extra").mkdir()
+    (new / "extra/more.md").write_text("More")
+    (new / "prompts/helper.md").write_text("Second prompt")
+    (new / ".mindroom-bundle.json").write_text("{}")
+    sources = ("agents.yaml", "extra", "extra/more.md", "prompts/helper.md")
+    assert classify_bundle_change(old, new, [Path("config.yaml")]) == BundleChange(sources, ())
+    assert classify_bundle_change(new, old, [Path("config.yaml")]) == BundleChange(sources, ())
+
+
+@pytest.mark.parametrize(
+    ("change", "other"),
+    [
+        (".env", (".env",)),
+        ("asset", ("plugins", "plugins/tool.py")),
+        ("unreferenced_yaml", ("prompts/unused.yaml",)),
+        ("include_dir_becomes_file", ("prompts",)),
+        ("include_file_becomes_dir", ("prompts/helper.md",)),
+    ],
+)
+def test_changes_outside_the_source_graph_are_reported(tmp_path: Path, change: str, other: tuple[str, ...]) -> None:
+    """Environment, assets, unread files, and include paths that change type are never sources."""
+    old = _bundle(tmp_path / "old")
+    new = _changed_copy(old, tmp_path / "new")
+    if change == ".env":
+        (new / ".env").write_text("MATRIX_SERVER_NAME=other.example.org\n")
+    elif change == "asset":
+        (new / "plugins").mkdir()
+        (new / "plugins/tool.py").write_text("print('tool')\n")
+    elif change == "unreferenced_yaml":
+        (new / "prompts/unused.yaml").write_text("{}\n")
+    else:
+        (new / "agents.yaml").write_text("helper:\n  display_name: Helper\n")
+        shutil.rmtree(new / "prompts")
+        if change == "include_dir_becomes_file":
+            (new / "prompts").write_text("#!/bin/sh\n")
+            (new / "prompts").chmod(0o755)
+        else:
+            (new / "prompts/helper.md").mkdir(parents=True)
+    change_set = classify_bundle_change(old, new, [Path("config.yaml")])
+    assert change_set.other == other
+
+
+def test_each_entrypoint_contributes_its_own_sources(tmp_path: Path) -> None:
+    """Entrypoints in subdirectories cover only their own include graphs."""
+    old = tmp_path / "old"
+    for name in ("prod", "staging"):
+        (old / "environments" / name).mkdir(parents=True)
+        (old / "environments" / name / "config.yaml").write_text("agents: {}\n")
+    (old / "scripts").mkdir()
+    (old / "scripts/run.sh").write_text("true\n")
+    new = _changed_copy(old, tmp_path / "new")
+    for name in ("prod", "staging"):
+        (new / "environments" / name / "config.yaml").write_text(f"agents: {{}}\n# {name}\n")
+    both = [Path("environments/prod/config.yaml"), Path("environments/staging/config.yaml")]
+    assert classify_bundle_change(old, new, both).other == ()
+    assert classify_bundle_change(old, new, both[:1]).other == ("environments/staging/config.yaml",)
+    (new / "scripts/run.sh").write_text("false\n")
+    assert classify_bundle_change(old, new, both).other == ("scripts/run.sh",)
+
+
+@pytest.mark.parametrize("problem", ["missing_entrypoint", "missing_include", "symlink", "escaping_config"])
+def test_unclassifiable_trees_fail_closed(tmp_path: Path, problem: str) -> None:
+    """Classification needs both complete source graphs and the installer's tree rules."""
+    old = _bundle(tmp_path / "old")
+    new = _changed_copy(old, tmp_path / "new")
+    config = Path("config.yaml")
+    if problem == "missing_entrypoint":
+        (new / "config.yaml").unlink()
+    elif problem == "missing_include":
+        (new / "prompts/helper.md").unlink()
+    elif problem == "symlink":
+        (new / "link.md").symlink_to(new / "prompts/helper.md")
+    else:
+        config = Path("../config.yaml")
+    with pytest.raises((*CONFIG_LOAD_USER_ERROR_TYPES, ValueError)):
+        classify_bundle_change(old, new, [config])
+
+
+def test_source_only_install_refuses_other_changes_before_publication(tmp_path: Path) -> None:
+    """Source-only installation compares the staged candidate with the active tree under the lock."""
+    source = _bundle(tmp_path / "source")
+    target = tmp_path / "active"
+    with pytest.raises(ValueError, match="existing target"):
+        install_config_bundle(source, target, source_only=True, process_env={})
+    assert not target.exists()
+    install_config_bundle(source, target, process_env={})
+    (source / "prompts/helper.md").write_text("Second prompt")
+    (source / ".env").write_text("MATRIX_SERVER_NAME=other.example.org\n")
+    active = _snapshot(target)
+    with pytest.raises(ValueError, match=r"1 path\(s\) outside the YAML/include sources of config\.yaml: \.env;"):
+        install_config_bundle(source, target, source_only=True, process_env={})
+    assert _snapshot(target) == active
+    assert not (tmp_path / "active.previous").exists()
+    (source / ".env").write_text("MATRIX_SERVER_NAME=example.org\n")
+    assert install_config_bundle(source, target, source_only=True, process_env={}).status == "installed"
+    assert install_config_bundle(source, target, source_only=True, process_env={}).status == "unchanged"
+    assert (target / "prompts/helper.md").read_text() == "Second prompt"
