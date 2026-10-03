@@ -405,16 +405,16 @@ class ResponseLifecycleCoordinator:
         signal_queued_message: bool,
     ) -> str | None:
         existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message or not self._should_signal_queued_message(response_envelope):
+        if not signal_queued_message or not (existing_turn or lifecycle_lock.locked()):
             return None
-        if not (existing_turn or lifecycle_lock.locked()):
-            return None
-        # An ingress reservation may already hold this source's notice for the running reply.
-        queued_signal.add_waiting_human_message(
-            response_envelope.source_event_id,
-            text=message_text_for_judgment(response_envelope),
-        )
-        # This agent answers a newer human message here, so the reply holding the conversation's jobs hands them over.
+        if self._should_signal_queued_message(response_envelope):
+            # An ingress reservation may already hold this source's notice for the running reply.
+            queued_signal.add_waiting_human_message(
+                response_envelope.source_event_id,
+                text=message_text_for_judgment(response_envelope),
+            )
+        # A newer visible reply of this agent here takes the conversation's jobs over from the reply holding them, so a
+        # turn queued behind that reply never waits for the jobs to finish.
         queued_signal.human_signal.notify()
         return response_envelope.source_event_id
 

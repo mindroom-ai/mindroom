@@ -126,8 +126,9 @@ async def test_newer_reply_of_the_same_agent_takes_over(other_message_pending: b
 
 
 @pytest.mark.asyncio
-async def test_scheduled_turn_waits_behind_the_holding_reply() -> None:
-    """Only a human message the agent answers takes over; a scheduled fire queues behind the reply."""
+@pytest.mark.parametrize("silent", [False, True])
+async def test_scheduled_turn_takes_over_unless_it_is_silent(silent: bool) -> None:
+    """A visible scheduled reply takes the work over like any newer reply; a silent one cannot hold it and queues."""
     lifecycle = ResponseLifecycleCoordinator()
     reply = _HoldingReply(lifecycle)
     await reply.start()
@@ -141,13 +142,20 @@ async def test_scheduled_turn_waits_behind_the_holding_reply() -> None:
             response_envelope=_envelope("$fire", source_kind=SCHEDULED_SOURCE_KIND),
             pipeline_timing=None,
             locked_operation=scheduled,
+            # The response runner never lets a silent schedule signal the conversation.
+            signal_queued_message=not silent,
         ),
     )
-    await asyncio.sleep(0.05)
-    assert not reply.released.is_set()
-    assert not queued.done()
+    if silent:
+        await asyncio.sleep(0.05)
+        assert not reply.released.is_set()
+        assert not queued.done()
+    else:
+        await asyncio.wait_for(reply.released.wait(), 5)
     await reply.stop()
     assert await queued == "$scheduled"
+    # The scheduled turn is no human message, so the running reply got no queued notice for it.
+    assert not lifecycle._thread_queued_signals[_TARGET.lifecycle_key].has_pending_human_messages()
 
 
 @pytest.mark.asyncio

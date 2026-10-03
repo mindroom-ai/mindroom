@@ -13031,7 +13031,7 @@ Unmanaged API execution keeps its existing synchronous lifetime and approval res
 
 While background work is outstanding in a conversation, the agent's latest reply stays open and holds it: after its own work, the reply waits for every outstanding job of this agent and requester in the conversation, including jobs that earlier replies started, without repeated model polling.
 Streaming and non-streaming replies show waiting progress, and pressing **Stop** on the waiting reply cancels the work it holds.
-When the agent starts answering a newer message in the conversation, the newer reply takes over the outstanding work and the older reply finishes; a message that another agent answers leaves the waiting reply as it is.
+When the agent starts a newer reply in the conversation, such as an answer to a newer message or a scheduled turn, the newer reply takes over the outstanding work and the older reply finishes; a message that another agent answers leaves the waiting reply as it is.
 Resuming an approved tool follows the same waiting behavior.
 Ready outcomes or approval boundaries cause one continuation of the holding reply using the native result-retrieval tool, up to 20 continuations per reply.
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
