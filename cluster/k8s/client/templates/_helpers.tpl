@@ -247,12 +247,22 @@ server {
   }
 {{- end }}
 
-  # Hashed build assets are referenced relative to the current route, so strip
-  # any route prefix before the assets/ or public/ segment.
-  location ~ ^/(?:.+/)?(assets|public)/(.+)$ {
+  # Build files are referenced relative to the current route, so strip the
+  # shortest route prefix before the first assets/ or public/ segment.
+  # Nested bundles such as public/element-call/assets/ keep their own path.
+  # Cache headers are omitted from 404s so browsers never pin a missing file.
+  location ~ ^/(?:[^/]+/)*?(?<client_file>(?:assets|public)/.+)$ {
     root /usr/share/nginx/html;
-    try_files /$1/$2 =404;
-    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    try_files /$client_file =404;
+    # Stable names such as public/element-call/index.html must revalidate so a
+    # client upgrade cannot leave them pointing at removed hashed files.
+    add_header Cache-Control "no-cache";
+
+    # Content-hashed files under an assets/ directory never change.
+    location ~ /assets/ {
+      try_files /$client_file =404;
+      add_header Cache-Control "public, max-age=31536000, immutable";
+    }
   }
 {{- if eq $base "/" }}
 
