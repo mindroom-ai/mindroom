@@ -299,7 +299,7 @@ def test_install_bundle_source_only_refuses_non_source_change(tmp_path: Path) ->
     assert not (target / "notes.txt").exists()
 
 
-@pytest.mark.parametrize("value", ["!!bool maybe", "!!timestamp later"])
+@pytest.mark.parametrize("value", ["!!bool maybe", "!!timestamp later", '!!int ""'])
 @pytest.mark.parametrize("json_output", [True, False])
 def test_classify_change_reports_unconstructible_yaml_as_failure(
     tmp_path: Path,

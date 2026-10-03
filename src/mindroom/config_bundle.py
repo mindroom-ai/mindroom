@@ -338,10 +338,12 @@ def _source_files(root: Path, configs: Sequence[Path]) -> set[str]:
     for config in configs:
         try:
             read = load_yaml_config_source(root / config)[1]
-        except (KeyError, AttributeError) as exc:
-            # PyYAML's safe constructor raises these for bad tagged scalars such
-            # as `!!bool maybe` or `!!timestamp x`; omit the value from the message.
-            msg = f"Cannot construct a tagged YAML value in {root / config}."
+        except Exception as exc:
+            # Any loader failure makes the tree unclassifiable, including the
+            # KeyError/AttributeError/IndexError the safe constructor raises for
+            # tags such as `!!bool maybe` or `!!int ""`. Some messages echo YAML
+            # values, so name only the file and the error type.
+            msg = f"Cannot load the YAML/include sources of {root / config} ({type(exc).__name__})."
             raise ValueError(msg) from exc
         files.update(path.relative_to(root).as_posix() for path in read)
     return files
