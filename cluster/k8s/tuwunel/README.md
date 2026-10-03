@@ -138,7 +138,8 @@ The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` a
 The first start after a Tuwunel upgrade can run a one-time database migration, and the listener does not open until it finishes.
 Tuwunel stops a migration only at its next safe point, and a kill before then leaves the database half migrated with no repair path.
 The chart therefore sets `terminationGracePeriodSeconds: 1800`, following [Tuwunel's Kubernetes guidance](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/deploying/kubernetes.md), instead of the Kubernetes default of 30 seconds.
-Lower it on platforms that cap the grace period, or set it to `null` to use the Kubernetes default.
+GKE Autopilot limits the grace period to 600 seconds (25 seconds for Spot Pods) and lowers larger values with a warning, so set `terminationGracePeriodSeconds: 600` there.
+Lower it on other platforms that cap the grace period, or set it to `null` to use the Kubernetes default.
 
 For large databases, raise `probes.startup.failureThreshold` so the startup probe budget covers the longest expected migration, because a failing startup probe restarts the container.
 Then set `progressDeadlineSeconds` above that budget so Kubernetes does not report the rollout as stalled while the migration runs.
