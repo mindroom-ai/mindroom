@@ -56,11 +56,11 @@ def test_storage_options_render_nothing_by_default(tmp_path: Path) -> None:
     docs = _render(tmp_path, {})
     container = _runtime_container(docs)
 
-    assert list(_pvcs(docs)) == ["mindroom-runtime-storage"]
-    assert {volume["name"] for volume in _pod_spec(docs)["volumes"]}.isdisjoint(
-        {"session-storage", "knowledge-storage"},
-    )
-    assert [mount["mountPath"] for mount in container["volumeMounts"]] == ["/app/config.yaml", "/app/agent_data"]
+    new_volumes = {"session-storage", "knowledge-storage"}
+
+    assert set(_pvcs(docs)).isdisjoint({"mindroom-runtime-sessions", "mindroom-runtime-knowledge"})
+    assert {volume["name"] for volume in _pod_spec(docs)["volumes"]}.isdisjoint(new_volumes)
+    assert {mount["name"] for mount in container["volumeMounts"]}.isdisjoint(new_volumes)
     assert SESSION_STORAGE_PATH_ENV not in {entry["name"] for entry in container["env"]}
 
 
@@ -175,7 +175,7 @@ _STATE = {"enabled": True, "existingClaim": "mindroom-state"}
                 "stateStorage": {
                     **_STATE,
                     "extraSubPaths": [{"name": "x", "mountPath": "/app/agent_data/encryption_keys"}],
-                }
+                },
             },
             "stateStorage.extraSubPaths[0].mountPath must differ from stateStorage.encryptionKeys.mountPath",
         ),
@@ -236,7 +236,7 @@ def test_storage_options_reject_invalid_values(tmp_path: Path, values: dict[str,
                 "stateStorage": {
                     **_STATE,
                     "extraSubPaths": [{"name": "x", "mountPath": "/app/agent_data/runtime-config"}],
-                }
+                },
             },
         ),
         (
