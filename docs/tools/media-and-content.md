@@ -271,6 +271,7 @@ search_by_brand("OpenAI")
 The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
 Before a tool call or dashboard status check, MindRoom renews an access token that expires within a minute with the stored `refresh_token`, `SPOTIFY_CLIENT_ID`, and `SPOTIFY_CLIENT_SECRET`, and saves the new `access_token`, `expires_at`, and any rotated `refresh_token`, so connections keep working past Spotify's one-hour token lifetime.
+A shared-scope agent that uses an installation-wide connection through `defaults.worker_grantable_credentials` does not renew it, so reconnect Spotify when that token expires.
 The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
 Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
 `get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
