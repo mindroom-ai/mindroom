@@ -46,6 +46,7 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -102,6 +103,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.sync_restart_retry import InterruptedTurnRooms
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
@@ -1997,6 +1999,48 @@ async def test_agent_still_drops_its_own_reply_that_names_a_human_requester(tmp_
     assert harness.policy.plan_turn_calls == 0
     assert harness.runner.requests == []
     assert harness.turn_store.is_handled(event.event_id) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authority(tmp_path: Path) -> None:
+    """A human cannot change entities their access excludes by having another agent post the command."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", access=ResponderAccessConfig(users=[_OWNER])),
+                "research": AgentConfig(display_name="Research", access=ResponderAccessConfig(users=[_SENDER])),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            router={"access": {"current_room_members": False, "members_of_rooms": [], "users": [_SENDER]}},
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    thread_root = "$thread-root:localhost"
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "!model default",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": thread_root},
+                constants.ACTING_REQUESTER_KEY: _SENDER,
+            },
+            "event_id": "$agent-command:localhost",
+            "sender": _entity_user_id(config, "research"),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert harness.turn_store.is_handled(event.event_id) is True
+    overrides = resolve_thread_model_override(runtime_paths_for(config), thread_root, configured_models=config.models)
+    assert set(overrides.active) == {"research", ROUTER_AGENT_NAME}
 
 
 @pytest.mark.asyncio
