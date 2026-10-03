@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import asyncio
+import gc
 import os
 import re
 import shutil
@@ -2952,6 +2953,14 @@ def _reset_model_media_capabilities() -> Generator[None, None, None]:
     reset_model_media_capability_cache()
     yield
     reset_model_media_capability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _restore_gc_thresholds() -> Generator[None, None, None]:
+    """Keep the primary's raised GC threshold from leaking into later tests."""
+    thresholds = gc.get_threshold()
+    yield
+    gc.set_threshold(*thresholds)
 
 
 @pytest.fixture(autouse=True)

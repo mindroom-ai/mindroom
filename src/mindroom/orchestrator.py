@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import signal
 import time
 from collections.abc import Awaitable, Callable
@@ -202,6 +203,12 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
+_GC_TUNING_ENV = "MINDROOM_GC_TUNING"
+# Python 3.13 collects the young generation every 2,000 net new containers, so on a busy primary an
+# object that outlives a fraction of a second is promoted, and a full pass starts once promotions reach
+# a quarter of the old generation. The middle threshold stays at 10: a middle pass walks up to ten
+# young generations, so its pause grows with both.
+_GC_YOUNG_THRESHOLD = 50_000
 
 
 async def _gather_periodic_shutdown_phase(
@@ -3060,6 +3067,18 @@ def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_p
     storage_path.mkdir(parents=True, exist_ok=True)
 
 
+async def _tune_gc_once_ready(runtime_ready: asyncio.Event) -> None:
+    """Raise the young collection threshold once the runtime first reports ready to serve turns.
+
+    A full collection walks every tracked object while holding the GIL, so its loop pause grows with the heap.
+    A larger young threshold lets short-lived turn objects die before promotion, so full collections
+    come less often, at the cost of longer young and middle collections.
+    """
+    await runtime_ready.wait()
+    gc.set_threshold(_GC_YOUNG_THRESHOLD)
+    logger.info("gc_threshold_raised", thresholds=list(gc.get_threshold()))
+
+
 def _start_auxiliary_tasks(
     orchestrator: _MultiAgentOrchestrator,
     runtime_paths: RuntimePaths,
@@ -3093,6 +3112,8 @@ def _start_auxiliary_tasks(
     tasks.append(create_background_task(run_provisioning_heartbeat(runtime_paths), name="provisioning_heartbeat"))
     if heap_probe is not None:
         tasks.append(heap_probe)
+    if runtime_paths.env_flag(_GC_TUNING_ENV, default=True):
+        tasks.append(create_background_task(_tune_gc_once_ready(orchestrator._runtime_ready_event), name="gc_tuning"))
     return tasks
 
 

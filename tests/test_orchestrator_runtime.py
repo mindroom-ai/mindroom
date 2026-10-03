@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import gc
 import ipaddress
 import os
 import signal
@@ -1524,6 +1525,62 @@ class TestAgentBot(AgentBotTestBase):
         else:
             assert probe is not None
             assert probe.cancelled()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("gc_tuning", [None, "0"])
+    async def test_orchestrator_main_raises_gc_threshold_once_ready_unless_disabled(
+        self,
+        tmp_path: Path,
+        gc_tuning: str | None,
+    ) -> None:
+        """Only after the runtime first reports ready, the primary raises its young GC threshold, once."""
+        reset_runtime_state()
+        process_env = {} if gc_tuning is None else {"MINDROOM_GC_TUNING": gc_tuning}
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=process_env,
+        )
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.stop = AsyncMock()
+        thresholds = gc.get_threshold()
+
+        async def _start() -> None:
+            tuning = next((task for task in asyncio.all_tasks() if task.get_name() == "gc_tuning"), None)
+            if gc_tuning == "0":
+                assert tuning is None
+            else:
+                assert tuning is not None
+                await asyncio.sleep(0)
+                assert not tuning.done()
+                assert gc.get_threshold() == thresholds
+                mock_orchestrator._runtime_ready_event.set()
+                await tuning
+            # A restarted runtime reports ready again without applying the threshold a second time.
+            mock_orchestrator._runtime_ready_event.clear()
+            mock_orchestrator._runtime_ready_event.set()
+            await asyncio.sleep(0)
+            msg = "stop after readiness"
+            raise RuntimeError(msg)
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
+            patch.object(gc, "set_threshold", wraps=gc.set_threshold) as set_threshold,
+            pytest.raises(RuntimeError, match="stop after readiness"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        if gc_tuning == "0":
+            set_threshold.assert_not_called()
+            assert gc.get_threshold() == thresholds
+            return
+        set_threshold.assert_called_once_with(50_000)
+        assert gc.get_threshold() == (50_000, *thresholds[1:])
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_rejects_invalid_heap_probe_before_starting_auxiliary_tasks(

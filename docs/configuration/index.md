@@ -1090,6 +1090,14 @@ Only garbage-collected container objects are counted; strings, bytes, and number
 Each walk pauses the event loop for about as long as a full garbage-collection pass and briefly allocates one pointer per tracked object, so prefer intervals of several minutes or more on large processes.
 Unset or `0` disables the probe, which is the default; any other value below `60` fails startup.
 
+A full garbage-collection pass walks every tracked object while holding Python's global lock, so it pauses the event loop for longer as the heap grows.
+Once the primary first reports ready, it raises Python's young-generation threshold from 2,000 (the Python 3.13 default) to 50,000, so more short-lived turn objects die before they are promoted and full passes come less often.
+It logs one `gc_threshold_raised` event with the new thresholds.
+Young and middle passes then run less often but each takes longer, tens to hundreds of milliseconds instead of a few, so more of them appear in the `event_loop_gc_collection` events that the event-loop stall detector logs for passes of 50 ms or more.
+Cyclic garbage also waits longer before it is freed, which can raise peak memory slightly.
+The change does not shorten a full pass itself, which still walks the whole heap.
+Set `MINDROOM_GC_TUNING=0` in the process environment or the config-adjacent `.env` to keep the interpreter's collector settings.
+
 ## Built-In Prompt Overrides
 
 MindRoom keeps built-in prompt defaults as uppercase globals in `src/mindroom/prompts.py`.
