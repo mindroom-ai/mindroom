@@ -63,6 +63,7 @@ Earlier attachments stay in chronological position through inline annotations, b
 ```
 
 Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
+When a message's file, image, or video is replaced by an edit, later turns use the replacement under a new attachment ID.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.

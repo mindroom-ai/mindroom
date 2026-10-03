@@ -360,6 +360,7 @@ class InboundTurnNormalizer:
                 self.deps.storage_path,
                 room_id=request.room_id,
                 thread_id=request.thread_id,
+                thread_history=request.thread_history,
             )
             if request.thread_id
             else []
