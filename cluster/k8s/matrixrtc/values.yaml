@@ -1,0 +1,101 @@
+# Optional MatrixRTC call backend chart.
+# It deploys a single-node LiveKit SFU and the MatrixRTC authorization service (lk-jwt-service) for Element Call-compatible clients and MindRoom voice agents.
+# Public HTTPS routing for /livekit/jwt and /livekit/sfu comes from the mindroom-client chart proxy or your own ingress.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+# Applied to both the LiveKit and the authorization service pods.
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Both images run as an unprivileged user with a read-only root filesystem.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+keys:
+  # Existing Secret holding the LiveKit API key and secret shared by LiveKit and the authorization service. Required.
+  # The chart derives LiveKit's LIVEKIT_KEYS value from these two keys, so the Secret needs no separate keys file.
+  # Use letters and digits only, and a secret of at least 32 characters.
+  existingSecret: ""
+  apiKeyKey: LIVEKIT_KEY
+  apiSecretKey: LIVEKIT_SECRET
+
+livekit:
+  image:
+    repository: livekit/livekit-server
+    tag: v1.13.7
+    digest: ""
+    pullPolicy: IfNotPresent
+  # WebSocket signaling and API port, served by the ClusterIP Service.
+  port: 7880
+  logLevel: info
+  media:
+    # Public IP address that carries WebRTC media. Required.
+    # The chart requests it as the media Service's loadBalancerIP and advertises it to clients as LiveKit's rtc.node_ip,
+    # so reserve a static address with your provider before installing.
+    loadBalancerIP: ""
+    # Provider-specific load balancer implementation, for example networking.gke.io/l4-regional-external on GKE.
+    loadBalancerClass: ""
+    annotations: {}
+    # The media Service publishes these ports unchanged because clients connect to the ports LiveKit advertises.
+    ports:
+      tcp: 7881
+      udp: 7882
+  # Raw LiveKit config merged over the chart-rendered config.yaml, for example webhook, limit, or rtc.turn_servers settings.
+  # Chart-owned settings (port, keys, key_file, rtc.node_ip, rtc.use_external_ip, rtc.tcp_port, rtc.udp_port, rtc.port_range_start, rtc.port_range_end, room.auto_create) cannot be set here.
+  extraConfig: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  # Raw Kubernetes EnvVar entries appended to the LiveKit container.
+  extraEnv: []
+
+auth:
+  image:
+    repository: ghcr.io/mindroom-ai/lk-jwt-service
+    # Pin a sha-<commit> tag or digest for reproducible production deployments.
+    tag: latest
+    digest: ""
+    pullPolicy: Always
+  # Public LiveKit WebSocket URL returned to clients with each token, for example wss://matrix.example.com/livekit/sfu. Required.
+  livekitUrl: ""
+  # Matrix server names whose users may create calls, for example [example.com]. Required.
+  # Users from other homeservers can only join calls that already exist.
+  fullAccessHomeservers: []
+  port: 8080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Raw Kubernetes EnvVar entries appended to the authorization service container, for example LIVEKIT_CS_API_URL_OVERRIDES.
+  extraEnv: []
+
+networkPolicy:
+  enabled: false
+  # Label selector for pods in the release namespace that proxy /livekit/jwt and /livekit/sfu, for example the mindroom-client pods.
+  clientPodSelector: {}
+  # Additional NetworkPolicyPeer entries allowed to reach the signaling and authorization ports, for example an ingress controller namespace.
+  extraFrom: []

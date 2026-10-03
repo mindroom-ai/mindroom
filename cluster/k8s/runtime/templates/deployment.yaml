@@ -10,8 +10,11 @@
 {{- $approvedEgressTokenSecretKey := include "mindroom-runtime.approvedEgressTokenSecretKey" . -}}
 {{- $usesConfigMapConfig := include "mindroom-runtime.usesConfigMapConfig" . -}}
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
+{{- $bootstrap := include "mindroom-runtime.bootstrapBundle" . | fromJson -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- $envFrom := include "mindroom-runtime.keyedList" (dict "value" .Values.env.envFrom "path" "env.envFrom") | fromJsonArray -}}
+{{- $stateInitDirs := include "mindroom-runtime.stateStorageInitDirs" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -87,9 +90,9 @@ spec:
             - -c
             - |
               set -eu
-              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
-              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
-              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
+              mkdir -p {{ $stateInitDirs }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} {{ $stateInitDirs }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} {{ $stateInitDirs }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
               mountPath: /state
@@ -177,18 +180,23 @@ spec:
             - {{ .Values.runtime.apiHost | quote }}
             - --api-port
             - {{ .Values.runtime.apiPort | quote }}
-            {{- if .Values.config.bootstrapBundlePath }}
+            {{- if $bootstrap.path }}
             - --bootstrap-config-bundle
-            - {{ .Values.config.bootstrapBundlePath | quote }}
+            - {{ $bootstrap.path | quote }}
             {{- end }}
-            {{- if .Values.config.bootstrapBundleRevision }}
+            {{- if $bootstrap.revision }}
             - --bootstrap-config-bundle-revision
-            - {{ .Values.config.bootstrapBundleRevision | quote }}
+            - {{ $bootstrap.revision | quote }}
             {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}
               protocol: TCP
+            {{- if .Values.scriptGateway.enabled }}
+            - name: script-gateway
+              containerPort: {{ .Values.scriptGateway.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
@@ -196,6 +204,10 @@ spec:
               value: {{ $configPath | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
+            {{- if .Values.sessionStorage.enabled }}
+            - name: MINDROOM_SESSION_STORAGE_PATH
+              value: {{ .Values.sessionStorage.mountPath | quote }}
+            {{- end }}
             {{- if .Values.runtime.logLevel }}
             - name: LOG_LEVEL
               value: {{ .Values.runtime.logLevel | quote }}
@@ -324,6 +336,15 @@ spec:
               value: {{ .Values.workers.kubernetes.scriptResources.defaultProfile | quote }}
             - name: MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON
               value: {{ toJson .Values.workers.kubernetes.scriptResources.profiles | quote }}
+            {{- if .Values.scriptGateway.enabled }}
+            - name: MINDROOM_SCRIPT_GATEWAY_PORT
+              value: {{ .Values.scriptGateway.port | quote }}
+            - name: MINDROOM_SCRIPT_GATEWAY_URL
+              value: {{ printf "http://%s:%v/api/script-gateway" (include "mindroom-runtime.scriptGatewayHost" .) .Values.scriptGateway.port | quote }}
+            # Backed by the required worker egress NetworkPolicy, which opens only the gateway port on this pod.
+            - name: MINDROOM_SCRIPT_GATEWAY_ISOLATED
+              value: "true"
+            {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}
@@ -413,17 +434,17 @@ spec:
                   name: {{ $entry.existingSecret }}
                   key: {{ $entry.key }}
             {{- end }}
-            {{- with .Values.env.extra }}
+            {{- with include "mindroom-runtime.envList" (list . .Values.env.extra "env.extra") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or $generatesApiKey .Values.env.envFrom }}
+          {{- if or $generatesApiKey $envFrom }}
           envFrom:
             {{- if $generatesApiKey }}
             # Worker tool code can reach this API; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
             - secretRef:
                 name: {{ $fullname }}-api-key
             {{- end }}
-            {{- with .Values.env.envFrom }}
+            {{- with $envFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
@@ -501,6 +522,19 @@ spec:
               mountPath: {{ .Values.stateStorage.syncContinuity.mountPath }}
               subPath: {{ .Values.stateStorage.syncContinuity.subPath }}
             {{- end }}
+            {{- range .Values.stateStorage.extraSubPaths }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" $ }}
+              mountPath: {{ .mountPath }}
+              subPath: {{ default .name .subPath | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.sessionStorage.enabled }}
+            - name: session-storage
+              mountPath: {{ .Values.sessionStorage.mountPath }}
+            {{- end }}
+            {{- if .Values.knowledgeStorage.enabled }}
+            - name: knowledge-storage
+              mountPath: {{ include "mindroom-runtime.knowledgeStorageMountPath" . }}
             {{- end }}
             {{- if .Values.approvedEgress.enabled }}
             - name: approved-egress-allowlist
@@ -513,7 +547,7 @@ spec:
               mountPath: /etc/agent-vault-access
               readOnly: true
             {{- end }}
-            {{- with .Values.extraVolumeMounts }}
+            {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
@@ -598,6 +632,16 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.stateStorageClaimName" . }}
         {{- end }}
+        {{- if .Values.sessionStorage.enabled }}
+        - name: session-storage
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.sessionStorageClaimName" . }}
+        {{- end }}
+        {{- if .Values.knowledgeStorage.enabled }}
+        - name: knowledge-storage
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.knowledgeStorageClaimName" . }}
+        {{- end }}
         {{- if .Values.approvedEgress.enabled }}
         - name: approved-egress-allowlist
           configMap:
@@ -615,6 +659,6 @@ spec:
             # bootstrap publishes the token; the tool errors cleanly until then.
             optional: true
         {{- end }}
-        {{- with .Values.extraVolumes }}
+        {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumes "path" "extraVolumes" "nameKey" "name") | fromJsonArray }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

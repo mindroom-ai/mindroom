@@ -399,36 +399,6 @@ def _decrypt_encrypted_media_bytes(
         return None
 
 
-def _media_payload_exceeds_limit_for_event(
-    event: nio.RoomMessageMedia | nio.RoomEncryptedMedia,
-    media_bytes: bytes,
-    *,
-    stage: str,
-) -> bool:
-    if not media_payload_exceeds_limit(media_bytes):
-        return False
-    logger.warning(
-        "Matrix media payload exceeds byte limit",
-        event_id=_event_id_for_log(event),
-        stage=stage,
-        size_bytes=len(media_bytes),
-        limit_bytes=_matrix_media_max_bytes,
-    )
-    return True
-
-
-def _decrypt_validated_media_bytes(
-    event: nio.RoomEncryptedMedia,
-    encrypted_bytes: bytes,
-) -> bytes | None:
-    decrypted_bytes = _decrypt_encrypted_media_bytes(event, encrypted_bytes)
-    if decrypted_bytes is None:
-        return None
-    if _media_payload_exceeds_limit_for_event(event, decrypted_bytes, stage="decrypt"):
-        return None
-    return decrypted_bytes
-
-
 async def download_mxc_bytes(
     client: nio.AsyncClient,
     mxc_url: str,
@@ -475,5 +445,5 @@ async def download_media_bytes(
         return None
 
     if isinstance(event, nio.RoomEncryptedMedia):
-        return _decrypt_validated_media_bytes(event, downloaded_bytes)
+        return _decrypt_encrypted_media_bytes(event, downloaded_bytes)
     return downloaded_bytes

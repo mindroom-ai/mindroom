@@ -1032,21 +1032,6 @@ class TestDownloadMxcText:
         assert result is None
         mock_decrypt.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_download_rejects_decrypted_sidecar_over_byte_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Decrypted sidecar bytes should be capped before UTF-8 decode and JSON parsing."""
-        monkeypatch.setattr(message_content_module, "_MXC_TEXT_MAX_BYTES", 5)
-        client = _make_client()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"small"
-        client.download.return_value = response
-        file_info = {"key": {"k": "key"}, "hashes": {"sha256": "hash"}, "iv": "iv"}
-
-        with patch("mindroom.matrix.message_content.decrypt_media_bytes", return_value=b"123456"):
-            result = await _download_mxc_text(client, "mxc://server/decrypted-oversized", file_info)
-
-        assert result is None
-
 
 class TestCanonicalContentResolution:
     """Tests for sidecar-backed canonical content extraction."""

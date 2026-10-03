@@ -125,6 +125,61 @@ The static runner sidecar mounts the agents and private_instances directories, s
 {{- default "state-storage" .Values.stateStorage.volumeName -}}
 {{- end -}}
 
+{{- /*
+Quoted state PVC directories, as seen at /state, that the prepare-state-storage init container creates and chowns.
+*/ -}}
+{{- define "mindroom-runtime.stateStorageInitDirs" -}}
+{{- $dirs := list "/state" -}}
+{{- if .Values.stateStorage.encryptionKeys.enabled -}}
+{{- $dirs = append $dirs (printf "/state/%s" .Values.stateStorage.encryptionKeys.subPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.syncContinuity.enabled -}}
+{{- $dirs = append $dirs (printf "/state/%s" .Values.stateStorage.syncContinuity.subPath) -}}
+{{- end -}}
+{{- range .Values.stateStorage.extraSubPaths -}}
+{{- $dirs = append $dirs (printf "/state/%s" (default .name .subPath)) -}}
+{{- end -}}
+{{- range $index, $dir := $dirs }}{{ if $index }} {{ end }}"{{ $dir }}"{{ end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.sessionStorageClaimName" -}}
+{{- default (printf "%s-sessions" (include "mindroom-runtime.fullname" .)) .Values.sessionStorage.existingClaim -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.knowledgeStorageClaimName" -}}
+{{- default (printf "%s-knowledge" (include "mindroom-runtime.fullname" .)) .Values.knowledgeStorage.existingClaim -}}
+{{- end -}}
+
+{{- /*
+Shared knowledge-base indexes live at <storage.mountPath>/knowledge_db; KnowledgeManager has no override for it.
+*/ -}}
+{{- define "mindroom-runtime.knowledgeStorageMountPath" -}}
+{{- printf "%s/knowledge_db" (trimSuffix "/" (clean .Values.storage.mountPath)) -}}
+{{- end -}}
+
+{{- /*
+Chart-managed PersistentVolumeClaim; takes (list $ claimName valuesBlock) where valuesBlock has accessModes, storageClassName, and size.
+*/ -}}
+{{- define "mindroom-runtime.persistentVolumeClaim" -}}
+{{- $root := index . 0 -}}
+{{- $values := index . 2 -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ index . 1 }}
+  labels:
+    {{- include "mindroom-runtime.labels" $root | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml $values.accessModes | nindent 4 }}
+  {{- if $values.storageClassName }}
+  storageClassName: {{ $values.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $values.size | quote }}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSourcePath" -}}
 {{- $bundle := index . 1 -}}
 {{- $sourcePath := default "/bundle" $bundle.sourcePath | clean -}}
@@ -136,6 +191,31 @@ The static runner sidecar mounts the agents and private_instances directories, s
 {{- $bundle := index . 1 -}}
 {{- $targetPath := default (printf "%s/content-bundles/%s" ($root.Values.storage.mountPath | trimSuffix "/") $bundle.name) $bundle.targetPath | clean -}}
 {{- if eq $targetPath "/" -}}/{{- else -}}{{ $targetPath | trimSuffix "/" }}{{- end -}}
+{{- end -}}
+
+{{/*
+Native bootstrap source as JSON: the explicit config.bootstrapBundlePath and revision,
+or the selected content bundle's target path plus subPath, with a revision hashed from its
+image digest and the selected image directory. root is the directory the transport replaces.
+*/}}
+{{- define "mindroom-runtime.bootstrapBundle" -}}
+{{- $bootstrap := dict "path" (default "" .Values.config.bootstrapBundlePath) "root" (default "" .Values.config.bootstrapBundlePath) "revision" (default "" .Values.config.bootstrapBundleRevision) -}}
+{{- $selected := .Values.config.bootstrapContentBundle.name -}}
+{{- if $selected -}}
+{{- $bootstrap = dict "path" "" "root" "" "revision" "" -}}
+{{- range $bundle := $.Values.contentBundles -}}
+{{- if eq (toString $bundle.name) (toString $selected) -}}
+{{- $subPath := default "" $.Values.config.bootstrapContentBundle.subPath -}}
+{{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
+{{- $imagePath := clean (printf "%s/%s" (include "mindroom-runtime.contentBundleSourcePath" (list $ $bundle)) $subPath) -}}
+{{- $digest := trimPrefix "@sha256:" (regexFind "@sha256:[a-f0-9]{64}$" (toString $bundle.image)) -}}
+{{- $_ := set $bootstrap "root" $targetPath -}}
+{{- $_ := set $bootstrap "path" (clean (printf "%s/%s" $targetPath $subPath)) -}}
+{{- $_ := set $bootstrap "revision" (sha256sum (printf "%s:%s" $digest $imagePath)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $bootstrap -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.contentBundleSeedCommand" -}}
@@ -357,6 +437,87 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.scriptGatewayName" -}}
+{{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.scriptGatewayWorkerPolicyName" -}}
+{{- printf "%s-script-gateway-workers" (include "mindroom-runtime.fullname" . | trunc 40 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.workerPodLabels" -}}
+mindroom.ai/component: worker
+app.kubernetes.io/managed-by: mindroom
+app.kubernetes.io/name: mindroom-worker
+{{- with .Values.workers.kubernetes.extraLabels }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{- define "mindroom-runtime.scriptGatewayHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "mindroom-runtime.scriptGatewayName" .) .Release.Namespace -}}
+{{- end -}}
+
+{{/*
+Normalize a list value that may also be written as a map keyed by entry.
+Helm replaces lists wholesale across values files but merges maps key by key, so the map form lets a later file override or remove one entry.
+Map entries render in key order, take nameKey (when set) from their key unless they set it, and drop null entries and null fields.
+String map values become {nameKey: key, scalarKey: value} when scalarKey is set.
+Arguments: dict "value" <list or map> "path" <values path> "nameKey" <field or ""> "scalarKey" <field or "">.
+Returns a JSON array for fromJsonArray.
+*/}}
+{{- define "mindroom-runtime.keyedList" -}}
+{{- $items := list -}}
+{{- if kindIs "map" .value -}}
+{{- range $key := keys .value | sortAlpha -}}
+{{- $item := index $.value $key -}}
+{{- if kindIs "map" $item -}}
+{{- $entry := dict -}}
+{{- with $.nameKey -}}
+{{- $_ := set $entry . $key -}}
+{{- end -}}
+{{- range $field, $fieldValue := $item -}}
+{{- if not (kindIs "invalid" $fieldValue) -}}
+{{- $_ := set $entry $field $fieldValue -}}
+{{- end -}}
+{{- end -}}
+{{- $items = append $items $entry -}}
+{{- else if and $.scalarKey (kindIs "string" $item) -}}
+{{- $items = append $items (dict $.nameKey $key $.scalarKey $item) -}}
+{{- else if kindIs "invalid" $item -}}
+{{- /* A null entry removes an entry set by an earlier values file. */ -}}
+{{- else if $.scalarKey -}}
+{{- fail (printf "%s.%s must be a string, a map, or null; quote numbers and booleans (or use --set-string)" $.path $key) -}}
+{{- else -}}
+{{- fail (printf "%s.%s must be a map or null" $.path $key) -}}
+{{- end -}}
+{{- end -}}
+{{- else if kindIs "slice" .value -}}
+{{- $items = .value -}}
+{{- else if not (kindIs "invalid" .value) -}}
+{{- fail (printf "%s must be a list or a map" .path) -}}
+{{- end -}}
+{{- toJson $items -}}
+{{- end -}}
+
+{{/*
+EnvVar entries from a list or a name-keyed map (see keyedList).
+A map value may be a plain string shorthand for {value: ...}.
+String values are rendered with tpl, so they can reference values such as {{ .Release.Namespace }}.
+Arguments: list <root context> <list or map> <values path>.
+*/}}
+{{- define "mindroom-runtime.envList" -}}
+{{- $root := index . 0 -}}
+{{- $env := list -}}
+{{- range $entry := include "mindroom-runtime.keyedList" (dict "value" (index . 1) "path" (index . 2) "nameKey" "name" "scalarKey" "value") | fromJsonArray -}}
+{{- if kindIs "string" $entry.value -}}
+{{- $_ := set $entry "value" (tpl $entry.value $root) -}}
+{{- end -}}
+{{- $env = append $env $entry -}}
+{{- end -}}
+{{- toJson $env -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
 {{- $extraEnv := dict -}}
 {{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.injectWorkerProxyEnv -}}
@@ -367,13 +528,22 @@ matchLabels:
 {{- $_ := set $extraEnv "http_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
-{{- with .Values.egressProxy.noProxy -}}
-{{- $noProxy := join "," . -}}
-{{- $_ := set $extraEnv "NO_PROXY" $noProxy -}}
-{{- $_ := set $extraEnv "no_proxy" $noProxy -}}
+{{- $noProxy := list -}}
+{{- range .Values.egressProxy.noProxy -}}
+{{- $noProxy = append $noProxy (tpl (toString .) $) -}}
+{{- end -}}
+{{- if .Values.scriptGateway.enabled -}}
+{{- $noProxy = append $noProxy (include "mindroom-runtime.scriptGatewayHost" .) -}}
+{{- end -}}
+{{- with $noProxy -}}
+{{- $_ := set $extraEnv "NO_PROXY" (join "," .) -}}
+{{- $_ := set $extraEnv "no_proxy" (join "," .) -}}
 {{- end -}}
 {{- end -}}
 {{- range $key, $value := .Values.workers.kubernetes.extraEnv -}}
+{{- if kindIs "string" $value -}}
+{{- $value = tpl $value $ -}}
+{{- end -}}
 {{- $_ := set $extraEnv $key $value -}}
 {{- end -}}
 {{- if $extraEnv -}}
@@ -478,6 +648,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 
 {{- define "mindroom-runtime.agentVaultAccessGrantsName" -}}
 {{- printf "%s-access-grants" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Agent Vault Job (or grants ConfigMap) name from (list root baseName renderedInputs).
+jobNaming=contentHash appends a hash of the rendered inputs, so a plain `kubectl apply`
+creates a new object when they change and leaves the existing one alone otherwise.
+*/}}
+{{- define "mindroom-runtime.agentVaultJobName" -}}
+{{- $root := index . 0 -}}
+{{- $name := index . 1 -}}
+{{- if eq $root.Values.workers.kubernetes.agentVault.jobNaming "contentHash" -}}
+{{- printf "%s-%s" ($name | trunc 52 | trimSuffix "-") (index . 2 | sha256sum | trunc 10) -}}
+{{- else -}}
+{{- $name -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.agentVaultAccessGrantsConfigPath" -}}

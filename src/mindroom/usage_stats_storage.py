@@ -291,8 +291,12 @@ def _shared_agent_sources(
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is not None:
             continue
-        candidate = _safe_candidate(root, Path("agents") / agent_name / "sessions" / f"{agent_name}.db")
+        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        candidate = _safe_candidate(root, relative)
         if candidate is None:
+            sources.append(
+                _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="shared_agent"),
+            )
             continue
         sources.append(
             _source(
@@ -420,14 +424,17 @@ def _directory_entries(path: Path) -> tuple[Path, ...] | UsageStorageDiagnostic:
 
 def _safe_candidate(root: Path, relative: Path) -> Path | None:
     current = root
-    for part in relative.parts[:-1]:
-        current /= part
-        if current.is_symlink():
-            return None
     candidate = root / relative
-    if candidate.is_symlink():
-        return None
-    resolved = candidate.resolve()
+    try:
+        for part in relative.parts[:-1]:
+            current /= part
+            if current.is_symlink():
+                return None
+        if candidate.is_symlink():
+            return None
+        resolved = candidate.resolve()
+    except OSError:
+        return None  # An unsearchable directory is reported like a rejected path, not as a failed discovery.
     return resolved if resolved.is_relative_to(root) else None
 
 

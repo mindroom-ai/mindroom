@@ -99,6 +99,76 @@ app.kubernetes.io/component: homeserver
 {{- end -}}
 
 {{/*
+TOML key, quoted unless it is a bare key.
+*/}}
+{{- define "mindroom-tuwunel.tomlKey" -}}
+{{- if regexMatch "^[A-Za-z0-9_-]+$" . -}}
+{{- . -}}
+{{- else -}}
+{{- toJson . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+TOML value for a tuwunel.settings entry: strings are rendered with tpl, and lists may nest but not hold tables.
+JSON encodes these scalars as valid TOML, including integral numbers as TOML integers.
+Arguments: list <root context> <values path> <value>.
+*/}}
+{{- define "mindroom-tuwunel.tomlValue" -}}
+{{- $root := index . 0 -}}
+{{- $path := index . 1 -}}
+{{- $value := index . 2 -}}
+{{- if kindIs "string" $value -}}
+{{- tpl $value $root | toJson -}}
+{{- else if kindIs "slice" $value -}}
+{{- $items := list -}}
+{{- range $index, $item := $value -}}
+{{- if or (kindIs "map" $item) (kindIs "invalid" $item) -}}
+{{- fail (printf "%s[%d] must be a string, number, boolean, or list; use tuwunel.extraConfig for arrays of tables" $path $index) -}}
+{{- end -}}
+{{- $items = append $items (include "mindroom-tuwunel.tomlValue" (list $root (printf "%s[%d]" $path $index) $item)) -}}
+{{- end -}}
+{{- printf "[%s]" (join ", " $items) -}}
+{{- else -}}
+{{- toJson $value -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The non-table entries of a tuwunel.settings map as TOML key/value lines; null entries are omitted.
+Arguments: list <root context> <values path> <map>.
+*/}}
+{{- define "mindroom-tuwunel.settingsKeys" -}}
+{{- $root := index . 0 -}}
+{{- $path := index . 1 -}}
+{{- range $key, $value := index . 2 }}
+{{- if not (or (kindIs "map" $value) (kindIs "invalid" $value)) }}
+{{ include "mindroom-tuwunel.tomlKey" $key }} = {{ include "mindroom-tuwunel.tomlValue" (list $root (printf "%s.%s" $path $key) $value) }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The map entries of a tuwunel.settings map as TOML tables below table, recursively.
+Arguments: list <root context> <values path> <table> <map>.
+*/}}
+{{- define "mindroom-tuwunel.settingsTables" -}}
+{{- $root := index . 0 -}}
+{{- $path := index . 1 -}}
+{{- $table := index . 2 -}}
+{{- range $key, $value := index . 3 }}
+{{- if kindIs "map" $value }}
+{{- $childPath := printf "%s.%s" $path $key }}
+{{- $childTable := printf "%s.%s" $table (include "mindroom-tuwunel.tomlKey" $key) }}
+
+[{{ $childTable }}]
+{{- include "mindroom-tuwunel.settingsKeys" (list $root $childPath $value) }}
+{{- include "mindroom-tuwunel.settingsTables" (list $root $childPath $childTable $value) }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Rendered tuwunel.toml.
 Secret-bearing options reference files mounted from existing Secrets, so no secret material lands in the ConfigMap.
 */}}
@@ -119,9 +189,11 @@ registration_token_file = {{ include "mindroom-tuwunel.registrationTokenFile" . 
 {{- if .Values.tuwunel.appserviceRegistration.existingSecret }}
 appservice_dir = {{ include "mindroom-tuwunel.appserviceDir" . | quote }}
 {{- end }}
+{{- include "mindroom-tuwunel.settingsKeys" (list $ "tuwunel.settings" .Values.tuwunel.settings) }}
 {{- with .Values.tuwunel.extraConfig }}
 {{ . }}
 {{- end }}
+{{- include "mindroom-tuwunel.settingsTables" (list $ "tuwunel.settings" "global" .Values.tuwunel.settings) }}
 
 [global.well_known]
 client = {{ include "mindroom-tuwunel.wellKnownClient" . | quote }}

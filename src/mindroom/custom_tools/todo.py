@@ -512,8 +512,8 @@ def _render_template_definition(
     path, template_root = _resolve_template_path(name, template_roots)
     raw_text = template_root.read_text(path)
     budget.charge_read(path, raw_text)
-    raw_template = _load_template_document(path, raw_text)
-    _validate_template_document(raw_template, path)
+    # The unrendered template must be YAML, so Jinja stays inside values; the rendered document is validated below.
+    _load_template_document(path, raw_text)
     schema = _PARAMS_SCHEMAS.get(name) if template_root.source == "builtin" else None
     if schema is None:
         resolved_params = dict(params)

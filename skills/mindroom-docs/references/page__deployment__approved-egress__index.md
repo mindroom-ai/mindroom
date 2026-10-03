@@ -35,6 +35,11 @@ These runtime-derived entries are not written back to `config.yaml` by dashboard
 Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
+The proxy reads the static allowlist only at startup.
+The chart hashes inline `approvedEgress.allowlist.domains` into the proxy pod template, so changing them rolls the proxy.
+With `approvedEgress.allowlist.existingConfigMap`, the chart cannot see the content, so restart the proxy Deployment after editing that ConfigMap, or put a content hash in `approvedEgress.podAnnotations`.
+MindRoom's own copy of the allowlist refreshes only when its pod restarts, so after removing a domain also restart the MindRoom Deployment; until then `request_network_access` reports that domain as already allowed and creates no grant, while the proxy blocks it.
+
 ## Agent Vault Chaining
 
 When approved egress and Agent Vault are used together, the correct chain is:

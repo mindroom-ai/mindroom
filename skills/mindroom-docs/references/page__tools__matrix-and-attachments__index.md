@@ -380,7 +380,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
-An `m.room.message` that `send_event` sends for a human requester names that requester, so the agents and teams it mentions act for that human, as they do for the agent's ordinary replies.
+An `m.room.message` that `send_event` sends for a human or configured bot-account requester names that requester, so the agents and teams it mentions act for that requester, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.

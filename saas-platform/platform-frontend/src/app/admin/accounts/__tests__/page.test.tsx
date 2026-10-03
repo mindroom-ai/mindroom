@@ -351,5 +351,23 @@ describe('Admin Accounts Page', () => {
         )
       })
     })
+
+    it('should show the backend reason when a status change fails', async () => {
+      const detail = 'Failed to update account authentication'
+      mockApiCall.mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => ({ detail })
+      })
+      const user = userEvent.setup()
+
+      await user.selectOptions(screen.getAllByRole('combobox')[0], 'suspended')
+      await user.click(screen.getAllByText('Save')[0])
+
+      await waitFor(() => {
+        expect(mockAlert).toHaveBeenCalledWith(`Failed to update status: ${detail}`)
+      })
+    })
   })
 })

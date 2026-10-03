@@ -1,20 +1,21 @@
 # mindroom-dev single-issue development protocol.
+# Free-text params are JSON-escaped, which keeps quotes and backslashes valid inside YAML double quotes.
 
 name: mindroom-dev
 version: "1.0"
 description: "Single-issue dev protocol: plan, implement, review, live-test, and PR."
 
 todos:
-  - title: "Create living report for {{ ISSUE_REF }} in the repo notes or task file"
+  - title: "Create living report for {{ (ISSUE_REF | tojson)[1:-1] }} in the repo notes or task file"
     priority: high
-  - title: "Create implementation plan for {{ ISSUE_REF }} on {{ BRANCH }}"
+  - title: "Create implementation plan for {{ (ISSUE_REF | tojson)[1:-1] }} on {{ (BRANCH | tojson)[1:-1] }}"
     depends_on: [1]
     priority: high
   - title: "Implement requested change in {{ REPO }}"
     depends_on: [2]
-    assigned_agent: "{{ IMPLEMENTER_AGENT }}"
+    assigned_agent: "{{ (IMPLEMENTER_AGENT | tojson)[1:-1] }}"
     priority: high
-  - title: "Run focused automated tests for {{ ISSUE_REF }}"
+  - title: "Run focused automated tests for {{ (ISSUE_REF | tojson)[1:-1] }}"
     depends_on: [3]
     priority: high
   - sub_template: parallel-review-loop
@@ -27,6 +28,6 @@ todos:
   - title: "Capture live-test or manual verification evidence when the change needs runtime proof"
     depends_on: [5]
     priority: high
-  - title: "Push {{ BRANCH }} and open PR if IS_PR is true"
+  - title: "Push {{ (BRANCH | tojson)[1:-1] }} and open PR if IS_PR is true"
     depends_on: [6, 7]
     priority: critical

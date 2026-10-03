@@ -497,13 +497,13 @@ All runtimes for the same non-private agent read and write the same storage dire
 If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
 Agents that use `private` are different.
 They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`.
-Workers mount those canonical private-instance roots.
-They do not own them.
+Dedicated Docker and Kubernetes workers mount only the private root (`private.root`) inside that state root, never the state root itself, and own neither.
+The Kubernetes `static_runner` sidecar mounts the whole `private_instances` directory.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
 The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
-Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth, local-only, and model-provider placement unchanged.
+Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth and local-only placement unchanged.
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](../deployment/sandbox-proxy.md#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described below.
@@ -579,7 +579,7 @@ mind_template/
 In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage.
 That private root is not created next to `config.yaml`.
 It is not stored under `workers/<worker>/`.
-Workers mount the same canonical private-instance root when they execute that requester scope.
+Dedicated workers mount that `mind_data/` private root, not the state root around it, when they execute that requester scope.
 For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
 
 ### Private Fields
@@ -654,7 +654,9 @@ Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlenco
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
 Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
 Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
@@ -801,6 +803,7 @@ agents:
 
 Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
 Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
+The names `router`, `user`, and `_shared` are reserved for MindRoom's own accounts and storage.
 
 ## Defaults
 

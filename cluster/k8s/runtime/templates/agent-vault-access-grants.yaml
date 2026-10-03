@@ -2,44 +2,67 @@
 {{- $accessGrants := $av.accessGrants -}}
 {{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) }}
 {{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
+{{- $config := include "mindroom-runtime.agentVaultAccessGrantsConfig" . -}}
+{{- $jobSpec := include "mindroom-runtime.agentVaultAccessGrantsJobSpec" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $name }}
+  name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
   labels:
     {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
 data:
   access-grants.yaml: |
-    apiUrl: {{ $av.apiUrl | quote }}
-    vaultNamePrefix: {{ $av.vaultNamePrefix | quote }}
-    {{- if $accessGrants.tenantId }}
-    tenantId: {{ $accessGrants.tenantId | quote }}
-    {{- end }}
-    {{- if $accessGrants.accountId }}
-    accountId: {{ $accessGrants.accountId | quote }}
-    {{- end }}
-    grants:
-      {{- range $grant := $accessGrants.grants }}
-      - email: {{ $grant.email | quote }}
-        workerScope: {{ $grant.workerScope | quote }}
-        {{- if $grant.requester }}
-        requester: {{ $grant.requester | quote }}
-        {{- end }}
-        {{- if $grant.agent }}
-        agent: {{ $grant.agent | quote }}
-        {{- end }}
-        role: {{ default "admin" $grant.role | quote }}
-      {{- end }}
+    {{- $config | nindent 4 }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $name }}
+  name: {{ include "mindroom-runtime.agentVaultJobName" (list . $name (print $config $jobSpec)) }}
   labels:
     {{- include "mindroom-runtime.agentVaultAccessGrantsLabels" . | nindent 4 }}
+  {{- if eq $av.jobNaming "fixed" }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  {{- end }}
+{{ $jobSpec }}
+{{- end }}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfig" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $accessGrants := $av.accessGrants -}}
+apiUrl: {{ $av.apiUrl | quote }}
+vaultNamePrefix: {{ $av.vaultNamePrefix | quote }}
+{{- if $accessGrants.tenantId }}
+tenantId: {{ $accessGrants.tenantId | quote }}
+{{- end }}
+{{- if $accessGrants.accountId }}
+accountId: {{ $accessGrants.accountId | quote }}
+{{- end }}
+grants:
+  {{- range $grant := $accessGrants.grants }}
+  - email: {{ $grant.email | quote }}
+    workerScope: {{ $grant.workerScope | quote }}
+    {{- if $grant.requester }}
+    requester: {{ $grant.requester | quote }}
+    {{- end }}
+    {{- if $grant.agent }}
+    agent: {{ $grant.agent | quote }}
+    {{- end }}
+    role: {{ default "admin" $grant.role | quote }}
+  {{- end }}
+{{- end }}
+
+{{- /* With jobNaming=contentHash, each grants config gets its own ConfigMap,
+     so each Job reads the grants it was created for, not a later apply's. */ -}}
+{{- define "mindroom-runtime.agentVaultAccessGrantsConfigMapName" -}}
+{{- $name := include "mindroom-runtime.agentVaultAccessGrantsName" . -}}
+{{- include "mindroom-runtime.agentVaultJobName" (list . $name (include "mindroom-runtime.agentVaultAccessGrantsConfig" .)) -}}
+{{- end }}
+
+{{- define "mindroom-runtime.agentVaultAccessGrantsJobSpec" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $accessGrants := $av.accessGrants -}}
 spec:
   ttlSecondsAfterFinished: 86400
   template:
@@ -82,7 +105,7 @@ spec:
       volumes:
         - name: access-grants-config
           configMap:
-            name: {{ $name }}
+            name: {{ include "mindroom-runtime.agentVaultAccessGrantsConfigMapName" . }}
         - name: access-grants-admin-token
           secret:
             secretName: {{ $accessGrants.adminTokenSecret.name }}

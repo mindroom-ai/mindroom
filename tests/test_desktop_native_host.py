@@ -607,7 +607,7 @@ def _attach_shell_runtime(host: NativeDesktopHost, tmp_path: Path) -> NativeBrid
     """Attach a real shell-only bridge to the native channel without opening Matrix."""
     config = load_native_config(native_config_path(tmp_path))
     runtime = NativeBridgeRuntime(SimpleNamespace(storage_root=tmp_path), config)
-    runtime._shell = DesktopShell(environment={"PATH": os.defpath})
+    runtime._shell = DesktopShell(environment={"PATH": os.environ["PATH"]})
     runtime._bridge = DesktopBridge(
         client=object(),
         provider=None,
@@ -1058,7 +1058,7 @@ def offline_runtime_session(monkeypatch: pytest.MonkeyPatch) -> _FakeOwner:
     monkeypatch.setattr("mindroom.desktop.bridge_components.PyAutoGuiDesktopProvider", forbidden_gui_provider)
     monkeypatch.setattr(
         "mindroom.desktop.login_environment.capture_login_environment",
-        AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"}),
+        AsyncMock(return_value={"PATH": os.environ["PATH"], "MINDROOM_CAPTURED": "from-login-shell"}),
     )
     return owner
 

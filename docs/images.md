@@ -92,8 +92,8 @@ Transient failures (HTTP 5xx and 429 status codes on the provider exception) als
 
 ## Limitations
 
-- **Incoming image size** -- the downloaded payload and, for encrypted images, the decrypted payload must each be at most 64 MiB (67,108,864 bytes).
-  These checks run after download returns; send a smaller image if rejected, and account for any stricter homeserver or provider limits.
+- **Incoming image size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted images decrypt to the same size.
+  MindRoom stops a download as soon as it passes that limit, so send a smaller image when it is rejected, and account for any stricter homeserver or provider limits.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.

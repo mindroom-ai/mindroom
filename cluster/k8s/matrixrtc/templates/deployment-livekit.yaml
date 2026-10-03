@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mindroom-matrixrtc.livekitName" . }}
+  labels:
+    {{- include "mindroom-matrixrtc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: livekit
+spec:
+  # Without Redis, LiveKit keeps rooms in memory on one node, and the media address points at one pod.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "livekit") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "livekit") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include "mindroom-matrixrtc.livekitConfig" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "mindroom-matrixrtc.podSpecCommon" . | nindent 6 }}
+      containers:
+        - name: livekit
+          image: {{ include "mindroom-matrixrtc.image" (dict "root" $ "image" .Values.livekit.image) | quote }}
+          imagePullPolicy: {{ .Values.livekit.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/livekit/config.yaml
+          env:
+            - name: MATRIXRTC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keys.existingSecret | quote }}
+                  key: {{ .Values.keys.apiKeyKey | quote }}
+            - name: MATRIXRTC_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keys.existingSecret | quote }}
+                  key: {{ .Values.keys.apiSecretKey | quote }}
+            # Kubernetes expands the references at container start; LiveKit parses the "key: secret" pair as YAML.
+            # The inner quotes keep a numeric-looking secret a string, which LiveKit would otherwise drop.
+            - name: LIVEKIT_KEYS
+              value: '"$(MATRIXRTC_API_KEY)": "$(MATRIXRTC_API_SECRET)"'
+            {{- with .Values.livekit.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: signal
+              containerPort: {{ .Values.livekit.port }}
+              protocol: TCP
+            - name: rtc-tcp
+              containerPort: {{ .Values.livekit.media.ports.tcp }}
+              protocol: TCP
+            - name: rtc-udp
+              containerPort: {{ .Values.livekit.media.ports.udp }}
+              protocol: UDP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: signal
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: signal
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.livekit.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/livekit
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mindroom-matrixrtc.livekitName" . }}

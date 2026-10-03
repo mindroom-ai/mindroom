@@ -65,7 +65,7 @@ def selected_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def login_environment(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Replace the account login-shell capture with a fixed environment."""
-    capture = AsyncMock(return_value={"PATH": os.defpath, "MINDROOM_CAPTURED": "from-login-shell"})
+    capture = AsyncMock(return_value={"PATH": os.environ["PATH"], "MINDROOM_CAPTURED": "from-login-shell"})
     monkeypatch.setattr("mindroom.desktop.login_environment.capture_login_environment", capture)
     return capture
 

@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Any, Literal
 import nio
 
 from mindroom.attachments import AttachmentRecord
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
+from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    SKIP_MENTIONS_KEY,
+    SOURCE_KIND_KEY,
+)
 from mindroom.custom_tools.attachments import (
     resolve_send_attachments,
     send_resolved_attachments,
@@ -114,6 +120,9 @@ class MatrixMessageOperations:
         ):
             extra_content[ORIGINAL_SENDER_KEY] = context.requester_id
             extra_content[SOURCE_KIND_KEY] = TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+        elif context.requester_id in context.config.bot_accounts:
+            # Trusted relays carry only humans, so name a bot-account requester the way ordinary replies do.
+            extra_content[ACTING_REQUESTER_KEY] = context.requester_id
         if attachment_ids:
             extra_content[ATTACHMENT_IDS_KEY] = attachment_ids
         if message_extras:

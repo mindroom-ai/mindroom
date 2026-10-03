@@ -38,7 +38,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
@@ -64,30 +64,32 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
 ## check-active-responses
 
-Check the running process's admitted Matrix work and OpenAI-compatible requests.
+Check the running process for live work that a restart would interrupt: admitted Matrix work, OpenAI-compatible requests, voice calls, and background script runs.
 
 ```
 mindroom check-active-responses
 mindroom check-active-responses --json
 mindroom check-active-responses --details
 mindroom check-active-responses --details --json
+mindroom check-active-responses --wait 1800
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
-| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `0` | Runtime ready, admission open, and no admitted Matrix work, OpenAI requests, voice calls, or interruptible script runs. |
+| `1` | Admitted Matrix work, OpenAI-compatible requests, voice calls, or interruptible script runs are active. |
 | `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
 
 The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
-Rows contain `channel`, `responder`, and `requester_id`.
-The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point, plus one row per voice call.
+Rows contain `channel` (`matrix`, `openai`, or `call`), `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope, authenticated OpenAI requester context, or the caller the agent joined.
+Details also list `script_runs` with `run_id`, the owning agent as `responder`, the owner as `requester_id`, and `recoverable`.
 Unknown identities are `null` in JSON and labeled unknown in text.
-Identities are held only in memory; no database, history, or Matrix lookups are added.
+Response and call identities are held only in memory; script rows come from a read-only query of the durable script run store, and no history or Matrix lookups are added.
 
 Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
 The CLI reads that key from the selected runtime environment.
@@ -98,14 +100,28 @@ Aggregate output never includes identities.
 Nested admission slots count separately, so this is not a count of unique responses.
 Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
 `active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+`active_calls` counts [voice calls](https://docs.mindroom.chat/voice-calls/) that an agent has joined or is joining.
+A restart, or a configuration reload that restarts the call agent, drops the agent from its calls, and a rejoined call starts a new call session, so calls count as busy.
+
+`interruptible_script_runs` counts unfinished [background script runs](https://docs.mindroom.chat/tools/background-scripts/) that a restart would interrupt, including Docker, unsafe-local, cancelling, and runs whose recovery contract or owner authorization cannot be confirmed.
+`recoverable_script_runs` counts runs whose worker process restart startup would adopt under the current runtime environment.
+Recoverable runs do not make the runtime busy, because they are designed to survive restarts and may run for hours.
+They survive only while the replacement keeps their recovery contract, so treat them as busy before a change that [interrupts them](https://docs.mindroom.chat/tools/background-scripts/#lifecycle-and-failure-semantics).
+
 Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
 
 This is a point-in-time observation, not a drain or restart lock.
 New work can start immediately afterward.
 For multiple processes, check each process directly.
 
+`--wait SECONDS` polls every 5 seconds while the runtime is busy and exits as soon as it is idle.
+If work is still active at the deadline, the command exits `1` with the last busy snapshot.
+An unavailable result ends the wait immediately with exit `2`, because work could have been interrupted while the status was unknown.
+A poll still in flight at the deadline is not cut short, so the total runtime can exceed `--wait`.
+Only the final snapshot is printed.
+
 The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to set each request's HTTP connect, read, and write timeouts (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
 Redirects are disabled.
 
@@ -737,7 +753,9 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
@@ -966,6 +984,7 @@ If installation fails, MindRoom starts in the terminal instead.
 `mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
 Both `mindroom service install` and `mindroom run` save `MINDROOM_API_KEY` and the provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) to `.env` before installing, because the service does not see your shell's environment and would otherwise serve the dashboard on every interface without the key your terminal runs used.
 Keys are quoted where needed so `.env` reads them back unchanged, and installation stops with an error when an exported key contains `${`, which reading `.env` would expand, or when a key that needs quoting ends in a backslash.
+When the service will still start without a dashboard credential, installing it prints the same open-dashboard warning as a terminal run, since the service's own warning only reaches its logs.
 If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
 On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 
@@ -1190,19 +1209,21 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Migrate config.yaml to membership access settings.                    │
-│ fingerprint      Print the config source SHA-256, including all transitively included  │
-│                  files.                                                                │
-│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
-│                  runtime reload.                                                       │
-│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
-│                  failed/restart-required/unavailable.                                  │
+│ init              Create a starter config.yaml with a personal agent and model.        │
+│ show              Display the current config file with syntax highlighting.            │
+│ edit              Open config.yaml in your default editor.                             │
+│ validate          Validate config.yaml and check for common issues.                    │
+│ resolve           Print the fully merged config YAML with all !include tags resolved.  │
+│ path              Show the resolved config file path and search locations.             │
+│ migrate           Migrate config.yaml to membership access settings.                   │
+│ fingerprint       Print the config source SHA-256, including all transitively included │
+│                   files.                                                               │
+│ install-bundle    Validate and install a complete tree; use check-applied to confirm   │
+│                   runtime reload.                                                      │
+│ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
+│                   changes, 2 error.                                                    │
+│ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
+│                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1359,6 +1380,8 @@ Changed managed trees replace the active tree only if its file names, modes, and
 This covers `.env` and files outside the YAML include graph too.
 An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
 `--force` cannot be combined with `--initialize-only`.
+`--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
+The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
 
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
@@ -1411,6 +1434,27 @@ The fingerprint identifies native YAML/include sources, so use the existing `che
 The installer advances the root config mtime on changed activation for the existing watcher.
 Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
 Preserve `TARGET.previous` until runtime confirmation succeeds.
+
+### config classify-change
+
+Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
+
+```bash
+mindroom config classify-change ./active ./candidate --json
+mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml --config staging/config.yaml
+```
+
+Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
+Directories that only appear or disappear around those files also count as sources.
+Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
+Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload).
+A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
+Each `--config` entrypoint (default `config.yaml`) must load in both trees.
+Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
+The command only reads both trees, and its results list paths, never file contents.
+
+JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
+Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
 
 ### config fingerprint and config check-applied
 

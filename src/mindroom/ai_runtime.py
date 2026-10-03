@@ -309,9 +309,10 @@ def _completed_trailing_tool_results(
         # Provider projections can insert trusted context between calls and results.
         if message.role in {"system", "developer"}:
             continue
-        # Formatting may append user-role media after a just-completed batch.
-        # At response entry real user messages must still stop this scan.
-        if after_tool_batch and message.role == "user":
+        # Formatting may append user-role media after a just-completed batch, and a paused call's
+        # result follows that media when the run resumes. Only a trailing user message is real input,
+        # so at response entry it still stops this scan.
+        if message.role == "user" and (after_tool_batch or results):
             continue
         if message.role == "tool":
             results.append(message)
@@ -837,12 +838,8 @@ def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> Non
             return
         results = _completed_trailing_tool_results(messages, context.response_turn_id, after_tool_batch=True)
         if results is None:
-            _append_queued_notice_if_needed(
-                messages=messages,
-                function_call_results=(),
-                notice_text=notice_text,
-                judged=True,
-            )
+            # Calls paused for approval or delegation leave the batch unresolved; the response that
+            # resumes it judges the completed batch, reusing this turn's decision for an unchanged queue.
             return
         await _judge_queued_notice(
             messages,

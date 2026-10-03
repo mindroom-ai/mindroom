@@ -79,6 +79,8 @@ class _SubstitutionOnlyError(Exception):
 
 def _render_text(request: Mapping[str, Any], *, memory_limited: bool) -> str:
     environment = SandboxedEnvironment(autoescape=False, undefined=StrictUndefined)
+    # `tojson` output escapes values inside YAML double quotes, and YAML rejects JSON's surrogate-pair escapes.
+    environment.policies["json.dumps_kwargs"] = {"sort_keys": True, "ensure_ascii": False}
     max_chars = request["max_chars"]
     parsed = environment.parse(request["template"])
     # Plain substitution cannot allocate, so it is safe where memory cannot be capped.

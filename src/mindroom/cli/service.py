@@ -16,6 +16,7 @@ from rich.panel import Panel
 from mindroom.constants import PROVIDER_ENV_KEYS, resolve_primary_runtime_paths
 from mindroom.runtime_env_policy import is_unset_env_value
 
+from .config import DEFAULT_API_HOST, DEFAULT_API_PORT, warn_dashboard_without_key, worker_dashboard_api_key_needed
 from .env_file import upsert_env_values
 
 if TYPE_CHECKING:
@@ -231,7 +232,7 @@ def _ask_for_login_service() -> ServiceManager | None:
 
 
 def _print_installed_service(manager: ServiceManager, result: InstallResult) -> None:
-    """Print where to check on a service that was just installed and started."""
+    """Print where to check on a service that was just installed and started, and whether its dashboard is open."""
     log_hint = f"View logs: [cyan]{manager.get_log_command()}[/cyan]"
     if result.log_dir is not None:
         log_hint = f"View logs: [cyan]{result.log_dir}/[/cyan]"
@@ -244,6 +245,29 @@ def _print_installed_service(manager: ServiceManager, result: InstallResult) -> 
             title="Service Installed",
             border_style="green",
         ),
+    )
+    _warn_if_service_dashboard_is_open(manager.get_service_environment())
+
+
+def _warn_if_service_dashboard_is_open(service_environment: Mapping[str, str]) -> None:
+    """Warn here, where someone reads it, when the service's dashboard API will listen on every interface without a key."""
+    from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
+
+    try:
+        runtime_paths = _service_runtime_paths(service_environment)
+        # With dedicated workers, the service's `mindroom run` generates a key when it starts.
+        if (
+            runtime_paths is None
+            or worker_dashboard_api_key_needed(runtime_paths)
+            or dashboard_requires_credential(runtime_paths)
+        ):
+            return
+    except ValueError:
+        # The service stops with its own error.
+        return
+    warn_dashboard_without_key(
+        f"{DEFAULT_API_HOST}:{DEFAULT_API_PORT}",
+        f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, then run [cyan]mindroom service restart[/cyan].",
     )
 
 
@@ -289,21 +313,24 @@ def restart_service() -> None:
     _print_service_action_result(manager.restart_service())
 
 
-def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
-    """Whether the installed service's runtime still waits for this machine to be paired, so its dashboard is not up yet.
+def _service_runtime_paths(service_environment: Mapping[str, str]) -> RuntimePaths | None:
+    """Return the installed service's runtime, from the environment saved in its unit (config and storage paths), not the caller's.
 
-    The service runs with the environment saved in its unit (config and storage paths), not with the caller's.
+    Returns None when no installed unit or plist holds that environment, such as after a concurrent uninstall.
     """
-    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
-
     config_path = service_environment.get("MINDROOM_CONFIG_PATH")
     if config_path is None:
-        # The unit or plist disappeared after the status check.
-        return False
+        return None
+    return resolve_primary_runtime_paths(config_path=Path(config_path), process_env=dict(service_environment))
+
+
+def _service_pairing_required(service_environment: Mapping[str, str]) -> bool:
+    """Whether the installed service's runtime still waits for this machine to be paired, so its dashboard is not up yet."""
+    from mindroom.matrix.provisioning_env import local_pairing_required  # noqa: PLC0415
+
     try:
-        return local_pairing_required(
-            resolve_primary_runtime_paths(config_path=Path(config_path), process_env=dict(service_environment)),
-        )
+        runtime_paths = _service_runtime_paths(service_environment)
+        return runtime_paths is not None and local_pairing_required(runtime_paths)
     except ValueError:
         # An undecodable .env, incomplete credentials, or an unreadable secret file stop the service with its own error.
         return False

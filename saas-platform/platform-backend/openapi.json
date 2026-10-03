@@ -405,20 +405,6 @@
         "title": "AdminListResponse",
         "type": "object"
       },
-      "AdminLogoutResponse": {
-        "description": "Admin logout response model.",
-        "properties": {
-          "success": {
-            "title": "Success",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "success"
-        ],
-        "title": "AdminLogoutResponse",
-        "type": "object"
-      },
       "AdminStatsOut": {
         "description": "Admin statistics output model.",
         "properties": {
@@ -2391,25 +2377,6 @@
           }
         },
         "summary": "Update Account Status"
-      }
-    },
-    "/admin/auth/logout": {
-      "post": {
-        "description": "Admin logout placeholder.",
-        "operationId": "admin_logout_admin_auth_logout_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdminLogoutResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Admin Logout"
       }
     },
     "/admin/instance-lifecycle": {
