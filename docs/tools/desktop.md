@@ -65,7 +65,8 @@ For applications, the local bridge starts in observe-only mode unless a person a
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
 Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
-MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and a bridge whose allowlist names either refuses to start.
+MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and saving either or naming it with `--allow-app` is refused.
+A setup saved by an earlier release that allowed either loads without it.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
 
