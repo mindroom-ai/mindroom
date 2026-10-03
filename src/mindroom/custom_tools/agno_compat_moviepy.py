@@ -77,7 +77,7 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # Reason: Agno builds each line's word clips, full-width background, and composite up front and keeps all of
 # them until encoding ends, so memory grows by megabytes per line at 1080p and long captions exhaust the primary.
 # Each line composite also starts at time zero, so every frame composites every line that has not yet ended.
-# Upstream issue: Tracking gap; caption-memory tracking has not been verified.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
 # Upstream PR: None identified.
 # Remove when: The SDK renders caption lines on demand with memory independent of the caption length.
 # Coverage: tests/test_moviepy_caption_layout.py::test_embed_captions_keeps_one_caption_line_in_memory.
@@ -85,7 +85,7 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # AGNO_COMPAT: MoviePy embed_captions names its default output from the last dot anywhere in the path.
 # Reason: Agno splits video_path at its last dot, so an extensionless video below a dotted or ./ directory
 # gets an output named after that directory and written outside it.
-# Upstream issue: Tracking gap; default-output tracking has not been verified.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
 # Upstream PR: None identified.
 # Remove when: The SDK names the default output after the video's file name, beside the video.
 # Coverage: tests/test_moviepy_video_tools.py::test_default_caption_output_lands_next_to_the_input.
