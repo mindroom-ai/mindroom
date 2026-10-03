@@ -82,6 +82,7 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1258,6 +1259,37 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     function = toolkit.async_functions["list_memories"].model_copy(deep=True)
     function.process_entrypoint()
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
+
+
+@pytest.mark.parametrize("tool_name", ["memory", "self_config", "skill_manage"])
+def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name: str) -> None:
+    """Background tool jobs authorize a direct toolkit's calls only from the construction it records."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].memory_backend = "file"
+    agent_runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    )
+
+    toolkit = build_agent_toolkit(
+        tool_name,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        agent_runtime=agent_runtime,
+        execution_identity=None,
+    )
+
+    assert toolkit is not None
+    construction = get_toolkit_construction(toolkit)
+    assert construction is not None
+    assert construction.name == tool_name
 
 
 def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:

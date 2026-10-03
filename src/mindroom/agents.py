@@ -816,15 +816,19 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "skill_manage":
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
 
-        return SkillManageTools(
-            agent_name,
-            config,
-            runtime_paths,
-            agent_workspace_skills_root(
-                runtime_paths,
+        # It keeps its own output handling, but background tool jobs still need its construction identity.
+        return bind_toolkit_construction(
+            SkillManageTools(
                 agent_name,
-                workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                config,
+                runtime_paths,
+                agent_workspace_skills_root(
+                    runtime_paths,
+                    agent_name,
+                    workspace_root=agent_runtime.workspace.root if agent_runtime.workspace is not None else None,
+                ),
             ),
+            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
         )
 
     if tool_name == "compact_context":
