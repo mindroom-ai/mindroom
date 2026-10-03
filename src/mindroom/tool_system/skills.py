@@ -403,7 +403,7 @@ def _resolve_configured_skill_roots(skill_roots: Sequence[Path] | None = None) -
 
 def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
     """Return skill listings with precedence rules applied."""
-    roots = list(roots or _get_default_skill_roots())
+    roots = list(roots) if roots is not None else _get_default_skill_roots()
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
     plugin_roots = {root.expanduser().resolve() for root in _get_plugin_skill_roots()}
