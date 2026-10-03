@@ -157,6 +157,17 @@ def test_docs_workflow_grants_pages_deployment_only_to_the_deploy_job() -> None:
     assert _job_permissions(workflow, "deploy") == {"contents": "read", "pages": "write", "id-token": "write"}
 
 
+def test_docs_site_builds_restore_no_actions_cache() -> None:
+    """Any job on main can write the Actions cache, so only pull-request docs builds, which publish nothing, use it."""
+    steps = _load_workflow("docs.yml")["jobs"]["build"]["steps"]
+    setup_uv = [step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")]
+    pull_request_only = "${{ github.event_name == 'pull_request' }}"
+
+    assert setup_uv
+    assert all(step.get("with", {}).get("enable-cache") == pull_request_only for step in setup_uv)
+    assert not any(str(step.get("uses", "")).startswith("actions/cache") for step in steps)
+
+
 # Pull request runs share one group per ref; every other event gets its own group, so it is never cancelled.
 PULL_REQUEST_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
