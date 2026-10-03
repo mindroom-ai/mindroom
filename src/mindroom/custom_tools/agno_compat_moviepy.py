@@ -29,7 +29,7 @@ _STAGING_PREFIX = "mindroom-moviepy-"
 _MAX_STAGED_VIDEO_BYTES = 1 << 30
 _MAX_STAGED_CAPTION_BYTES = 1 << 20
 # FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
-_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav,mp3,flac,aac"
+_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,flv,asf,gif,ogg,wav,mp3,flac,aac"
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
@@ -116,7 +116,7 @@ def _require_plain_media(staged: str) -> None:
         check=False,
     )
     if probe.returncode != 0:
-        msg = "Video input must be a plain media file; playlists, manifests, and unrecognized formats are refused."
+        msg = "Video input must be a supported plain media file; playlists and manifests are refused."
         raise ValueError(msg)
 
 
