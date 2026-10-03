@@ -130,6 +130,7 @@ send_email(
 `airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
 A relative `dags_dir` resolves from the agent workspace, which is also the default DAG directory.
 DAG paths follow the agent's `file_access`: with the default `workspace`, `read_dag_file()` and `save_dag_file()` refuse files outside the agent workspace, so a DAG folder elsewhere needs `file_access: unrestricted`.
+`read_dag_file()` refuses files larger than 64 MiB.
 `save_dag_file()` creates missing parent directories before writing the target DAG file.
 This tool manages DAG source files only.
 It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
