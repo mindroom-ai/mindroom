@@ -93,7 +93,7 @@ If there are no blocking findings, say APPROVE; the non-blocking lists may still
 - Wait for both reviewers before declaring the loop clean.
 - One approval is not enough if the other reviewer is still running.
 - If any reviewer says `CHANGES REQUIRED`, verify the claim before editing.
-- If the claim is real, fix it in the main thread, run focused verification, commit, push, and start a new review loop.
+- If the claim is a realistic, in-scope issue, fix it in the main thread, run focused verification, commit, push, and start a new review loop.
 - If the claim is stale or wrong, record the reason and continue evaluating the other findings.
 - Close completed subagents after their results are no longer needed.
 
@@ -104,6 +104,6 @@ Report only current facts:
 - Branch and pushed head SHA.
 - Commits made.
 - Verification run.
-- Review loop outcome.
+- Review loop outcome, including each declined finding and its one-line reason.
 - Out-of-scope findings and where they were recorded.
 - Any skipped verification and why.

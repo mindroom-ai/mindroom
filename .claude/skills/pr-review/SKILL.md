@@ -26,6 +26,7 @@ A bug or security finding without such a scenario is an edge case, for example o
 Attacks across a boundary the security posture protects are never edge cases, and findings that match an intentional behavior listed there are not issues at all.
 Edge cases do not block; list them, one line each, under **Edge cases (not blocking)**.
 Checklist items without a runtime trigger, such as duplication, structure, tests, and docs, keep the standard below.
+A missing test for an edge case is itself an edge case.
 Do not ask for mechanisms that no realistic scenario needs, such as new limits, caches, retries, fallbacks, or hardening.
 
 ## Out-of-Scope Problems

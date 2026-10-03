@@ -15,7 +15,7 @@ Treat comments as symptoms, not a patch list.
 Critically evaluate each claim before editing.
 Decide whether it is a real bug, code-quality improvement, test or docs gap, stale comment, overengineering, scope creep, edge case, or out-of-scope problem.
 
-For every real issue, identify the violated invariant, the owning module, and the intended boundary.
+For every real, in-scope issue, identify the violated invariant, the owning module, and the intended boundary.
 Then fix the root cause at that boundary.
 Prefer deleting obsolete code and tests over adding compatibility wrappers, helper bandages, dynamic fallbacks, or test-only production branches.
 
@@ -53,7 +53,7 @@ Before editing, state the grouped findings using these labels:
 - `Real bug`: Behavior is wrong, unsafe, or violates an invariant.
 - `Code-quality cleanup`: The issue is in scope and improves clarity or maintainability without changing behavior.
 - `Test/docs gap`: The implementation is acceptable but missing required verification or documentation.
-- `Overreach / scope creep`: The suggestion adds something the PR does not need, such as unnecessary abstraction or mechanisms; real problems are `Edge case` or `Out of scope` instead.
+- `Overreach / scope creep`: The suggestion adds something the PR does not need, such as unnecessary abstraction or mechanisms; suggestions about problems this PR should not fix are `Edge case` or `Out of scope` instead.
 - `Edge case`: A bug or security claim with no realistic scenario, as `pr-review` defines it; skip it with a one-line reason.
 - `Out of scope`: A real problem outside the PR's scope, as `pr-review` defines it; record it as `pr-review` describes instead of fixing it here.
 - `Incorrect / stale`: The claim does not match the current code or misunderstands the design.
