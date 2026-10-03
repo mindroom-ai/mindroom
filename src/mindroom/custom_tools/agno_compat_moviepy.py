@@ -131,12 +131,14 @@ def _caption_layers(
     layers = []
     for index, line in enumerate(subtitle_lines):
         start, duration = line["start"], line["end"] - line["start"]
-        layer = VideoClip(duration=duration)
-        mask = VideoClip(is_mask=True, duration=duration)
-        layer.size = mask.size = canvas(index).size
+        # A clip draws its first frame when constructed, which renders the line once here.
         # The rendered line keeps absolute video times, while a layer's frames count from the line start.
-        layer.frame_function = lambda t, index=index, start=start: canvas(index).get_frame(start + t)
-        mask.frame_function = lambda t, index=index, start=start: canvas(index).mask.get_frame(start + t)
+        layer = VideoClip(lambda t, index=index, start=start: canvas(index).get_frame(start + t), duration=duration)
+        mask = VideoClip(
+            lambda t, index=index, start=start: cast("VideoClip", canvas(index).mask).get_frame(start + t),
+            is_mask=True,
+            duration=duration,
+        )
         layers.append(layer.with_mask(mask).with_start(start).with_position(("center", "bottom")))
     return layers
 
