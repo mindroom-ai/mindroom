@@ -2725,6 +2725,7 @@ async def _run_api_server(
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
     from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
+    from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
@@ -2761,7 +2762,13 @@ async def _run_api_server(
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
-            await server.serve()
+            async with serve_script_gateway_listener(
+                runtime_paths,
+                host=host,
+                broker=None if script_runtime is None else script_runtime.broker,
+                log_level=log_level,
+            ):
+                await server.serve()
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
