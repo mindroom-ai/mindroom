@@ -12,6 +12,7 @@ import nio
 import pytest
 from agno.run.agent import RunOutput
 
+import mindroom.commands.handler as handler_module
 import mindroom.routing
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, command_parser, get_command_help
@@ -531,6 +532,38 @@ async def test_room_model_command_records_authorizing_sender(tmp_path: Path) -> 
     state = resolve_room_model_override(context.runtime_paths, ROOM_ID, configured_models=context.config.models)
     assert state.active == "large"
     assert state.set_by == "@bridge-admin:localhost"
+
+
+@pytest.mark.asyncio
+async def test_room_model_command_ignores_room_power_of_an_entity_posting_for_a_human(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent's own room power must not authorize a command it posted on a human's behalf."""
+    client = AsyncMock()
+    client.room_get_state_event.return_value = _power_levels_response(users={"@agent:localhost": 100})
+    context = _room_model_context(tmp_path, client)
+    monkeypatch.setattr(
+        handler_module,
+        "persisted_bot_user_ids",
+        lambda _runtime_paths: frozenset({"@agent:localhost"}),
+    )
+
+    await handle_command(
+        context=context,
+        room=SimpleNamespace(room_id=ROOM_ID),
+        event=_room_model_event("@agent:localhost", "!room_model large"),
+        command=Command(
+            type=CommandType.ROOM_MODEL,
+            args={"args_text": "large"},
+            raw_text="!room_model large",
+        ),
+        requester_user_id="@user:localhost",
+    )
+
+    state = resolve_room_model_override(context.runtime_paths, ROOM_ID, configured_models=context.config.models)
+    assert state.active is None
+    assert context.send_response.await_args.args[0] == "❌ Room admin only."
 
 
 @pytest.mark.asyncio
