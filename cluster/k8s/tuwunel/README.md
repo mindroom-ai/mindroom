@@ -110,6 +110,7 @@ tuwunel:
 - Strings are rendered with `tpl`, so shared values can derive environment-specific names such as room aliases from `tuwunel.serverName`.
 - A `null` value omits an option set by an earlier values file.
 - Options the chart already renders, such as `server_name`, `port`, or `well_known`, are rejected; use their dedicated values.
+- An option set both here and in `tuwunel.extraConfig`, as a `[global]` key or a `[global.<key>]` table, is rejected, because the duplicate would make `tuwunel.toml` invalid; move each option to one place.
 - Arrays of tables still belong in `tuwunel.extraConfig`.
 
 ## Custom Config
