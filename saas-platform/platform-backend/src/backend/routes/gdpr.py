@@ -325,7 +325,6 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allo
         raise HTTPException(status_code=409, detail="This account deletion can no longer be cancelled")
     # The account is active again, so a cached pending-deletion sign-in must not limit its next request.
     invalidate_account_auth_cache(account_id)
-    instance_lifecycle.restart_teardown_grace(account_id)
     try:
         await instance_lifecycle.resume_account_billing(account_id)
     except stripe.StripeError:
@@ -336,6 +335,9 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allo
         )
     else:
         billing = ""
+    # After the billing resume, so a database error here cannot skip it, and before the reconcile, so held instances
+    # whose teardown date passed during the deletion are not uninstalled.
+    instance_lifecycle.restart_teardown_grace(account_id)
     # Instances held for the deletion restart only while their subscription is entitled.
     restart_errors = await instance_lifecycle.reconcile_account_instances(account_id)
     instances = (

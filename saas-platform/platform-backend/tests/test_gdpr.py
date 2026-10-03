@@ -438,6 +438,21 @@ class TestGDPREndpoints:
         assert "still ends at the end of its billing period" in message
         assert "Restarting your hosted instances failed and is retried automatically." in message
 
+    def test_cancel_deletion_resumes_billing_even_when_the_teardown_grace_restart_fails(
+        self, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """The restore committed, so a retry answers not_pending; a database error must not skip the billing resume."""
+        deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        _account_deleted_at(mock_supabase, deleted_at)
+        mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=True)
+        mock_lifecycle.restart_teardown_grace.side_effect = RuntimeError("database unavailable")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
+
+        assert response.status_code == 500
+        mock_lifecycle.resume_account_billing.assert_awaited_once_with("00000000-0000-0000-0000-000000000002")
+
     def test_cancel_deletion_reports_a_restore_the_database_refused(
         self, client, mock_verify_user, mock_supabase, mock_lifecycle
     ):
