@@ -86,7 +86,7 @@ A crash leaves the same pending state as orderly shutdown, and in both the inter
 When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and gives the new attempt that account in a transient instruction not to repeat calls that may already have taken effect.
 Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the instruction.
 The account never enters the conversation history later turns read.
-Instead every streamed edit of the new attempt carries the stopped attempts' tool calls in `io.mindroom.earlier_tool_trace`, so a stop during the new attempt passes them on again; their text is not carried.
+Instead every streamed edit of the new attempt carries the stopped attempts' tool calls in `io.mindroom.earlier_tool_trace`, so a crash or shutdown during the new attempt passes them on again; their text is not carried, and a stop that leaves a terminal status, such as a user stop, does not carry them.
 A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, instead gets an instruction warning that side effects may already have happened.
 A replayed turn whose earlier attempt left no reply to adopt, such as a silent scheduled run or a turn whose placeholder was never sent, gets no instruction.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
