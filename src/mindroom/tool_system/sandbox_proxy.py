@@ -1011,6 +1011,7 @@ def _call_proxy_sync(
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
+            worker_grantable_credentials=manager_context.worker_grantable_credentials,
         )
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
         from mindroom.tool_system.media_transport import (  # noqa: PLC0415
