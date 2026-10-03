@@ -800,7 +800,13 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
         users=["@alice:example.org"],
     )
     identity = ToolExecutionIdentity(
-        "matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent"
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        None,
+        None,
+        "parent",
     )
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
