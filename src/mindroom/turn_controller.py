@@ -783,6 +783,28 @@ class TurnController:
             reservation_owner=reservation_owner,
         )
 
+    def _reply_target_event_id(self, event: PreparedIngress) -> str:
+        """Return the message a response to this event answers: a finished reply's original, else the event."""
+        return self.deps.ingress.entity_final_reply_original_event_id(event) or event.event_id
+
+    def _mentioned_entity_final_reply(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageFormatted,
+    ) -> nio.RoomMessageFormatted | None:
+        """Return another entity's completed edit as its reply when that reply mentions this entity."""
+        final_reply = self.deps.ingress.entity_final_reply(event)
+        if final_reply is None:
+            return None
+        _mentioned_agents, am_i_mentioned, _has_non_agent_mentions = check_agent_mentioned(
+            final_reply.source,
+            self.deps.matrix_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room=room,
+        )
+        return final_reply if am_i_mentioned else None
+
     async def _agent_mention_may_wake(
         self,
         room: nio.MatrixRoom,
@@ -1057,7 +1079,7 @@ class TurnController:
                 hook_source=hook_source,
                 message_received_depth=message_received_depth,
                 trust_internal_payload_metadata=resolved_trust_internal_payload_metadata,
-                discovery_event_id=self.deps.ingress.router_relay_original_event_id(event),
+                discovery_event_id=self.deps.ingress.discovery_event_id(event),
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
             ),
             room=room,
@@ -1292,7 +1314,7 @@ class TurnController:
             target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
                 thread_id=coalesced_thread_id,
-                reply_to_event_id=event.event_id,
+                reply_to_event_id=self._reply_target_event_id(event),
                 event_source=context_event.source,
             )
         else:
@@ -1302,7 +1324,7 @@ class TurnController:
                 else self.deps.resolver.build_message_target(
                     room_id=room.room_id,
                     thread_id=context.thread_id,
-                    reply_to_event_id=event.event_id,
+                    reply_to_event_id=self._reply_target_event_id(event),
                     event_source=event.source,
                 )
             )
@@ -2231,7 +2253,7 @@ class TurnController:
         return self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=coalescing_key.thread_id,
-            reply_to_event_id=event.event_id,
+            reply_to_event_id=self._reply_target_event_id(event),
             event_source=context_event.source,
         ).lifecycle_key
 
@@ -2301,7 +2323,12 @@ class TurnController:
         }
         if not isinstance(event.body, str) or (is_nonterminal_stream and event_info.is_edit):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
-        prechecked_event = await self._precheck_dispatch_event(room, event, is_edit=event_info.is_edit)
+        # Another entity's finished reply arrives as an edit of its placeholder; its mentions dispatch like a message.
+        final_reply = self._mentioned_entity_final_reply(room, event) if event_info.is_edit else None
+        if final_reply is not None:
+            event = final_reply
+        is_edit = event_info.is_edit and final_reply is None
+        prechecked_event = await self._precheck_dispatch_event(room, event, is_edit=is_edit)
         if prechecked_event is None:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if is_nonterminal_stream:
@@ -2325,12 +2352,12 @@ class TurnController:
                 receipt_time=receipt_time,
             )
         try:
-            if event_info.is_edit:
+            if is_edit:
                 await reservation_owner.release()
                 handed_off = await self._handle_edit_event(room, prechecked_event, event_info)
                 return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
-            routed_alias = self.deps.ingress.router_relay_original_event_id(event)
-            claim_aliases = (routed_alias,) if routed_alias else ()
+            discovery_alias = self.deps.ingress.discovery_event_id(event)
+            claim_aliases = (discovery_alias,) if discovery_alias else ()
             pending_turn = TurnRecord.create(
                 [event.event_id],
                 discovery_event_ids=claim_aliases,

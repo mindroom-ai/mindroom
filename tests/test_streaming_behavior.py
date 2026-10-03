@@ -311,9 +311,8 @@ class TestStreamingBehavior:
             requester_user_id: str | None = None,
             enable_streaming: bool = True,
         ) -> bool:
-            _ = (client, room_id, enable_streaming)
-            # Helper streams when mentioned by user
-            return requester_user_id == "@user:localhost"
+            _ = (client, room_id, requester_user_id)
+            return enable_streaming
 
         mock_should_use_streaming.side_effect = side_effect
 
@@ -398,52 +397,41 @@ class TestStreamingBehavior:
             await helper_bot._on_message(mock_room, user_event)
             await drain_coalescing(helper_bot)
 
-        # Verify helper bot sent initial message and edit
-        assert helper_bot.client.room_send.call_count >= 1  # At least initial message
+        # The helper posted a placeholder, streamed into it, and delivered its final text as an edit.
+        placeholder_content, streaming_edit_content, final_edit_content = (
+            call.kwargs["content"] for call in helper_bot.client.room_send.call_args_list
+        )
+        assert final_edit_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
 
-        # Simulate the initial message from helper while the stream is still active.
-        initial_event = MagicMock(spec=nio.RoomMessageText)
-        initial_event.sender = "@mindroom_helper:localhost"
-        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
-        initial_event.event_id = "$helper_response_123"
-        initial_event.server_timestamp = 1234567890
-        initial_event.source = {
-            "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
-                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
-            },
-        }
+        def helper_event(event_id: str, content: dict[str, object]) -> nio.RoomMessageText:
+            return nio.RoomMessageText.from_dict(
+                {
+                    "content": content,
+                    "event_id": event_id,
+                    "sender": "@mindroom_helper:localhost",
+                    "origin_server_ts": 1234567890,
+                    "room_id": "!test:localhost",
+                    "type": "m.room.message",
+                },
+            )
 
-        # Process initial message - calculator should NOT respond while the stream is active.
-        with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
-            mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
-
-            calc_bot.logger.info("processing_initial_message", body=initial_event.body)
-
-            await calc_bot._on_message(mock_room, initial_event)
+        # The user the helper answered is still in the room.
+        mock_room.users = {"@user:localhost": MagicMock()}
+        mock_room.invited_users = {}
+        for event in (
+            helper_event("$helper_response_123", placeholder_content),
+            helper_event("$helper_streaming_edit", streaming_edit_content),
+        ):
+            await calc_bot._on_message(mock_room, event)
             await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0  # Calculator didn't process anything
+        assert mock_ai_response.call_count == 0
 
-        # Now simulate the final message
-        final_event = MagicMock(spec=nio.RoomMessageText)
-        final_event.sender = "@mindroom_helper:localhost"
-        final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
-        final_event.event_id = "$helper_final"
-        final_event.server_timestamp = 1234567891
-        final_event.source = {
-            "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
-                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            },
-        }
-
-        # Process final message - calculator SHOULD respond now
-        with patch("mindroom.conversation_resolver.check_agent_mentioned") as mock_check:
-            mock_check.return_value = ([MatrixID.parse("@mindroom_calculator:localhost")], True, False)
-            await calc_bot._on_message(mock_room, final_event)
+        # The final edit wakes the calculator once, however often it is delivered.
+        final_edit = helper_event("$helper_final_edit", final_edit_content)
+        for _ in range(2):
+            await calc_bot._on_message(mock_room, final_edit)
             await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 2  # thinking + final

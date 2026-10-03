@@ -141,6 +141,7 @@ The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise r
 MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the requester must send those personally.
 A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the requester by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
+A mention counts once the reply is finished, including a streamed reply whose final text replaces its placeholder, and never in a reply that was stopped or failed.
 A mention in an agent's or team's message wakes the mentioned entity only while the person it acts for is a joined member of the room; an invited or departed requester, or membership MindRoom cannot confirm, wakes nobody.
 Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, 50 by default, and continue after the next message from a person.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.

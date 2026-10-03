@@ -97,7 +97,9 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
+from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -1928,6 +1930,64 @@ def _joined_room(config: Config, *entity_names: str, requester: str = _OWNER) ->
     return room
 
 
+def _final_reply_edit(
+    config: Config,
+    *,
+    placeholder_id: str,
+    event_id: str,
+    status: str = constants.STREAM_STATUS_COMPLETED,
+    body: str = "@general please take this over",
+) -> nio.RoomMessageText:
+    """Return research's edit that delivers its reply for the owner into its placeholder, as delivery builds it."""
+    content = build_edit_event_content(
+        event_id=placeholder_id,
+        new_content={
+            "body": body,
+            "msgtype": "m.text",
+            "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+        },
+        new_text=body,
+        extra_content={constants.ACTING_REQUESTER_KEY: _OWNER, constants.STREAM_STATUS_KEY: status},
+    )
+    return _final_reply_edit_event(config, content, event_id=event_id)
+
+
+def _final_reply_edit_event(config: Config, content: dict[str, Any], *, event_id: str) -> nio.RoomMessageText:
+    """Return research's edit event carrying this content."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": _entity_user_id(config, "research"),
+            "origin_server_ts": 1_000_001,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
+def _admit_placeholder(harness: _Harness, placeholder_id: str, thread_id: str | None = _THREAD_ROOT) -> None:
+    """Record the placeholder as admitted into this thread, or at room level."""
+    resolver = harness.controller.deps.resolver
+    resolver.deps = replace(resolver.deps, relations=make_relation_lookup(threads={placeholder_id: thread_id}))
+
+
+class _NoEditRegeneration:
+    """Edit regenerator that records the edits it receives and regenerates nothing."""
+
+    def __init__(self) -> None:
+        self.edit_event_ids: list[str] = []
+
+    async def handle_message_edit(
+        self,
+        room: nio.MatrixRoom,  # noqa: ARG002
+        event: nio.RoomMessageText,
+        event_info: EventInfo,  # noqa: ARG002
+        requester_user_id: str,  # noqa: ARG002
+    ) -> None:
+        self.edit_event_ids.append(event.event_id)
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_mentioned_agent_acts_for_the_human_an_agent_reply_was_written_for(tmp_path: Path) -> None:
@@ -2120,6 +2180,103 @@ async def test_agents_stop_waking_each_other_at_the_limit_until_a_person_writes(
     await harness.deliver(room, resumed)
 
     assert [request.response_envelope.source_event_id for request in harness.runner.requests] == [resumed.event_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("placeholder_thread", [_THREAD_ROOT, None])
+async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_once(
+    tmp_path: Path,
+    placeholder_thread: str | None,
+) -> None:
+    """A reply delivered as the final edit of its placeholder dispatches its mention once, answering that reply."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    research = _entity_user_id(config, "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id, placeholder_thread)
+    placeholder = _entity_reply_event(config, sender=research, acting_requester=_OWNER, event_id=placeholder_id)
+    placeholder.source["content"]["body"] = "Thinking..."
+    placeholder.source["content"][constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_PENDING
+    if placeholder_thread is not None:
+        placeholder.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": placeholder_thread}
+    final_edit = _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost")
+
+    await harness.deliver(room, placeholder)
+    assert harness.runner.requests == []
+    await harness.deliver(room, final_edit)
+    await harness.deliver(room, final_edit)
+    await harness.deliver(
+        room,
+        _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$regenerated:localhost"),
+    )
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == _OWNER
+    assert request.response_envelope.origin.acting_sender_id == research
+    # The answer replies to the finished reply, in its thread, or in a new thread on it.
+    assert request.reply_to_event_id == placeholder_id
+    assert request.response_envelope.target.resolved_thread_id == (placeholder_thread or placeholder_id)
+    assert request.sources.logical_source_event_ids == (final_edit.event_id,)
+    assert request.sources.discovery_event_ids == (placeholder_id,)
+    assert "please take this over" in request.prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("status", [constants.STREAM_STATUS_CANCELLED, constants.STREAM_STATUS_ERROR])
+async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
+    """Only a completed reply hands off; a stopped or failed one stays an ordinary edit."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    regenerator = _NoEditRegeneration()
+    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    room = _joined_room(config, "general", "research")
+    _admit_placeholder(harness, "$placeholder:localhost")
+    edit = _final_reply_edit(
+        config,
+        placeholder_id="$placeholder:localhost",
+        event_id="$stopped:localhost",
+        status=status,
+    )
+
+    await harness.deliver(room, edit)
+
+    assert harness.runner.requests == []
+    assert regenerator.edit_event_ids == [edit.event_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_agent_reply_finished_through_a_sidecar_still_acts_for_its_requester(tmp_path: Path) -> None:
+    """An oversized final reply keeps its requester inside the replacement content, where the handoff reads it."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id)
+    uploads: list[bytes] = []
+
+    async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
+        uploads.append(kwargs["data_provider"](None, None).read())
+        return nio.UploadResponse("mxc://localhost/final-reply"), None
+
+    upload_client = make_matrix_client_mock()
+    upload_client.upload = AsyncMock(side_effect=upload)
+    body = "@general please take this over. " + "Details. " * 4_000
+    edit = _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost", body=body)
+    sidecar_content = await prepare_large_message(upload_client, _ROOM_ID, edit.source["content"], room_encrypted=False)
+    assert constants.ACTING_REQUESTER_KEY not in sidecar_content
+    harness.controller._client().download = AsyncMock(
+        return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]),
+    )
+
+    await harness.deliver(room, _final_reply_edit_event(config, sidecar_content, event_id="$final:localhost"))
+
+    assert [request.user_id for request in harness.runner.requests] == [_OWNER]
+    assert harness.runner.requests[0].prompt.count("Details.") == 4_000
 
 
 @pytest.mark.asyncio
