@@ -338,13 +338,16 @@ Several volumes and Secrets only work together, so plan backups as restore units
 | Volume | Values | Contents |
 |--------|--------|----------|
 | `<fullname>-storage` | `storage` | The storage root (`MINDROOM_STORAGE_PATH`, default `/app/agent_data`): `matrix_state.yaml` with each agent's Matrix account, device ID, and access token; `tracking/` with the event journal binding file and, with `eventCache.backend: sqlite`, the journal itself; `credentials/` and `private_oauth/` credential files and OAuth stores; agent and team sessions, learning, memory, and workspaces; `control_state/`; `knowledge_db/` and `knowledge_git/`; `logs/`; and `encryption_keys/` and `sync_continuity/` unless `stateStorage` is enabled |
-| `<fullname>-state` | `stateStorage` | When enabled, the `encryption_keys/` and `sync_continuity/` directories: each agent's Matrix device store, which holds its E2EE keys and its Matrix sync position, and the pending join and decrypt fences |
-| `<volumeName>-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal: admitted Matrix events, turn records, the response outbox, and history debt |
+| `<fullname>-state` | `stateStorage` | When enabled, the `encryption_keys/` and `sync_continuity/` directories: each agent's Matrix device store, which holds its E2EE keys and its Matrix sync position, and the pending join and decrypt fences; also each `stateStorage.extraSubPaths` directory, such as `tracking/` |
+| `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
+| `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
+| `<volumeName>-<fullname>-event-cache-postgres-0`, default `data-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal: admitted Matrix events, turn records, the response outbox, and history debt |
 | `<server.name>-data`, default `agent-vault-data` | `workers.kubernetes.agentVault.server.persistence` | The chart-managed Agent Vault server's data, protected by its master password |
-| `<approved egress name>-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
+| `<approved egress name>-data`, default `<fullname>-egress-proxy-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
 | Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
-A session store relocated with `MINDROOM_SESSION_STORAGE_PATH` onto an extra volume belongs with the storage claim.
+Data that `stateStorage`, `sessionStorage`, or `knowledgeStorage` mount lives on those volumes instead of the storage claim.
+The sessions volume, like a session store relocated with `MINDROOM_SESSION_STORAGE_PATH` onto another volume, belongs with the storage claim.
 [Docker Data Persistence](https://docs.mindroom.chat/deployment/docker/#data-persistence) describes the storage root's directories in more detail.
 
 ### Restore units
@@ -360,7 +363,8 @@ Restore each of these sets together, from the same point in time:
   `tracking/event_journal_binding.json` must name the journal database's generation, or startup refuses the journal as never used or as a different journal.
   The journal also records, per agent, the last Matrix sync batch admitted from that agent's device store and rejects batches out of sequence, so the journal and `encryption_keys/` must come from the same moment.
   Keep `matrix_state.yaml` and `sync_continuity/` with them.
-  When restoring the chart-managed PostgreSQL volume where `<fullname>-event-cache-postgres-auth` no longer exists, restore that Secret too, or provide the original password through `eventCache.postgres.auth.password` or `eventCache.postgres.auth.existingSecret`, because the restored data directory keeps the password it was created with while the chart otherwise generates a new random one.
+  A restored chart-managed PostgreSQL volume keeps the password it was created with, while the chart generates a new random one when `<fullname>-event-cache-postgres-auth` no longer exists, so back up that password with the volume.
+  To keep it, set `eventCache.postgres.auth.password` to it, or set both `eventCache.postgres.auth.existingSecret` and `eventCache.databaseUrl.existingSecret` to a Secret holding the password and the matching connection URL, because the auth Secret alone leaves the runtime without a database URL.
 - **Homeserver and runtime Matrix state.**
   Each agent's access token and device exist on both sides, and the homeserver holds the device's published encryption keys.
   If the homeserver no longer knows an agent's stored token or device, or reports a different one, that agent does not start.
@@ -373,11 +377,12 @@ Per-volume snapshots taken at different times while MindRoom runs are not a cons
 Take them from one quiet point instead:
 
 1. Scale the runtime Deployment to zero and wait until its Pod has terminated, then scale dedicated worker Deployments (label `mindroom.ai/worker-id`) to zero and wait until their Pods have terminated, because workers write agent workspaces to the storage claim and a terminating Pod can still write.
-2. Snapshot the storage claim, the state claim, and the event journal volume, or dump the journal database with `pg_dump`.
+2. Snapshot the storage claim, the sessions claim if enabled, the state claim, and the event journal volume, or dump the journal database with `pg_dump`.
+   When the homeserver belongs to the same restore set, back it up in this window too, as described below for the Tuwunel volume.
 3. Once the snapshots are taken or the dump has finished, scale the runtime back up; it recreates workers on demand.
 
 A storage-level group snapshot that captures all coupled volumes at the same instant behaves like the whole runtime crashing at that instant, which the journal is designed to recover from: a batch committed before a crash is recognized when the device store delivers it again.
-The Agent Vault volume and the approved egress volume are not coupled to the journal and can be snapshotted on their own schedules.
+The Agent Vault, approved egress, and knowledge volumes are not coupled to the journal and can be snapshotted on their own schedules.
 For the Tuwunel volume, prefer an offline snapshot or Tuwunel's own database backups, since copying the files of a running RocksDB database does not produce a consistent copy, and Tuwunel's online backups do not include media; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
 
 ### Rebuildable data
@@ -388,15 +393,16 @@ For the Tuwunel volume, prefer an offline snapshot or Tuwunel's own database bac
 - `logs/` only holds runtime log files.
 - The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`, while static allowlists come from values.
 
-Everything else on the storage, state, and journal volumes is not rebuildable.
+Everything else on the storage, sessions, state, and journal volumes is not rebuildable.
 
 ### Restoring
 
-1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
+1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
    A PersistentVolumeClaim restored under the StatefulSet's claim name, `<volumeName>-<fullname>-event-cache-postgres-0`, is adopted by the chart-managed PostgreSQL; with an external database, restore the database and keep its URL Secret.
-2. Recreate the Secrets with their original values, including the credentials encryption key, the PostgreSQL auth Secret, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
+   To restore a `pg_dump` instead, install with a new journal volume and load the dump into it; until then the runtime refuses the empty database as never used.
+2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
 3. Start Tuwunel first, then the runtime.
-   `The bound Matrix device store is missing` or `Matrix stream changed` in the runtime log means the device stores do not match the journal, and an event journal binding error means the binding file and journal database do not match; restore the matching backups rather than deleting state, because automatic device replacement is unsupported.
+   `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError` in the runtime log means the device stores do not match the journal, and an event journal binding error means the binding file and journal database do not match; restore the matching backups rather than deleting state, because automatic device replacement is unsupported.
 
 See [Moving a journal safely](https://docs.mindroom.chat/cli/#moving-a-journal-safely) for copying or adopting a journal database, and [Device recovery after the upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/#device-recovery-after-the-upgrade) for device-store recovery.
 
