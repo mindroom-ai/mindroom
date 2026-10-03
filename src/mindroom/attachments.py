@@ -1224,7 +1224,7 @@ async def _register_thread_history_media_attachment(
     event: FileOrVideoMessageEvent | ImageMessageEvent,
     may_download: bool,
 ) -> tuple[AttachmentRecord | None, bool]:
-    """Return the event's attachment record, if any, and whether it was downloaded for it."""
+    """Return the event's attachment record, if any, and whether a download was attempted for it."""
     existing_record = await run_blocking_until_complete(
         partial(
             _load_existing_context_attachment,
