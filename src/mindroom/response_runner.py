@@ -3603,7 +3603,11 @@ class ResponseRunner:
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )
-        await self._persist_interrupted_recorder_off_loop(
+        # A failed write raises: the sources are still pending, so the turn
+        # retries instead of settling without the record that keeps its tools
+        # from running twice.
+        await asyncio.to_thread(
+            self._persist_interrupted_turn,
             recorder=recorder,
             session_scope=history_scope,
             session_id=resolved_target.session_id,

@@ -262,3 +262,22 @@ async def test_team_reply_is_recorded_in_its_team_history(tmp_path: Path) -> Non
     assert run.team_id == "team_general_helper"
     assert run.metadata["mindroom_replay_state"] == "interrupted"
     assert not await bot.journal_principal().is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_failed_replay_record_leaves_the_turn_pending(tmp_path: Path) -> None:
+    """Without its replay record the note would let tools run twice, so the turn stays owed."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    with (
+        patch.object(runner, "_persist_interrupted_turn", side_effect=RuntimeError("database is locked")),
+        pytest.raises(RuntimeError, match="database is locked"),
+    ):
+        await _replay(bot, request, _streamed())
+
+    store = bot.journal_principal()
+    assert await store.is_pending("$source")
+    assert await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
+    assert not bot.pending_sync_restart_retry_room_ids
