@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template
 
@@ -70,6 +72,18 @@ def test_default_client_config_is_unchanged_without_structured_values() -> None:
         "allowCustomHomeservers": False,
         "hashRouter": {"enabled": False, "basename": "/"},
     }
+
+
+def test_config_checksum_hashes_only_the_rendered_config_map() -> None:
+    """Template whitespace around the ConfigMap must not change checksum/config and roll existing client pods."""
+    completed = _run_helm_template(CLIENT_CHART, release_name="mindroom-client")
+    completed.check_returncode()
+    config_map = completed.stdout.split("# Source: mindroom-client/templates/configmap-config.yaml\n", 1)[1]
+    config_map = config_map.split("\n---\n", 1)[0].rstrip("\n") + "\n"
+    deployment = next(doc for doc in yaml.safe_load_all(completed.stdout) if doc and doc["kind"] == "Deployment")
+
+    checksum = deployment["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+    assert checksum == hashlib.sha256(config_map.encode()).hexdigest()
 
 
 def test_structured_values_merge_over_the_default_config_across_values_files(tmp_path: Path) -> None:
