@@ -517,7 +517,7 @@ generate_text_file("Plain text export", filename="notes.txt")
 `visualization` exposes `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
 The upstream toolkit switches matplotlib to the non-interactive `Agg` backend.
 Each chart function accepts dict-like data, list-based data, or JSON strings, normalizes the data, saves a PNG image, and returns a JSON payload with the file path and status.
-A chart's `filename` must be a plain file name; when it is omitted, the chart is numbered by type, such as `bar_chart_3.png`.
+A chart's `filename` must be a plain file name; when it is omitted, the chart is named after its type and numbered from the count of files already in `output_dir`, such as `bar_chart_3.png`.
 Charts replace an existing file of the same name without following links, and `output_dir` is created inside the workspace when it is missing.
 Agents without a workspace cannot save charts.
 `visualization` defaults to primary execution.
