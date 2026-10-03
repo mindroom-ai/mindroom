@@ -1721,20 +1721,31 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    @pytest.mark.parametrize(
+        "sidecar",
+        [
+            None,
+            '{"body": "x", "a": ' + "[" * 100_000 + "]" * 100_000 + "}",
+            '{"body": "x", "a": ' + "1" * 5_000 + "}",
+        ],
+        ids=["missing", "nested_past_recursion_limit", "integer_over_digit_limit"],
+    )
     async def test_an_unreadable_attachment_is_marked_incomplete_and_never_fetched_again(
         self,
         alice: PrincipalStore,
+        sidecar: str | None,
     ) -> None:
-        """A failed fetch settles the message as a preview that says it is incomplete.
+        """A failed fetch or parse settles the message as a preview that says it is incomplete.
 
-        Anyone who can post can attach a sidecar that never resolves. Keeping
-        the debt would download it again on every strict read and fail every
-        one of them, so the conversation could never be read again. The notice
-        keeps the truncated body from passing for the whole message.
+        Anyone who can post can attach a sidecar that never resolves, including
+        well-formed JSON that the parser still refuses. Keeping the debt would
+        download it again on every strict read and fail every one of them, so
+        the conversation could never be read again. The notice keeps the
+        truncated body from passing for the whole message.
         """
         source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
         await admit_all(alice, [source])
-        client = FakeClient(events={"$long": source})
+        client = FakeClient(events={"$long": source}, sidecars={} if sidecar is None else {"mxc://s/gone": sidecar})
         reader = await self._reader(alice, client)
 
         first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)

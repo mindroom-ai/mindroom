@@ -51,7 +51,11 @@ def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | Non
     """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
     try:
         payload = json.loads(payload_json)
-    except json.JSONDecodeError:
+    except (RecursionError, ValueError):
+        # Whoever posted the message chose these bytes. Besides malformed JSON
+        # (a ``ValueError``), well-formed JSON nested past the recursion limit or
+        # holding an integer over the digit limit raises too, and must leave the
+        # sidecar unresolved rather than fail the read.
         return None
     if not isinstance(payload, dict):
         return None

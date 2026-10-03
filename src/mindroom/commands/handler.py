@@ -26,6 +26,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import (
     configured_routable_entity_ids_for_room,
     entity_identity_registry,
+    persisted_bot_user_ids,
 )
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
@@ -260,6 +261,14 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     plugin_label = "plugin" if plugin_count == 1 else "plugins"
     active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
     return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
+
+
+def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, requester_user_id: str) -> str:
+    """Return the sender whose room power may authorize a room-admin command besides the requester."""
+    # A managed entity's own room power never authorizes a command it posted for a human.
+    if event.sender in persisted_bot_user_ids(context.runtime_paths):
+        return requester_user_id
+    return event.sender
 
 
 def _room_has_only(config: Config, room: nio.MatrixRoom, member_ids: set[str]) -> bool:
@@ -537,7 +546,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.THREAD_MODE:
@@ -547,7 +556,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             runtime_paths=context.runtime_paths,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.ENCRYPT:
@@ -556,7 +565,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             client=context.client,
             room_id=room.room_id,
             requester_user_id=requester_user_id,
-            sender_user_id=event.sender,
+            sender_user_id=_room_admin_sender(context, event, requester_user_id),
         )
 
     elif command.type == CommandType.E2EE:

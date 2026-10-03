@@ -18,6 +18,7 @@ _CODE_RUNNING_JOBS = (
     ("markdown-code-runner.yml", "markdown-code-runner"),
     ("pytest.yml", "test"),
     ("release.yml", "build"),
+    ("release.yml", "build_macos_helper"),
     ("security-scan.yml", "scan"),
     ("smoke-stacks.yml", "smoke"),
     ("tach.yml", "check"),

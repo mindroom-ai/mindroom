@@ -8,6 +8,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import textwrap
 from contextlib import closing
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -1266,6 +1267,17 @@ def test_platform_chart_trusts_forwarded_client_addresses_only_from_private_netw
     )
 
     assert config["data"]["TRUSTED_PROXY_CIDRS"] == "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+
+def test_reference_ingress_sets_x_real_ip_from_the_client_connection() -> None:
+    """Clients reach the node directly, so the trusted controller must not take their address from their headers."""
+    terraform = Path("cluster/terraform/terraform-k8s/kube.tf").read_text(encoding="utf-8")
+    module = _hcl_block(terraform, 'module "kube-hetzner"')
+    values = yaml.safe_load(textwrap.dedent(module.split("nginx_values = <<-EOT\n", 1)[1].split("\n  EOT", 1)[0]))
+
+    assert values["controller"]["config"]["use-forwarded-headers"] == "false"
+    assert values["controller"]["config"]["use-proxy-protocol"] == "false"
+    assert values["controller"]["service"]["externalTrafficPolicy"] == "Local"
 
 
 def test_platform_chart_can_pin_frontend_and_backend_images_separately() -> None:

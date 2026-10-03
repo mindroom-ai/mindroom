@@ -56,11 +56,40 @@ jobs:
           # A retried release must reach the macOS job, which waits for this one.
           skip-existing: true
 
+  build_macos_helper:
+    name: Build macOS desktop helper
+    # Helper build code runs on its own runner, never beside the signing and release secrets.
+    # It starts after PyPI publishing so it cannot touch this run's wheel artifact before it is published.
+    needs: deploy
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.release_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - name: Build desktop helper
+        run: macos/build-desktop-helper.sh
+      # Artifacts drop symlinks and executable bits, so ship the bundle as a tarball.
+      - name: Archive desktop helper
+        run: tar -C dist/macos/desktop-helper/dist -cf "$RUNNER_TEMP/desktop-helper.tar" "MindRoom Desktop Helper.app"
+      - name: Upload desktop helper
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: macos-desktop-helper
+          path: ${{ runner.temp }}/desktop-helper.tar
+          if-no-files-found: error
+
   build_macos_app:
     name: Build and publish macOS app
     # The app installs the runtime release matching its own version, so publish
-    # it only after that version is on PyPI.
-    needs: deploy
+    # it only after that version is on PyPI, which the helper job waits for.
+    needs: build_macos_helper
     runs-on: macos-latest
     timeout-minutes: 45
     permissions:
@@ -84,9 +113,15 @@ jobs:
         run: git lfs pull
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
-      # Build the Python helper before the signing identity and Apple secrets exist in this job.
-      - name: Build desktop helper
-        run: macos/build-desktop-helper.sh
+      - name: Download desktop helper
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: macos-desktop-helper
+          path: ${{ runner.temp }}
+      - name: Unpack desktop helper
+        run: |
+          mkdir -p dist/macos/desktop-helper/dist
+          tar -xf "$RUNNER_TEMP/desktop-helper.tar" -C dist/macos/desktop-helper/dist
       - name: Import Developer ID certificate
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
         with:
