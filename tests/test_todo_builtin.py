@@ -495,6 +495,29 @@ todos:
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
 
 
+def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path: Path) -> None:
+    """Jinja in priority and depends_on values should be validated after rendering, like every other value."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "templated-fields",
+        _template_text(
+            "templated-fields",
+            '  - title: One\n  - title: Two\n    priority: "{{ PRIORITY }}"\n    depends_on: ["{{ DEP }}"]\n',
+        ),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "high", "DEP": 1})
+        with pytest.raises(ValueError, match=r"document validation failed: todos\.1\.priority"):
+            tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "urgent", "DEP": 1})
+
+    first, second = _read_todos(config)["items"]
+    assert second["priority"] == "high"
+    assert second["depends_on"] == [first["id"]]
+
+
 def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:
     """Template expansion should reject cyclic dependency graphs before writing state."""
     config = _config(tmp_path)
