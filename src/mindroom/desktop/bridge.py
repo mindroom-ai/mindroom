@@ -624,7 +624,7 @@ class DesktopBridge:
             return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
         return success_response(command, result=execution.result, screenshot=screenshot)
 
-    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:  # noqa: PLR0911
+    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
         try:
             return await self._execute(command)
         except DesktopEmergencyStopError as exc:
