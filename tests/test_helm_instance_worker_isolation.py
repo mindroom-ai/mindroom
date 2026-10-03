@@ -3470,6 +3470,60 @@ def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:
     assert "initContainers" not in pod_spec
 
 
+def test_runtime_chart_runs_runtime_image_containers_as_non_root() -> None:
+    """Every runtime-image container enforces non-root, while the state-storage chown step stays explicitly root."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "stateStorage.enabled=true",
+        "stateStorage.create=true",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        "workers.kubernetes.agentVault.accessGrants.enabled=true",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].email=maintainer@example.test",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].workerScope=shared",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].agent=helper",
+        release_name="mindroom-runtime",
+    )
+    pod_spec = _resource(docs, "Deployment", "mindroom-runtime")["spec"]["template"]["spec"]
+    containers = {container["name"]: container for container in [*pod_spec["initContainers"], *pod_spec["containers"]]}
+    access_grants = _container(_resource(docs, "Job", "agent-vault-access-grants"), "access-grants")
+    runtime_security = {"runAsNonRoot": True, "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+
+    assert pod_spec["securityContext"] == {"fsGroup": 1000, "fsGroupChangePolicy": "OnRootMismatch"}
+    for name in ("prepare-sandbox-runner-storage", "mindroom", "sandbox-runner"):
+        assert containers[name]["securityContext"] == runtime_security
+    assert access_grants["securityContext"] == runtime_security
+    assert containers["prepare-state-storage"]["securityContext"] == {
+        "runAsUser": 0,
+        "runAsNonRoot": False,
+        "allowPrivilegeEscalation": False,
+    }
+
+
+def test_runtime_chart_agent_vault_server_runs_as_numeric_non_root_user() -> None:
+    """The vault image names its user, so the chart sets the uid the kubelet needs to enforce runAsNonRoot."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.kubernetes.agentVault.server.enabled=true",
+        "workers.kubernetes.agentVault.server.image=infisical/agent-vault:test",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "agent-vault")
+
+    assert deployment["spec"]["template"]["spec"]["securityContext"] == {
+        "fsGroup": 101,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
+    assert _container(deployment, "agent-vault")["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
+
+
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:
     """Hosted runtimes should keep Matrix client state on a dedicated PVC."""
     values_path = tmp_path / "values.yaml"

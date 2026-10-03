@@ -40,7 +40,10 @@ podSecurityContext:
   fsGroup: 1000
   fsGroupChangePolicy: OnRootMismatch
 
+# Applies to every chart container that runs the runtime image: the runtime, the static runner and its storage init container, and the access-grants Job.
+# The image runs as uid 1000; runAsNonRoot makes the kubelet enforce that.
 securityContext:
+  runAsNonRoot: true
   allowPrivilegeEscalation: false
   capabilities:
     drop:
@@ -481,7 +484,11 @@ workers:
         podSecurityContext:
           fsGroup: 101
           fsGroupChangePolicy: OnRootMismatch
+        # The infisical/agent-vault image sets USER to the name agentvault (uid 65532, gid 101).
+        # The kubelet can only enforce runAsNonRoot for a numeric user, so runAsUser repeats the uid.
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
           allowPrivilegeEscalation: false
           capabilities:
             drop:
