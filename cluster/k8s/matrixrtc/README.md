@@ -82,6 +82,19 @@ matrixRTC:
 The Service names follow `<release>-mindroom-matrixrtc-auth` and `<release>-mindroom-matrixrtc-livekit`; set `fullnameOverride` for shorter names.
 The client chart must serve `/.well-known/matrix/client` for the Matrix server name so clients and MindRoom discover `livekitServiceUrl`.
 
+## Routing
+
+With the values above and the client chart installed as `mindroom-client`, route public traffic to these Services:
+
+| Public route | Kubernetes Service | Backend |
+| --- | --- | --- |
+| `https://example.com/.well-known/matrix/client` (Matrix server name) | `mindroom-client` (client chart) | Served by nginx from `matrix.homeserverUrl` and `matrixRTC.livekitServiceUrl` |
+| `https://matrix.example.com/livekit/jwt/` | `mindroom-client` | Proxied to `matrixrtc-mindroom-matrixrtc-auth:8080` |
+| `wss://matrix.example.com/livekit/sfu/` | `mindroom-client` | Proxied to `matrixrtc-mindroom-matrixrtc-livekit:7880` as WebSocket signaling, with 120-second read and send timeouts |
+| `203.0.113.10`, TCP `7881` and UDP `7882` | `matrixrtc-mindroom-matrixrtc-livekit-media` (`LoadBalancer`) | LiveKit media, connected directly without HTTP proxies |
+
+Proxies in front of `mindroom-client` must pass the WebSocket upgrade on `/livekit/sfu/` and keep those connections open for the length of a call, because some load balancers close WebSockets after a fixed timeout.
+
 ## Network Policy
 
 Set `networkPolicy.enabled: true` to restrict ingress to both components:
