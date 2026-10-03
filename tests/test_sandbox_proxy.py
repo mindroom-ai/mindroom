@@ -6185,11 +6185,11 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
 
 
 @pytest.mark.asyncio
-async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path(
+async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sync-only proxied tools should emit worker progress before the async call result resolves."""
+    """A sync worker-routed tool's async proxy emits worker progress before the call result resolves."""
     release_execute = threading.Event()
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -6258,7 +6258,8 @@ async def test_sync_only_worker_routed_tool_surfaces_progress_in_real_async_path
         worker_tools_override=["file"],
         worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
     )
-    assert tool.async_functions == {}
+    # The sync function runs through its async proxy in async runs, so it can be stopped.
+    assert inspect.iscoroutinefunction(tool.get_async_functions()["read_file"].entrypoint)
     tool = prepend_tool_hook_bridge(
         tool,
         build_tool_hook_bridge(
