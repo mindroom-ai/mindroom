@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.run.base import RunStatus
@@ -32,11 +32,7 @@ from mindroom.approval_response import (
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
-from mindroom.background_tasks import (
-    create_background_task,
-    run_blocking_until_complete,
-    run_coroutine_until_complete,
-)
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -62,11 +58,7 @@ from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import (
-    InterruptedReplaySnapshot,
-    persist_interrupted_replay_snapshot,
-    persist_stopped_attempt_snapshot,
-)
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -254,20 +246,6 @@ _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "is unknown. Write your complete reply from the start, and before repeating any tool call with side effects, "
     "check whether it already took effect."
 )
-_EARLIER_ATTEMPTS_HEADER = (
-    "What earlier interrupted attempts had shown, with tool calls listed as finished already run:"
-)
-
-
-def _with_interrupted_attempt_instruction(request: ResponseRequest, text: str) -> ResponseRequest:
-    """Tell this turn's model that a stopped attempt came before it."""
-    return replace(
-        request,
-        transient_enrichment_items=(
-            *request.transient_enrichment_items,
-            EnrichmentItem(key="interrupted_attempt", text=text, persist=False, minimal_required=True),
-        ),
-    )
 
 
 async def _cancel_pending_responses(
@@ -2523,31 +2501,6 @@ class ResponseRunner:
         finally:
             storage.close()
 
-    def _persist_stopped_attempt(
-        self,
-        snapshot: InterruptedReplaySnapshot,
-        *,
-        attempt: str,
-        session_scope: HistoryScope,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity,
-        run_id: str,
-    ) -> tuple[bool, str]:
-        """Fold one stopped attempt, named by its last visible edit, into the turn's live record."""
-        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-        try:
-            return persist_stopped_attempt_snapshot(
-                storage=storage,
-                session_id=session_id,
-                scope_id=session_scope.scope_id,
-                run_id=run_id,
-                attempt=attempt,
-                snapshot=snapshot,
-                is_team=session_scope.kind == "team",
-            )
-        finally:
-            storage.close()
-
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
         if recorder.outcome == "pending":
@@ -3620,20 +3573,18 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-        history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
     ) -> ResponseRequest:
-        """Record what a replayed turn's stopped attempt already showed and ran before answering again.
+        """Tell a replayed turn what its stopped attempt already showed and ran.
 
         A process that stops mid-stream, whether it crashes or shuts down in
         order, leaves its reply streaming and its sources pending, so replay
-        adopts that reply and answers again in place. Matrix holds the only
-        account of the stopped attempt, so its visible text and tool trace are
-        folded into the turn's interrupted replay record, which keeps the new
-        attempt from repeating finished tools.
+        adopts that reply and answers again in place. The reply in Matrix is
+        the only account of the stopped attempt, so its visible text and tool
+        trace go to the new attempt as transient context that keeps it from
+        repeating finished tools.
         """
         event_id = request.existing_event_id
-        if event_id is None or not (request.existing_event_is_placeholder and request.existing_event_is_recovered):
+        if event_id is None or not request.existing_event_is_recovered:
             return request
         try:
             message = await fetch_latest_visible_message(
@@ -3648,54 +3599,32 @@ class ResponseRunner:
             # missing key or a refusing server may never change.
             message = None
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
-        if message is None or unfinished is None:
-            if message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-                # Unreadable, or stopped before showing anything (an acknowledgement,
-                # hidden or non-streamed tool calls): unknown work, not absent work.
-                return _with_interrupted_attempt_instruction(request, _UNKNOWN_ATTEMPT_INSTRUCTION)
+        if unfinished is not None:
+            completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
+            attempt = render_stopped_attempt(
+                partial_text=strip_team_display(unfinished.partial_text),
+                completed_tools=completed_tools,
+                interrupted_tools=interrupted_tools,
+            )
+            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        elif message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+            # Unreadable, or stopped before showing anything (an acknowledgement,
+            # hidden or non-streamed tool calls): unknown work, not absent work.
+            instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
+        else:
             return request
-        completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
-        recorder = self._build_turn_recorder(
-            user_message=request.model_prompt or request.prompt,
-            user_message_is_structured=request.current_prompt_is_structured,
-            reply_to_event_id=request.reply_to_event_id,
-            requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        self.deps.logger.info(
+            "interrupted_attempt_resumed",
+            response_event_id=event_id,
+            attempt_shown=unfinished is not None,
         )
-        recorder.record_interrupted(
-            run_metadata=recorder.run_metadata,
-            assistant_text=strip_team_display(unfinished.partial_text),
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-        )
-        recorder.set_response_event_id(event_id)
-        # A failed write raises and leaves the sources pending for retry, since
-        # answering without this record could repeat the finished tools. The
-        # write finishes before cancellation releases the lifecycle lock.
-        appended, account = await run_blocking_until_complete(
-            partial(
-                self._persist_stopped_attempt,
-                recorder.interrupted_snapshot(),
-                attempt=message.latest_event_id,
-                session_scope=history_scope,
-                session_id=resolved_target.session_id,
-                execution_identity=execution_identity,
-                # Names a new record after the attempt that starts it.
-                run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
+        return replace(
+            request,
+            transient_enrichment_items=(
+                *request.transient_enrichment_items,
+                EnrichmentItem(key="interrupted_attempt", text=instruction, persist=False, minimal_required=True),
             ),
         )
-        self.deps.logger.info(
-            "interrupted_attempt_recorded",
-            response_event_id=event_id,
-            completed_tool_count=len(completed_tools),
-        )
-        # The account rides in the instruction, so no history window can drop it.
-        # Rereading an attempt already recorded means the attempt since then left
-        # no edit, so what that one did is unknown.
-        if appended:
-            return _with_interrupted_attempt_instruction(request, f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{account}")
-        earlier = f"\n\n{_EARLIER_ATTEMPTS_HEADER}\n\n{account}" if account else ""
-        return _with_interrupted_attempt_instruction(request, f"{_UNKNOWN_ATTEMPT_INSTRUCTION}{earlier}")
 
     async def _prepare_locked_source(
         self,
@@ -3797,12 +3726,7 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        return await self._with_interrupted_attempt(
-            prepared_request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        )
+        return await self._with_interrupted_attempt(prepared_request, resolved_target=resolved_target)
 
     async def _begin_locked_turn(
         self,

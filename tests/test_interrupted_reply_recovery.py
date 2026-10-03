@@ -8,9 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -22,7 +20,6 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import DeliveryStage
-from mindroom.history.storage import archive_compaction_chunk, reconcile_compaction_state
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseAttempt, ResponseSources
@@ -36,9 +33,6 @@ from tests.test_response_runner_focused import _admit_approval_source
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
 
     from mindroom.bot import AgentBot
     from mindroom.response_runner import ResponseRequest
@@ -117,9 +111,8 @@ def _streamed(
     *,
     status: str | None = STREAM_STATUS_STREAMING,
     trace: tuple[ToolTraceEntry, ...] = TRACE,
-    latest_edit: str = "$edit-a",
 ) -> ResolvedVisibleMessage:
-    message = ResolvedVisibleMessage.synthetic(
+    return ResolvedVisibleMessage.synthetic(
         event_id=REPLY_ID,
         sender="@mindroom_general:localhost",
         body=body,
@@ -127,8 +120,6 @@ def _streamed(
         thread_id="$thread",
         content={"body": body, **_content(status, trace)},
     )
-    message.latest_event_id = latest_edit
-    return message
 
 
 async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
@@ -178,13 +169,13 @@ async def _replay(
     bot: AgentBot,
     request: ResponseRequest,
     visible: ResolvedVisibleMessage | Exception | None,
-) -> tuple[list[tuple[ResponseTurnContext, list[str]]], AsyncMock]:
-    """Run the replayed turn, observing each model call's context and the history it could read."""
+) -> tuple[list[ResponseTurnContext], AsyncMock]:
+    """Run the replayed turn with the model and the Matrix read replaced at their seams."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    calls: list[tuple[ResponseTurnContext, list[str]]] = []
+    contexts: list[ResponseTurnContext] = []
 
     async def fake_ai_response(*args: object, **_kwargs: object) -> str:
-        calls.append((cast("ResponseTurnContext", args[0]), _recorded_attempts(bot, request)))
+        contexts.append(cast("ResponseTurnContext", args[0]))
         return "The complete report."
 
     fetch = AsyncMock(side_effect=visible) if isinstance(visible, Exception) else AsyncMock(return_value=visible)
@@ -193,49 +184,25 @@ async def _replay(
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
     ):
         await runner.generate_response(request)
-    return calls, fetch
+    return contexts, fetch
 
 
 def _attempt_context(context: ResponseTurnContext) -> list[str]:
     return [item.text for item in context.transient_enrichment_items if item.key == "interrupted_attempt"]
 
 
-def _recorded_attempts(bot: AgentBot, request: ResponseRequest) -> list[str]:
-    """Return the assistant text of every stopped-attempt record in the turn's agent history."""
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = request.response_envelope.target
-    storage = runner.deps.state_writer.create_storage(
-        runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost"),
-    )
-    try:
-        session = get_agent_session(storage, target.session_id)
-    finally:
-        storage.close()
-    runs = [] if session is None else session.runs or []
-    return [
-        cast("str", run.content)
-        for run in runs
-        # The faked model never records completion, so its own turn ends in a failed record.
-        if isinstance(run.metadata, dict) and run.metadata.get("mindroom_original_status") == "cancelled"
-    ]
-
-
 @pytest.mark.asyncio
 async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_did(tmp_path: Path) -> None:
     """The new attempt sees the earlier text and finished tools, then replaces the reply like any answer."""
     bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
 
-    ((context, history),), _fetch = await _replay(bot, request, _streamed())
+    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
 
     (instruction,) = _attempt_context(context)
     assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
-    # The account rides in the instruction too, so no history window can drop it.
+    assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in instruction
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in instruction
-    (attempt,) = history
-    assert attempt.startswith("Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; ")
-    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in attempt
-    assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in attempt
+    assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in instruction
     store = bot.journal_principal()
     final = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
@@ -248,15 +215,15 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 
 
 @pytest.mark.asyncio
-async def test_a_streamed_replay_reads_the_record_and_instruction_too(tmp_path: Path) -> None:
+async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path) -> None:
     """The streaming path receives the same context and still delivers through the adopted reply."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    calls: list[tuple[ResponseTurnContext, list[str]]] = []
+    contexts: list[ResponseTurnContext] = []
 
     async def fake_stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        calls.append((ctx, _recorded_attempts(bot, request)))
+        contexts.append(ctx)
         yield "The complete report."
 
     with (
@@ -266,10 +233,8 @@ async def test_a_streamed_replay_reads_the_record_and_instruction_too(tmp_path: 
     ):
         await runner.generate_response(request)
 
-    ((context, history),) = calls
-    assert len(_attempt_context(context)) == 1
-    (attempt,) = history
-    assert "The `counter` tool finished" in attempt
+    ((instruction,),) = [_attempt_context(context) for context in contexts]
+    assert "The `counter` tool finished" in instruction
     final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
     assert final.edits_event_id == REPLY_ID
@@ -280,13 +245,11 @@ async def test_a_streamed_replay_reads_the_record_and_instruction_too(tmp_path: 
 async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
     """A reply that already reached a terminal state hides no stopped work."""
     bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
     visible = _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR)
 
-    ((context, _history),), _fetch = await _replay(bot, request, visible)
+    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), visible)
 
     assert _attempt_context(context) == []
-    assert _recorded_attempts(bot, request) == []
     assert not await bot.journal_principal().is_pending("$source")
 
 
@@ -308,23 +271,21 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
 ) -> None:
     """Unknown is not nothing: the turn is answered, warned that side effects may already have happened."""
     bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
 
-    ((context, _history),), _fetch = await _replay(bot, request, read)
+    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), read)
 
     (instruction,) = _attempt_context(context)
     assert "what that attempt did is unknown" in instruction
-    assert _recorded_attempts(bot, request) == []
     assert not await bot.journal_principal().is_pending("$source")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("placeholder", "recovered"),
-    [(False, True), (True, False)],
+    [(False, False), (True, False)],
     ids=["edit_regeneration", "fresh_placeholder"],
 )
-async def test_only_a_recovered_placeholder_is_read_for_a_stopped_attempt(
+async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
     placeholder: bool,
     recovered: bool,
@@ -337,153 +298,26 @@ async def test_only_a_recovered_placeholder_is_read_for_a_stopped_attempt(
         existing_event_is_recovered=recovered,
     )
 
-    ((context, _history),), fetch = await _replay(bot, request, _streamed())
+    (context,), fetch = await _replay(bot, request, _streamed())
 
     fetch.assert_not_awaited()
     assert _attempt_context(context) == []
 
 
 @pytest.mark.asyncio
-async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> None:
-    """A second stop before the new attempt shows the old tools keeps them, in one latest run."""
+async def test_a_team_reply_reaches_the_new_attempt_without_its_display_chrome(tmp_path: Path) -> None:
+    """The team header and no-consensus note are presentation, not what the stopped attempt said."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = request.response_envelope.target
-    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    second = _streamed("A new start", trace=(), latest_edit="$edit-b")
-    instructions: list[str] = []
-
-    for visible in (_streamed(), _streamed(), second, second):
-        with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-            answered = await runner._with_interrupted_attempt(
-                request,
-                resolved_target=target,
-                history_scope=HistoryScope(kind="agent", scope_id="general"),
-                execution_identity=identity,
-            )
-        (instruction,) = [
-            item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"
-        ]
-        instructions.append(instruction)
-
-    # Rereading a recorded attempt means the attempt after it left no edit, so its work is unknown.
-    assert ["is unknown" in instruction for instruction in instructions] == [False, True, False, True]
-    assert all("The `counter` tool finished" in instruction for instruction in instructions)
-    (record,) = _recorded_attempts(bot, request)
-    first_account, second_account = record.split("\n\nA new start")
-    assert first_account.startswith("Half of the report")
-    assert "The `counter` tool finished" in first_account
-    assert second_account == "\n\n(turn stopped before completion)"
-
-
-@pytest.mark.asyncio
-async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path) -> None:
-    """Rereading an attempt compaction archived, even one folded into an older record, is not new."""
-    bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = request.response_envelope.target
-    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    scope = HistoryScope(kind="agent", scope_id="general")
-
-    async def fold(visible: ResolvedVisibleMessage) -> str:
-        with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-            answered = await runner._with_interrupted_attempt(
-                request,
-                resolved_target=target,
-                history_scope=scope,
-                execution_identity=identity,
-            )
-        (instruction,) = [
-            item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"
-        ]
-        return instruction
-
-    def live_runs() -> list[RunOutput | TeamRunOutput]:
-        storage = runner.deps.state_writer.create_storage(identity)
-        try:
-            session = get_agent_session(storage, target.session_id)
-            assert session is not None
-            reconcile_compaction_state(storage, session, scope)
-            return list(session.runs or [])
-        finally:
-            storage.close()
-
-    second = _streamed("A second try", trace=(), latest_edit="$edit-b")
-    await fold(_streamed())
-    await fold(second)
-    storage = runner.deps.state_writer.create_storage(identity)
-    try:
-        session = get_agent_session(storage, target.session_id)
-        assert session is not None
-        archive_compaction_chunk(
-            storage=storage,
-            session=session,
-            scope=scope,
-            summary=SessionSummary(summary="The counter tool ran once."),
-            summary_model="test-model",
-            archived_runs=list(session.runs or []),
-        )
-    finally:
-        storage.close()
-
-    reread = await fold(second)
-    assert "is unknown" in reread
-    assert "earlier interrupted attempts" not in reread
-    assert live_runs() == []
-    assert "is unknown" not in await fold(_streamed("A new start", trace=(), latest_edit="$edit-c"))
-    (record,) = live_runs()
-    assert cast("str", record.content).startswith("A new start")
-
-
-@pytest.mark.asyncio
-async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> None:
-    """Answering without the record could repeat finished tools, so the turn stays owed instead."""
-    bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-
-    with (
-        patch.object(runner, "_persist_stopped_attempt", side_effect=RuntimeError("database is locked")),
-        pytest.raises(RuntimeError, match="database is locked"),
-    ):
-        await _replay(bot, request, _streamed())
-
-    store = bot.journal_principal()
-    assert await store.is_pending("$source")
-    assert await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
-
-
-@pytest.mark.asyncio
-async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) -> None:
-    """A team scope's stopped attempt is recorded in that scope, without its display chrome."""
-    bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = request.response_envelope.target
-    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
-    scope = HistoryScope(kind="team", scope_id="team_general_helper")
-
     visible = _streamed(
         f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}\n\n\n*No team consensus - showing individual responses only*",
     )
-    with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-        await runner._with_interrupted_attempt(
-            request,
-            resolved_target=target,
-            history_scope=scope,
-            execution_identity=identity,
-        )
 
-    storage = runner.deps.state_writer.create_storage(identity, scope=scope)
-    try:
-        session = get_team_session(storage, target.session_id)
-    finally:
-        storage.close()
-    assert session is not None
-    (run,) = session.runs
-    assert run.team_id == "team_general_helper"
-    assert cast("str", run.content).startswith("Half of the report\n\n(turn stopped before completion")
-    assert "consensus" not in cast("str", run.content)
-    assert "The `counter` tool finished" in cast("str", run.content)
+    with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
+        answered = await runner._with_interrupted_attempt(request, resolved_target=request.response_envelope.target)
+
+    (instruction,) = [item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"]
+    assert "\n\nHalf of the report\n\n(turn stopped before completion" in instruction
+    assert "Team Response" not in instruction
+    assert "consensus" not in instruction

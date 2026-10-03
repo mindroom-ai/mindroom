@@ -2353,7 +2353,6 @@ depends_on = [
     "mindroom.agent_storage",
     "mindroom.constants",
     "mindroom.history.storage",
-    "mindroom.history.types",
     "mindroom.prompt_message_tags",
     "mindroom.tool_system.events",
 ]
@@ -6287,7 +6286,7 @@ expose = [
     "build_interrupted_replay_snapshot",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
-    "persist_stopped_attempt_snapshot",
+    "render_stopped_attempt",
     "split_interrupted_tool_trace",
     "tool_execution_call_id",
 ]
