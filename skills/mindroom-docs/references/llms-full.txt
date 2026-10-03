@@ -5012,8 +5012,7 @@ Use `calls wait` when the result is still queued, running, or waiting for a deci
 It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
 Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
 Waiting pauses that shell command and its owning response; other conversations can continue.
-New tool calls and schema preparation must come from a Bash call that is still running.
-Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
+New tool calls and schema preparation must come from a Bash call that is still running or whose earlier calls are still finishing; later ones are rejected instead of being queued for a later call.
 
 Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
 These JSON inputs are mutually exclusive and require a JSON object.

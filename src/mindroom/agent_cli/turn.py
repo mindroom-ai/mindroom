@@ -270,6 +270,10 @@ class LiveTurnTools(TurnToolBridge):
             # A mindroom-agent from another MindRoom release does not send its window.
             msg = "mindroom-agent did not name its shell command; use the mindroom-agent of this MindRoom release"
             raise CliBashWindowRequiredError(msg)
+        if self.control_executions:
+            # The control fence closed every window, including ones whose command still runs.
+            msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
+            raise CliBashWindowRequiredError(msg)
         if window not in self._windows:
             msg = "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running"
             raise CliBashWindowRequiredError(msg)
