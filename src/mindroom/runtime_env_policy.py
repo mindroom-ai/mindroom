@@ -30,7 +30,6 @@ __all__ = [
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "WORKER_COMPUTER_ENABLED_ENV",
     "WORKER_EGRESS_PROXY_ENV_BY_KEY",
-    "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
@@ -534,11 +533,6 @@ def credentials_encryption_key_value(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def credentials_encryption_key_from_env(env: Mapping[str, str]) -> str | None:
-    """Return the credential encryption key from an env mapping."""
-    return credentials_encryption_key_value(env.get(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
 
 def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
