@@ -41,11 +41,11 @@ After each fix, use fresh read-only reviewers with neutral prompts.
    Fix only real, in-scope issues in the main thread.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
    Decline edge cases, as `pr-review` defines them, with a one-line reason.
-   Write each out-of-scope finding down as soon as you classify it, where the task already tracks work, such as a GitHub issue or the task's tracking file, so it survives context compaction; do not fix it in this PR.
+   Record out-of-scope findings as `pr-review` describes and do not fix them in this PR.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.
    After every third review round that still finds many issues or a new major bug class, stop patching and reconsider the design before another patch round.
-7. Stop only when both fresh reviewers approve the same head.
+7. Stop only when both fresh reviewers approve the same head, or when every remaining finding on that head is declined with a recorded reason.
    Confirm the worktree is clean and the remote branch matches the local head.
 
 ## Bias Firewall
@@ -105,4 +105,5 @@ Report only current facts:
 - Commits made.
 - Verification run.
 - Review loop outcome.
+- Out-of-scope findings and where they were recorded.
 - Any skipped verification and why.

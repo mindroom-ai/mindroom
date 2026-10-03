@@ -53,9 +53,9 @@ Before editing, state the grouped findings using these labels:
 - `Real bug`: Behavior is wrong, unsafe, or violates an invariant.
 - `Code-quality cleanup`: The issue is in scope and improves clarity or maintainability without changing behavior.
 - `Test/docs gap`: The implementation is acceptable but missing required verification or documentation.
-- `Overreach / scope creep`: The suggestion adds something the PR does not need, such as unnecessary abstraction or mechanisms; real problems in unchanged code are `Out of scope` instead.
+- `Overreach / scope creep`: The suggestion adds something the PR does not need, such as unnecessary abstraction or mechanisms; real problems are `Edge case` or `Out of scope` instead.
 - `Edge case`: A bug or security claim with no realistic scenario, as `pr-review` defines it; skip it with a one-line reason.
-- `Out of scope`: A real problem in code the PR does not change; write it down as soon as you classify it, where the task tracks work, such as a GitHub issue or the task's tracking file, instead of fixing it here.
+- `Out of scope`: A real problem outside the PR's scope, as `pr-review` defines it; record it as `pr-review` describes instead of fixing it here.
 - `Incorrect / stale`: The claim does not match the current code or misunderstands the design.
 - `Needs clarification`: The correct action depends on product or architectural intent that cannot be inferred.
 
