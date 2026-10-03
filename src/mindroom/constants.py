@@ -686,8 +686,7 @@ def trusted_tool_runtime_env_values(
 
 def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env = runtime_env_policy.isolated_worker_runtime_env(runtime_paths.process_env)
-    env_file_values = runtime_env_policy.isolated_worker_runtime_env(runtime_paths.env_file_values)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
