@@ -211,15 +211,17 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
 
-    for _ in range(3):
-        task = await scheduling._reconcile_runnable_task_retrying(
-            client,
-            ROOM_ID,
-            TASK_ID,
-            config=Config(),
-            runtime_paths=runtime_paths,
-        )
-        assert task is not None
+    # A failed read retries forever, so make it fail fast instead of hanging until the timeout.
+    with patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock(side_effect=AssertionError("task read failed"))):
+        for _ in range(3):
+            task = await scheduling._reconcile_runnable_task_retrying(
+                client,
+                ROOM_ID,
+                TASK_ID,
+                config=Config(),
+                runtime_paths=runtime_paths,
+            )
+            assert task is not None
 
     client.room_get_state.assert_not_awaited()
     assert [call.args[2] for call in client._send.await_args_list] == [
