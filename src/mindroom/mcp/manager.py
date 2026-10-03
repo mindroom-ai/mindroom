@@ -1611,6 +1611,9 @@ class MCPServerManager:
                     error=str(exc),
                 )
             finally:
+                # Waiting for running calls can delay a refresh past its reserved slot, so space the next one
+                # from this end.
+                state.stale_refresh_not_before = monotonic() + _STALE_REFRESH_MIN_INTERVAL_SECONDS
                 # A failed refresh schedules its own backoff retry from within this
                 # task, so only clear or reschedule when no replacement exists.
                 if state.refresh_task is current_task:
