@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 import ssl  # noqa: TC003 - Required for runtime get_type_hints on public transport constructors.
@@ -376,8 +377,15 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
+        # The lookup blocks, so it runs in a thread to keep the event loop serving other work.
+        addresses = await asyncio.to_thread(
+            validated_connect_addresses,
+            host,
+            port=port,
+            allow_private_networks=self._allow_private_networks,
+        )
         return await _connect_validated_async(
-            validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            addresses,
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,

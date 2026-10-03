@@ -678,6 +678,18 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
 
+    async def test_final_reply_names_its_bot_account_requester(self, tmp_path: Path) -> None:
+        """Entities the reply mentions apply their access to a configured bot account, as they would to a human."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.runtime.config.bot_accounts = ["@user:localhost"]
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await gateway.deliver_final(self._final_request("answer"))
+
+        assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
+
     async def test_final_reply_for_an_entity_requester_names_no_requester(self, tmp_path: Path) -> None:
         """A reply to an agent or system requester leaves mentioned entities acting as today."""
         gateway = _gateway(tmp_path, FakeOutbox())

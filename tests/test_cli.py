@@ -473,9 +473,9 @@ def test_agent_and_team_names_must_not_overlap() -> None:
 
 
 @pytest.mark.parametrize("section", ["agents", "teams"])
-@pytest.mark.parametrize("entity_name", [constants_mod.ROUTER_AGENT_NAME, "user"])
+@pytest.mark.parametrize("entity_name", [constants_mod.ROUTER_AGENT_NAME, "user", "_shared"])
 def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_name: str) -> None:
-    """Built-in managed entity account keys are not configurable responder aliases."""
+    """Names MindRoom uses for its own accounts and storage are not configurable responder aliases."""
     config_data = {
         "agents": {
             "assistant": {
