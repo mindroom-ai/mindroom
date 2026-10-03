@@ -224,6 +224,23 @@ def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
         time.sleep(0.05)
 
 
+def test_request_stopped_before_dispatch_never_runs_and_keeps_the_template(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    tmp_path: Path,
+) -> None:
+    """A stop accepted while the template warmed up keeps the request from starting, without retiring the template."""
+    manager, spawned = stub_manager
+    pid_file = tmp_path / "child.pid"
+
+    # An already cancelled request stops as soon as its stop is bound.
+    with pytest.raises(ForkserverError, match="stopped before it was sent"):
+        _stub_execute(manager, envelope=f"sleep:{pid_file}", bind_stop=lambda stop: stop())
+
+    assert _stub_execute(manager).returncode == 0
+    assert not pid_file.exists()
+    assert len(spawned) == 1
+
+
 def test_template_recycled_when_env_fingerprint_changes(
     stub_manager: tuple[_SandboxForkserver, list[str]],
 ) -> None:
