@@ -2062,6 +2062,7 @@ defaults:
   max_tool_calls_per_turn: 1000    # Default: 1000 (tool calls one agent or team turn may execute; later calls return a tool error, and the turn ends with its text so far after this many plus two model requests)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  max_consecutive_agent_replies: 50 # Default: 50 (agent or team messages in a row before agents stop waking each other; global only)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -2344,6 +2345,15 @@ PostgreSQL requires a nonblank URL; supplying a URL alone does not switch a SQLi
 Changes to the effective store apply after restarting MindRoom.
 Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
 See the [journal binding and migration commands](https://docs.mindroom.chat/cli/#journal) before moving, restoring, or adopting a journal.
+
+## Agents Mentioning Agents
+
+An agent or team that mentions another agent or team in its reply wakes it.
+When the reply was written for a person, the mentioned entity answers for that person, who must still be a joined member of the room; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
+`defaults.max_consecutive_agent_replies` defaults to `50` and accepts any positive integer.
+Once a conversation has that many consecutive agent or team messages since a person last wrote there, mentions in further agent messages wake nobody.
+The next message from a person in that conversation starts the count again.
+For a room-level conversation the count covers the room's messages outside threads.
 
 ## Automatic Restart Resumption
 
@@ -20478,6 +20488,8 @@ The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise r
 MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the requester must send those personally.
 A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the requester by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
+A mention in an agent's or team's message wakes the mentioned entity only while the person it acts for is a joined member of the room; an invited or departed requester, or membership MindRoom cannot confirm, wakes nobody.
+Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, 50 by default, and continue after the next message from a person.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.

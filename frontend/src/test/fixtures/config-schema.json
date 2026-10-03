@@ -1200,6 +1200,13 @@
           "title": "Show Stop Button",
           "type": "boolean"
         },
+        "max_consecutive_agent_replies": {
+          "default": 50,
+          "description": "Most consecutive agent or team messages in one conversation before mentions in them stop waking other agents and teams; a message from a person resets the count",
+          "minimum": 1,
+          "title": "Max Consecutive Agent Replies",
+          "type": "integer"
+        },
         "auto_resume_after_restart": {
           "default": true,
           "description": "Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
@@ -4215,6 +4222,7 @@
           "debounce_ms": 1000
         },
         "show_stop_button": true,
+        "max_consecutive_agent_replies": 50,
         "auto_resume_after_restart": true,
         "learning": true,
         "learning_mode": "always",

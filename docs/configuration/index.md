@@ -698,6 +698,7 @@ defaults:
   max_tool_calls_per_turn: 1000    # Default: 1000 (tool calls one agent or team turn may execute; later calls return a tool error, and the turn ends with its text so far after this many plus two model requests)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  max_consecutive_agent_replies: 50 # Default: 50 (agent or team messages in a row before agents stop waking each other; global only)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -980,6 +981,15 @@ PostgreSQL requires a nonblank URL; supplying a URL alone does not switch a SQLi
 Changes to the effective store apply after restarting MindRoom.
 Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
 See the [journal binding and migration commands](../cli.md#journal) before moving, restoring, or adopting a journal.
+
+## Agents Mentioning Agents
+
+An agent or team that mentions another agent or team in its reply wakes it.
+When the reply was written for a person, the mentioned entity answers for that person, who must still be a joined member of the room; see [Responder access](../authorization.md#responder-access).
+`defaults.max_consecutive_agent_replies` defaults to `50` and accepts any positive integer.
+Once a conversation has that many consecutive agent or team messages since a person last wrote there, mentions in further agent messages wake nobody.
+The next message from a person in that conversation starts the count again.
+For a room-level conversation the count covers the room's messages outside threads.
 
 ## Automatic Restart Resumption
 

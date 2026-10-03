@@ -1819,6 +1819,8 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
     bot = _make_bot(tmp_path, debounce_ms=0, other_agent_names=("research",))
     install_direct_response_admission(bot)
     room = _make_room()
+    # A reply written for Alice wakes the agent it mentions only while she is in the room.
+    room.users = {"@alice:localhost": MagicMock()}
     research = entity_identity_registry(bot.config, bot.runtime_paths).current_id("research").full_id
     messages = [
         ("$alice-first", "alice first", "@alice:localhost", 1001),
