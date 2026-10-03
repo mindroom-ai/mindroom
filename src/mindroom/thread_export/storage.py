@@ -20,7 +20,7 @@ import yaml
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.path_confinement import MAX_READ_BYTES, open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -903,6 +903,19 @@ def write_thread_payload(
     trusted_root: Path | None = None,
 ) -> bool:
     """Write one thread payload when changed and return whether bytes were replaced."""
+    text = yaml_io.safe_dump(
+        payload,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    # Every reader of an export file refuses one above this cap, so a larger thread keeps its previous file and fails.
+    if len(text.encode("utf-8")) > MAX_READ_BYTES:
+        msg = (
+            f"Thread {thread_id} in {room.room_id} is too large to export: its file would pass the "
+            f"{MAX_READ_BYTES >> 20} MiB thread-export file limit"
+        )
+        raise ValueError(msg)
     root_fd = _open_owned_export_root(
         output_dir,
         create=True,
@@ -920,12 +933,6 @@ def write_thread_payload(
         raise RuntimeError(msg)
     try:
         filename = f"{_safe_path_segment(thread_id)}.yaml"
-        text = yaml_io.safe_dump(
-            payload,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
         # Compare text rather than parse it, so even a thread too long for the bounded parser is not rewritten unchanged.
         existing = _read_text_at(room_fd, filename)
         if existing is not None and _without_exported_at(existing) == _without_exported_at(text):

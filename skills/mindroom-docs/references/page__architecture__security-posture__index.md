@@ -67,6 +67,7 @@ Numeric keys are counted because they can be chosen to share one hash, and a `!!
 They are also refused when more than 16 lines start with `%`, as YAML directives do, because libyaml compares each `%TAG` directive with every earlier one before the event checks see any of them.
 A value PyYAML cannot build, such as a year-0 date, is handled like any other YAML error in that file.
 The thread exporter decides whether a file changed by comparing its text rather than parsing it, and indexes a thread file too large to parse whole from the thread header before its messages.
+A thread whose export would exceed the 64 MiB thread-export cap is not written: the exporter keeps only the message content it writes, stops reading the thread once that passes the cap, reports the thread as failed, and leaves its previous file in place.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.

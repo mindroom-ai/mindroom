@@ -574,6 +574,34 @@ def test_thread_too_long_to_parse_whole_stays_indexed_and_is_not_rewritten(
         write_room_index(output_dir, room)
 
 
+def test_a_thread_export_above_the_read_cap_fails_and_keeps_its_previous_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file every export reader would refuse is never written, so it is not rewritten each pass or left out of the index."""
+    monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", 4_096)
+    output_dir = tmp_path / "thread_exports"
+
+    def payload(body: str) -> dict[str, object]:
+        return {
+            "version": 1,
+            "thread": {"id": "$grown:localhost", "source": "matrix", "message_count": 1},
+            "messages": [{"event_id": "$event:localhost", "sender": "@user:localhost", "timestamp": 1, "body": body}],
+        }
+
+    assert write_thread_payload(output_dir, _room(), "$grown:localhost", payload("short")) is True
+    exported = output_dir / "lobby" / _thread_filename("$grown:localhost")
+    previous = exported.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="too large to export"):
+        write_thread_payload(output_dir, _room(), "$grown:localhost", payload("x" * 5_000))
+    assert exported.read_text(encoding="utf-8") == previous
+
+    with pytest.raises(ValueError, match="too large to export"):
+        write_thread_payload(output_dir, _room("other"), "$grown:localhost", payload("x" * 5_000))
+    assert not (output_dir / "other").exists()
+
+
 def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
     """A fetched thread drops the content its export never writes, and the written payload stays the same."""
     router = "@mindroom_router:localhost"
