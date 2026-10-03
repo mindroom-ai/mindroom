@@ -330,15 +330,14 @@ class UnfinishedStreamedReply:
 def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:
     """Read back the work a stopped stream left visible, or ``None`` when it left none.
 
-    ``body`` is the canonical visible body. A bare placeholder shows nothing the
-    turn did, so a replay of that turn has nothing to carry forward.
+    ``body`` is the canonical visible body. Placeholder text shows nothing the
+    turn did, so only a tool trace beside it is carried forward.
     """
-    if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES or body.strip() in {
-        _PROGRESS_PLACEHOLDER,
-        TEAM_PROGRESS_PLACEHOLDER,
-    }:
+    if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES:
         return None
     partial_text = clean_partial_reply_text(strip_visible_tool_markers(body)).strip()
+    if partial_text == TEAM_PROGRESS_PLACEHOLDER:
+        partial_text = ""
     tool_trace = tuple(tool_trace_from_content(content))
     if not partial_text and not tool_trace:
         return None

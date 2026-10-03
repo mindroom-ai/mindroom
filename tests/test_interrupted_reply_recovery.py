@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom.agent_storage import get_agent_session
+from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -78,6 +78,16 @@ def test_a_tool_trace_without_text_is_still_unfinished_work() -> None:
 def test_a_bare_placeholder_left_nothing(body: str, status: str) -> None:
     """Nothing visible ran behind a placeholder, so there is nothing to carry forward."""
     assert unfinished_streamed_reply(body, _content(status, ())) is None
+
+
+@pytest.mark.parametrize("body", ["Thinking...", TEAM_PROGRESS_PLACEHOLDER])
+def test_a_trace_beside_placeholder_text_is_still_carried(body: str) -> None:
+    """Placeholder text says nothing, but a tool trace beside it still ran."""
+    reply = unfinished_streamed_reply(body, _content(STREAM_STATUS_STREAMING))
+
+    assert reply is not None
+    assert reply.partial_text == ""
+    assert reply.tool_trace == TRACE
 
 
 @pytest.mark.parametrize(
@@ -153,6 +163,7 @@ async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
         sources=sources,
         existing_event_id=REPLY_ID,
         existing_event_is_placeholder=True,
+        existing_event_is_recovered=True,
         matrix_run_metadata=bot._turn_store.build_run_metadata(record),
     )
 
@@ -173,9 +184,7 @@ async def _replay(
     fetch = AsyncMock(return_value=visible)
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=fetch),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         await runner.generate_response(request)
     return contexts, fetch
@@ -234,7 +243,7 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 @pytest.mark.parametrize(
     "visible",
     [
-        _streamed("Thinking...", status=STREAM_STATUS_PENDING),
+        _streamed("Thinking...", status=STREAM_STATUS_PENDING, trace=()),
         _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR),
         None,
     ],
@@ -256,10 +265,23 @@ async def test_replay_without_unfinished_visible_work_answers_as_before(
 
 
 @pytest.mark.asyncio
-async def test_regenerating_an_existing_answer_never_reads_a_stopped_attempt(tmp_path: Path) -> None:
-    """Only an adopted placeholder can hold a stopped attempt's stream; an edited answer re-drives."""
+@pytest.mark.parametrize(
+    ("placeholder", "recovered"),
+    [(False, True), (True, False)],
+    ids=["edit_regeneration", "fresh_placeholder"],
+)
+async def test_only_a_recovered_placeholder_is_read_for_a_stopped_attempt(
+    tmp_path: Path,
+    placeholder: bool,
+    recovered: bool,
+) -> None:
+    """An edited answer re-drives, and a placeholder this attempt just sent has no earlier attempt behind it."""
     bot = _bot(tmp_path)
-    request = replace(await _crashed_turn(bot), existing_event_is_placeholder=False)
+    request = replace(
+        await _crashed_turn(bot),
+        existing_event_is_placeholder=placeholder,
+        existing_event_is_recovered=recovered,
+    )
 
     (context,), fetch = await _replay(bot, request, _streamed())
 
@@ -307,3 +329,32 @@ async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> 
     store = bot.journal_principal()
     assert await store.is_pending("$source")
     assert await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
+
+
+@pytest.mark.asyncio
+async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) -> None:
+    """A team's stopped attempt lands in the team scope its next attempt reads."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = request.response_envelope.target
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    scope = HistoryScope(kind="team", scope_id="team_general_helper")
+
+    with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())):
+        await runner._with_interrupted_attempt(
+            request,
+            resolved_target=target,
+            history_scope=scope,
+            execution_identity=identity,
+        )
+
+    storage = runner.deps.state_writer.create_storage(identity, scope=scope)
+    try:
+        session = get_team_session(storage, target.session_id)
+    finally:
+        storage.close()
+    assert session is not None
+    (run,) = session.runs
+    assert run.team_id == "team_general_helper"
+    assert "The `counter` tool finished" in cast("str", run.content)

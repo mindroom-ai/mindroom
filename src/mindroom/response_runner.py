@@ -233,8 +233,11 @@ _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "A service restart stopped your previous attempt at replying to the current message, and this reply replaces it. "
-    "What that attempt had shown is in the conversation above; tool calls it lists as finished already ran. "
-    "Write your complete reply from the start, using those results instead of calling the finished tools again."
+    "What that attempt had shown is in the conversation above. "
+    "Tool calls it lists as finished already ran; those it lists as still running may have finished too, "
+    "and tool calls hidden from the conversation are not listed. "
+    "Write your complete reply from the start, reusing those results instead of repeating calls that may already "
+    "have taken effect."
 )
 
 
@@ -505,6 +508,8 @@ class ResponseRequest:
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
+    # Set when replay adopts the reply an earlier attempt at this turn left behind.
+    existing_event_is_recovered: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3579,7 +3584,7 @@ class ResponseRunner:
         the new attempt from repeating finished tools.
         """
         event_id = request.existing_event_id
-        if event_id is None or not request.existing_event_is_placeholder:
+        if event_id is None or not (request.existing_event_is_placeholder and request.existing_event_is_recovered):
             return request
         message = await fetch_latest_visible_message(
             self._client(),

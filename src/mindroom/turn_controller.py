@@ -1650,7 +1650,7 @@ class TurnController:
             await self._require_durable_interactive_selection(source_event_id)
             return False
         selection_handled_turn = pending_turn
-        ack_event_id = (
+        recovered_ack_event_id = (
             await self.deps.visible_responses.recovered_response_event_id(
                 selection_handled_turn,
                 room_id=room.room_id,
@@ -1664,7 +1664,7 @@ class TurnController:
             response_text=(
                 f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
             ),
-            recovered_response_event_id=ack_event_id,
+            recovered_response_event_id=recovered_ack_event_id,
             delivery_turn_id=source_event_id,
             # This acknowledgement is the placeholder the selection's answer
             # then edits, which is what `existing_event_is_placeholder` below
@@ -1748,6 +1748,7 @@ class TurnController:
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
                 existing_event_is_placeholder=True,
+                existing_event_is_recovered=recovered_ack_event_id is not None,
                 user_id=requester_user_id,
                 attachment_ids=selection_attachment_ids or None,
                 response_envelope=response_envelope,
@@ -2098,6 +2099,7 @@ class TurnController:
                     user_id=dispatch.requester_user_id,
                     existing_event_id=recovered_response_event_id,
                     existing_event_is_placeholder=recovered_response_event_id is not None,
+                    existing_event_is_recovered=recovered_response_event_id is not None,
                     response_envelope=dispatch.envelope,
                     correlation_id=dispatch.correlation_id,
                     matrix_run_metadata=matrix_run_metadata,
