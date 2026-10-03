@@ -2185,7 +2185,7 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
             agents={
                 "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], worker_scope="shared"),
             },
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
         context.runtime_paths,
     )
