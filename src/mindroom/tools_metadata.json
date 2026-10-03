@@ -6353,7 +6353,7 @@
         {
           "authored_override": true,
           "default": "charts",
-          "description": null,
+          "description": "Directory inside the agent workspace where charts are saved",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,
@@ -6444,7 +6444,7 @@
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "create_bar_chart",
         "create_histogram",
