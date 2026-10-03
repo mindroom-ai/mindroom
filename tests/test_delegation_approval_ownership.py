@@ -401,7 +401,12 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     delegate = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
     for function in delegate.get_async_functions().values():
         function.owning_toolkit = "delegate"
-    apply_tool_approval_capability(delegate, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    apply_tool_approval_capability(
+        delegate,
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="delegate",
+    )
     calculator = CalculatorTools()
     for function in (*calculator.functions.values(), *calculator.async_functions.values()):
         function.owning_toolkit = "calculator"
