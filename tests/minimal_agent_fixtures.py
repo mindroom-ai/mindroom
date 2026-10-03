@@ -22,6 +22,12 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.session import TurnToolRegistry
 
 
+def cli_window() -> str | None:
+    """Return the CLI window of the shell command running here, as `mindroom-agent` sends it."""
+    env = current_agent_cli_shell_env()
+    return env.window if env is not None else None
+
+
 @pytest.fixture
 def agent_cli_api() -> Iterator[None]:
     """Run like `mindroom run`, whose API server minimal Bash's CLI calls back."""

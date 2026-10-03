@@ -56,7 +56,7 @@ def standard_cli_eligible(
 
 
 def wrap_native_shell_window(tools: Sequence[Toolkit]) -> bool:
-    """Run each native `run_shell_command` inside the response's CLI window; return whether one was found."""
+    """Run each native `run_shell_command` inside its own CLI window; return whether one was found."""
     wrapped = False
     for toolkit in tools:
         function = toolkit.get_async_functions().get("run_shell_command")

@@ -67,9 +67,11 @@ matrixRTC:
   livekitServiceUrl: https://matrix.example.com/livekit/jwt
   proxy:
     enabled: true
-    jwtServiceUpstream: http://matrixrtc-auth:8080
-    sfuUpstream: http://livekit:7880
+    jwtServiceUpstream: http://matrixrtc-mindroom-matrixrtc-auth:8080
+    sfuUpstream: http://matrixrtc-mindroom-matrixrtc-livekit:7880
 ```
+
+The upstreams name the Services of a MatrixRTC chart release called `matrixrtc` in the same namespace; see its [Routing](../matrixrtc/README.md#routing) table.
 
 When enabled, nginx serves `/.well-known/matrix/client` with the configured homeserver and `org.matrix.msc4143.rtc_foci` announcement.
 Route that well-known path from the Matrix server-name origin to this Service when the client uses a different hostname.

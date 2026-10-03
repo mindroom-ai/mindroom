@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import functools
@@ -34,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
+    WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_json,
@@ -935,6 +937,7 @@ def _call_proxy_sync(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
 
@@ -1012,6 +1015,7 @@ def _call_proxy_sync(
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
             worker_grantable_credentials=manager_context.worker_grantable_credentials,
+            cancellation=cancellation,
         )
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
         from mindroom.tool_system.media_transport import (  # noqa: PLC0415
@@ -1105,6 +1109,7 @@ def _wrap_async_function(
             inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
         ):
             return await entrypoint(*args, **kwargs)
+        cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
             function_entrypoint=entrypoint,
@@ -1120,8 +1125,14 @@ def _wrap_async_function(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            cancellation=cancellation,
         )
-        return await _run_in_worker_proxy_executor(call)
+        try:
+            return await _run_in_worker_proxy_executor(call)
+        except asyncio.CancelledError:
+            # The blocking request keeps running after this await is cancelled; stop it at the worker too.
+            cancellation.cancel()
+            raise
 
     declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint

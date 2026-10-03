@@ -6,6 +6,26 @@ It is for clusters that already provide surrounding platform pieces such as Matr
 Use the instance chart in `cluster/k8s/instance` when you want a complete MindRoom instance with its own Matrix homeserver.
 Use this chart when MindRoom should run inside an existing platform.
 
+## Contents
+
+- [Minimal Install](#minimal-install)
+- [Rollout Progress Deadline](#rollout-progress-deadline)
+- [Restart Safety](#restart-safety)
+- [Event Journal](#event-journal)
+- [Config Sources](#config-sources)
+- [Runtime State Storage](#runtime-state-storage)
+- [Session and Knowledge Storage](#session-and-knowledge-storage)
+- [Content Bundles](#content-bundles)
+- [Provider API Keys from Kubernetes Secrets](#provider-api-keys-from-kubernetes-secrets)
+- [Layering Values Files](#layering-values-files)
+- [Control-Plane NetworkPolicy](#control-plane-networkpolicy)
+- [Worker Egress Proxy](#worker-egress-proxy)
+- [Background Script Gateway](#background-script-gateway)
+- [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
+- [Existing Platform Example](#existing-platform-example)
+- [Notes](#notes)
+- [Adopting Existing Resources](#adopting-existing-resources)
+
 ## Minimal Install
 
 ```bash
@@ -143,6 +163,7 @@ config:
 
 MindRoom stores Matrix encryption keys and crash-atomic sync continuity records under `MINDROOM_STORAGE_PATH`.
 Hosted installs can keep those restart-critical directories on a dedicated PVC while normal workspace data stays on `storage`.
+Use it when `storage` is shared network storage, such as the `ReadWriteMany` volume dedicated workers need, so this state gets a volume that you can provision and snapshot on its own.
 The chart mounts the same state PVC at `stateStorage.mountPath` and overlays the configured subpaths where MindRoom already reads and writes those directories.
 The optional init container creates the state directories and applies the configured ownership before the runtime starts.
 `initPermissions.runAsUser` and `initPermissions.fsGroup` are the ownership targets used by the init container.
@@ -198,6 +219,10 @@ stateStorage:
       mountPath: /app/agent_data/tracking
 ```
 
+On an existing install, the state PVC's subpaths start empty and hide the directories already on `storage`.
+After the [Restart Safety](#restart-safety) check, apply the change with `replicaCount: 0`, copy `encryption_keys/`, `sync_continuity/`, and each `extraSubPaths` directory such as `tracking/` from the storage claim to the matching subpaths of the state claim, for example from a temporary pod that mounts both, then set `replicaCount` back to 1.
+Without the copy, agents fail to start with `The bound Matrix device store is missing`, and an empty `tracking/` drops the records kept there, such as room and thread overrides and, with `eventCache.backend: sqlite`, the event journal itself.
+
 ## Session and Knowledge Storage
 
 `sessionStorage` gives agent and team session databases their own volume.
@@ -205,6 +230,7 @@ The chart mounts it at `sessionStorage.mountPath` (default `/app/session_state`)
 `knowledgeStorage` gives shared knowledge-base indexes their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
 Each block creates a `<fullname>-sessions` or `<fullname>-knowledge` PVC from `size`, `storageClassName`, and `accessModes`, or mounts `existingClaim` instead.
 Both volumes must be writable by the runtime user; `podSecurityContext.fsGroup` covers volume types that support ownership management.
+Use them to keep these SQLite and Chroma databases on fast `ReadWriteOnce` storage, sized on their own, when `storage` is `ReadWriteMany` network storage shared with dedicated workers.
 
 ```yaml
 sessionStorage:
@@ -216,6 +242,10 @@ knowledgeStorage:
   size: 100Gi
   storageClassName: fast-rwo
 ```
+
+On an existing install, these volumes start empty, so copy the data first as described for [Runtime State Storage](#runtime-state-storage).
+Copy every `sessions/` directory, such as `agents/<name>/sessions/` and `teams/<name>/sessions/`, to the same relative path on the sessions volume; otherwise agents and teams start new, empty session databases while the old ones stay unused on `storage`.
+Copy the contents of `knowledge_db/` to the root of the knowledge volume too, or MindRoom rebuilds each index from its sources and repeats every embedding call, as described in [Rebuildable data](../../../docs/deployment/kubernetes.md#rebuildable-data).
 
 ## Content Bundles
 
@@ -318,6 +348,34 @@ plugins:
   - /app/agent_data/content-bundles/team-config/plugins/review-tools
   - /app/agent_data/content-bundles/policy-pack/plugins/policy-tools
 ```
+
+### Updating a Bootstrapped Config
+
+With `config.bootstrapContentBundle`, a config change reaches the runtime through a restart or a hot install.
+
+The restart path ships any change, including `.env`, plugins, and other files a config reload does not reread:
+
+1. Push the new bundle image and pin its digest in `contentBundles[].image`.
+2. Run the [Restart Safety](#restart-safety) check and continue only when it exits `0`.
+3. Run `helm upgrade`; the new digest is a new revision, so startup validates the bundle and installs it before MindRoom loads the config.
+
+A candidate that fails validation, or an active tree edited outside the installer, for example by a dashboard save, stops startup with `Bundle initialization failed` and leaves the active tree unchanged; pin the previous digest to start again.
+
+The hot path applies changes limited to the YAML/include sources without a restart.
+Copy the candidate tree, the bundle directory that `subPath` selects, into the running pod, check it, install it, and wait for the runtime to apply it:
+
+```bash
+pod=$(kubectl -n mindroom get pods -l app.kubernetes.io/instance=mindroom-runtime,app.kubernetes.io/component=runtime -o jsonpath='{.items[0].metadata.name}')
+kubectl -n mindroom exec "$pod" -c mindroom -- rm -rf /app/agent_data/config-candidate
+kubectl -n mindroom cp ./environments/prod "$pod:/app/agent_data/config-candidate" -c mindroom
+kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config classify-change /app/agent_data/active-config /app/agent_data/config-candidate
+kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config install-bundle /app/agent_data/config-candidate --target /app/agent_data/active-config --source-only --json
+kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config check-applied --path /app/agent_data/active-config/config.yaml --fingerprint <receipt-fingerprint> --wait 300
+```
+
+`classify-change` exits `1` when the change also touches other files, which need the restart path, and `--source-only` makes the installer refuse such a candidate too.
+`check-applied` waits for the `fingerprint` from the installer's JSON receipt; the [CLI reference](../../../docs/cli.md#config-install-bundle) describes rolling back to `active-config.previous` if it fails.
+A hot install keeps the stored revision, so restarts preserve it until the next bundle digest replaces the tree; ship the same change in that image.
 
 ## Provider API Keys from Kubernetes Secrets
 
@@ -501,6 +559,44 @@ Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the autho
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
 
+Use `egressProxy` when another chart or platform layer already manages the proxy:
+
+```yaml
+workers:
+  backend: kubernetes
+
+egressProxy:
+  enabled: true
+  service:
+    name: mindroom-egress-proxy
+    namespace: mindroom
+    port: 3128
+  noProxy:
+    - localhost
+    - 127.0.0.1
+    - ::1
+    - internal-api.mindroom.svc.cluster.local
+  networkPolicy:
+    create: true
+    proxyPodSelector:
+      matchLabels:
+        app.kubernetes.io/name: mindroom-egress-proxy
+    extraEgress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: internal-api
+        ports:
+          - protocol: TCP
+            port: 8080
+```
+
+When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`.
+`workers.kubernetes.extraEnv` is still applied after those defaults, so platform values can override individual variables.
+When `approvedEgress.enabled` is true, the chart automatically points worker proxy settings and the worker egress policy at the chart-managed proxy.
+When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
+For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
+
 When Agent Vault is also enabled, keep approved egress as the first network hop.
 The proxy resolves dynamic `request_network_access` grants from the worker pod's source IP; if worker traffic goes to Agent Vault first, every request reaches Squid from the vault pod IP and worker identity cannot be resolved.
 Enable `approvedEgress.parentProxy` to route only token-bearing Agent Vault tool traffic through the vault parent after the allowlist/grant check:
@@ -683,44 +779,6 @@ Applying changed inputs creates a new Job, and applying unchanged inputs leaves 
 Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
 To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
 
-Use `egressProxy` when another chart or platform layer already manages the proxy:
-
-```yaml
-workers:
-  backend: kubernetes
-
-egressProxy:
-  enabled: true
-  service:
-    name: mindroom-egress-proxy
-    namespace: mindroom
-    port: 3128
-  noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
-    - internal-api.mindroom.svc.cluster.local
-  networkPolicy:
-    create: true
-    proxyPodSelector:
-      matchLabels:
-        app.kubernetes.io/name: mindroom-egress-proxy
-    extraEgress:
-      - to:
-          - podSelector:
-              matchLabels:
-                app.kubernetes.io/name: internal-api
-        ports:
-          - protocol: TCP
-            port: 8080
-```
-
-When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and lowercase variants through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`.
-`workers.kubernetes.extraEnv` is still applied after those defaults, so platform values can override individual variables.
-When `approvedEgress.enabled` is true, the chart automatically points worker proxy settings and the worker egress policy at the chart-managed proxy.
-When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
-For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
-
 ## Background Script Gateway
 
 Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
@@ -752,6 +810,7 @@ When `networkPolicy.create` is true, a `<fullname>-script-gateway` NetworkPolicy
 The isolation attestation relies on the chart's worker egress NetworkPolicy, so `scriptGateway.enabled` requires `workers.backend=kubernetes`, `egressProxy.enabled` or `approvedEgress.enabled`, and `egressProxy.networkPolicy.create=true`.
 Keep `egressProxy.networkPolicy.extraEgress` and the egress proxy allowlist from opening the control-plane API port or the main runtime Service to workers.
 The Service is separate from the main runtime Service so `service.type` never exposes the gateway port outside the cluster.
+See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker-and-network-requirements) for the script tool, its gateway contract, and run lifecycle.
 
 ## Matrix Managed Account Authentication
 
