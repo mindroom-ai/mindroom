@@ -59,7 +59,6 @@ An operation without a platform frontend caller can still serve an external inte
 | POST | `/admin/{resource}` | `admin.py` | No current frontend caller; generic record creation |
 | PUT | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record update |
 | DELETE | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record deletion |
-| POST | `/admin/auth/logout` | `admin.py` | No current frontend caller; logout placeholder |
 
 The generic list callers use `accounts`, `subscriptions`, `instances`, `audit_logs`, and `usage_metrics` as resource values.
 Account detail requests use the specific `/admin/accounts/{account_id}` route, registered before generic record lookup.

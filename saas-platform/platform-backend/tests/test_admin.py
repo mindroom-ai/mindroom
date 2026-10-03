@@ -416,16 +416,6 @@ class TestAdminEndpoints:
         assert set(_auth_cache) == {"acc_other"}
         _auth_cache.clear()
 
-    def test_admin_logout(self, client: TestClient, mock_verify_admin: Mock):
-        """Test admin logout."""
-        # Make request
-        response = client.post("/admin/auth/logout")
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-
     def test_admin_list_resources(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin listing resources."""
         # Setup mock with query chaining for accounts
