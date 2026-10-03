@@ -552,8 +552,8 @@ async def test_source_and_conversation_lookups_follow_admission_recovery_and_exp
             session_id="parent-session",
             requester_id="@alice:test",
         )
-        by_conversation = await runtime.conversation_jobs(**source, requester_id="@alice:test")
-        return [job.job_id for job in by_source], [job.job_id for job in by_conversation]
+        by_conversation = await runtime.held_jobs(**source, requester_id="@alice:test")
+        return [job.job_id for job in by_source], [job.job_id for job, _readable in by_conversation]
 
     runtime = await tool_job_runtime(tmp_path)
     try:

@@ -247,10 +247,13 @@ class ToolJobRuntime:
         authorize: Callable[[BackgroundJob], bool],
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
+        denied: Callable[[BackgroundJob], bool] | None = None,
     ) -> None:
         # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
         self._authorize = authorize
+        # Access proven gone, as opposed to access merely unresolved, such as while room membership resolves.
+        self._denied = denied or (lambda job: not authorize(job))
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
         self.authorize_execution = authorize_execution
         self._cancel = cancel
@@ -749,15 +752,11 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    def _unconsumed(self, entry: _Entry) -> bool:
+    @staticmethod
+    def _unconsumed(entry: _Entry) -> bool:
         """Whether no parent run consumed the outcome, no Stop ended the job, and no waiter claims it."""
         job = entry.job
-        return (
-            not job.consumed
-            and job.user_stop_receipt_order is None
-            and entry.claim is None
-            and self._authorize(entry.job)
-        )
+        return not job.consumed and job.user_stop_receipt_order is None and entry.claim is None
 
     async def _find(
         self,
@@ -799,7 +798,7 @@ class ToolJobRuntime:
             ),
         )
 
-    async def conversation_jobs(
+    async def held_jobs(
         self,
         *,
         transport_agent_name: str,
@@ -807,13 +806,23 @@ class ToolJobRuntime:
         thread_id: str | None,
         requester_id: str,
         source_kind: str | None = None,
-    ) -> list[BackgroundJob]:
-        """Discover outstanding work for one requester, conversation, and delivery policy."""
+    ) -> list[tuple[BackgroundJob, bool]]:
+        """Outstanding work a reply's message holds for one requester and conversation, each with whether it is readable.
+
+        Work whose access is only unresolved stays held, so a message keeps holding it while room membership resolves;
+        a proven denial ends the hold.
+        """
         silent = source_kind == SILENT_SCHEDULE_SOURCE_KIND
-        return await self._find(
-            partial(self._by_conversation.get, (transport_agent_name, room_id, thread_id, requester_id)),
-            lambda entry: (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent and self._unconsumed(entry),
-        )
+        async with self._lock:
+            if self._closed:
+                return []
+            return [
+                (await self._snapshot(entry), self._authorize(entry.job))
+                for entry in self._by_conversation.get((transport_agent_name, room_id, thread_id, requester_id))
+                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
+                and self._unconsumed(entry)
+                and not self._denied(entry.job)
+            ]
 
     async def expire_consumed(
         self,

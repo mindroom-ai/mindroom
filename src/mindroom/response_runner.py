@@ -159,7 +159,7 @@ from mindroom.tool_jobs.held_replies import (
     stopped_edit,
     waiting_notice,
 )
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
@@ -3174,13 +3174,14 @@ class ResponseRunner:
                     source_kind=request.response_envelope.source_kind,
                     message_event_id=message_id,
                     presentation=StreamingPresentation(
-                        response_text=final_outcome.final_visible_body or "",
+                        response_text=(final_outcome.final_visible_body or "").strip(),
                         tool_trace=final_outcome.tool_trace,
                     ),
                     extra_content=dict(final_outcome.extra_content or {}),
                     notice=boundary.notice,
                     stop_button_event_id=stop_button_event_id,
                     joins=boundary.joins,
+                    offered=boundary.offered,
                 ),
             )
             return
@@ -3204,30 +3205,31 @@ class ResponseRunner:
     async def stop_held_reply(self, message_id: str, stop_receipt_order: int) -> bool:
         """End the work a message holds while no turn runs on it, and show the message as stopped."""
         hold = await self._hold_on_message(message_id)
-        if hold is None:
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if hold is None or runtime is None:
             return False
 
-        async def stop_locked() -> bool:
-            held = await self._hold_on_message(message_id)
-            if held is None:
-                # A turn released the message while this Stop waited for the conversation.
-                return True
-            runtime = get_background_runtime(self.deps.runtime_paths)
-            if runtime is not None:
+        async def held_by_message(job: BackgroundJob) -> bool:
+            return holds_job(hold.key, job)
 
-                async def held_by_message(job: BackgroundJob) -> bool:
-                    return holds_job(held.key, job)
-
-                await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
-            await self.deps.held_replies.delete(held.key.hold_id, generation=held.generation)
-            await self._release_held_message(held, stopped=True)
-            return True
-
-        return await self._lifecycle_coordinator.run_locked_target_operation(
-            target=hold.target,
-            while_waiting=None,
-            locked_operation=stop_locked,
+        await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
+        # The message settles once the conversation is free; a turn running meanwhile, perhaps for long, must not
+        # hold up the room's other events, such as a Stop of that turn.
+        create_background_task(
+            self._lifecycle_coordinator.run_locked_target_operation(
+                target=hold.target,
+                while_waiting=None,
+                locked_operation=partial(self._settle_stopped_hold, hold),
+            ),
+            name=f"held_reply_stop:{message_id}",
+            owner=self.deps.runtime,
         )
+        return True
+
+    async def _settle_stopped_hold(self, hold: HeldReply) -> None:
+        """Show a stopped message as stopped, unless a turn that ran meanwhile already settled it."""
+        if await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation) is not None:
+            await self._release_held_message(hold, stopped=True)
 
     async def handoff_held_reply_wake(self, event: JournalEvent) -> bool:
         """Transfer a held reply's wake to a detached response owner; it settles once that turn is done."""
@@ -3332,23 +3334,22 @@ class ResponseRunner:
         if saved is None or saved.generation != hold.generation:
             # A newer turn saved or released the hold since the wake.
             return None
-        jobs = await conversation_work(runtime, hold.key)
-        ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
-        if ready and hold.joins < JOB_JOIN_LIMIT:
-            prompt = completion_prompt(ready)
+        work = await conversation_work(runtime, hold.key, attempted=hold.offered)
+        if work.ready and hold.joins < JOB_JOIN_LIMIT:
+            prompt = completion_prompt(work.ready)
             return replace(
                 request,
                 prompt=prompt,
                 response_envelope=replace(request.response_envelope, body=prompt),
                 held_continuation=HeldContinuation(
                     presentation=hold.presentation,
-                    ready_job_ids=frozenset(job.job_id for job in ready),
+                    attempted_job_ids=hold.offered | {job.job_id for job in work.ready},
                     joins=hold.joins,
                 ),
             )
-        if jobs and hold.joins < JOB_JOIN_LIMIT:
+        if work.jobs and hold.joins < JOB_JOIN_LIMIT:
             # The work changed without becoming ready, so the message shows what it waits for now.
-            await self._save_held_reply(replace(hold, notice=waiting_notice(jobs)))
+            await self._save_held_reply(replace(hold, notice=waiting_notice(work.jobs)))
         elif await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation) is not None:
             await self._release_held_message(hold)
         return None

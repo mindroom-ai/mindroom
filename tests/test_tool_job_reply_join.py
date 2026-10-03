@@ -583,7 +583,7 @@ async def test_turn_continuing_a_held_message_extends_it(tmp_path: Path, *, stre
 
     ctx = replace(
         _ctx(),
-        held_continuation=HeldContinuation(presentation=prior, ready_job_ids=frozenset({"work"}), joins=3),
+        held_continuation=HeldContinuation(presentation=prior, attempted_job_ids=frozenset({"work"}), joins=3),
     )
     try:
         await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)

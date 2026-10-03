@@ -53,7 +53,18 @@ _IDLE_ROUNDS = 20_000
 class Step:
     """A printable, shrinkable step; it names jobs by index, never by identity."""
 
-    kind: Literal["message", "silenced", "release", "wake", "race", "stop_held", "stop_live", "fail_next", "crash"]
+    kind: Literal[
+        "message",
+        "silenced",
+        "release",
+        "wake",
+        "race",
+        "stop_held",
+        "stop_live",
+        "fail_next",
+        "ignore_next",
+        "crash",
+    ]
     # Jobs the reply to a message starts before its response boundary.
     jobs: int = 0
     # Those jobs wait for a release.
@@ -89,6 +100,8 @@ class _Model:
     latest_boundary_message: str | None = None
     # Work can be left unheld until the next reply: a continuation failed, or a message used up its joins.
     unheld_allowed: bool = False
+    # Outcomes the model left unread; each waits for the conversation's next reply.
+    unread: set[str] = field(default_factory=set)
     # A crash cut a turn short somewhere in its settlement, so holds are exact again only after the next boundary.
     uncertain: bool = False
     # The last edit of each message, as a client shows it.
@@ -129,6 +142,7 @@ class HeldReplyFuzzRunner:
         self._order = 0
         self._crashing = False
         self._failing = False
+        self._ignoring = False
         # Wakes the journal still owes a turn: admitted, and not yet run to the end.
         self.pending_wakes: dict[str, JournalEvent] = {}
         self.woken: list[HeldReply] = []
@@ -185,12 +199,14 @@ class HeldReplyFuzzRunner:
 
     async def finish(self) -> None:
         """Release all work and wake held messages until none is left; unheld work waits for the next reply."""
+        # From here on the model reads everything and no continuation fails.
+        self._ignoring = self._failing = False
         for gate in self.gates.values():
             gate.set()
         await self._idle()
         await self._wake_until_quiet()
-        if self.model.unheld_allowed and self._outstanding():
-            # Work a failed continuation left unheld waits for the next reply in the conversation.
+        if self._outstanding() and (self.model.unheld_allowed or self._unread()):
+            # Work a failed continuation left unheld, and outcomes left unread, wait for the next reply.
             await self.step(Step("message"))
             await self._wake_until_quiet()
         await self.check()
@@ -229,6 +245,9 @@ class HeldReplyFuzzRunner:
             for job in self._jobs()
             if job.user_stop_receipt_order is None and (job.status not in TERMINAL_STATUSES or not job.consumed)
         ]
+
+    def _unread(self) -> list[BackgroundJob]:
+        return [job for job in self._outstanding() if job.job_id in self.model.unread]
 
     def _live(self) -> list[_Turn]:
         return [turn for turn in self.model.turns if turn.live]
@@ -345,7 +364,7 @@ class HeldReplyFuzzRunner:
     ) -> FinalDeliveryOutcome:
         """Run the scripted model up to the response boundary and deliver the turn's final answer."""
         seed = request.held_continuation
-        attempted: set[str] = set(seed.ready_job_ids) if seed is not None else set()
+        attempted: set[str] = set(seed.attempted_job_ids) if seed is not None else set()
         joins = seed.joins + 1 if seed is not None else 0
         try:
             with tool_runtime_context(self.context), reply_boundary_report(report):
@@ -392,7 +411,12 @@ class HeldReplyFuzzRunner:
         return outcome
 
     async def _retrieve(self, prompt: str, turn: _Turn) -> None:
-        """Retrieve every outcome a prompt names, as the model does with the job tool."""
+        """Retrieve every outcome a prompt names, as the model does with the job tool, unless told to ignore one."""
+        if self._ignoring:
+            # An outcome the model leaves unread waits for the conversation's next reply.
+            self._ignoring = False
+            self.model.unread.update(_JOB_ID.findall(prompt))
+            return
         for job_id in _JOB_ID.findall(prompt):
             waited = await self.runtime.wait(job_id, owner=self.owner, depth=0, timeout=0)
             if waited.claim is not None:
@@ -486,6 +510,9 @@ class HeldReplyFuzzRunner:
     async def _fail_next(self, _step: Step) -> None:
         self._failing = True
 
+    async def _ignore_next(self, _step: Step) -> None:
+        self._ignoring = True
+
     async def _crash(self, _step: Step) -> None:
         """Tear the event loop down between two awaits, then start again over what was saved.
 
@@ -545,7 +572,7 @@ class HeldReplyFuzzRunner:
             )
             if not any(turn.message == hold.message_event_id for turn in self._live()):
                 assert held_messages == [hold.message_event_id], held_messages
-        outstanding = self._outstanding()
+        outstanding = [job for job in self._outstanding() if job.job_id not in self.model.unread]
         if outstanding and not self._live() and not self.pending_wakes and not self.model.unheld_allowed:
             # Outstanding work always has a message holding it.
             assert hold is not None, [job.job_id for job in outstanding]

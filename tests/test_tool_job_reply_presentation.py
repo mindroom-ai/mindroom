@@ -258,7 +258,7 @@ async def test_blocking_continuation_cancellation_preserves_the_held_presentatio
         existing_event_id="$response",
         held_continuation=HeldContinuation(
             presentation=StreamingPresentation("New analysis.\n\n🔧 `retrieve` [1]", tool_trace=trace),
-            ready_job_ids=frozenset({"job"}),
+            attempted_job_ids=frozenset({"job"}),
             joins=0,
         ),
     )

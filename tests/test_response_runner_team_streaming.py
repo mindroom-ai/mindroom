@@ -944,7 +944,7 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         existing_event_is_placeholder=False,
         held_continuation=HeldContinuation(
             presentation=StreamingPresentation(latest_text, tool_trace=tuple(latest_trace)),
-            ready_job_ids=frozenset({"job-1"}),
+            attempted_job_ids=frozenset({"job-1"}),
             joins=0,
         ),
     )

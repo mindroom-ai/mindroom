@@ -697,7 +697,7 @@ def _turn_run_state(ctx: ResponseTurnContext) -> TurnRunState:
     if held is not None:
         run.prior_response_text = held.presentation.response_text
         run.prior_response_tools = held.presentation.tool_trace
-        run.attempted_job_outcomes.update(held.ready_job_ids)
+        run.attempted_job_outcomes.update(held.attempted_job_ids)
         run.job_joins = held.joins + 1
     return run
 

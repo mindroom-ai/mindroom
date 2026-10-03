@@ -75,12 +75,14 @@ class ProcessRuntime(ToolJobRuntime):
         authorize: Callable[[BackgroundJob], bool],
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
+        denied: Callable[[BackgroundJob], bool] | None = None,
     ) -> None:
         super().__init__(
             journal.tool_jobs(uuid4().hex),
             authorize=authorize,
             authorize_execution=authorize_execution,
             cancel=cancel,
+            denied=denied,
         )
         self._journal = journal
 
@@ -102,6 +104,7 @@ async def tool_job_runtime(
     authorize: Callable[[BackgroundJob], bool] = _authorize_all,
     authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
+    denied: Callable[[BackgroundJob], bool] | None = None,
 ) -> ProcessRuntime:
     """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
 
@@ -112,6 +115,7 @@ async def tool_job_runtime(
         authorize=authorize,
         authorize_execution=authorize_execution,
         cancel=cancel,
+        denied=denied,
     )
     await runtime._store.take_ownership()
     return runtime
@@ -210,7 +214,7 @@ def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
     return [
         entry.job
         for entry in runtime._entries.values()
-        if entry.job.status in TERMINAL_STATUSES and runtime._unconsumed(entry)
+        if entry.job.status in TERMINAL_STATUSES and runtime._unconsumed(entry) and runtime._authorize(entry.job)
     ]
 
 

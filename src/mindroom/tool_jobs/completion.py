@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.held_replies import HoldKey, conversation_work, waiting_notice
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -44,6 +44,8 @@ class ReplyBoundary:
     # The notice the message shows while it holds outstanding work, or None when it holds nothing.
     notice: str | None
     joins: int
+    # Outcomes the reply already asked for, which turns continuing its message do not ask for again.
+    offered: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,8 @@ class HeldContinuation:
     """A turn continuing a held message: what the message already shows and the ready work it retrieves first."""
 
     presentation: StreamingPresentation
-    ready_job_ids: frozenset[str]
+    # Outcomes this turn asks for first, with those the message already asked for, so neither is asked for again.
+    attempted_job_ids: frozenset[str]
     # Ready results the message continued with before this turn; this turn's first retrieval adds one more.
     joins: int
 
@@ -137,16 +140,16 @@ async def join_conversation_jobs(
         silent=context.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
         participants=tuple(sorted({context.agent_name, *(agent_names or ())})),
     )
-    jobs = await conversation_work(runtime, key, attempted=attempted)
-    ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
-    if ready and joins < JOB_JOIN_LIMIT:
-        attempted.update(job.job_id for job in ready)
-        return _JobJoin(prompt=completion_prompt(ready))
+    work = await conversation_work(runtime, key, attempted=attempted)
+    if work.ready and joins < JOB_JOIN_LIMIT:
+        attempted.update(job.job_id for job in work.ready)
+        return _JobJoin(prompt=completion_prompt(work.ready))
     # At the join limit the message stops holding, and the next reply in the conversation takes the work.
-    holds = bool(jobs) and joins < JOB_JOIN_LIMIT
+    holds = bool(work.jobs) and joins < JOB_JOIN_LIMIT
     report = _REPORT.get()
     if report is not None:
-        report.boundary = ReplyBoundary(key, waiting_notice(jobs) if holds else None, joins)
+        notice = waiting_notice(work.jobs) if holds else None
+        report.boundary = ReplyBoundary(key, notice, joins, offered=frozenset(attempted))
     return _JobJoin(holds=holds)
 
 

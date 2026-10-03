@@ -87,6 +87,11 @@ class HeldReplies(RuleBasedStateMachine):
         self._step("fail_next")
 
     @rule()
+    def ignore_next(self) -> None:
+        """Make the model leave the next outcomes it is asked to retrieve unread."""
+        self._step("ignore_next")
+
+    @rule()
     def crash(self) -> None:
         """Tear the process down between two awaits."""
         self._step("crash")
@@ -140,6 +145,10 @@ def test_generated_conversations_always_hold_outstanding_work() -> None:
         pytest.param(
             [Step("message", jobs=1, hold=True), Step("release"), Step("race", jobs=1, hold=True), Step("wake")],
             id="a-wake-and-a-new-reply-queue-together",
+        ),
+        pytest.param(
+            [Step("message", jobs=2, hold=True), Step("release"), Step("ignore_next"), Step("wake"), Step("wake")],
+            id="an-unread-outcome-is-not-offered-again-by-wakes",
         ),
         pytest.param(
             [Step("message", jobs=1, hold=True), Step("crash"), Step("wake")],

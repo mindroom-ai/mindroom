@@ -26,6 +26,7 @@ from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import PROGRESS_PLACEHOLDER, StreamingPresentation, build_cancelled_response_update
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
@@ -83,6 +84,8 @@ class HeldReply:
     stop_button_event_id: str | None
     # Ready results this message already continued with, across its own turn and the turns continuing it.
     joins: int
+    # Outcomes its turns already asked for; one the model left unread waits for the conversation's next reply.
+    offered: frozenset[str] = frozenset()
     # The save that wrote this hold, set once it is saved, and the save a wake was last admitted for.
     generation: str = ""
     woken_generation: str | None = None
@@ -101,21 +104,36 @@ def holds_job(key: HoldKey, job: BackgroundJob) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _HeldWork:
+    """The outstanding work a message holds, and the ready outcomes of it a turn may retrieve now."""
+
+    jobs: tuple[BackgroundJob, ...]
+    ready: tuple[BackgroundJob, ...]
+
+
 async def conversation_work(
     runtime: ToolJobRuntime,
     key: HoldKey,
     *,
     attempted: Collection[str] = (),
-) -> list[BackgroundJob]:
-    """Return the outstanding work a reply holding ``key`` retrieves, apart from work it already asked for."""
-    jobs = await runtime.conversation_jobs(
-        transport_agent_name=key.recipient,
-        room_id=key.room_id,
-        thread_id=key.thread_id,
-        requester_id=key.requester_id,
-        source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
+) -> _HeldWork:
+    """Return the outstanding work a reply holding ``key`` holds, apart from outcomes it already asked for."""
+    held = [
+        (job, readable)
+        for job, readable in await runtime.held_jobs(
+            transport_agent_name=key.recipient,
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_id=key.requester_id,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else None,
+        )
+        if job.owner.agent_name in key.participants and job.job_id not in attempted
+    ]
+    return _HeldWork(
+        jobs=tuple(job for job, _readable in held),
+        ready=tuple(job for job, readable in held if readable and job.status in TERMINAL_STATUSES),
     )
-    return [job for job in jobs if job.owner.agent_name in key.participants and job.job_id not in attempted]
 
 
 def waiting_notice(jobs: Sequence[BackgroundJob]) -> str:
@@ -138,6 +156,7 @@ def encode_held_reply(hold: HeldReply) -> str:
             "notice": hold.notice,
             "stop_button_event_id": hold.stop_button_event_id,
             "joins": hold.joins,
+            "offered": sorted(hold.offered),
         },
     )
 
@@ -161,6 +180,7 @@ def _restored(saved: SavedHeldReply) -> HeldReply | None:
         notice=payload["notice"],
         stop_button_event_id=payload["stop_button_event_id"],
         joins=int(payload["joins"]),
+        offered=frozenset(payload["offered"]),
         generation=saved.generation,
         woken_generation=saved.woken_generation,
     )

@@ -22,8 +22,9 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   A newer reply of the agent with the same participants that reaches its response boundary takes the work over, and the older message shows its own reply again without the notice.
   A turn that never reaches that boundary, such as another agent's reply, a reply whose participation check stays silent, or a delegated child running inside its caller, leaves the message holding.
   A silent schedule holds its own work without a message, and the turn continuing it is silent too.
-  The reply offers each ready outcome to the model once; one the model leaves unretrieved waits for the conversation's next reply.
-  Stop on a held message cancels the work it holds and shows the message as stopped; Stop while a turn continues the message stops that turn and the work like any reply.
+  A message offers each ready outcome to the model once, across its own turn and the turns continuing it; one the model leaves unretrieved waits for the conversation's next reply.
+  Work whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
+  Stop on a held message cancels the work it holds at once and shows the message as stopped once no turn runs in the conversation; Stop while a turn continues the message stops that turn and the work like any reply.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.

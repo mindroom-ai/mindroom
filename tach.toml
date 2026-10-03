@@ -7597,6 +7597,7 @@ visibility = [
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
     "mindroom.tool_jobs.execution_authority",
+    "mindroom.tool_jobs.held_replies",
     "mindroom.tool_jobs.user_stop",
 ]
 
@@ -7941,6 +7942,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.message_target",
     "mindroom.streaming",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
     "mindroom.turn_origin",
 ]

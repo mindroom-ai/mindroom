@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.delivery_gateway import EditTextRequest
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -24,6 +26,7 @@ from mindroom.tool_jobs.held_replies import (
     HeldReply,
     HoldKey,
     _wake_event_id,
+    conversation_work,
     decode_held_reply,
     encode_held_reply,
 )
@@ -32,7 +35,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.tool_job_helpers import lookup, start_job, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, lookup, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -245,7 +248,7 @@ async def test_resuming_a_held_message_retrieves_ready_work(held: _Held) -> None
     assert 'job_id="ready"' in resumed.prompt
     assert resumed.response_envelope.body == resumed.prompt
     assert resumed.held_continuation is not None
-    assert resumed.held_continuation.ready_job_ids == frozenset({"ready"})
+    assert resumed.held_continuation.attempted_job_ids == frozenset({"ready"})
     assert resumed.held_continuation.joins == 2
     assert resumed.held_continuation.presentation.response_text == "Started."
 
@@ -316,22 +319,119 @@ async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _
 
 
 @pytest.mark.asyncio
-async def test_stop_on_a_held_message_ends_its_work(held: _Held) -> None:
-    """Stop on a message no turn runs on cancels the work it holds and shows the message as stopped."""
+@pytest.mark.parametrize("busy", [False, True])
+async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) -> None:
+    """Stop on a message no turn runs on cancels its work at once and shows the message stopped once the room is free.
+
+    A turn running in the conversation meanwhile does not hold the Stop, or the room's other events, up.
+    """
     gate = asyncio.Event()
     await held.start("running", gate)
     await held.settle("$reply", "Started.", _WAITING_NOTICE, button="$button")
     assert await held.runner.held_reply_for_message("$reply", "!room:localhost")
     assert not await held.runner.held_reply_for_message("$reply", "!other:localhost")
-    assert await held.runner.stop_held_reply("$reply", 7)
+    target = held.request.response_envelope.target
+    release = asyncio.Event()
+    running = asyncio.Event()
+
+    async def busy_turn() -> None:
+        running.set()
+        await release.wait()
+
+    turn = None
+    if busy:
+        turn = asyncio.create_task(
+            held.runner._lifecycle_coordinator.run_locked_target_operation(
+                target=target,
+                while_waiting=None,
+                locked_operation=busy_turn,
+            ),
+        )
+        await asyncio.wait_for(running.wait(), JOB_TEST_TIMEOUT)
+    assert await asyncio.wait_for(held.runner.stop_held_reply("$reply", 7), JOB_TEST_TIMEOUT)
     stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
     assert stopped.user_stop_receipt_order == 7
     await wait_for_status(held.runtime, "running", "cancelled")
+    if turn is not None:
+        assert held.edits[-1].new_text == f"Started.\n\n{_WAITING_NOTICE}"
+        release.set()
+        await turn
+    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
     assert await held.hold() is None
     assert held.edits[-1].new_text == "Started.\n\n**[Response cancelled by user]**"
     assert held.edits[-1].extra_content["io.mindroom.stream_status"] == "cancelled"
     held.bot.client.room_redact.assert_awaited_once_with("!room:localhost", "$button", reason="Response completed")
     assert not await held.runner.stop_held_reply("$reply", 8)
+
+
+@pytest.mark.asyncio
+async def test_work_whose_access_is_unresolved_stays_held(tmp_path: Path) -> None:
+    """While room membership resolves, a message keeps holding work it cannot read yet; a proven denial ends that."""
+    state = _Held(tmp_path)
+    access = "allowed"
+    state.runtime = await tool_job_runtime(
+        tmp_path,
+        authorize=lambda _job: access == "allowed",
+        denied=lambda _job: access == "denied",
+    )
+    pin_background_tool_jobs(state.bot.config, state.bot.runtime_paths)
+    register_background_runtime(state.bot.runtime_paths, state.runtime)
+
+    async def edit(_gateway: object, request: EditTextRequest) -> bool:
+        return await state.edit(request)
+
+    try:
+        with patch.object(type(state.runner.deps.delivery_gateway), "edit_text", edit):
+            await state.start("work")
+            await wait_for_status(state.runtime, "work", "completed")
+            # Membership starts resolving again, as after a restart or a router sync restart.
+            access = "pending"
+            await state.settle("$reply", "Started.", _WAITING_NOTICE)
+            hold = await state.hold()
+            assert hold is not None
+            work = await conversation_work(state.runtime, _KEY)
+            assert ([job.job_id for job in work.jobs], work.ready) == (["work"], ())
+            # Unreadable for now, the ready outcome is held without a turn retrieving it.
+            assert await state.runner._resume_held_reply(replace(state.request, held_reply=hold)) is None
+            again = await state.hold()
+            assert again is not None
+            access = "allowed"
+            resumed = await state.runner._resume_held_reply(replace(state.request, held_reply=again))
+            assert resumed is not None
+            assert 'job_id="work"' in resumed.prompt
+            access = "denied"
+            assert await state.runner._resume_held_reply(replace(state.request, held_reply=again)) is None
+            assert await state.hold() is None
+    finally:
+        await state.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_offered_outcome_is_not_offered_again_by_wakes(held: _Held) -> None:
+    """An outcome the model left unread waits for the next reply; wakes continue only with work not yet offered."""
+    gate = asyncio.Event()
+    await held.start("ignored")
+    await wait_for_status(held.runtime, "ignored", "completed")
+    await held.start("running", gate)
+    await held.runner._settle_held_reply(
+        held.request,
+        _completed("$reply", "Started."),
+        ReplyBoundary(_KEY, _WAITING_NOTICE, 1, offered=frozenset({"ignored"})),
+        stop_button_event_id=None,
+    )
+    hold = await held.hold()
+    assert hold is not None
+    assert hold.offered == frozenset({"ignored"})
+    work = await conversation_work(held.runtime, _KEY, attempted=hold.offered)
+    assert ([job.job_id for job in work.jobs], work.ready) == (["running"], ())
+    gate.set()
+    await wait_for_status(held.runtime, "running", "completed")
+    resumed = await held.runner._resume_held_reply(replace(held.request, held_reply=hold))
+    assert resumed is not None
+    assert 'job_id="running"' in resumed.prompt
+    assert 'job_id="ignored"' not in resumed.prompt
+    assert resumed.held_continuation is not None
+    assert resumed.held_continuation.attempted_job_ids == frozenset({"ignored", "running"})
 
 
 def _wake(hold: HeldReply) -> JournalEvent:

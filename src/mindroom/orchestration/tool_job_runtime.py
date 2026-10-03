@@ -25,7 +25,6 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_backg
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     CONSUMED_RESULT_RETENTION,
-    TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
@@ -102,6 +101,7 @@ class ToolJobRuntimeCoordinator:
                     authorize=self._authorized,
                     authorize_execution=self._authorize_execution,
                     cancel=self._interrupt_child,
+                    denied=self._denied,
                 )
         else:
             instance.parked = await index_parked_work(journal)
@@ -350,12 +350,8 @@ class ToolJobRuntimeCoordinator:
             if hold.key.recipient in self._unrestored_stops:
                 # A Stop saved while the runtime was away may still end this work.
                 continue
-            jobs = await conversation_work(self.runtime, hold.key)
-            if (
-                jobs
-                and all(job.status not in TERMINAL_STATUSES for job in jobs)
-                and waiting_notice(jobs) == hold.notice
-            ):
+            work = await conversation_work(self.runtime, hold.key, attempted=hold.offered)
+            if work.jobs and not work.ready and waiting_notice(work.jobs) == hold.notice:
                 continue
             bot = self.bot_provider(hold.key.recipient)
             # Synced membership: a bot outside the room costs no homeserver request on every pass.

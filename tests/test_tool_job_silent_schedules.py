@@ -462,9 +462,9 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
             "thread_id": owner.resolved_thread_id,
             "requester_id": owner.requester_id,
         }
-        quiet = await runtime.conversation_jobs(**conversation, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-        assert [job.job_id for job in quiet] == [job_id]
-        assert await runtime.conversation_jobs(**conversation) == []
+        quiet = await runtime.held_jobs(**conversation, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+        assert [job.job_id for job, _readable in quiet] == [job_id]
+        assert await runtime.held_jobs(**conversation) == []
     finally:
         release.set()
         await runtime.shutdown()
