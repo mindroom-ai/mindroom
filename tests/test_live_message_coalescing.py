@@ -1489,7 +1489,7 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
 
     active_threads: set[str | None] = set()
 
-    async def wait_for_thread_response_idle(room_id: str, thread_id: str | None) -> None:
+    async def wait_until_follow_ups_may_dispatch(room_id: str, thread_id: str | None) -> None:
         assert room_id == room.room_id
         assert thread_id == "$m1"
         await release_first_dispatch.wait()
@@ -1516,12 +1516,12 @@ async def test_messages_during_active_response_wait_and_batch_after_completion(t
         ),
         patch.object(
             bot._response_runner,
-            "wait_for_thread_response_idle",
-            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+            "wait_until_follow_ups_may_dispatch",
+            new=AsyncMock(side_effect=wait_until_follow_ups_may_dispatch),
         ),
         patch.object(
             bot._response_runner,
-            "active_thread_ids_for_room",
+            "thread_ids_holding_follow_ups",
             new=lambda _room_id: frozenset(active_threads),
         ),
     ):
@@ -1570,19 +1570,19 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
     async def record_dispatch(_controller: object, batch: PreparedTurn) -> None:
         calls.append(batch)
 
-    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+    async def wait_until_follow_ups_may_dispatch(_room_id: str, _thread_id: str | None) -> None:
         await idle.wait()
 
     with (
         patch("mindroom.turn_controller.dispatch_text_message", new=AsyncMock(side_effect=record_dispatch)),
         patch.object(
             bot._response_runner,
-            "wait_for_thread_response_idle",
-            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+            "wait_until_follow_ups_may_dispatch",
+            new=AsyncMock(side_effect=wait_until_follow_ups_may_dispatch),
         ),
         patch.object(
             bot._response_runner,
-            "active_thread_ids_for_room",
+            "thread_ids_holding_follow_ups",
             new=lambda _room_id: frozenset(active_threads),
         ),
         patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),

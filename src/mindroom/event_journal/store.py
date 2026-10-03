@@ -2114,6 +2114,12 @@ class ToolJobStore:
             lambda transaction: tool_jobs.take_ownership(transaction, self._runtime_generation),
         )
 
+    async def require_ownership(self) -> None:
+        """Raise ``ToolJobOwnershipLostError`` unless this generation still owns every job."""
+        await self._backend.write(
+            lambda transaction: tool_jobs.require_ownership(transaction, self._runtime_generation),
+        )
+
     async def load_all(self) -> tuple[SavedToolJob, ...]:
         """Return every saved job."""
         return await self._backend.read(tool_jobs.load_all)

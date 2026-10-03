@@ -214,7 +214,8 @@ class DelegationFuzzRunner:
             cleanup=partial(interrupt_stopped_child, config=self.config, runtime_paths=self.paths),
             runtime_paths=self.paths,
         )
-        assert await settle_child_approvals(job.job_id)
+        await settle_child_approvals(self.runtime, job.job_id)
+        assert not self.runtime.unsettled_approvals
         return outcome
 
     async def run(self, steps: list[Step]) -> None:

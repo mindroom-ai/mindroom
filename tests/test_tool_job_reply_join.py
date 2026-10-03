@@ -195,7 +195,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             signal.notify()
             assert [item.content async for item in stream] == [None]
             assert (await lookup(runtime, "quiet", owner=owner, depth=0)).status == "running"
-            signal.clear()
+            signal.takeover_started()
             finish.set()
             waited = await runtime.wait("quiet", owner=owner, depth=0)
             await runtime.release_wait("quiet", waited.claim)

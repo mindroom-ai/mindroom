@@ -246,7 +246,7 @@ async def test_human_followup_allows_subagent_next_tool(tmp_path: Path) -> None:
             assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.status == "running"
         proceed.set()
         await asyncio.wait_for(next_tool.wait(), JOB_TEST_TIMEOUT)
-        human.clear()
+        human.takeover_started()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "finished"
     finally:
         await runtime.shutdown()

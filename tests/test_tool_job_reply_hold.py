@@ -85,11 +85,20 @@ async def test_follow_up_ingress_alone_keeps_the_reply_holding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_newer_reply_of_the_same_agent_takes_over() -> None:
-    """Queuing a reply to a newer human message releases the holding reply, and only once."""
+@pytest.mark.parametrize("other_message_pending", [False, True])
+async def test_newer_reply_of_the_same_agent_takes_over(other_message_pending: bool) -> None:
+    """Queuing a reply to a newer human message releases the holding reply, and only until that reply starts.
+
+    A message still waiting for the turn policy cannot keep releasing the newer reply's own waits.
+    """
     lifecycle = ResponseLifecycleCoordinator()
     reply = _HoldingReply(lifecycle)
     await reply.start()
+    other = (
+        lifecycle.reserve_waiting_human_message(target=_TARGET, response_envelope=_envelope("$other"))
+        if other_message_pending
+        else None
+    )
     newer_released = asyncio.Event()
 
     async def newer(_target: MessageTarget) -> str:
@@ -112,6 +121,8 @@ async def test_newer_reply_of_the_same_agent_takes_over() -> None:
     assert await follow_up == "$newer"
     # The newer reply consumed the hand-over, so its own waits stay attached.
     assert not newer_released.is_set()
+    if other is not None:
+        other.cancel()
 
 
 @pytest.mark.asyncio
@@ -137,3 +148,39 @@ async def test_scheduled_turn_waits_behind_the_holding_reply() -> None:
     assert not queued.done()
     await reply.stop()
     assert await queued == "$scheduled"
+
+
+@pytest.mark.asyncio
+async def test_new_messages_reach_the_turn_policy_while_the_reply_only_waits() -> None:
+    """New messages wait behind a generating reply, but not behind one that only waits on background work.
+
+    Otherwise a follow-up this agent would answer could never start the reply that takes the work over.
+    """
+    lifecycle = ResponseLifecycleCoordinator()
+    room_id, thread_id = _TARGET.lifecycle_key.room_id, _TARGET.lifecycle_key.thread_id
+    generating, waits = asyncio.Event(), asyncio.Event()
+    reply = _HoldingReply(lifecycle)
+
+    async def generate_then_wait(target: MessageTarget) -> str:
+        generating.set()
+        await waits.wait()
+        return await reply._operation(target)
+
+    reply.task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=_TARGET,
+            response_envelope=_envelope("$first"),
+            pipeline_timing=None,
+            locked_operation=generate_then_wait,
+        ),
+    )
+    await asyncio.wait_for(generating.wait(), 5)
+    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset({thread_id})
+    dispatch = asyncio.create_task(lifecycle.wait_until_follow_ups_may_dispatch(room_id, thread_id))
+    await asyncio.sleep(0)
+    assert not dispatch.done()
+    waits.set()
+    await asyncio.wait_for(dispatch, 5)
+    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset()
+    await reply.stop()
+    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset()

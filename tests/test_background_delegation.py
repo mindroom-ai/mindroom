@@ -486,7 +486,9 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     listed = json.loads(await JobTools(paths, identity).job("list"))
                     assert [item["status"] for item in listed if item["job_id"] == child.delegation_id] == ["running"]
                 release.set()
-                signal.clear()
+                if human:
+                    # The newer reply that took the work over has started.
+                    signal.takeover_started()
                 if approval:
                     await decide()
                 status = "cancelled" if approval == "cancelled" else "completed"

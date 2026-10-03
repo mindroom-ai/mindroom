@@ -17,27 +17,42 @@ class HumanMessageSignal:
     """Release a reply's waits once its agent starts answering a newer human message in the conversation."""
 
     _subscribers: set[Callable[[], None]] = field(default_factory=set)
-    _pending: bool = False
+    # Newer replies of this agent queued in the conversation that have not started yet.
+    _takeovers: int = 0
+    # Set while the reply waits on background work, so a newer message may reach the turn policy meanwhile.
+    _waiting: asyncio.Event = field(default_factory=asyncio.Event)
 
     def subscribe(self, callback: Callable[[], None]) -> None:
         """Subscribe one wait, releasing it at once while a newer reply is still queued."""
         self._subscribers.add(callback)
-        if self._pending:
+        self._waiting.set()
+        if self._takeovers > 0:
             callback()
 
     def unsubscribe(self, callback: Callable[[], None]) -> None:
         """Release a finished wait's subscription."""
         self._subscribers.discard(callback)
+        if not self._subscribers:
+            self._waiting.clear()
+
+    @property
+    def waiting(self) -> bool:
+        """Whether the reply only waits on background work that a newer reply of its agent would take over."""
+        return self._waiting.is_set()
+
+    async def wait_until_waiting(self) -> None:
+        """Return once the reply waits on background work."""
+        await self._waiting.wait()
 
     def notify(self) -> None:
-        """Release subscribed waits without changing the execution of their jobs."""
-        self._pending = True
+        """A newer reply queued: release subscribed waits until it starts, without changing the execution of their jobs."""
+        self._takeovers += 1
         for callback in tuple(self._subscribers):
             callback()
 
-    def clear(self) -> None:
-        """Consume the queued reply so later waits can remain attached."""
-        self._pending = False
+    def takeover_started(self) -> None:
+        """A queued newer reply started or gave up, so later waits stay attached unless another one is queued."""
+        self._takeovers -= 1
 
 
 @dataclass

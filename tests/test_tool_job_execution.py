@@ -313,7 +313,7 @@ async def test_human_followup_releases_original_sdk_call_once(tmp_path: Path) ->
                     assert response.tools is not None
                     handle = response.tools[0].result
                     job_id = json.loads(handle)["job_id"]
-                    signal.clear()
+                    signal.takeover_started()
                     release.set()
                     completed = await asyncio.wait_for(
                         runtime.wait(job_id, owner=build_execution_identity_from_runtime_context(context), depth=0),
@@ -549,7 +549,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             assert not closed.is_set()
             job_id = json.loads(response.tools[0].result)["job_id"]
             release.set()
-            signal.clear()
+            signal.takeover_started()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert closed.is_set()
             assert result.job.status == ("failed" if fails else "completed")
@@ -997,7 +997,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                 returned = await parent
                 job_id = json.loads(returned[3].result)["job_id"]
                 release.set()
-                signal.clear()
+                signal.takeover_started()
                 waited = await runtime.wait(job_id, owner=owner, depth=0)
                 assert state == {"changed": 0, "conflict": "old", "unrelated": "old"}
                 state.update({"conflict": "newer", "unrelated": "newer"})

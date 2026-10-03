@@ -37,16 +37,28 @@ def take_ownership(transaction: Transaction, runtime_generation: str) -> None:
     )
 
 
-def _require_ownership(transaction: Transaction, runtime_generation: str) -> None:
-    row = transaction.fetchone("SELECT runtime_generation FROM tool_job_owner WHERE singleton = ?", (True,))
-    if row is None or row["runtime_generation"] != runtime_generation:
+def require_ownership(transaction: Transaction, runtime_generation: str) -> None:
+    """Refuse unless this generation owns the jobs, holding the owner row until the transaction ends.
+
+    The no-op update locks that row, so on PostgreSQL a takeover from another process cannot commit between this
+    check and the write that follows it; SQLite's single writer already orders them.
+    """
+    row = transaction.fetchone(
+        """
+        UPDATE tool_job_owner SET runtime_generation = runtime_generation
+        WHERE singleton = ? AND runtime_generation = ?
+        RETURNING runtime_generation
+        """,
+        (True, runtime_generation),
+    )
+    if row is None:
         msg = "Another tool job runtime took over this journal."
         raise ToolJobOwnershipLostError(msg)
 
 
 def accept(transaction: Transaction, runtime_generation: str, job_id: str, job_json: str) -> None:
     """Save a newly accepted job, refusing an ID any runtime already accepted."""
-    _require_ownership(transaction, runtime_generation)
+    require_ownership(transaction, runtime_generation)
     inserted = transaction.fetchone(
         """
         INSERT INTO tool_jobs (job_id, job_json) VALUES (?, ?)
@@ -68,7 +80,7 @@ def save(
     result_payload_json: str | None,
 ) -> None:
     """Replace an accepted job's snapshot, and its outcome payload when one is given."""
-    _require_ownership(transaction, runtime_generation)
+    require_ownership(transaction, runtime_generation)
     transaction.execute(
         "UPDATE tool_jobs SET job_json = ?, result_payload_json = COALESCE(?, result_payload_json) WHERE job_id = ?",
         (job_json, result_payload_json, job_id),
@@ -77,7 +89,7 @@ def save(
 
 def delete(transaction: Transaction, runtime_generation: str, job_id: str) -> None:
     """Forget one job together with its payload."""
-    _require_ownership(transaction, runtime_generation)
+    require_ownership(transaction, runtime_generation)
     transaction.execute("DELETE FROM tool_jobs WHERE job_id = ?", (job_id,))
 
 

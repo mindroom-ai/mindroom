@@ -10,10 +10,13 @@ from mindroom import approval_manager
 from mindroom.approval_response import identify_approval_tools, plan_approval_calls
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal import ApprovalDecision
+from mindroom.logging_config import get_logger
 from mindroom.tool_approval import BackgroundScriptToolOrigin, resolve_tool_approval_approver
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput
 
@@ -21,8 +24,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.event_journal import ApprovalCall
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+logger = get_logger(__name__)
 _CANCELLED_REASON = "The background job asking for this approval ended before a decision."
 
 
@@ -63,21 +68,25 @@ async def request_child_approvals(
         toolkit_owners=paused.toolkit_owners,
     )
     runtime = get_background_runtime(runtime_paths)
+    if runtime is None:
+        msg = "Background tool jobs are not running."
+        raise RuntimeError(msg)
     gated = any(call.decision is None for call in plan.calls)
-    if gated and runtime is not None:
+    if gated:
         await runtime.set_awaiting_approval(child.delegation_id, awaiting=True)
-    try:
-        decided = await asyncio.gather(
-            *(
-                _decide(child.delegation_id, tool, call, owner=owner, config=config, runtime_paths=runtime_paths)
-                for tool, call in zip(plan.tools, plan.calls, strict=True)
-            ),
+    decisions = [
+        asyncio.ensure_future(
+            _decide(child.delegation_id, tool, call, owner=owner, config=config, runtime_paths=runtime_paths),
         )
+        for tool, call in zip(plan.tools, plan.calls, strict=True)
+    ]
+    try:
+        decided = await asyncio.gather(*decisions)
     except BaseException:
         # Cancellation or a failed card ends this pause; no card of it may stay answerable.
-        await run_coroutine_until_complete(settle_child_approvals(child.delegation_id))
+        await run_coroutine_until_complete(_end_pause(runtime, child.delegation_id, decisions))
         raise
-    if gated and runtime is not None:
+    if gated:
         await runtime.set_awaiting_approval(child.delegation_id, awaiting=False)
     decisions = {call.tool_call_id: approved for call, (approved, _reason) in zip(plan.calls, decided, strict=True)}
     reasons = {
@@ -124,10 +133,38 @@ async def _decide(
     return decision.status == "approved", decision.reason
 
 
-async def settle_child_approvals(job_id: str) -> bool:
-    """Deny every card a job still waits on; False while no approval runtime can settle them yet."""
+async def _end_pause(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    decisions: Sequence[asyncio.Future[tuple[bool, str | None]]],
+) -> None:
+    """Stop every card request of an ended pause, so none posts later, then deny the cards already posted."""
+    for decision in decisions:
+        decision.cancel()
+    await asyncio.gather(*decisions, return_exceptions=True)
+    await settle_child_approvals(runtime, job_id)
+
+
+async def settle_child_approvals(runtime: ToolJobRuntime, job_id: str) -> None:
+    """Deny every card a job still waits on, or leave the job to the coordinator's retries while that cannot happen."""
     manager = approval_manager.get_approval_store()
-    if manager is None or manager.cards is None or manager.send_delivery is None:
-        return False
-    await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=_CANCELLED_REASON)
-    return True
+    if manager is not None and manager.cards is not None and manager.send_delivery is not None:
+        try:
+            await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=_CANCELLED_REASON)
+        except Exception:
+            # A settlement failure must not replace how the job ended.
+            logger.exception("Denying a background job's approval cards failed; retrying", job_id=job_id)
+        else:
+            runtime.unsettled_approvals.discard(job_id)
+            return
+    runtime.unsettled_approvals.add(job_id)
+
+
+async def prune_child_approvals(jobs: Iterable[BackgroundJob]) -> None:
+    """Forget the settled approval targets of the delegation jobs retention deleted; their cards retired long before."""
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return
+    for job in jobs:
+        if job.kind == "delegation":
+            await manager.prune_background_approvals(_approval_run_id(job.job_id))

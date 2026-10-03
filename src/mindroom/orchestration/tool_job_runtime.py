@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle: startup recovery, revocation, saved Stops, card expiry, and retention."""
+"""Managed tool-job lifecycle: startup recovery, revocation, saved Stops, card denial, and retention."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from uuid import uuid4
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
-from mindroom.delegation.job_approvals import settle_child_approvals
+from mindroom.delegation.job_approvals import prune_child_approvals, settle_child_approvals
 from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -79,8 +79,6 @@ class ToolJobRuntimeCoordinator:
     # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
     # bot exists to read its journal.
     _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
-    # Jobs a restart interrupted whose approval cards still need denying; each pass retries them.
-    _unsettled_approvals: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self) -> None:
         """Pin execution mode, then build the job runtime or index parked ownership, before dispatch can start."""
@@ -95,7 +93,7 @@ class ToolJobRuntimeCoordinator:
             if self._runtime is None:
                 store = journal.tool_jobs(uuid4().hex)
                 # Take the jobs over before dispatch starts, fencing any runtime that still writes from before;
-                # the first sync recovers them.
+                # the first sync recovers them, and a later one never takes them back from a newer process.
                 await store.take_ownership()
                 self._runtime = ToolJobRuntime(
                     store,
@@ -133,8 +131,7 @@ class ToolJobRuntimeCoordinator:
             runtime_paths=self.runtime_paths,
         )
         # A job interrupted while it waited for approvals leaves its cards answerable until they are denied.
-        if not await settle_child_approvals(job.job_id):
-            self._unsettled_approvals.add(job.job_id)
+        await settle_child_approvals(self.runtime, job.job_id)
         return outcome
 
     def _authorized(self, job: BackgroundJob) -> bool:
@@ -308,7 +305,6 @@ class ToolJobRuntimeCoordinator:
             self._instance = self._runtime = self._journal = None
             self._initialized = False
             self._unrestored_stops.clear()
-            self._unsettled_approvals.clear()
 
     async def _run(self) -> None:
         next_retention = 0.0
@@ -328,9 +324,8 @@ class ToolJobRuntimeCoordinator:
         """Stop revoked work, apply saved Stops, and deny the cards of interrupted jobs; failures retry next pass."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
-        for job_id in tuple(self._unsettled_approvals):
-            if await settle_child_approvals(job_id):
-                self._unsettled_approvals.discard(job_id)
+        for job_id in tuple(self.runtime.unsettled_approvals):
+            await settle_child_approvals(self.runtime, job_id)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
@@ -364,7 +359,8 @@ class ToolJobRuntimeCoordinator:
                         finished[key] = False
             return all(finished[(entity, source)] for source in sources)
 
-        await self.runtime.expire_consumed(
+        expired = await self.runtime.expire_consumed(
             before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,
             source_finished=source_finished,
         )
+        await prune_child_approvals(expired)

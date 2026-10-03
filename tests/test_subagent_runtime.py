@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +16,7 @@ from agno.tools.function import Function, FunctionCall
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 import mindroom.tool_system.metadata as metadata_module
+from mindroom import approval_manager
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.config.access import ResponderAccessConfig
@@ -701,7 +702,7 @@ async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delegation a restart interrupted denies its approval cards, retrying until an approval runtime is ready."""
+    """A delegation a restart interrupted denies its approval cards, retrying until the approval runtime manages to."""
     coordinator = ToolJobRuntimeCoordinator(
         test_runtime_paths(tmp_path),
         lambda: managed_team_config(tmp_path),
@@ -712,23 +713,38 @@ async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
     coordinator._runtime = await tool_job_runtime(tmp_path)
     monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
     settled: list[str] = []
-    ready = False
 
-    async def settle(job_id: str) -> bool:
-        settled.append(job_id)
-        return ready
+    @dataclass
+    class _Approvals:
+        cards: object = field(default_factory=object)
+        send_delivery: object = field(default_factory=object)
+        failures: int = 1
 
-    monkeypatch.setattr(runtime_module, "settle_child_approvals", settle)
+        async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
+            assert reason
+            settled.append(run_id)
+            if self.failures:
+                self.failures -= 1
+                msg = "approval store unavailable"
+                raise OSError(msg)
+            return 1
+
+    approvals: _Approvals | None = None
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: approvals)
     job = replace(completed_delegation_job(), status="running", result=None)
+    run_id = f"tool-job:{job.job_id}"
     try:
+        # No approval runtime yet, then one whose first settlement fails: both leave the job for the next pass.
         await coordinator._interrupt_child(job)
+        approvals = _Approvals()
         await coordinator._reconcile()
-        ready = True
+        assert coordinator.runtime.unsettled_approvals == {job.job_id}
         await coordinator._reconcile()
+        assert coordinator.runtime.unsettled_approvals == set()
         await coordinator._reconcile()
     finally:
         await coordinator.runtime.shutdown()
-    assert settled == [job.job_id, job.job_id, job.job_id]
+    assert settled == [run_id, run_id]
 
 
 @pytest.mark.asyncio
@@ -754,8 +770,12 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     control = JobControl()
     control.cancel(shutdown=restart)
     job = replace(completed_delegation_job(), status="running", result=None)
-    with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):
-        outcome = await coordinator._interrupt_child(job)
+    coordinator._runtime = await tool_job_runtime(tmp_path)
+    try:
+        with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):
+            outcome = await coordinator._interrupt_child(job)
+    finally:
+        await coordinator.runtime.shutdown()
     assert outcome is not None
     assert recorded == [
         ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")

@@ -114,9 +114,11 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
 
         statuses = {}
         journal = EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))
+        store = journal.tool_jobs(action)
+        await store.take_ownership()
         if action == "create":
             runtime = ToolJobRuntime(
-                journal.tool_jobs(action),
+                store,
                 authorize=lambda job: True,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,
@@ -153,7 +155,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             await runtime.shutdown()
         elif action == "recover":
             runtime = ToolJobRuntime(
-                journal.tool_jobs(action),
+                store,
                 authorize=authorized,
                 authorize_execution=lambda *args: None,
                 cancel=no_cleanup,

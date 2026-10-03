@@ -54,6 +54,7 @@ async def test_a_newer_runtime_fences_the_older_one(journal_database: Callable[[
     newer = journal_database().tool_jobs("newer")
     await newer.take_ownership()
     for write in (
+        older.require_ownership(),
         older.accept("other", "{}"),
         older.save("job", '{"status": "completed"}', '{"value": "late"}'),
         older.delete("job"),

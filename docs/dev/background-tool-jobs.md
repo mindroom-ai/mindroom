@@ -19,6 +19,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   Waiting is transient visible progress, and Stop on the waiting reply cancels the work it holds.
   Results arriving during streaming wait for a safe response boundary.
   When the agent starts answering a newer human message there, the newer reply takes over; a message that another agent answers leaves the reply holding.
+  A reply that only waits on background work does not hold new messages back, so the turn policy decides who answers them while it waits.
+  The reply offers each ready outcome to the model once; one the model leaves unretrieved waits for the conversation's next reply.
   No job completion starts a reply of its own; after a restart the next reply in the conversation retrieves interrupted outcomes.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
@@ -87,4 +89,6 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python t
 Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
+A reply holds only the work of its own requester, so when the agent answers another requester in the conversation, the first requester's work waits for their next message.
+A config reload waits for holding replies like any active reply, applying after at most 10 minutes.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.

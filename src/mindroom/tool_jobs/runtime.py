@@ -73,7 +73,7 @@ class BackgroundOutcome:
 
     status: _OutcomeStatus
     result: str | None = None
-    # The adapter's full result, saved in its own file; the job keeps only a summary of `result`.
+    # The adapter's full result, saved beside the job; the job keeps only a summary of `result`.
     result_payload: EncodedResultPayload | None = None
 
 
@@ -97,7 +97,7 @@ class BackgroundJob:
     # At most _JOB_SUMMARY_MAX_CHARS of the outcome text; an adapter's payload keeps its full result.
     result: str | None = None
     summary_truncated: bool = False
-    # Whether the outcome saved a payload file; an outcome the runtime authored has only its summary.
+    # Whether the outcome saved a payload; an outcome the runtime authored has only its summary.
     has_result_payload: bool = False
     # Whether a parent run saved the outcome as its tool result, and the admitted turn whose run first saved it.
     consumed: bool = False
@@ -174,7 +174,7 @@ class _Entry:
     cancel: _Cleanup | None = None
     # False only while memory retains an outcome of work that already ran but could not be saved.
     saved: bool = True
-    # That unsaved outcome's payload, kept only until a retried save writes its file.
+    # That unsaved outcome's payload, kept only until a retried save lands it.
     unsaved_payload: EncodedResultPayload | None = None
     stopped_outcome: BackgroundOutcome | None = None
     # The one in-flight cancellation drain; Stop and revocation do not await it, so a done callback logs its failure.
@@ -248,7 +248,7 @@ class ToolJobRuntime:
         authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: _Cleanup,
     ) -> None:
-        # Saves land only while this runtime's generation owns the jobs, which `recover` takes first.
+        # Saves land only while this runtime's generation owns the jobs, which its creator takes before recovery.
         self._store = store
         self._authorize = authorize
         # Rechecks a retained function's current authority immediately before application entry; raises if revoked.
@@ -263,6 +263,8 @@ class ToolJobRuntime:
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
+        # Jobs that ended while their approval cards could not be denied yet; the coordinator retries them every pass.
+        self.unsettled_approvals: set[str] = set()
 
     @staticmethod
     def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
@@ -371,10 +373,13 @@ class ToolJobRuntime:
         return await asyncio.to_thread(json.loads, payload_json)
 
     async def recover(self) -> None:
-        """Take the jobs over from any earlier runtime and restore their outcomes, never replaying execution."""
+        """Restore the outcomes of the jobs this runtime took over, never replaying execution.
+
+        A runtime that a newer one replaced refuses, rather than adopting that runtime's jobs.
+        """
         async with self._lock:
             self._ensure_open()
-            await self._store.take_ownership()
+            await self._store.require_ownership()
             for saved in await self._store.load_all():
                 if saved.job_id in self._entries:
                     continue
@@ -759,7 +764,7 @@ class ToolJobRuntime:
         entries: Callable[[], Iterable[_Entry]],
         matches: Callable[[_Entry], bool],
     ) -> list[BackgroundJob]:
-        """Copy matching jobs without approval state, reading `entries` under the lock; a closed runtime has none."""
+        """Copy matching jobs, reading `entries` under the lock; a closed runtime has none."""
         async with self._lock:
             if self._closed:
                 return []
@@ -815,17 +820,18 @@ class ToolJobRuntime:
         *,
         before: datetime,
         source_finished: Callable[[BackgroundJob], Awaitable[bool]],
-    ) -> None:
+    ) -> list[BackgroundJob]:
         """Delete old consumed jobs whose originating turn has finished, which never lets their call run again.
 
         A claim is acknowledged only after the parent run saved a non-`None` result for the exact tool call, Agno runs
         a call again only when its saved result is `None`, and `source_finished` refuses while the job's session has an
         open approval continuation.
-        A job also stays while jobs its completion turn started remain, because Stop traces them through it.
+        Returns the deleted jobs.
         """
+        deleted: list[BackgroundJob] = []
         async with self._lock:
             if self._closed or self._shutdown_task is not None:
-                return
+                return deleted
             candidates = [
                 await self._snapshot(entry) for entry in self._entries.values() if self._expirable(entry, before)
             ]
@@ -834,13 +840,15 @@ class ToolJobRuntime:
                 continue
             async with self._lock:
                 if self._closed or self._shutdown_task is not None:
-                    return
+                    return deleted
                 entry = self._entries.get(job.job_id)
                 if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, before):
                     continue
                 # A cancelled caller cannot separate the landed deletion from forgetting the job.
                 await run_coroutine_until_complete(self._store.delete(job.job_id))
                 self._remove_entry(job.job_id)
+                deleted.append(job)
+        return deleted
 
     def _expirable(self, entry: _Entry, before: datetime) -> bool:
         job = entry.job

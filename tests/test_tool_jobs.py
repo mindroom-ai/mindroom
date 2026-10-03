@@ -756,7 +756,7 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
             waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
         await asyncio.sleep(0)
         signal.notify()
-        signal.clear()
+        signal.takeover_started()
         result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
         assert result.job.status == "running"
         assert result.claim is None
@@ -1419,7 +1419,7 @@ async def test_invalid_wait_budget_cannot_claim_result(tmp_path: Path, budget: o
 
 
 @pytest.mark.asyncio
-async def test_repeated_human_followups_release_each_wait_and_clear_allows_waiting(tmp_path: Path) -> None:
+async def test_repeated_human_followups_release_each_wait_until_their_reply_starts(tmp_path: Path) -> None:
     """A prior follow-up cannot permanently detach later turns from the same job."""
     runtime = await tool_job_runtime(tmp_path)
     signal = HumanMessageSignal()
@@ -1440,14 +1440,13 @@ async def test_repeated_human_followups_release_each_wait_and_clear_allows_waiti
             operation=operation,
         )
         for _ in range(2):
-            signal.clear()
             with human_message_signal_context(signal):
                 waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(asyncio.shield(waiter), 0.02)
             signal.notify()
             assert (await asyncio.wait_for(waiter, 1)).job.status == "running"
-        signal.clear()
+            signal.takeover_started()
         finish.set()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "saved"
     finally:

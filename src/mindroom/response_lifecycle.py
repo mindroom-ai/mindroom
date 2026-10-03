@@ -97,7 +97,7 @@ class ResponseLifecycleReservation:
     def _consume_notice(self) -> None:
         if self._notice is None:
             return
-        self._queued_signal.consume_waiting_human_message(self._notice)
+        self._queued_signal.consume_turn_notice(self._notice)
         self._notice = None
 
     async def _release(self) -> None:
@@ -188,7 +188,11 @@ class _QueuedMessageState:
         del self._pending_messages[source_event_id]
         if self.pending_human_messages == 0:
             self._event.clear()
-            self.human_signal.clear()
+
+    def consume_turn_notice(self, source_event_id: str) -> None:
+        """The newer reply that queued this notice started or gave up, so it no longer takes the jobs over."""
+        self.consume_waiting_human_message(source_event_id)
+        self.human_signal.takeover_started()
 
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
@@ -247,22 +251,38 @@ class ResponseLifecycleCoordinator:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(target.lifecycle_key)
 
-    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
-        """Return canonical thread IDs with active response lifecycles in one room."""
+    def _holds_follow_ups(self, lifecycle_key: ResponseLifecycleKey) -> bool:
+        """Whether new messages wait for this conversation's reply: it runs and is not only waiting on background work.
+
+        A reply that only waits lets them reach the turn policy, so a newer reply of its agent can take the work over.
+        """
+        if not self._has_active_response_for_thread_key(lifecycle_key):
+            return False
+        queued_signal = self._thread_queued_signals.get(lifecycle_key)
+        return queued_signal is None or not queued_signal.human_signal.waiting
+
+    def thread_ids_holding_follow_ups(self, room_id: str) -> frozenset[str | None]:
+        """Return canonical thread IDs in one room whose reply holds new messages back."""
         known_lifecycle_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
         return frozenset(
             lifecycle_key.thread_id
             for lifecycle_key in known_lifecycle_keys
-            if lifecycle_key.room_id == room_id and self._has_active_response_for_thread_key(lifecycle_key)
+            if lifecycle_key.room_id == room_id and self._holds_follow_ups(lifecycle_key)
         )
 
-    async def wait_for_thread_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until a response lifecycle lock is idle for one room/thread key."""
+    async def wait_until_follow_ups_may_dispatch(self, room_id: str, thread_id: str | None) -> None:
+        """Wait until one room/thread's reply no longer holds new messages back."""
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
-        while self._has_active_response_for_thread_key(lifecycle_key):
+        while self._holds_follow_ups(lifecycle_key):
             queued_signal = self._thread_queued_signals.get(lifecycle_key)
             if queued_signal is not None and queued_signal.has_active_response_turn():
-                await queued_signal.wait_until_idle()
+                idle = asyncio.ensure_future(queued_signal.wait_until_idle())
+                waiting = asyncio.ensure_future(queued_signal.human_signal.wait_until_waiting())
+                try:
+                    await asyncio.wait({idle, waiting}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    idle.cancel()
+                    waiting.cancel()
                 continue
             lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
             if lifecycle_lock is not None and lifecycle_lock.locked():
@@ -389,13 +409,13 @@ class ResponseLifecycleCoordinator:
             return None
         if not (existing_turn or lifecycle_lock.locked()):
             return None
-        # This agent answers a newer human message here, so the reply holding the conversation's jobs hands them over.
-        queued_signal.human_signal.notify()
-        if not queued_signal.add_waiting_human_message(
+        # An ingress reservation may already hold this source's notice for the running reply.
+        queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
-        ):
-            return None
+        )
+        # This agent answers a newer human message here, so the reply holding the conversation's jobs hands them over.
+        queued_signal.human_signal.notify()
         return response_envelope.source_event_id
 
     def _consume_queued_human_notice(
@@ -406,7 +426,7 @@ class ResponseLifecycleCoordinator:
     ) -> None:
         if notice is None:
             return
-        queued_signal.consume_waiting_human_message(notice)
+        queued_signal.consume_turn_notice(notice)
 
     def _start_response_turn(
         self,
@@ -510,6 +530,8 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
+                # Consumed once: a started reply no longer takes the conversation's jobs over.
+                notice = None
                 queued_signal.mid_turn_gate = mid_turn_gate
                 with (
                     human_message_signal_context(queued_signal.human_signal),
