@@ -7151,7 +7151,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.bridge_components", "mindr
 
 [[modules]]
 path = "mindroom.desktop.local_dashboard"
-depends_on = ["mindroom.constants", "mindroom.desktop.native_protocol"]
+depends_on = ["mindroom.constants", "mindroom.desktop.native_protocol", "mindroom.services.launchd"]
 visibility = ["mindroom.desktop.native_host"]
 
 [[modules]]

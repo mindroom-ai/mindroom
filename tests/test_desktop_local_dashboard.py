@@ -5,22 +5,111 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.desktop import local_dashboard
 from mindroom.desktop.native_host import NativeDesktopHost, serve_native_stream
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
+from mindroom.services.config import ServiceStatus
+from mindroom.services.launchd import manager as launchd_manager
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+
+_REUSE_PORT_LISTENER = (
+    "import socket, sys\n"
+    "listener = socket.socket()\n"
+    "listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)\n"
+    "listener.bind(('127.0.0.1', int(sys.argv[1])))\n"
+    "listener.listen()\n"
+    "print(flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+@contextmanager
+def _foreign_listener(port: int) -> Iterator[None]:
+    """Listen on the port from another same-user process that is not the service's child."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", _REUSE_PORT_LISTENER, str(port)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdout.readline()
+    try:
+        yield
+    finally:
+        process.stdin.close()
+        process.wait(timeout=5)
 
 
 @pytest.mark.asyncio
-async def test_dashboard_reads_and_refreshes_config_adjacent_env_without_pairing(tmp_path: Path) -> None:
+async def test_dashboard_key_reaches_only_a_port_that_the_mindroom_service_alone_listens_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another program on the dashboard port, alone or beside the service, must never receive the API key."""
+    lsof = shutil.which("lsof", path=f"{os.environ.get('PATH', '')}{os.pathsep}/usr/sbin")
+    if lsof is None:
+        pytest.skip("lsof is unavailable")
+    monkeypatch.setattr(local_dashboard, "_LSOF", lsof)
+    # This test process plays the service's runtime child; its parent plays the launchd job.
+    service = ServiceStatus(installed=True, running=True, pid=os.getppid())
+    monkeypatch.setattr(
+        local_dashboard,
+        "launchd_manager",
+        launchd_manager._replace(get_service_status=lambda: service),
+    )
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_URL": f"http://127.0.0.1:{port}", "MINDROOM_API_KEY": "service-only-key"},
+    )
+    host = NativeDesktopHost(paths, helper_version="test")
+    request = NativeRequest(str(uuid4()), "dashboard_configuration", {})
+
+    assert await host.handle(request) == {"url": f"http://127.0.0.1:{port}", "api_key": "service-only-key"}
+    refused = []
+    with _foreign_listener(port):
+        with pytest.raises(NativeProtocolError) as beside_service:
+            await host.handle(request)
+        refused.append(beside_service.value)
+        listener.close()
+        with pytest.raises(NativeProtocolError) as alone:
+            await host.handle(request)
+        refused.append(alone.value)
+    with pytest.raises(NativeProtocolError) as unbound:
+        await host.handle(request)
+    refused.append(unbound.value)
+
+    assert {error.code for error in refused} == {"dashboard_unavailable"}
+    assert all("service-only-key" not in str(error) for error in refused)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reads_and_refreshes_config_adjacent_env_without_pairing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A running helper must pick up edited credentials, without including them in normal status."""
+    monkeypatch.setattr(local_dashboard, "_service_owns_port", lambda _port: True)
     env = tmp_path / ".env"
     env.write_text('MINDROOM_API_KEY="test-first-key"\nMINDROOM_URL=http://localhost:8877\n')
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})

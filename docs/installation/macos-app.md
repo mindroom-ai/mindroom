@@ -83,6 +83,7 @@ Once the service is running, **Open Dashboard** opens the local dashboard inside
 The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
 It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
 Automatic sign-in is limited to HTTP loopback URLs (`localhost`, `127.0.0.1`, or `[::1]`) with an explicit port.
+The key is sent only when this Mac's MindRoom launchd service is the only program listening on that port, so another app or user that takes the port first cannot receive it; if the dashboard reports it cannot connect while the service is starting, select **Reload**.
 The dashboard session stays separate from Chat and is not saved after the app quits.
 **Open Chat** opens the Chat section in the app.
 
