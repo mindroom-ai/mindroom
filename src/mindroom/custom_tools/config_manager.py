@@ -123,13 +123,12 @@ def _reject_redaction_markers(changes: list[_ConfigPatchChange]) -> None:
 def redaction_marker_error(fields: dict[str, object]) -> str | None:
     """Return a refusal when a field value copies redacted read output, which would replace the hidden real value."""
     for field_name, value in fields.items():
-        location = redaction_marker_location(value)
-        if location is not None:
-            field_path = ".".join((field_name, *location))
+        if redaction_marker_location(value) is not None:
+            # These writers replace the whole value, so dropping one redacted element would delete the hidden real one.
             return (
-                f"Error: {field_path!r} contains the redaction marker {REDACTED!r} or a masked URL password, "
-                "which configuration reads show in place of a hidden value; set that field to its real value "
-                f"or leave it out.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+                f"Error: {field_name!r} holds the redaction marker {REDACTED!r} or a masked URL password, "
+                f"which configuration reads show in place of a hidden value; pass {field_name!r} only with its "
+                f"real values, or omit it to keep the stored value.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
             )
     return None
 

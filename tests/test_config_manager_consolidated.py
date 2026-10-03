@@ -440,7 +440,8 @@ def test_agent_update_refuses_instructions_copied_from_redacted_read(tmp_path: P
             instructions=[*shown_instructions, "Be concise"],
         )
 
-    assert "'instructions.0' contains the redaction marker" in result
+    assert "'instructions' holds the redaction marker" in result
+    assert "omit it to keep the stored value" in result
     assert "Changes were NOT applied." in result
     assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["talent"]["instructions"] == instructions
 

@@ -324,7 +324,8 @@ class TestUpdateOwnConfig:
                 shown = tool.get_own_config()
                 shown_instructions = yaml.safe_load(shown.split("```yaml\n", 1)[1].removesuffix("```"))["instructions"]
                 result = tool.update_own_config(instructions=[*shown_instructions, "Be concise"])
-            assert "'instructions.0' contains the redaction marker" in result
+            assert "'instructions' holds the redaction marker" in result
+            assert "omit it to keep the stored value" in result
             assert "Changes were NOT applied." in result
             assert load_config_yaml(config_path).agents["coder"].instructions == instructions
         finally:
