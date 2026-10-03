@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.run.base import RunStatus
@@ -56,7 +56,11 @@ from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import (
+    build_interrupted_replay_snapshot,
+    persist_interrupted_replay_snapshot,
+    render_interrupted_replay_content,
+)
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -231,6 +235,11 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+_INTERRUPTED_ATTEMPT_INSTRUCTION = (
+    "A service restart stopped your previous attempt at this reply, and this reply replaces it. "
+    "What that attempt had shown is below; tool calls listed as finished already ran. "
+    "Write your complete reply from the start, using those results instead of calling the finished tools again."
+)
 
 
 async def _cancel_pending_responses(
@@ -841,7 +850,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
-    register_recoverable_interruption: Callable[[str, str], None]
+    register_approval_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -1917,7 +1926,7 @@ class ResponseRunner:
             visible_text=update,
             failure_reason=failing.failure_reason,
         ):
-            self.deps.register_recoverable_interruption(failing.source_event_ids[0], failing.room_id)
+            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
         return settled
 
     async def _approval_interruption_update(
@@ -3541,14 +3550,7 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        request = prepared_request
-        if await self._settle_unfinished_streamed_reply(
-            request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        ):
-            return None
+        request = await self._with_interrupted_attempt(prepared_request, resolved_target=resolved_target)
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),
@@ -3558,28 +3560,23 @@ class ResponseRunner:
         )
         return request
 
-    async def _settle_unfinished_streamed_reply(
+    async def _with_interrupted_attempt(
         self,
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-        history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
-    ) -> bool:
-        """End an earlier attempt's adopted stream as restart-interrupted instead of running the turn again.
+    ) -> ResponseRequest:
+        """Tell a replayed turn what its stopped attempt already showed and ran.
 
         A process that stops mid-stream, whether it crashes or shuts down in
         order, leaves its reply streaming and its sources pending, so replay
-        adopts that reply. Running the model again would repeat whatever its
-        tools already did. The reply ends the way a sync restart ends one: the
-        restart note, an interrupted replay record, and sources settled by the
-        note's own FINAL delivery, after which restart recovery resumes the
-        thread. Matrix holds the only account of that attempt, so the replay
-        record is built from its visible text and tool trace.
+        adopts that reply and answers again in place. Matrix holds the only
+        account of the stopped attempt, so its visible text and tool trace
+        become context that keeps the new attempt from repeating finished tools.
         """
         event_id = request.existing_event_id
         if event_id is None or not request.existing_event_is_placeholder:
-            return False
+            return request
         message = await fetch_latest_visible_message(
             self._client(),
             room_id=resolved_target.room_id,
@@ -3588,55 +3585,35 @@ class ResponseRunner:
         )
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
         if unfinished is None:
-            return False
+            return request
         completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
-        recorder = self._build_turn_recorder(
-            user_message=request.model_prompt or request.prompt,
-            user_message_is_structured=request.current_prompt_is_structured,
-            reply_to_event_id=request.reply_to_event_id,
-            requester_id=request.user_id,
-            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
-        )
-        recorder.record_interrupted(
-            run_metadata=recorder.run_metadata,
-            assistant_text=unfinished.partial_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-        )
-        # A failed write raises: the sources are still pending, so the turn
-        # retries instead of settling without the record that keeps its tools
-        # from running twice.
-        await asyncio.to_thread(
-            self._persist_interrupted_turn,
-            recorder=recorder,
-            session_scope=history_scope,
-            session_id=resolved_target.session_id,
-            execution_identity=execution_identity,
-            # Stable, so a replay that stops again before the note lands rewrites this record.
-            run_id=str(uuid5(NAMESPACE_URL, event_id)),
-            is_team=history_scope.kind == "team",
-            response_event_id=event_id,
-        )
-        source_event_id = request.response_envelope.source_event_id
-        noted = await self.deps.delivery_gateway.edit_text(
-            EditTextRequest(
-                target=resolved_target,
-                event_id=event_id,
-                new_text=unfinished.note_text,
-                extra_content=unfinished.note_metadata,
-                delivery_turn_id=source_event_id,
-                response_attempt=ResponseAttempt(self.deps.agent_name, request.sources),
+        attempt = render_interrupted_replay_content(
+            build_interrupted_replay_snapshot(
+                user_message=None,
+                user_message_is_structured=False,
+                partial_text=unfinished.partial_text,
+                completed_tools=completed_tools,
+                interrupted_tools=interrupted_tools,
+                run_metadata=None,
             ),
         )
         self.deps.logger.info(
-            "unfinished_streamed_reply_settled",
-            source_event_id=source_event_id,
+            "interrupted_attempt_resumed",
             response_event_id=event_id,
-            noted=noted,
+            completed_tool_count=len(completed_tools),
         )
-        if noted and resolved_target.resolved_thread_id is not None:
-            self.deps.register_recoverable_interruption(source_event_id, resolved_target.room_id)
-        return True
+        return replace(
+            request,
+            transient_enrichment_items=(
+                *request.transient_enrichment_items,
+                EnrichmentItem(
+                    key="interrupted_attempt",
+                    text=f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}",
+                    persist=False,
+                    minimal_required=True,
+                ),
+            ),
+        )
 
     async def _prepare_locked_source(
         self,

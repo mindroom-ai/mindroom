@@ -553,7 +553,7 @@ def test_interruption_registration_without_running_loop_retains_room(tmp_path: P
     bot = _bot(tmp_path)
     orchestrator = MagicMock()
     bot.orchestrator = orchestrator
-    bot._register_recoverable_interruption("$source", "!room:localhost")
+    bot._register_approval_interruption("$source", "!room:localhost")
     assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
     orchestrator.request_interrupted_turn_recovery.assert_not_called()
 
@@ -583,7 +583,7 @@ async def test_late_interruption_completion_during_shutdown_does_not_start_recov
     await _begin_shutdown(orchestrator)
 
     async def settle() -> None:
-        bot._register_recoverable_interruption("$source", "!room:localhost")
+        bot._register_approval_interruption("$source", "!room:localhost")
 
     with patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as scan:
         await asyncio.create_task(settle())

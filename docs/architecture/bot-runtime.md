@@ -82,6 +82,8 @@ Matrix callback
 Orderly shutdown closes response and journal callback admission before withdrawing runtime capabilities, and tags both sets of owners before cancelling them.
 The source-quiescence request stays latched across supervisor retries and late startup completion, so transport lifecycle notifications cannot reopen admission.
 Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
+A crash leaves the same pending state as orderly shutdown, and in both the interrupted reply stays visibly streaming until replay adopts it and answers again in place.
+When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and gives the new attempt that partial text and the finished tool results as transient context, so it does not repeat tools that already ran; a reply showing only its placeholder carries nothing forward.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.
@@ -302,17 +304,13 @@ One draining owner folds each source's newest Matrix revision into a complete re
 A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
 A committed service-restart or generic terminal interruption note records its exact source room in `InterruptedTurnRooms`.
-Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries in the current membership epoch whose FINAL is absent or is an acknowledged interruption note.
+Replacement recovery uses the registered room directly, while next-startup cleanup discovers acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch.
 Discovery pages the existing delivery outbox, including acknowledgements made before turn attribution, and an empty inventory requires no Matrix history calls.
 Recovery reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
 Repair and relay publication use the same per-delivery owner as normal Matrix delivery, with ownership checked inside bounded room tasks and again before mutation.
 Before publishing a continuation, recovery reads the complete candidate thread to check for later human work and an already-published continuation.
 An interrupted edit revision remains uncommitted for re-drive.
-Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation, except a FINAL that is itself an acknowledged interruption note.
-A process that stops mid-stream, whether it crashes or shuts down in order, leaves its reply streaming and its sources pending, so journal replay adopts that reply.
-When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` does not run the model again, because that would repeat whatever the earlier attempt's tools already did.
-It builds the interrupted replay record from the reply's visible text and tool trace, delivers the restart note as the turn's FINAL so the same commit settles its sources, and registers the room for the recovery that resumes a sync-restart interruption.
-A reply that still shows only its placeholder replays from the start, and an edit regeneration re-drives as before.
+Pending journal replay, active generation, and owed or acknowledged FINAL delivery preclude synthetic continuation.
 Same-requester supersession preserves canonical replay when an INITIAL already owns durable delivery work, including unattempted sends and acknowledgements that precede response attribution.
 When every current source is deleted and no FINAL owns the response, its unfinished INITIAL remains durable cleanup debt until Matrix disappearance and visible-response attribution detachment are confirmed.
 Fallback eligibility and edits share the delivery lock with cleanup, and the transactional ledger prevents late completion writes from restoring a deleted INITIAL or inventing an answer.

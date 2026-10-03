@@ -16,7 +16,6 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
-    ORIGINAL_SENDER_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -97,7 +96,6 @@ __all__ = [
     "current_task_is_process_shutdown",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
-    "restart_interrupted_metadata",
     "send_streaming_response",
     "stream_progress_edits",
     "strip_matching_visible_tool_markers",
@@ -321,37 +319,19 @@ def build_restart_interrupted_body(text: str) -> str:
     return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
 
 
-def restart_interrupted_metadata(content: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return the metadata a restart note keeps from the in-progress message it ends."""
-    preserved = {
-        key: value
-        for key, value in (content or {}).items()
-        if isinstance(key, str)
-        and (
-            (key.startswith("io.mindroom.") and key != "io.mindroom.long_text")
-            or key in {ORIGINAL_SENDER_KEY, "m.mentions"}
-        )
-    }
-    preserved[STREAM_STATUS_KEY] = STREAM_STATUS_ERROR
-    return preserved
-
-
 @dataclass(frozen=True)
 class UnfinishedStreamedReply:
     """What one reply showed when the process streaming it stopped before finishing it."""
 
     partial_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
-    # The restart note that ends the reply, as ordinary restart cleanup writes it.
-    note_text: str
-    note_metadata: dict[str, Any]
 
 
 def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:
     """Read back the work a stopped stream left visible, or ``None`` when it left none.
 
     ``body`` is the canonical visible body. A bare placeholder shows nothing the
-    turn did, so replaying that turn from the start repeats nothing visible.
+    turn did, so a replay of that turn has nothing to carry forward.
     """
     if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES or body.strip() in {
         _PROGRESS_PLACEHOLDER,
@@ -362,16 +342,7 @@ def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> Unfinish
     tool_trace = tuple(tool_trace_from_content(content))
     if not partial_text and not tool_trace:
         return None
-    note_metadata = restart_interrupted_metadata(content)
-    # The note is terminal, so no transient warmup suffix remains for these keys to strip.
-    note_metadata.pop(STREAM_VISIBLE_BODY_KEY, None)
-    note_metadata.pop(STREAM_WARMUP_SUFFIX_KEY, None)
-    return UnfinishedStreamedReply(
-        partial_text=partial_text,
-        tool_trace=tool_trace,
-        note_text=build_restart_interrupted_body(body),
-        note_metadata=note_metadata,
-    )
+    return UnfinishedStreamedReply(partial_text=partial_text, tool_trace=tool_trace)
 
 
 @dataclass(frozen=True)

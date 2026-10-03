@@ -178,7 +178,7 @@ def _render_retained_tool_context(snapshot: InterruptedReplaySnapshot) -> str:
     return "\n".join(lines)
 
 
-def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
+def render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> str:
     """Render one interrupted snapshot into canonical assistant replay text."""
     parts: list[str] = []
     if snapshot.partial_text:
@@ -210,7 +210,7 @@ def _build_interrupted_replay_run(
     is_team: bool,
 ) -> RunOutput | TeamRunOutput:
     """Build one canonical replayable run for an interrupted top-level turn."""
-    content = _render_interrupted_replay_content(snapshot)
+    content = render_interrupted_replay_content(snapshot)
     messages = []
     if snapshot.user_message:
         requester_id = snapshot.run_metadata.get("requester_id")

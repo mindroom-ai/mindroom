@@ -767,7 +767,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
-                register_recoverable_interruption=self._register_recoverable_interruption,
+                register_approval_interruption=self._register_approval_interruption,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -1066,8 +1066,8 @@ class AgentBot:
         """Return rooms with interrupted turns awaiting replacement recovery."""
         return self._interrupted_turn_rooms.pending_room_ids
 
-    def _register_recoverable_interruption(self, source_event_id: str, room_id: str) -> None:
-        """Wake fleet recovery once the owner of a settled interruption releases its claims."""
+    def _register_approval_interruption(self, source_event_id: str, room_id: str) -> None:
+        """Wake fleet recovery after the settled approval's owner releases its claims."""
         if self._entity_removed or not self._interrupted_turn_rooms.register(source_event_id, room_id=room_id):
             return
         orchestrator = self.orchestrator

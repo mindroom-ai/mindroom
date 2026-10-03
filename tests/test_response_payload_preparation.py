@@ -7,6 +7,7 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -186,6 +187,27 @@ async def test_prepare_builds_request_from_inputs_and_refreshed_history(tmp_path
     build_request = seen[0]
     assert build_request.thread_history is refreshed_history
     assert build_request.prompt == "raw prompt"
+
+
+@pytest.mark.asyncio
+async def test_prepare_keeps_runtime_context_added_before_preparation(tmp_path: Path) -> None:
+    """Message enrichment adds to the request's transient context rather than replacing it."""
+    bot = _bot(tmp_path)
+    target = _target()
+    runtime_item = EnrichmentItem(key="interrupted_attempt", text="earlier attempt", persist=False)
+    request = replace(
+        _request(target, _preparation(target), thread_history=ThreadHistoryResult([], is_full_history=True)),
+        transient_enrichment_items=(runtime_item,),
+    )
+
+    with patch.object(
+        bot._inbound_turn_normalizer,
+        "build_dispatch_payload_with_attachments",
+        new=AsyncMock(return_value=DispatchPayload(prompt="built prompt")),
+    ):
+        result = await bot._request_payload_preparer.prepare(request)
+
+    assert runtime_item in result.transient_enrichment_items
 
 
 @pytest.mark.asyncio

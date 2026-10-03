@@ -9,7 +9,6 @@ from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.event_journal import DeliveryStage
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.journal_ingress import replayable_redaction_target
-from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
@@ -84,12 +83,7 @@ class ResponseDeliveryRecovery:
             if (
                 isinstance(body, str)
                 and content.get(STREAM_STATUS_KEY) == STREAM_STATUS_ERROR
-                # A long note is stored as a preview cut short before its note, so
-                # restart cleanup checks the note on the full visible body instead.
-                and (
-                    body.rstrip().endswith((RESTART_INTERRUPTED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE))
-                    or holds_unresolved_sidecar(content)
-                )
+                and body.rstrip().endswith((RESTART_INTERRUPTED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE))
             ):
                 interrupted_final = await self.principal.approval_interruption_is_recoverable(
                     delivery.delivery_id,

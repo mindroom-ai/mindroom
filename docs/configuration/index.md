@@ -980,7 +980,6 @@ See the [journal binding and migration commands](../cli.md#journal) before movin
 ## Automatic Restart Resumption
 
 `defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
-A reply that a crash or shutdown left mid-stream is ended with the same restart note once its turn replays, and is resumed the same way with the text and tool calls it already showed.
 Set it to `false` to suppress those automatic prompts and resume the work manually.
 Resumption still depends on current recovery ownership, room membership, a resolved original requester, and fresh history checks that reject superseded work.
 This setting does not globally disable ordinary durable event replay or stale-response cleanup.

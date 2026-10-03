@@ -6285,6 +6285,7 @@ expose = [
     "build_interrupted_replay_snapshot",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
+    "render_interrupted_replay_content",
     "split_interrupted_tool_trace",
     "tool_execution_call_id",
 ]
