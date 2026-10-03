@@ -50,6 +50,7 @@ def config_install_bundle(
     config: Path = typer.Option(Path("config.yaml"), help="Config file path relative to the bundle root."),  # noqa: B008
     initialize_only: bool = typer.Option(False, help="Keep an existing target unless a declared revision changed."),
     force: bool = typer.Option(False, help="Explicitly replace authored edits or an unmanaged target."),
+    source_only: bool = typer.Option(False, help="Refuse changes outside the YAML/include sources of --config."),
     expected_digest: str | None = typer.Option(None, help="Require this whole-tree candidate digest."),
     revision: str | None = typer.Option(None, help="Record this bootstrap revision in the installed tree."),
     json_output: bool = typer.Option(False, "--json", help="Print a filesystem receipt as JSON."),
@@ -69,6 +70,7 @@ def config_install_bundle(
                 config=config,
                 initialize_only=initialize_only,
                 force=force,
+                source_only=source_only,
                 expected_digest=expected_digest,
                 revision=revision,
             )
@@ -88,3 +90,38 @@ def config_install_bundle(
             typer.echo(f"Source fingerprint: {result.fingerprint}; use config check-applied to confirm runtime reload.")
         if result.recovery_pending:
             typer.echo("Bundle is active; retry to finish previous-tree rotation or cleanup.", err=True)
+
+
+def config_classify_change(
+    old: Path = typer.Argument(..., help="Directory containing the current tree, such as the install target."),  # noqa: B008
+    new: Path = typer.Argument(..., help="Directory containing the candidate tree."),  # noqa: B008
+    config: list[Path] = typer.Option(  # noqa: B008
+        [Path("config.yaml")],
+        help="Config entrypoint relative to both roots; repeat for several.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
+) -> None:
+    """Classify tree differences; exit 0 YAML/include sources only, 1 other changes, 2 error."""
+    # Defer the Pydantic/cryptography config graph until this command runs,
+    # preserving the slim CLI import contract.
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config_bundle import classify_bundle_change  # noqa: PLC0415
+
+    try:
+        change = classify_bundle_change(old, new, config)
+    except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
+        if json_output:
+            typer.echo(json.dumps({"status": "failed", "detail": str(exc)}))
+        else:
+            typer.echo(f"Change classification failed: {exc}", err=True)
+        raise typer.Exit(2) from None
+    status = "non_source" if change.other else "source_only"
+    if json_output:
+        typer.echo(json.dumps({"status": status, **asdict(change)}))
+    else:
+        typer.echo(f"{len(change.sources)} YAML/include source path(s) changed.")
+        if change.other:
+            typer.echo("Changes outside YAML/include sources, which config reload does not reread:")
+            for name in change.other:
+                typer.echo(f"  {name}")
+    raise typer.Exit(1 if change.other else 0)
