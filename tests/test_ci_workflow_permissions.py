@@ -173,7 +173,7 @@ PULL_REQUEST_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
     "cancel-in-progress": True,
 }
-# Workflows that deliberately keep their own older concurrency policy.
+# Workflows that serialize runs per ref instead, so a main push waits for the previous run rather than running beside it.
 _OWN_CONCURRENCY_POLICY = {"docs.yml", "plugin-fleet.yml"}
 _PULL_REQUEST_WORKFLOWS = sorted(
     path.name
@@ -186,3 +186,9 @@ _PULL_REQUEST_WORKFLOWS = sorted(
 def test_pull_request_workflows_cancel_only_superseded_pull_request_runs(name: str) -> None:
     """A newer push to a pull request cancels its older runs, and no other event ever shares their group."""
     assert _load_workflow(name).get("concurrency") == PULL_REQUEST_CONCURRENCY
+
+
+@pytest.mark.parametrize("name", sorted(_OWN_CONCURRENCY_POLICY))
+def test_serialized_workflows_cancel_only_superseded_pull_request_runs(name: str) -> None:
+    """A cancelled in-progress run marks its main commit failed, so only pull request runs may be cancelled."""
+    assert _load_workflow(name)["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"

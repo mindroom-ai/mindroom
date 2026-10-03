@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run.
+# Main runs queue instead: cancelling an in-progress build or Pages deployment marks its commit failed, and a newer queued run still replaces any older one that has not started.
 concurrency:
   group: "pages-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
