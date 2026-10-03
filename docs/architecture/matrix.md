@@ -90,7 +90,7 @@ When deriving context for an incoming event, MindRoom:
 3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
 4. May start a new thread under a room-root event when agent thread mode requires it.
 
-A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events; a root older than that is reported as unproven, so those callers fail closed.
+A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 non-edit messages from that walk; a root older than either bound is reported as unproven, so those callers fail closed.
 Every message event in the room counts toward that bound, including each streaming edit of every other reply on a homeserver that keeps them.
 
 ```

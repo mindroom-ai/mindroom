@@ -15,6 +15,7 @@ from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
     _MAX_THREAD_ROOM_SCAN_PAGES,
+    _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES,
     OpaqueEncryptedThreadHistoryError,
     _ThreadRoomScanBoundError,
     fetch_thread_event_sources_via_room_messages,
@@ -514,6 +515,33 @@ async def test_thread_scan_stops_at_its_page_bound_without_calling_the_root_abse
 
     assert not isinstance(caught.value, ThreadRoomScanRootNotFoundError)
     assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+async def test_thread_scan_stops_once_it_retains_its_message_bound() -> None:
+    """Ordinary messages are kept until the walk ends, so their count bounds the walk before the page bound does."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    per_page = 100
+    pages_served = 0
+
+    async def full_pages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        return _messages_response(
+            [
+                _message_event(f"$filler-{pages_served}-{index}:localhost", "filler", timestamp=pages_served)
+                for index in range(per_page)
+            ],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=full_pages)
+
+    with pytest.raises(_ThreadRoomScanBoundError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES // per_page
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,9 @@ _MAX_THREAD_ENUMERATION_PAGES = 100
 # the room counts, including each streaming edit of every other reply, so the
 # bound leaves room for a busy room's ordinary long-running threads.
 _MAX_THREAD_ROOM_SCAN_PAGES = 1000
+# Edits collapse to one per sender, but every other message is kept until the walk ends,
+# so retained messages get their own bound to cap the walk's memory.
+_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES = 10_000
 
 
 class _ThreadRoomScanBoundError(RuntimeError):
@@ -566,10 +569,14 @@ async def bulk_scan_thread_event_sources(
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
-        if page_count >= _MAX_THREAD_ROOM_SCAN_PAGES:
+        if (
+            page_count >= _MAX_THREAD_ROOM_SCAN_PAGES
+            or len(scanned_message_sources) >= _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES
+        ):
             msg = (
-                f"thread room scan in {room_id} reached its {_MAX_THREAD_ROOM_SCAN_PAGES}-page bound "
-                "with history left, so the requested roots are unproven"
+                f"thread room scan in {room_id} reached its bound of {_MAX_THREAD_ROOM_SCAN_PAGES} pages "
+                f"or {_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES} retained messages with history left, "
+                "so the requested roots are unproven"
             )
             logger.warning(
                 "Thread room scan reached its page bound before finding every root",
