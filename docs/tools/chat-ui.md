@@ -25,7 +25,9 @@ agents:
 ```
 
 The toolkit is opt-in and requires a live Matrix room context.
+Canvases are a separate opt-in inside it; see [Turning canvases on](#turning-canvases-on).
 It does not accept a URL, credential, API endpoint, DOM selector, Matrix identity, room ID, or thread ID from the model.
+The only identifiers it accepts are a canvas's own event ID, to update that canvas, and a workspace file path for a canvas page, read under the agent's `file_access`.
 MindRoom supplies the addressed requester, configured agent sender, current room, and canonical thread from the active turn.
 Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
 
@@ -36,7 +38,7 @@ Each action works on a different thing, and none of them touches the user's own 
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
 | `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
-| `show_canvas(...)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `show_canvas(...)`, opt-in with `enable_show_canvas` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
 | `open_settings(section=...)` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
 
@@ -48,9 +50,9 @@ The toolkit adds the same map to the agent's instructions on every turn, listing
   `computer` and `members` are the only supported panel values; `browser` is not a panel value.
 - `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
 - `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
-- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases).
+- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases). It is available only when the agent's `chat_ui` entry sets `enable_show_canvas: true`.
 
-Each call sends an `m.room.message` notice in the current conversation.
+Each call sends an `m.room.message` notice in the current conversation; a canvas update sends an `m.replace` edit of the canvas's notice instead.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
 The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
 Both Computer entry points retain the existing `action: "show_computer"` transport metadata and result action for compatibility with existing clients.
@@ -107,6 +109,7 @@ UI requests reveal only the bounded Chat surfaces described above; worker comput
 
 `show_canvas` lets an agent show a web page beside the conversation and read what the user chose.
 Use it when seeing or clicking beats reading or typing: dashboards, reports, charts, slides, menus, forms, pickers, and multi-step flows.
+It is off by default on both sides; see [Turning canvases on](#turning-canvases-on).
 
 ```python
 chat_ui.show_canvas(
@@ -204,9 +207,21 @@ Browsers do not let a page block WebRTC, so a malicious canvas could still leak 
 Chat therefore shows which agent made each canvas and reminds the user that what they enter may leave the panel.
 Chat does not run canvases during a call, because call frames listen to the page's messages.
 
-### Turning canvases on in MindRoom Chat
+### Turning canvases on
 
-Canvases are off unless the Chat deployment enables them in its runtime `config.json`:
+Canvases need two switches, and both are off by default.
+
+The agent gets `show_canvas` only when its `chat_ui` entry enables it; without it the agent neither has the function nor sees it in its instructions:
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+```
+
+MindRoom Chat shows canvases only when the deployment enables them in its runtime `config.json`:
 
 ```json
 {
@@ -221,15 +236,6 @@ Canvases are off unless the Chat deployment enables them in its runtime `config.
 When they are off, the notice shows its text fallback and its button explains that interactive panels are turned off.
 Automatic opening follows the same `autoOpenFromHomeservers` rule as other UI requests; otherwise the user opens the canvas with the notice's **Open panel** button.
 
-To keep an agent's other `chat_ui` actions but not canvases, exclude the function in the agent's tool entry; the agent then neither has `show_canvas` nor sees it in its instructions:
-
-```yaml
-agents:
-  researcher:
-    tools:
-      - chat_ui:
-          exclude_tools: [show_canvas]
-```
 
 ## Worker computer requirements
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_lib
+import unicodedata
 from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
@@ -12,7 +13,11 @@ from agno.tools import Toolkit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_access import resolve_agent_file
-from mindroom.matrix.client_delivery import send_message_result, upload_media_bytes_as_mxc
+from mindroom.matrix.client_delivery import (
+    can_send_to_encrypted_room,
+    send_message_result,
+    upload_media_bytes_as_mxc,
+)
 from mindroom.matrix.identity import parse_historical_matrix_user_id
 from mindroom.matrix.large_messages import EDIT_MESSAGE_SIZE_LIMIT, calculate_event_size
 from mindroom.matrix.message_builder import build_message_content
@@ -20,6 +25,7 @@ from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -90,7 +96,12 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
 
 
 def _canvas_title_is_valid(title: str) -> bool:
-    return bool(title) and title.isprintable() and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
+    # Emoji sequences, no-break spaces, and soft hyphens are fine; line breaks and control characters are not.
+    return (
+        bool(title)
+        and not any(unicodedata.category(char) == "Cc" or char in "\u2028\u2029" for char in title)
+        and len(title.encode("utf-16-le")) // 2 <= _CANVAS_TITLE_MAX_UNITS
+    )
 
 
 class ChatUITools(Toolkit):
@@ -101,14 +112,16 @@ class ChatUITools(Toolkit):
         *,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
+        enable_show_canvas: bool = False,
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
-        super().__init__(
-            name="chat_ui",
-            add_instructions=True,
-            tools=[self.show_computer, self.open_settings, self.open_panel, self.show_canvas],
-        )
+        tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
+        # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
+        # their users' clients refuse to show.
+        if enable_show_canvas:
+            tools.append(self.show_canvas)
+        super().__init__(name="chat_ui", add_instructions=True, tools=tools)
 
     @property
     def instructions(self) -> str:
@@ -403,7 +416,8 @@ class ChatUITools(Toolkit):
         will be sent and asks them to confirm. The answer arrives as the user's next
         message, formatted as
         ``Canvas response (<canvas_event_id>, revision <event_id>): <label>``
-        followed by the JSON data.
+        followed by the JSON data. If that revision is not your latest update, the user
+        answered an earlier version of the page.
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
@@ -478,7 +492,9 @@ class ChatUITools(Toolkit):
                 canvas_event_id=canvas_event_id,
             )
         if not _canvas_title_is_valid(title):
-            return cls._canvas_error(f"Canvas title must be a single line of 1-{_CANVAS_TITLE_MAX_UNITS} characters.")
+            return cls._canvas_error(
+                f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters without control characters.",
+            )
         given = [value for value in (html, path) if value is not None and value != ""]
         if len(given) != 1:
             return cls._canvas_error("Give exactly one of html or path.")
@@ -569,6 +585,9 @@ class ChatUITools(Toolkit):
             )
             if calculate_event_size(probe) <= EDIT_MESSAGE_SIZE_LIMIT:
                 return inline
+        # Check the room's encryption trust policy first, so a refused send leaves no orphan upload.
+        if not can_send_to_encrypted_room(context.client, context.room_id, operation="chat_ui_canvas_upload"):
+            return cls._canvas_error("Canvas pages cannot be sent to this encrypted room.")
         # Encrypted rooms get an encrypted upload; the event carries only the reference.
         mxc_uri, upload = await upload_media_bytes_as_mxc(
             context.client,
@@ -646,6 +665,15 @@ class ChatUITools(Toolkit):
         content = source.get("content")
         metadata = content.get(_UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
         relation = content.get("m.relates_to") if isinstance(content, dict) else None
+        if (
+            response.event.sender == context.client.user_id
+            and isinstance(relation, dict)
+            and relation.get("rel_type") == "m.replace"
+            and isinstance(relation.get("event_id"), str)
+        ):
+            # Answers name both IDs, so a revision is an easy mix-up; point at the canvas instead.
+            original_id = relation["event_id"]
+            return error(f"That ID is a revision of a canvas; pass canvas_event_id='{original_id}' instead.")
         if (
             response.event.sender != context.client.user_id
             or not isinstance(content, dict)

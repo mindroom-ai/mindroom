@@ -137,7 +137,7 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_canvas/update", "", "show_canvas", "update"),
         _ContractCase("show_canvas/document", "", "show_canvas", "document"),
     )
-    registered_actions = set(ChatUITools().get_async_functions())
+    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions())
     exported_actions = {case.action for case in actions}
     if registered_actions != exported_actions:
         msg = (

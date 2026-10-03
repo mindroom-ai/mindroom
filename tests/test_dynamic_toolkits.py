@@ -1443,8 +1443,9 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
 @pytest.mark.parametrize(
     ("tool_entry", "excluded"),
     [
-        ("chat_ui", ()),
-        ({"chat_ui": {"exclude_tools": ["show_canvas"]}}, ("show_canvas",)),
+        ("chat_ui", ("show_canvas",)),
+        ({"chat_ui": {"enable_show_canvas": True}}, ()),
+        ({"chat_ui": {"enable_show_canvas": True, "exclude_tools": ["open_settings"]}}, ("open_settings",)),
     ],
 )
 def test_chat_ui_instructions_map_only_the_enabled_functions(
@@ -1452,7 +1453,10 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     tool_entry: object,
     excluded: tuple[str, ...],
 ) -> None:
-    """The agent's prompt names what each chat_ui function works on, and nothing it cannot call."""
+    """The agent's prompt names what each chat_ui function works on, and nothing it cannot call.
+
+    Canvases are opt-in, so a plain chat_ui entry neither has show_canvas nor describes it.
+    """
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [tool_entry]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)

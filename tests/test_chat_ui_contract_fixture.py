@@ -72,8 +72,8 @@ async def test_contract_rejects_unmapped_registered_action(tmp_path: Path, monke
     """Adding a public tool must require a corresponding client contract case."""
     original_init = ChatUITools.__init__
 
-    def init_with_new_action(self: ChatUITools) -> None:
-        original_init(self)
+    def init_with_new_action(self: ChatUITools, **kwargs: object) -> None:
+        original_init(self, **kwargs)  # type: ignore[arg-type]
         self.register(self.show_computer, name="new_action")
 
     monkeypatch.setattr(ChatUITools, "__init__", init_with_new_action)

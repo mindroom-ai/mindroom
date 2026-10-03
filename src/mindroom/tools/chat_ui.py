@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -18,12 +25,26 @@ if TYPE_CHECKING:
     description=(
         "Show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own "
         "worker browser), the Canvas panel (an interactive web page the agent writes, such as a dashboard, "
-        "slides, or a form, which the user can answer), the Members panel, or a Settings section. "
+        "slides, or a form, which the user can answer; opt in with enable_show_canvas), the Members panel, "
+        "or a Settings section. "
         "Sends a UI request; does not navigate or control the user's own browser."
     ),
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    config_fields=[
+        ConfigField(
+            name="enable_show_canvas",
+            label="Enable Show Canvas",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                "Let the agent show interactive web pages in the Canvas panel. "
+                "MindRoom Chat must also turn canvases on (mindroom.canvas.enabled)."
+            ),
+        ),
+    ],
     requires_primary_runtime=True,
     requires_room_context=True,
     icon="PanelsTopLeft",
