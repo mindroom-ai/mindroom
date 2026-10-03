@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 from mindroom import constants, interactive
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -46,7 +47,7 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -96,7 +97,9 @@ from mindroom.inbound_turn_normalizer import (
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
+from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -1919,13 +1922,79 @@ def _entity_reply_event(
     )
 
 
+def _joined_room(config: Config, *entity_names: str, requester: str = _OWNER) -> nio.MatrixRoom:
+    """Return a room with complete membership in which the requester an agent reply acts for is joined."""
+    room = _room_with_members(config, *entity_names)
+    room.add_member(requester, requester, None)
+    room.members_synced = True
+    return room
+
+
+def _final_reply_edit(
+    config: Config,
+    *,
+    placeholder_id: str,
+    event_id: str,
+    status: str = constants.STREAM_STATUS_COMPLETED,
+    body: str = "@general please take this over",
+) -> nio.RoomMessageText:
+    """Return research's edit that delivers its reply for the owner into its placeholder, as delivery builds it."""
+    content = build_edit_event_content(
+        event_id=placeholder_id,
+        new_content={
+            "body": body,
+            "msgtype": "m.text",
+            "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+        },
+        new_text=body,
+        extra_content={constants.ACTING_REQUESTER_KEY: _OWNER, constants.STREAM_STATUS_KEY: status},
+    )
+    return _final_reply_edit_event(config, content, event_id=event_id)
+
+
+def _final_reply_edit_event(config: Config, content: dict[str, Any], *, event_id: str) -> nio.RoomMessageText:
+    """Return research's edit event carrying this content."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": content,
+            "event_id": event_id,
+            "sender": _entity_user_id(config, "research"),
+            "origin_server_ts": 1_000_001,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+
+def _admit_placeholder(harness: _Harness, placeholder_id: str, thread_id: str | None = _THREAD_ROOT) -> None:
+    """Record the placeholder as admitted into this thread, or at room level."""
+    resolver = harness.controller.deps.resolver
+    resolver.deps = replace(resolver.deps, relations=make_relation_lookup(threads={placeholder_id: thread_id}))
+
+
+class _NoEditRegeneration:
+    """Edit regenerator that records the edits it receives and regenerates nothing."""
+
+    def __init__(self) -> None:
+        self.edit_event_ids: list[str] = []
+
+    async def handle_message_edit(
+        self,
+        room: nio.MatrixRoom,  # noqa: ARG002
+        event: nio.RoomMessageText,
+        event_info: EventInfo,  # noqa: ARG002
+        requester_user_id: str,  # noqa: ARG002
+    ) -> None:
+        self.edit_event_ids.append(event.event_id)
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_mentioned_agent_acts_for_the_human_an_agent_reply_was_written_for(tmp_path: Path) -> None:
     """The mentioned agent authorizes and runs as the human, while the replying agent stays the author."""
     config = _owner_only_general_config(tmp_path)
     harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
+    room = _joined_room(config, "general", "research")
     research = _entity_user_id(config, "research")
 
     await harness.deliver(room, _entity_reply_event(config, sender=research, acting_requester=_OWNER))
@@ -1978,7 +2047,7 @@ async def test_mentioned_agent_acts_for_the_bot_account_an_agent_reply_was_writt
         test_runtime_paths(tmp_path / "runtime"),
     )
     harness = _build_harness(config, tmp_path)
-    room = _room_with_members(config, "general", "research")
+    room = _joined_room(config, "general", "research", requester=bot_account)
     event = _entity_reply_event(config, sender=_entity_user_id(config, "research"), acting_requester=bot_account)
 
     await harness.deliver(room, event)
@@ -2039,6 +2108,179 @@ async def test_agent_still_drops_its_own_reply_that_names_a_human_requester(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("membership", ["joined", "invited", "departed", "unknown"])
+async def test_agent_reply_wakes_a_mentioned_agent_only_while_its_requester_is_joined(
+    tmp_path: Path,
+    membership: str,
+) -> None:
+    """An agent's mention wakes another agent only while the person it acts for is joined to the room."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    room.add_member(_OWNER, _OWNER, None, invited=membership == "invited")
+    if membership == "departed":
+        room.remove_member(_OWNER)
+    room.members_synced = membership != "unknown"
+    harness.controller._client().joined_members.return_value = nio.JoinedMembersError("unavailable")
+    event = _entity_reply_event(config, sender=_entity_user_id(config, "research"), acting_requester=_OWNER)
+
+    await harness.deliver(room, event)
+
+    assert [request.user_id for request in harness.runner.requests] == ([_OWNER] if membership == "joined" else [])
+    if membership != "joined":
+        assert harness.ignored_dispatch_sources == [(event.event_id,)]
+
+
+def test_consecutive_agent_reply_limit_defaults_to_fifty_and_must_be_positive() -> None:
+    """The limit on consecutive agent messages is fifty unless configured, and never below one."""
+    assert DefaultsConfig().max_consecutive_agent_replies == 50
+    with pytest.raises(ValidationError, match="max_consecutive_agent_replies"):
+        DefaultsConfig(max_consecutive_agent_replies=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_agents_stop_waking_each_other_at_the_limit_until_a_person_writes(tmp_path: Path) -> None:
+    """Consecutive agent messages since a person last wrote stop the chain; a new person message restarts it."""
+    config = _owner_only_general_config(tmp_path)
+    config.defaults.max_consecutive_agent_replies = 2
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    general = _entity_user_id(config, "general")
+    research = _entity_user_id(config, "research")
+    owner_message = make_visible_message(sender=_OWNER, body="@research look into it", event_id=_THREAD_ROOT)
+    general_message = make_visible_message(sender=general, body="@research here is more")
+
+    def reply(event_id: str) -> nio.RoomMessageText:
+        event = _entity_reply_event(config, sender=research, acting_requester=_OWNER, event_id=event_id)
+        event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": _THREAD_ROOT}
+        return event
+
+    capped = reply("$capped-reply:localhost")
+    _serve_conversation(
+        harness,
+        [owner_message, general_message, make_visible_message(sender=research, event_id=capped.event_id)],
+    )
+    await harness.deliver(room, capped)
+
+    assert harness.runner.requests == []
+    assert harness.ignored_dispatch_sources == [(capped.event_id,)]
+
+    resumed = reply("$resumed-reply:localhost")
+    _serve_conversation(
+        harness,
+        [
+            owner_message,
+            general_message,
+            make_visible_message(sender=research, event_id=capped.event_id),
+            make_visible_message(sender=_OWNER, body="keep going"),
+            make_visible_message(sender=research, event_id=resumed.event_id),
+        ],
+    )
+    await harness.deliver(room, resumed)
+
+    assert [request.response_envelope.source_event_id for request in harness.runner.requests] == [resumed.event_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("placeholder_thread", [_THREAD_ROOT, None])
+async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_once(
+    tmp_path: Path,
+    placeholder_thread: str | None,
+) -> None:
+    """A reply delivered as the final edit of its placeholder dispatches its mention once, answering that reply."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    research = _entity_user_id(config, "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id, placeholder_thread)
+    placeholder = _entity_reply_event(config, sender=research, acting_requester=_OWNER, event_id=placeholder_id)
+    placeholder.source["content"]["body"] = "Thinking..."
+    placeholder.source["content"][constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_PENDING
+    if placeholder_thread is not None:
+        placeholder.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": placeholder_thread}
+    final_edit = _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost")
+
+    await harness.deliver(room, placeholder)
+    assert harness.runner.requests == []
+    await harness.deliver(room, final_edit)
+    await harness.deliver(room, final_edit)
+    await harness.deliver(
+        room,
+        _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$regenerated:localhost"),
+    )
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.user_id == _OWNER
+    assert request.response_envelope.origin.acting_sender_id == research
+    # The answer replies to the finished reply, in its thread, or in a new thread on it.
+    assert request.reply_to_event_id == placeholder_id
+    assert request.response_envelope.target.resolved_thread_id == (placeholder_thread or placeholder_id)
+    assert request.sources.logical_source_event_ids == (final_edit.event_id,)
+    assert request.sources.discovery_event_ids == (placeholder_id,)
+    assert "please take this over" in request.prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("status", [constants.STREAM_STATUS_CANCELLED, constants.STREAM_STATUS_ERROR])
+async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
+    """Only a completed reply hands off; a stopped or failed one stays an ordinary edit."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    regenerator = _NoEditRegeneration()
+    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    room = _joined_room(config, "general", "research")
+    _admit_placeholder(harness, "$placeholder:localhost")
+    edit = _final_reply_edit(
+        config,
+        placeholder_id="$placeholder:localhost",
+        event_id="$stopped:localhost",
+        status=status,
+    )
+
+    await harness.deliver(room, edit)
+
+    assert harness.runner.requests == []
+    assert regenerator.edit_event_ids == [edit.event_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_agent_reply_finished_through_a_sidecar_still_acts_for_its_requester(tmp_path: Path) -> None:
+    """An oversized final reply keeps its requester inside the replacement content, where the handoff reads it."""
+    config = _owner_only_general_config(tmp_path)
+    harness = _build_harness(config, tmp_path)
+    room = _joined_room(config, "general", "research")
+    placeholder_id = "$placeholder:localhost"
+    _admit_placeholder(harness, placeholder_id)
+    uploads: list[bytes] = []
+
+    async def upload(**kwargs: Any) -> tuple[nio.UploadResponse, None]:  # noqa: ANN401
+        uploads.append(kwargs["data_provider"](None, None).read())
+        return nio.UploadResponse("mxc://localhost/final-reply"), None
+
+    upload_client = make_matrix_client_mock()
+    upload_client.upload = AsyncMock(side_effect=upload)
+    body = "@general please take this over. " + "Details. " * 4_000
+    edit = _final_reply_edit(config, placeholder_id=placeholder_id, event_id="$final:localhost", body=body)
+    sidecar_content = await prepare_large_message(upload_client, _ROOM_ID, edit.source["content"], room_encrypted=False)
+    assert constants.ACTING_REQUESTER_KEY not in sidecar_content
+    harness.controller._client().download = AsyncMock(
+        return_value=MagicMock(spec=nio.DownloadResponse, body=uploads[0]),
+    )
+
+    await harness.deliver(room, _final_reply_edit_event(config, sidecar_content, event_id="$final:localhost"))
+
+    assert [request.user_id for request in harness.runner.requests] == [_OWNER]
+    assert harness.runner.requests[0].prompt.count("Details.") == 4_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authority(tmp_path: Path) -> None:
     """A human cannot change entities their access excludes by having another agent post the command."""
     config = bind_runtime_paths(
@@ -2053,7 +2295,7 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
         test_runtime_paths(tmp_path / "runtime"),
     )
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
+    room = _joined_room(config, ROUTER_AGENT_NAME, "general", "research", requester=_SENDER)
     thread_root = "$thread-root:localhost"
     event = nio.RoomMessageText.from_dict(
         {

@@ -771,7 +771,7 @@ Run matching MindRoom revisions in the primary and workers so both use the same 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Credential-backed tools that declare `requires_primary_runtime=True` always stay local regardless of `worker_tools`.
-Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+These include `spotify` and `homeassistant`, which are also shared-only integrations that require `worker_scope` unset or `shared`.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 You can set `worker_scope` per agent or in `defaults`:

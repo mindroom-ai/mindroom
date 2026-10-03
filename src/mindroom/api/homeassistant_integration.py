@@ -12,6 +12,7 @@ Uses the official Home Assistant REST API.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
@@ -30,6 +31,7 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
 )
 from mindroom.api.integrations import get_dashboard_url
+from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
@@ -118,17 +120,26 @@ def _homeassistant_http_client(*, allow_private_url: bool) -> httpx.AsyncClient:
     )
 
 
-async def _test_connection(instance_url: str, token: str, *, allow_private_url: bool = False) -> dict[str, Any]:
-    """Test connection to Home Assistant."""
+async def _test_connection(config: dict[str, Any], target: RequestCredentialsTarget) -> dict[str, Any]:
+    """Test connection to Home Assistant, renewing an expired OAuth access token."""
+    allow_private_url = _private_url_allowed(config)
     try:
+        instance_url = _normalize_instance_url(config["instance_url"])
         fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
         async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
+
+            async def get(endpoint: str) -> httpx.Response:
+                return await send_homeassistant_request(
+                    client,
+                    fetch_url,
+                    config,
+                    "GET",
+                    endpoint,
+                    save_config=partial(_save_config, target),
+                )
+
             # Test API connection
-            response = await client.get(
-                urljoin(fetch_url, "/api/"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
+            response = await get("/api/")
 
             if response.status_code == 401:
                 raise HTTPException(status_code=401, detail="Invalid authentication token")
@@ -141,20 +152,12 @@ async def _test_connection(instance_url: str, token: str, *, allow_private_url: 
             api_info = response.json()
 
             # Get config for more details
-            config_response = await client.get(
-                urljoin(fetch_url, "/api/config"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
+            config_response = await get("/api/config")
 
             config_info = config_response.json() if config_response.status_code == 200 else {}
 
             # Get states to count entities
-            states_response = await client.get(
-                urljoin(fetch_url, "/api/states"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
-            )
+            states_response = await get("/api/states")
 
             entities = states_response.json() if states_response.status_code == 200 else []
 
@@ -203,12 +206,11 @@ async def get_status(request: Request, agent_name: str | None = None) -> HomeAss
                 error="Missing instance URL or token",
             )
 
-        instance_url = _normalize_instance_url(instance_url)
-        info = await _test_connection(instance_url, token, allow_private_url=_private_url_allowed(config))
+        info = await _test_connection(config, target)
 
         return HomeAssistantStatus(
             connected=True,
-            instance_url=instance_url,
+            instance_url=_normalize_instance_url(instance_url),
             version=info.get("version"),
             location_name=info.get("location_name"),
             has_credentials=True,
@@ -306,10 +308,15 @@ async def connect_token(
         service_names=("homeassistant",),
     )
     _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
+    connection = {
+        "instance_url": instance_url,
+        "long_lived_token": config.long_lived_token,
+        "allow_private_url": config.allow_private_url,
+    }
 
     # Test the connection
     try:
-        await _test_connection(instance_url, config.long_lived_token, allow_private_url=config.allow_private_url)
+        await _test_connection(connection, target)
     except HTTPException:
         raise
     except Exception as e:
@@ -318,14 +325,7 @@ async def connect_token(
             detail=f"Failed to connect to Home Assistant: {e!s}",
         ) from e
 
-    _save_config(
-        target,
-        {
-            "instance_url": instance_url,
-            "long_lived_token": config.long_lived_token,
-            "allow_private_url": config.allow_private_url,
-        },
-    )
+    _save_config(target, connection)
 
     return {"status": "connected", "message": "Successfully connected to Home Assistant"}
 
@@ -441,10 +441,13 @@ async def get_entities(
 
     try:
         async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
-            response = await client.get(
-                urljoin(fetch_url, "/api/states"),
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10.0,
+            response = await send_homeassistant_request(
+                client,
+                fetch_url,
+                config,
+                "GET",
+                "/api/states",
+                save_config=partial(_save_config, target),
             )
 
             if response.status_code != 200:
@@ -507,11 +510,14 @@ async def call_service(
 
     try:
         async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
-            response = await client.post(
-                urljoin(fetch_url, f"/api/services/{domain}/{service}"),
-                headers={"Authorization": f"Bearer {token}"},
-                json=service_data,
-                timeout=10.0,
+            response = await send_homeassistant_request(
+                client,
+                fetch_url,
+                config,
+                "POST",
+                f"/api/services/{domain}/{service}",
+                save_config=partial(_save_config, target),
+                json_data=service_data,
             )
 
             if response.status_code not in (200, 201):

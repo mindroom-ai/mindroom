@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,6 +19,7 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
+from mindroom.spotify_tokens import current_spotify_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -96,8 +98,9 @@ def _save_spotify_credentials(credentials: dict[str, Any], target: RequestCreden
     save_credentials_for_target("spotify", credentials_to_save, target)
 
 
+# A plain function, so FastAPI runs the blocking token renewal and Spotify request in its threadpool.
 @router.get("/spotify/status")
-async def get_spotify_status(
+def get_spotify_status(
     request: Request,
     agent_name: str | None = None,
 ) -> SpotifyStatus:
@@ -110,6 +113,15 @@ async def get_spotify_status(
 
     status.connected = True
     try:
+        # Renew only a token held in the target's own store, which the renewal saves back to.
+        # A connection shared through worker_grantable_credentials is left as is, so it is never copied there.
+        own_creds = load_credentials_for_target("spotify", replace(target, allowed_shared_services=None))
+        if own_creds and "access_token" in own_creds:
+            creds = current_spotify_credentials(
+                own_creds,
+                target.runtime_paths,
+                lambda renewed: _save_spotify_credentials(renewed, target),
+            )
         spotify_cls, _ = _ensure_spotify_packages(target.runtime_paths)
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
