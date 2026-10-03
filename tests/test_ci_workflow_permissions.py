@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-WORKFLOW_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
 # Jobs that install or run repository or dependency code chosen by the pushed commit.
 _CODE_RUNNING_JOBS = (
     ("docs.yml", "build"),
@@ -100,6 +104,32 @@ def test_security_scan_pins_the_tools_it_installs() -> None:
     installs = [step["run"] for step in steps if step.get("run", "").startswith("pip install")]
 
     assert installs == ["pip install pip-audit==2.10.1"]
+
+
+def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
+    """A bare pip-audit checks only its own environment, so the audit reads the requirements exported from uv.lock."""
+    steps = _load_workflow("security-scan.yml")["jobs"]["scan"]["steps"]
+    audit = next(step["run"] for step in steps if step.get("name") == "Python dependency audit")
+    bash = shutil.which("bash")
+    assert bash is not None
+    assert shutil.which("uv") is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Exit like pip-audit does on findings, which must stay advisory.
+    (bin_dir / "pip-audit").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RUNNER_TEMP/pip-audit-args"\nexit 1\n')
+    (bin_dir / "pip-audit").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)}
+
+    subprocess.run([bash, "-e", "-c", audit], cwd=ROOT, env=env, check=True)
+
+    requirements = tmp_path / "requirements.txt"
+    assert (tmp_path / "pip-audit-args").read_text().splitlines() == [
+        "--disable-pip",
+        "--no-deps",
+        "-r",
+        str(requirements),
+    ]
+    assert re.search(r"^agno==", requirements.read_text(encoding="utf-8"), re.MULTILINE)
 
 
 def test_pypi_publish_job_only_downloads_and_publishes_the_built_wheel() -> None:
