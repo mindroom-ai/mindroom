@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from pydantic import ValidationError
 
 from mindroom import model_loading
@@ -646,15 +647,17 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("interrupt", [False, True])
-async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool, interrupt: bool) -> None:
+@pytest.mark.parametrize("media", [False, True])
+async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool, interrupt: bool, media: bool) -> None:
     """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
     state = _QueuedMessageState()
     judgments: list[JudgmentRequest] = []
     messages = [Message(role="user", content="Do the task")]
 
-    def work() -> str:
+    def work() -> ToolResult:
         state.add_waiting_human_message("$new", text="Thanks")
-        return "Completed action"
+        images = [Image(content=b"image", mime_type="image/png")] if media else None
+        return ToolResult(content="Completed action", images=images)
 
     def delegate() -> str:
         return "Child result"
@@ -692,6 +695,8 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
         assert len(model.requests) == 1
         assert judgments == []
         assert not any(message.content == "WRAP UP NOW" for message in messages)
+        # Agno moves generated media into a user-role message after the ordinary call's result.
+        assert (messages[-1].role == "user") is media
         # The driver resumes the run with the child's result, completing the batch for the judge.
         messages.append(Message(role="tool", content="Child result", tool_call_id="child", tool_name="delegate"))
         await respond()
