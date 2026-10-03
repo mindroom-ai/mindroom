@@ -28,7 +28,12 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
-from .config_bundle import config_classify_change, config_install_bundle, initialize_runtime_bundle
+from .config_bundle import (
+    config_apply_bundle,
+    config_classify_change,
+    config_install_bundle,
+    initialize_runtime_bundle,
+)
 from .config_reload import config_check_applied, config_fingerprint
 from .desktop import desktop_app
 from .local_stack import local_stack_setup
@@ -80,6 +85,7 @@ config_app.command("migrate")(config_migrate)
 config_app.command("fingerprint")(config_fingerprint)
 config_app.command("install-bundle")(config_install_bundle)
 config_app.command("classify-change")(config_classify_change)
+config_app.command("apply-bundle")(config_apply_bundle)
 config_app.command("check-applied")(config_check_applied)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")

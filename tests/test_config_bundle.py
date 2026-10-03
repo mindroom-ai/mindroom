@@ -405,9 +405,17 @@ def test_previous_tree_is_a_supported_validated_rollback_source(tmp_path: Path) 
     source = _bundle(tmp_path / "source")
     target = tmp_path / "active"
     first = install_config_bundle(source, target, process_env={})
+    assert first.previous_digest is None
     (source / "prompts/helper.md").write_text("Rejected revision")
-    install_config_bundle(source, target, process_env={})
-    rollback = install_config_bundle(tmp_path / "active.previous", target, process_env={})
+    second = install_config_bundle(source, target, process_env={})
+    assert second.previous_digest == first.digest
+    assert install_config_bundle(source, target, process_env={}).previous_digest is None
+    rollback = install_config_bundle(
+        tmp_path / "active.previous",
+        target,
+        expected_digest=second.previous_digest,
+        process_env={},
+    )
     assert rollback.fingerprint == first.fingerprint
     assert (target / "prompts/helper.md").read_text() == "First prompt"
     assert (tmp_path / "active.previous/prompts/helper.md").read_text() == "Rejected revision"

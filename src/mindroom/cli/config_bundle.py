@@ -3,15 +3,34 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from contextlib import redirect_stdout
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import typer
 
 from mindroom.cli.config import activate_cli_runtime
+from mindroom.cli.config_reload import request_reload_status, wait_for_applied
 from mindroom.constants import exported_process_env
+
+if TYPE_CHECKING:
+    from mindroom.config_bundle import BundleInstallResult
+    from mindroom.config_reload import ConfigReloadStatus
+    from mindroom.constants import RuntimePaths
+
+type _ApplyStatus = Literal["applied", "pending", "failed", "rolled_back", "unconfirmed", "restart_required"]
+
+_APPLY_EXIT_CODES: dict[_ApplyStatus, int] = {
+    "applied": 0,
+    "pending": 1,
+    "failed": 2,
+    "rolled_back": 3,
+    "unconfirmed": 4,
+    "restart_required": 5,
+}
 
 
 def initialize_runtime_bundle(
@@ -42,6 +61,10 @@ def initialize_runtime_bundle(
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
         typer.echo(f"Bundle initialization failed: {exc}", err=True)
         raise typer.Exit(2) from None
+
+
+def _install_json(result: BundleInstallResult | None) -> dict[str, object] | None:
+    return None if result is None else {**asdict(result), "config_path": str(result.config_path)}
 
 
 def config_install_bundle(
@@ -81,7 +104,7 @@ def config_install_bundle(
             typer.echo(f"Bundle installation failed: {exc}", err=True)
         raise typer.Exit(2) from None
     if json_output:
-        typer.echo(json.dumps({**asdict(result), "config_path": str(result.config_path)}))
+        typer.echo(json.dumps(_install_json(result)))
     else:
         typer.echo(f"Bundle {result.status}: {result.config_path}")
         if result.digest:
@@ -125,3 +148,164 @@ def config_classify_change(
             for name in change.other:
                 typer.echo(f"  {name}")
     raise typer.Exit(1 if change.other else 0)
+
+
+# Runtime results that settle an apply without rollback.
+_SETTLED: dict[str, tuple[_ApplyStatus, str]] = {
+    "applied": ("applied", "The runtime applied the candidate's YAML/include sources."),
+    "pending": ("pending", "The runtime has not settled the candidate; confirm it later with config check-applied."),
+    "restart_required": (
+        "restart_required",
+        "The runtime adopted the candidate but needs a restart to apply it fully.",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _ApplyReceipt:
+    """Final outcome of one apply; only `applied` confirms the candidate."""
+
+    status: _ApplyStatus
+    detail: str
+    install: BundleInstallResult | None = None
+    runtime_status: str | None = None
+    rollback: BundleInstallResult | None = None
+    rollback_runtime_status: str | None = None
+
+
+def _settled_status(
+    runtime_paths: RuntimePaths,
+    url: str | None,
+    fingerprint: str | None,
+    wait: float,
+    timeout: float,
+) -> str:
+    """Return the runtime result for one fingerprint, or unavailable when it cannot be read."""
+    if fingerprint is None:
+        return "unavailable"
+    try:
+        return wait_for_applied(runtime_paths, url, fingerprint, wait, timeout).status
+    except (ValueError, OSError):
+        return "unavailable"
+
+
+def _status_before_install(
+    runtime_paths: RuntimePaths,
+    url: str | None,
+    wait: float,
+    timeout: float,
+) -> ConfigReloadStatus:
+    """Prove the runtime result can be read before anything changes."""
+    if not math.isfinite(wait):
+        msg = "--wait must be finite."
+        raise ValueError(msg)
+    status = request_reload_status(runtime_paths, url, timeout)
+    if status.status == "unavailable":
+        msg = "MindRoom has no config reload status yet; nothing was installed."
+        raise ValueError(msg)
+    return status
+
+
+def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
+    source: Path,
+    target: Path,
+    *,
+    config: Path,
+    expected_digest: str | None,
+    source_only: bool,
+    rollback_on_failure: bool,
+    url: str | None,
+    wait: float,
+    timeout: float,
+) -> _ApplyReceipt:
+    # Defer the Pydantic/cryptography config graph until this command runs,
+    # preserving the slim CLI import contract.
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
+
+    try:
+        runtime_paths = activate_cli_runtime(target / config)
+        before = _status_before_install(runtime_paths, url, wait, timeout)
+        # Native config loading may log to stdout before logging is configured.
+        with redirect_stdout(sys.stderr):
+            install = install_config_bundle(
+                source,
+                target,
+                config=config,
+                source_only=source_only,
+                expected_digest=expected_digest,
+            )
+    except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
+        return _ApplyReceipt("failed", str(exc))
+    status = _settled_status(runtime_paths, url, install.fingerprint, wait, timeout)
+    if status in _SETTLED:
+        return _ApplyReceipt(*_SETTLED[status], install, status)
+    # A failure recorded before this install cannot confirm the new tree's result.
+    stale = install.status == "installed" and (before.status, before.fingerprint) == ("failed", install.fingerprint)
+    if status != "failed" or stale:
+        detail = "The candidate is installed, but its runtime result is unconfirmed; inspect before retrying."
+        return _ApplyReceipt("unconfirmed", detail, install, status)
+    if not rollback_on_failure or install.previous_digest is None:
+        return _ApplyReceipt("failed", "The runtime rejected the candidate, which remains installed.", install, status)
+    previous = target.expanduser().absolute()
+    try:
+        with redirect_stdout(sys.stderr):
+            rollback = install_config_bundle(
+                previous.with_name(f"{previous.name}.previous"),
+                target,
+                config=config,
+                expected_digest=install.previous_digest,
+            )
+    except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
+        detail = f"The runtime rejected the candidate, and restoring the previous tree failed: {exc}"
+        return _ApplyReceipt("unconfirmed", detail, install, status)
+    rollback_status = _settled_status(runtime_paths, url, rollback.fingerprint, wait, timeout)
+    if rollback_status == "applied":
+        detail = "The runtime rejected the candidate; the previous tree is restored and applied."
+        return _ApplyReceipt("rolled_back", detail, install, status, rollback, rollback_status)
+    detail = "The runtime rejected the candidate; the previous tree is restored, but its runtime result is unconfirmed."
+    return _ApplyReceipt("unconfirmed", detail, install, status, rollback, rollback_status)
+
+
+def config_apply_bundle(
+    source: Path = typer.Argument(..., help="Directory containing the complete configuration tree."),  # noqa: B008
+    target: Path = typer.Option(..., help="Directory the running MindRoom loads; TARGET.previous retains rollback."),  # noqa: B008
+    config: Path = typer.Option(Path("config.yaml"), help="Config file path relative to the bundle root."),  # noqa: B008
+    expected_digest: str | None = typer.Option(None, help="Require this whole-tree candidate digest."),
+    source_only: bool = typer.Option(
+        False,
+        "--source-only",
+        help="Refuse changes outside the YAML/include sources of --config.",
+    ),
+    rollback_on_failure: bool = typer.Option(
+        False,
+        "--rollback-on-failure",
+        help="Restore the digest-pinned previous tree when the runtime rejects a changed candidate.",
+    ),
+    url: str | None = typer.Option(None, help="MindRoom base URL; defaults to MINDROOM_URL or localhost:8765."),
+    wait: float = typer.Option(300.0, min=0.0, help="Wait up to this many seconds for each runtime result."),
+    timeout: float = typer.Option(10.0, min=0.001, help="HTTP timeout in seconds."),
+    json_output: bool = typer.Option(False, "--json", help="Print the final receipt as JSON."),
+) -> None:
+    """Install a tree and confirm its reload; exit 0 applied, 1 pending, 2 failed, 3 rolled back, 4 unconfirmed, 5 restart required."""
+    receipt = _apply_bundle(
+        source,
+        target,
+        config=config,
+        expected_digest=expected_digest,
+        source_only=source_only,
+        rollback_on_failure=rollback_on_failure,
+        url=url,
+        wait=wait,
+        timeout=timeout,
+    )
+    if json_output:
+        payload = {
+            **asdict(receipt),
+            "install": _install_json(receipt.install),
+            "rollback": _install_json(receipt.rollback),
+        }
+        typer.echo(json.dumps(payload))
+    else:
+        typer.echo(f"Bundle apply {receipt.status}: {receipt.detail}")
+    raise typer.Exit(_APPLY_EXIT_CODES[receipt.status])

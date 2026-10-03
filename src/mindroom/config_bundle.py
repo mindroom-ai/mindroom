@@ -79,6 +79,7 @@ class BundleInstallResult:
     fingerprint: str | None = None
     digest: str | None = None
     recovery_pending: bool = False
+    previous_digest: str | None = None
 
 
 def _tree_entries(root: Path) -> dict[str, tuple[int, bytes | None]]:
@@ -221,12 +222,13 @@ def _publish_bundle(stage: Path, target: Path) -> bool:
     return False
 
 
-def _unchanged_or_replaceable(target: Path, candidate_digest: str, *, force: bool, require_managed: bool) -> bool:
+def _replaceable_digest(target: Path, candidate_digest: str, *, force: bool, require_managed: bool) -> str | None:
+    """Return the active tree digest once replacing that tree is allowed."""
     if not target.exists():
-        return False
+        return None
     active_digest = _tree_digest(target)
     if active_digest == candidate_digest and not require_managed:
-        return True
+        return active_digest
     try:
         metadata = json.loads((target / _METADATA).read_text())
     except (OSError, ValueError):
@@ -235,7 +237,7 @@ def _unchanged_or_replaceable(target: Path, candidate_digest: str, *, force: boo
     if not force and active_digest != baseline:
         msg = "Target contains authored edits or is unmanaged; use --force to replace it explicitly."
         raise ValueError(msg)
-    return active_digest == candidate_digest
+    return active_digest
 
 
 def _validate_revision(revision: str | None) -> None:
@@ -428,7 +430,8 @@ def install_config_bundle(
             if expected_digest is not None and digest != expected_digest:
                 msg = "Candidate tree digest does not match --expected-digest; no replacement was made."
                 raise ValueError(msg)
-            unchanged = _unchanged_or_replaceable(target, digest, force=force, require_managed=revision is not None)
+            active_digest = _replaceable_digest(target, digest, force=force, require_managed=revision is not None)
+            unchanged = active_digest == digest
             if source_only and not unchanged:
                 _require_source_only(target, stage, config)
             if unchanged and revision is None:
@@ -456,6 +459,7 @@ def install_config_bundle(
                 loaded.source_fingerprint,
                 digest,
                 recovery_pending,
+                active_digest,
             )
         finally:
             if stage.exists():
