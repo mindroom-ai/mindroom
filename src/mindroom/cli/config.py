@@ -1317,19 +1317,34 @@ MINDROOM_API_KEY={api_key}
 """
 
 
-def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:
-    """Give the dashboard API a key when dedicated workers could otherwise call it without one.
+# Where `mindroom run`, and so the login service, serves the dashboard API unless told otherwise.
+DEFAULT_API_HOST = "0.0.0.0"  # noqa: S104
+DEFAULT_API_PORT = 8765
+
+
+def warn_dashboard_without_key(address: str, remedy: str) -> None:
+    """Warn that anyone who can reach the dashboard API at ``address`` can administer MindRoom."""
+    console.print(
+        f"[yellow]Warning:[/yellow] The dashboard API listens on {address} without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom.",
+    )
+    console.print(f"  {remedy}")
+
+
+def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bool:
+    """Return whether dedicated workers could reach the dashboard API while `MINDROOM_API_KEY` is unset.
 
     Worker shells keep network access to the primary, so an open API would hand them
     MindRoom's configuration. An explicitly empty key keeps open access.
     """
     from mindroom.workers.runtime import primary_worker_backend_is_dedicated  # noqa: PLC0415
 
-    if (
-        dashboard_has_credential
-        or runtime_paths.env_value("MINDROOM_API_KEY") is not None
-        or not primary_worker_backend_is_dedicated(runtime_paths)
-    ):
+    return runtime_paths.env_value("MINDROOM_API_KEY") is None and primary_worker_backend_is_dedicated(runtime_paths)
+
+
+def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:
+    """Give the dashboard API a key when dedicated workers could otherwise call it without one."""
+    if dashboard_has_credential or not worker_dashboard_api_key_needed(runtime_paths):
         return False
     env_path = runtime_paths.env_path
     try:

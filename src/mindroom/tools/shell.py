@@ -178,6 +178,7 @@ def _shell_subprocess_env(
     *,
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
+    extra_path_prepend: tuple[str, ...] = (),
     workspace_dir: Path | None = None,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses."""
@@ -196,7 +197,7 @@ def _shell_subprocess_env(
 
     path_value = subprocess_path_with_prepends(
         env.get("PATH"),
-        prepend_entries=_shell_path_prepend_entries(shell_path_prepend),
+        prepend_entries=(*extra_path_prepend, *_shell_path_prepend_entries(shell_path_prepend)),
     )
     if path_value is None:
         env.pop("PATH", None)
@@ -441,16 +442,18 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             except ValueError as exc:
                 return f"Error: {exc}"
             runtime_env = self._runtime_env
-            shell_path_prepend = self._shell_path_prepend
+            extra_path_prepend: tuple[str, ...] = ()
             if (cli_env := current_agent_cli_shell_env()) is not None:
                 runtime_env = {**runtime_env, **cli_env.env()}
                 if cli_env.bin_dir is not None:
                     # First, so an older `mindroom-agent` on the agent's configured PATH cannot shadow this response's CLI.
-                    shell_path_prepend = ",".join(entry for entry in (cli_env.bin_dir, shell_path_prepend) if entry)
+                    # Kept out of the comma-separated setting, whose parsing would split a path containing a comma.
+                    extra_path_prepend = (cli_env.bin_dir,)
             subprocess_env = _shell_subprocess_env(
                 runtime_env,
                 base_process_env=self._base_process_env,
-                shell_path_prepend=shell_path_prepend,
+                shell_path_prepend=self._shell_path_prepend,
+                extra_path_prepend=extra_path_prepend,
                 workspace_dir=self.base_dir,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)

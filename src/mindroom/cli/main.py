@@ -18,6 +18,8 @@ from mindroom.constants import ensure_writable_config_path
 from .api import is_loopback_host
 from .banner import make_banner
 from .config import (
+    DEFAULT_API_HOST,
+    DEFAULT_API_PORT,
     activate_cli_runtime,
     check_env_keys,
     config_app,
@@ -27,6 +29,7 @@ from .config import (
     format_validation_errors,
     load_config_quiet,
     print_config_search_locations,
+    warn_dashboard_without_key,
 )
 from .config_bundle import config_install_bundle, initialize_runtime_bundle
 from .config_reload import config_check_applied, config_fingerprint
@@ -61,8 +64,6 @@ _CONFIG_INIT_PROVIDER_CHOICES = (
 _CONNECT_ALREADY_CONNECTED_EXIT_CODE = 3
 # Matches `MindRoomCommand.pairingCancelledExitCode` in the macOS app.
 _CONNECT_CANCELLED_EXIT_CODE = 130
-_DEFAULT_API_HOST = "0.0.0.0"  # noqa: S104
-_DEFAULT_API_PORT = 8765
 
 app = typer.Typer(
     help=_HELP,
@@ -136,12 +137,12 @@ def run(
         help="Start the bundled dashboard/API server alongside the bot",
     ),
     api_port: int = typer.Option(
-        _DEFAULT_API_PORT,
+        DEFAULT_API_PORT,
         "--api-port",
         help="Port for the bundled dashboard/API server",
     ),
     api_host: str = typer.Option(
-        _DEFAULT_API_HOST,
+        DEFAULT_API_HOST,
         "--api-host",
         help="Host for the bundled dashboard/API server",
     ),
@@ -182,8 +183,8 @@ def run(
         config_path is None
         and storage_path is None
         and api
-        and api_host == _DEFAULT_API_HOST
-        and api_port == _DEFAULT_API_PORT
+        and api_host == DEFAULT_API_HOST
+        and api_port == DEFAULT_API_PORT
     )
     if service and not plain_run:
         typer.echo(
@@ -315,7 +316,7 @@ async def _run(
         from mindroom.frontend_assets import ensure_frontend_dist_dir  # noqa: PLC0415
 
         frontend_dir = ensure_frontend_dist_dir(runtime_paths)
-        display_host = "localhost" if api_host == _DEFAULT_API_HOST else api_host
+        display_host = "localhost" if api_host == DEFAULT_API_HOST else api_host
         if frontend_dir is None:
             console.print("Dashboard: unavailable (frontend assets missing)")
             console.print("  Install Bun or provide MINDROOM_FRONTEND_DIST when running from a source checkout.")
@@ -357,11 +358,10 @@ def _warn_if_dashboard_is_open_beyond_loopback(runtime_paths: RuntimePaths, api_
     if is_loopback_host(api_host) or dashboard_requires_credential(runtime_paths):
         return
     address_host = f"[{api_host}]" if ":" in api_host else api_host
-    console.print(
-        f"[yellow]Warning:[/yellow] The dashboard API listens on {address_host}:{api_port} without MINDROOM_API_KEY, "
-        "so anyone who can reach that address can administer MindRoom.",
+    warn_dashboard_without_key(
+        f"{address_host}:{api_port}",
+        f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.",
     )
-    console.print(f"  Set MINDROOM_API_KEY in {runtime_paths.env_path}, or pass --api-host 127.0.0.1.")
 
 
 @app.command()
