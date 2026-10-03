@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from mindroom.api.auth import dashboard_requires_credential
 from mindroom.cli.main import app
 from mindroom.cli.service import require_login_service, start_login_service
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, resolve_primary_runtime_paths
 from mindroom.services.config import (
     InstallResult,
     ServiceActionResult,
@@ -1066,6 +1066,43 @@ def test_service_install_keeps_the_shell_dashboard_key(
     service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
     assert service_runtime.env_value("MINDROOM_API_KEY") == key
     assert dashboard_requires_credential(service_runtime)
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_leaves_env_alone_when_it_already_holds_the_shell_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """Keys `.env` already holds are not saved again, so a symlinked `.env` installs and keeps its own lines."""
+    dotfiles_env = tmp_path / "dotfiles" / "mindroom.env"
+    dotfiles_env.parent.mkdir()
+    env_content = 'export OPENAI_API_KEY="sk-same"  # from dotfiles\nMINDROOM_API_KEY=dash-key\n'
+    dotfiles_env.write_text(env_content, encoding="utf-8")
+    (tmp_path / ".env").symlink_to(dotfiles_env)
+    shell_keys = {"OPENAI_API_KEY": "sk-same", "MINDROOM_API_KEY": "dash-key"}
+    runtime_paths = _shell_runtime(tmp_path, **shell_keys)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+        output = capsys.readouterr().out
+    else:
+        for env_key in PROVIDER_ENV_KEYS.values():
+            monkeypatch.delenv(env_key, raising=False)
+            monkeypatch.delenv(f"{env_key}_FILE", raising=False)
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        for name, value in shell_keys.items():
+            monkeypatch.setenv(name, value)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+        output = result.output
+
+    assert "from your shell" not in output
+    assert dotfiles_env.read_text(encoding="utf-8") == env_content
+    manager.install_service.assert_called_once_with()
 
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])
