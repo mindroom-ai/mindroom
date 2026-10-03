@@ -494,8 +494,8 @@ visibility = [
     "mindroom.reaction_dispatch",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
-    "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.disabled",
+    "mindroom.tool_jobs.held_replies",
     "mindroom.tool_jobs.user_stop",
     "mindroom.turn_controller",
     "mindroom.visible_response_reconciliation",
@@ -735,7 +735,6 @@ path = "mindroom.response_turn"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.helper_usage",
-    "mindroom.history.session_context",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",
@@ -793,7 +792,6 @@ visibility = [
     "mindroom.cli_approval_recovery",
     "mindroom.response_turn",
     "mindroom.delegation.execution",
-    "mindroom.tool_jobs.completion",
 ]
 
 [[modules]]
@@ -2706,6 +2704,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.tool_jobs.held_replies",
     "mindroom.agent_modes",
     "mindroom.runtime_resolution",
     "mindroom.ai_runtime",
@@ -4131,6 +4130,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.tool_jobs.held_replies",
     "mindroom.agents",
     "mindroom.approval_inbound",
     "mindroom.bot_room_lifecycle",
@@ -7627,6 +7627,7 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.tool_jobs.held_replies",
     "mindroom.approval_manager",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
@@ -7915,14 +7916,10 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.completion"
 depends_on = [
-    "mindroom.constants",
-    "mindroom.delivery_gateway",
-    "mindroom.tool_system.events",
-    "mindroom.dynamic_tool_continuation",
-    "mindroom.tool_jobs.runtime",
-    "mindroom.event_journal",
-    "mindroom.hooks",
+    "mindroom.dispatch_source",
     "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.held_replies",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -7932,6 +7929,26 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",
+]
+
+[[modules]]
+path = "mindroom.tool_jobs.held_replies"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.dispatch_source",
+    "mindroom.event_journal",
+    "mindroom.hooks",
+    "mindroom.message_target",
+    "mindroom.streaming",
+    "mindroom.tool_system.events",
+    "mindroom.turn_origin",
+]
+visibility = [
+    "mindroom.bot",
+    "mindroom.orchestration.tool_job_runtime",
+    "mindroom.response_runner",
+    "mindroom.tool_jobs.completion",
 ]
 
 [[modules]]

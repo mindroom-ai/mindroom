@@ -52,6 +52,10 @@ class ResponseAttemptRequest:
     user_id: str | None = None
     run_id: str | None = None
     on_cancelled: Callable[[str], None] | None = None
+    # The Stop button a held message already shows, reused instead of adding another.
+    stop_button_event_id: str | None = None
+    # Asked once the attempt ends, with the button it shows; True keeps the button for a message that goes on holding.
+    keep_stop_button: Callable[[str | None], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,16 @@ class ResponseAttemptRunner:
             show_button=user_is_online,
         )
         return user_is_online
+
+    async def _show_stop_button(self, request: ResponseAttemptRequest, message_id: str) -> bool:
+        """Show the message's Stop button, reusing the one a held message already shows."""
+        if request.stop_button_event_id is not None:
+            return True
+        if not await self._should_show_stop_button(request, message_id):
+            return False
+        self.deps.logger.info("Adding stop button", message_id=message_id)
+        await self.deps.stop_manager.add_stop_button(self.deps.client, message_id)
+        return True
 
     async def _forward_cancel_to_attempt_task(self, task: asyncio.Task[None], exc: asyncio.CancelledError) -> None:
         """Cancel the attempt task when the awaiting chain was cancelled instead.
@@ -148,7 +162,7 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:  # noqa: C901
+    async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
@@ -161,20 +175,13 @@ class ResponseAttemptRunner:
                 tracked_message_id,
                 request.target,
                 task,
-                None,
+                request.stop_button_event_id,
                 run_id=request.run_id,
             )
 
             try:
                 if message_id is not None:
-                    show_stop_button = await self._should_show_stop_button(request, message_id)
-                    if show_stop_button:
-                        self.deps.logger.info("Adding stop button", message_id=message_id)
-                        await self.deps.stop_manager.add_stop_button(
-                            self.deps.client,
-                            message_id,
-                        )
-
+                    show_stop_button = await self._show_stop_button(request, message_id)
                 await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
                 process_shutdown = current_task_is_process_shutdown()
@@ -207,13 +214,16 @@ class ResponseAttemptRunner:
             finally:
                 tracked = self.deps.stop_manager.tracked_messages.get(tracked_message_id)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
+                kept = request.keep_stop_button is not None and request.keep_stop_button(
+                    tracked.reaction_event_id if tracked is not None and show_stop_button else None,
+                )
                 if process_shutdown:
                     self.deps.stop_manager.discard_message(tracked_message_id)
                 else:
                     self.deps.stop_manager.clear_message(
                         tracked_message_id,
                         self.deps.client,
-                        remove_button=show_stop_button and not button_already_removed,
+                        remove_button=show_stop_button and not button_already_removed and not kept,
                     )
 
             return message_id

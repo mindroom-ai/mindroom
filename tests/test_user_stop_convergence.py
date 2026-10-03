@@ -21,6 +21,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.event_journal import SemanticConsumer
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.message_target import MessageTarget
@@ -200,6 +201,8 @@ def _stop_dispatcher(
     store: TurnStore,
     tmp_path: Path,
     stop_manager: StopManager,
+    *,
+    held_message: str | None = None,
 ) -> tuple[ReactionDispatcher, MagicMock, MagicMock]:
     """Build a reaction dispatcher whose journal and reconciler record what a stop reaction claims."""
     config = Config()
@@ -225,6 +228,10 @@ def _stop_dispatcher(
             emit_reaction_received_hooks=AsyncMock(),
             wait_for_admission_or_shutdown=AsyncMock(),
             config_confirmation=MagicMock(),
+            holds_background_work=AsyncMock(
+                side_effect=lambda message_id, room_id: message_id == held_message and room_id == _ROOM_ID,
+            ),
+            stop_held_work=AsyncMock(return_value=True),
         ),
     )
     return dispatcher, journal, reconciler
@@ -323,3 +330,49 @@ async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
     assert store.get_turn_record("$voice") == before
     assert gateway.finalized == []
     assert runner.cancel_requests == 0
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_stop_on_a_held_message_ends_its_work_without_a_turn(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+    *,
+    claimed: bool,
+) -> None:
+    """No turn runs on a message holding background work, so its Stop goes straight to that work, even on replay."""
+    store = await _store(journal_store)
+    dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, StopManager(), held_message="$held")
+    journal.receipt_order.return_value = 9
+    room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+    consumer = SemanticConsumer.STOP_REACTION if claimed else None
+    assert await dispatcher._maybe_handle_stop_reaction(room, _stop_reaction("$held"), consumer) is True
+    if claimed:
+        journal.claim_semantic_consumer.assert_not_awaited()
+    else:
+        journal.claim_semantic_consumer.assert_awaited_once_with(SemanticConsumer.STOP_REACTION)
+    dispatcher.deps.stop_held_work.assert_awaited_once_with("$held", 9)
+    reconciler.finalize.assert_not_awaited()
+    foreign = nio.MatrixRoom("!elsewhere:localhost", "@agent:localhost")
+    assert await dispatcher._maybe_handle_stop_reaction(foreign, _stop_reaction("$held"), None) is False
+
+
+async def test_stop_on_a_message_whose_continuation_runs_cancels_that_turn(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """While a turn continues a held message, its Stop takes the ordinary live path, which also ends the work."""
+    store = await _store(journal_store)
+    stop_manager = StopManager()
+    response_task = asyncio.create_task(asyncio.Event().wait())
+    stop_manager.set_current("$held", MessageTarget.resolve(_ROOM_ID, None, None), response_task)
+    dispatcher, _journal, reconciler = _stop_dispatcher(store, tmp_path, stop_manager, held_message="$held")
+    reconciler.finalize.return_value = True
+    try:
+        room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+        assert await dispatcher._maybe_handle_stop_reaction(room, _stop_reaction("$held"), None) is True
+        reconciler.finalize.assert_awaited_once()
+        dispatcher.deps.holds_background_work.assert_not_awaited()
+        dispatcher.deps.stop_held_work.assert_not_awaited()
+    finally:
+        response_task.cancel()
+        await asyncio.gather(response_task, return_exceptions=True)

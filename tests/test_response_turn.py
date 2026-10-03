@@ -43,7 +43,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, _ReadyJobContinuation
+from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, _JobJoin
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -2195,12 +2195,14 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("joins", [0, 1])
-async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_reply(
+@pytest.mark.parametrize(("joins", "holds"), [(0, False), (1, False), (0, True)])
+async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_joined_or_held_reply(
     monkeypatch: pytest.MonkeyPatch,
     joins: int,
+    *,
+    holds: bool,
 ) -> None:
-    """Without a job join a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
+    """Without a job join or hold a streamed team publishes its terminal rendering, exactly as a disabled turn does."""
     log = _AdapterLog()
     attempts = 0
 
@@ -2219,17 +2221,19 @@ async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_join
             ),
         )
 
-    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> _JobJoin:
         if len(attempted) < joins:
             attempted.add(f"job{len(attempted)}")
-            yield _ReadyJobContinuation("Retrieve the result")
+            return _JobJoin(prompt="Retrieve the result")
+        return _JobJoin(holds=holds)
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
     chunks = await _collect(
         stream_response_turn(_ctx(), _streaming_adapter(log, attempt), TurnSinks(), continuation=_continuation()),
     )
     published = [chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk for chunk in chunks]
-    assert published == (["Document 1", "Document 2"] if joins else ["notice:Terminal 1"])
+    expected = ["Document 1", "Document 2"] if joins else ["Document 1"] if holds else ["notice:Terminal 1"]
+    assert published == expected
 
 
 @pytest.mark.asyncio
@@ -2246,10 +2250,11 @@ async def test_job_join_follows_spent_dynamic_continuations(monkeypatch: pytest.
         text = "final" if attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1 else "after join"
         return CompletedAttempt(response_text=text, replayable_text=text, has_visible_content=True)
 
-    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> _JobJoin:
         if not attempted:
             attempted.add("job")
-            yield _ReadyJobContinuation("Retrieve the result")
+            return _JobJoin(prompt="Retrieve the result")
+        return _JobJoin()
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
     result = await run_blocking_response_turn(
@@ -2287,9 +2292,12 @@ async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(completed())
 
-    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], *, joins: int, **_kwargs: object) -> _JobJoin:
+        # The join owns its limit: at the limit it no longer continues the reply.
+        if joins >= JOB_JOIN_LIMIT:
+            return _JobJoin()
         attempted.add(f"job{len(attempted)}")
-        yield _ReadyJobContinuation("Retrieve the result")
+        return _JobJoin(prompt="Retrieve the result")
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
     if streaming:

@@ -33,6 +33,7 @@ from mindroom.tool_approval import (
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace, tool_markers_match_trace
+from mindroom.turn_origin import TurnIntent
 
 _USER_STOP_FAILURE_REASON = "cancelled_by_user"
 
@@ -183,6 +184,13 @@ def continuation_target(
     reply_to_event_id: str | None = None,
 ) -> MessageTarget:
     """Return the canonical Matrix conversation target for one continuation."""
+    if (
+        continuation.origin is not None
+        and continuation.origin.intent is TurnIntent.HELD_REPLY_CONTINUATION
+        and reply_to_event_id in continuation.source_event_ids
+    ):
+        # A held reply's wake is a runtime source, not a Matrix event to reply to.
+        reply_to_event_id = None
     return MessageTarget(
         room_id=continuation.room_id,
         source_thread_id=continuation.thread_id,

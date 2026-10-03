@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -20,7 +20,7 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from agno.db.base import BaseDb
     from structlog.stdlib import BoundLogger
@@ -94,16 +94,6 @@ class ResponseLifecycleReservation:
             raise RuntimeError(msg)
         await self._acquire_task
 
-    def _give_up_lock(self) -> None:
-        """Let the conversation's other turns take the lock while this response only waits."""
-        self._owns_lock = False
-        self._lifecycle_lock.release()
-
-    async def _retake_lock(self) -> None:
-        """Take the lock back after waiting, behind the turns that queued for it meanwhile."""
-        await self._lifecycle_lock.acquire()
-        self._owns_lock = True
-
     def _consume_notice(self) -> None:
         if self._notice is None:
             return
@@ -155,8 +145,6 @@ class _QueuedMessageState:
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
-    # Turns that gave up the lock while they only wait on background work and will take it back.
-    _waiting_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
     human_signal: HumanMessageSignal = field(default_factory=HumanMessageSignal)
@@ -210,15 +198,6 @@ class _QueuedMessageState:
         else:
             self.human_signal.settle()
 
-    def begin_waiting(self) -> None:
-        self._waiting_response_turns += 1
-
-    def finish_waiting(self) -> None:
-        self._waiting_response_turns -= 1
-
-    def has_waiting_response_turn(self) -> bool:
-        return self._waiting_response_turns > 0
-
     def has_pending_human_messages(self) -> bool:
         return self.pending_human_messages > 0
 
@@ -242,65 +221,6 @@ class _TurnNotice:
     source_event_id: str
     # A human message also stays a queued notice for the running reply's model; other turns only release its waits.
     human: bool
-
-
-@dataclass
-class _RunningTurn:
-    """One running response's hold on its conversation lock, which it gives up while it only waits on background work."""
-
-    lifecycle_lock: asyncio.Lock
-    reservation: ResponseLifecycleReservation | None
-    queued_signal: _QueuedMessageState
-    mid_turn_gate: MidTurnGate | None
-    owns_lock: bool = False
-
-    async def acquire(self) -> None:
-        if self.reservation is not None:
-            await self.reservation.wait_until_acquired()
-        else:
-            await self.lifecycle_lock.acquire()
-        self.owns_lock = True
-
-    async def release(self) -> None:
-        """Release the lock at the end of the turn, which a reservation does only while it still owns it."""
-        if self.reservation is not None:
-            self.owns_lock = False
-            await self.reservation.release()
-        elif self.owns_lock:
-            self.owns_lock = False
-            self.lifecycle_lock.release()
-
-    @asynccontextmanager
-    async def released_while_waiting(self) -> AsyncIterator[None]:
-        """Let the conversation's other turns run while this response only waits, then take the lock back.
-
-        A turn that gave the lock up is no longer active, so new messages reach the turn policy meanwhile. Taking the
-        lock back also follows a cancellation, so the response settles under the lock like any other; only a second
-        cancellation while it queues leaves it without the lock.
-        """
-        if not self.owns_lock:
-            yield
-            return
-        signal = self.queued_signal
-        signal.mid_turn_gate = None
-        signal.begin_waiting()
-        self.owns_lock = False
-        if self.reservation is not None:
-            self.reservation._give_up_lock()
-        else:
-            self.lifecycle_lock.release()
-        signal.finish_response_turn()
-        try:
-            yield
-        finally:
-            signal.begin_response_turn()
-            signal.finish_waiting()
-            if self.reservation is not None:
-                await self.reservation._retake_lock()
-            else:
-                await self.lifecycle_lock.acquire()
-            self.owns_lock = True
-            signal.mid_turn_gate = self.mid_turn_gate
 
 
 @dataclass(slots=True)
@@ -386,9 +306,7 @@ class ResponseLifecycleCoordinator:
                 # lock state alone silently drops user input.
                 candidate_signal = self._thread_queued_signals.get(candidate)
                 if candidate_signal is not None and (
-                    candidate_signal.has_pending_human_messages()
-                    or candidate_signal.has_active_response_turn()
-                    or candidate_signal.has_waiting_response_turn()
+                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
                 ):
                     continue
                 self._response_lifecycle_locks.pop(candidate, None)
@@ -491,8 +409,8 @@ class ResponseLifecycleCoordinator:
             # An ingress reservation may already hold this source's notice for the running reply.
             queued_signal.add_waiting_human_message(source_event_id, text=message_text_for_judgment(response_envelope))
             return _TurnNotice(source_event_id, human=True)
-        # Any queued turn ends the running reply's waits inside its model run, so the reply reaches the response
-        # boundary, where it lets this turn run while it keeps holding its background work.
+        # Any queued turn ends the running reply's waits inside its model run, so the reply finishes and its message
+        # holds the outstanding work while this turn runs.
         queued_signal.human_signal.notify()
         return _TurnNotice(source_event_id, human=False)
 
@@ -526,6 +444,16 @@ class ResponseLifecycleCoordinator:
         )
         return lifecycle_lock, queued_signal, notice
 
+    @staticmethod
+    async def _acquire_response_turn_lock(
+        lifecycle_lock: asyncio.Lock,
+        reservation: ResponseLifecycleReservation | None,
+    ) -> None:
+        if reservation is not None:
+            await reservation.wait_until_acquired()
+            return
+        await lifecycle_lock.acquire()
+
     def _consume_response_turn_notice(
         self,
         *,
@@ -537,6 +465,16 @@ class ResponseLifecycleCoordinator:
             reservation._consume_notice()
             return
         self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
+
+    @staticmethod
+    async def _release_response_turn_lock(
+        lifecycle_lock: asyncio.Lock,
+        reservation: ResponseLifecycleReservation | None,
+    ) -> None:
+        if reservation is not None:
+            await reservation.release()
+            return
+        lifecycle_lock.release()
 
     async def _finish_response_turn(
         self,
@@ -574,11 +512,12 @@ class ResponseLifecycleCoordinator:
             # This response now owns the reservation locally. Descendant tasks
             # must acquire their own lifecycle instead of inheriting this one-shot claim.
             _current_response_lifecycle_reservation.set(None)
-        running = _RunningTurn(lifecycle_lock, reservation, queued_signal, mid_turn_gate)
+        lock_acquired = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
-            await running.acquire()
+            await self._acquire_response_turn_lock(lifecycle_lock, reservation)
+            lock_acquired = True
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
@@ -591,17 +530,17 @@ class ResponseLifecycleCoordinator:
                 notice = None
                 queued_signal.mid_turn_gate = mid_turn_gate
                 with (
-                    human_message_signal_context(queued_signal.human_signal, running.released_while_waiting),
+                    human_message_signal_context(queued_signal.human_signal),
                     queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
                 ):
                     try:
                         return await locked_operation(target)
                     finally:
-                        if running.owns_lock:
-                            queued_signal.mid_turn_gate = None
+                        queued_signal.mid_turn_gate = None
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
-                await running.release()
+                if lock_acquired:
+                    await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:
             await self._finish_response_turn(
                 reservation=reservation,

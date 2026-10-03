@@ -56,13 +56,6 @@ class ToolTraceEntry:
     toolkit_name: str | None = field(default=None, compare=False)
 
 
-@dataclass(frozen=True, slots=True)
-class BackgroundWaitChunk:
-    """Set transient wait progress, or clear it with None, without changing the answer."""
-
-    content: str | None
-
-
 @dataclass(slots=True)
 class StructuredStreamChunk:
     """Streaming chunk that carries fully-rendered content plus structured metadata."""

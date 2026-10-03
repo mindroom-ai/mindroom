@@ -40,7 +40,7 @@ from mindroom.response_runner import (
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
-from mindroom.tool_jobs.completion import report_background_wait
+from mindroom.tool_jobs.completion import HeldContinuation
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -910,7 +910,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
 
 @pytest.mark.asyncio
 async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_path: Path) -> None:
-    """Stopping a team during a job wait keeps the prose and tool markers the wait published."""
+    """Stopping a blocking team turn that continues a held message keeps the prose and tool markers it shows."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     config.background_tool_jobs.enabled = True
@@ -942,18 +942,18 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
         existing_event_id="$existing",
         existing_event_is_placeholder=False,
+        held_continuation=HeldContinuation(
+            presentation=StreamingPresentation(latest_text, tool_trace=tuple(latest_trace)),
+            ready_job_ids=frozenset({"job-1"}),
+            joins=0,
+        ),
     )
 
-    async def wait_then_stop(*_args: object, **_kwargs: object) -> str:
-        # The published wait is what makes Matrix newer than this response's known body.
-        await report_background_wait(
-            StreamingPresentation(latest_text, tool_trace=tuple(latest_trace)),
-            "⏳ Waiting for background work…",
-        )
-        stop = "user_stop"
-        raise asyncio.CancelledError(stop)
+    async def stop(*_args: object, **_kwargs: object) -> str:
+        message = "user_stop"
+        raise asyncio.CancelledError(message)
 
-    with patch("mindroom.response_runner.team_response", new=wait_then_stop):
+    with patch("mindroom.response_runner.team_response", new=stop):
         resolution = await coordinator.generate_team_response_helper(
             request,
             team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
@@ -961,8 +961,8 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
         )
 
     assert resolution == "$existing"
-    assert len(edits) == 2
-    assert all(edit.event_id == "$existing" for edit in edits)
+    assert len(edits) == 1
+    assert edits[-1].event_id == "$existing"
     assert edits[-1].new_text == f"{latest_text}\n\n**[Response cancelled by user]**"
     assert edits[-1].tool_trace == latest_trace
 

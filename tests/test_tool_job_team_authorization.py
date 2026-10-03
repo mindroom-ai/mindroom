@@ -16,7 +16,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
-from mindroom.tool_jobs.completion import join_conversation_jobs
+from mindroom.tool_jobs.completion import _JobJoin, join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
@@ -139,11 +139,10 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
         waited = await runtime.wait("member", owner=owner, depth=0)
         await runtime.release_wait("member", waited.claim)
         with tool_runtime_context(context):
-            assert [item async for item in join_conversation_jobs(set())] == []
-            joined = [item async for item in join_conversation_jobs(set(), agent_names=("lead", "worker"))]
-            assert len(joined) == 1
-            assert not isinstance(joined[0], str)
-            assert 'job_id="member"' in joined[0].prompt
+            assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
+            joined = await join_conversation_jobs(set(), joins=0, agent_names=("lead", "worker"))
+            assert joined.prompt is not None
+            assert 'job_id="member"' in joined.prompt
         assert pending_outcome(runtime, "member") is not None
     finally:
         await runtime.shutdown()
@@ -182,7 +181,7 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         assert pending_outcomes(runtime) == []
         assert pending_outcome(runtime, job.job_id) is None
         with tool_runtime_context(context):
-            assert [item async for item in join_conversation_jobs(set())] == []
+            assert await join_conversation_jobs(set(), joins=0) == _JobJoin()
         for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)

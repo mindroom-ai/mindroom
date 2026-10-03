@@ -135,7 +135,6 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
-    BackgroundWaitChunk,
     StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -205,7 +204,7 @@ def _team_request_log_context(
 # Message length limits for team context and logging
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-_TeamStreamChunk = str | StructuredStreamChunk | BackgroundWaitChunk
+_TeamStreamChunk = str | StructuredStreamChunk
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_messages=30,
@@ -2907,10 +2906,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                     refresh_scheduler=refresh_scheduler,
                     members=members,
                     progress=progress,
-                ),
-                presentation=lambda: StreamingPresentation(
-                    response_text=presentation.render_body(),
-                    tool_trace=tuple(deepcopy(presentation.tool_trace)) if show_tool_calls else (),
                 ),
             )
         paused = paused_attempt_from_response(

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from mindroom.history_recovery import (
     HistoryRecoveryOutcome,
@@ -24,6 +24,7 @@ from . import (
     approval_grants,
     approvals,
     background_approvals,
+    held_replies,
     interactive_questions,
     journal,
     legacy_turn_records,
@@ -49,6 +50,7 @@ from .approvals import (  # noqa: TC001 - part of this module's runtime return t
     UnreadableApprovalCard,
 )
 from .background_approvals import BackgroundApprovalDecision  # noqa: TC001
+from .held_replies import SavedHeldReply  # noqa: TC001 - part of this module's runtime return types
 from .membership_state import claim_active_membership_epoch
 from .models import (
     AdmissionResult,
@@ -1994,6 +1996,10 @@ class EventJournalStore:
         """Read every saved tool job without taking ownership, as a disabled instance parks them."""
         return await self.backend.read(tool_jobs.load_all)
 
+    def held_replies(self) -> HeldReplyStore:
+        """Return the reply messages that hold their conversations' outstanding background work."""
+        return HeldReplyStore(_backend=self.backend)
+
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()
@@ -2150,4 +2156,63 @@ class ToolJobStore:
         """Forget a job together with its payload."""
         await self._backend.write(
             lambda transaction: tool_jobs.delete(transaction, self._runtime_generation, job_id),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HeldReplyStore:
+    """The reply messages holding their conversations' outstanding background work, one per hold.
+
+    Holds belong to the install like the jobs they wait on. Each save is a new
+    generation, so a wake admitted for an earlier one can tell it no longer
+    applies, even after the hold was released and saved again.
+    """
+
+    _backend: Backend
+
+    async def load(self, hold_id: str) -> SavedHeldReply | None:
+        """Return one hold, or ``None`` when no reply holds that work."""
+        return await self._backend.read(lambda transaction: held_replies.load(transaction, hold_id))
+
+    async def load_for_message(self, recipient: str, message_event_id: str) -> SavedHeldReply | None:
+        """Return the hold one recipient's reply message carries."""
+        return await self._backend.read(
+            lambda transaction: held_replies.load_for_message(transaction, recipient, message_event_id),
+        )
+
+    async def load_all(self) -> tuple[SavedHeldReply, ...]:
+        """Return every hold."""
+        return await self._backend.read(held_replies.load_all)
+
+    async def save(
+        self,
+        *,
+        hold_id: str,
+        recipient: str,
+        message_event_id: str | None,
+        hold_json: str,
+    ) -> tuple[SavedHeldReply | None, SavedHeldReply]:
+        """Make a reply the holder of its work, returning the hold it replaced and the saved one."""
+        generation = uuid4().hex
+        return await self._backend.write(
+            lambda transaction: held_replies.save(
+                transaction,
+                hold_id=hold_id,
+                recipient=recipient,
+                message_event_id=message_event_id,
+                hold_json=hold_json,
+                generation=generation,
+            ),
+        )
+
+    async def delete(self, hold_id: str, *, generation: str | None = None) -> SavedHeldReply | None:
+        """Release a hold, only that ``generation`` of it when one is given, returning the released hold."""
+        return await self._backend.write(
+            lambda transaction: held_replies.delete(transaction, hold_id, generation=generation),
+        )
+
+    async def mark_woken(self, hold_id: str, generation: str) -> bool:
+        """Record that a wake was admitted for this generation; False once another save replaced it."""
+        return await self._backend.write(
+            lambda transaction: held_replies.mark_woken(transaction, hold_id, generation),
         )

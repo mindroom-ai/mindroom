@@ -153,6 +153,7 @@ from .scheduling import (
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .tool_jobs.disabled import event_is_parked
+from .tool_jobs.held_replies import wake_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -182,6 +183,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_jobs.held_replies import HeldReply
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -711,6 +713,7 @@ class AgentBot:
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
+                on_held_reply_wake=lambda event: self._response_runner.handoff_held_reply_wake(event),
                 event_is_parked=lambda event: event_is_parked(self.config, self.runtime_paths, self.agent_name, event),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
@@ -769,6 +772,8 @@ class AgentBot:
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 register_approval_interruption=self._register_approval_interruption,
+                turn_store=self._turn_store,
+                held_replies=self._journal_store.held_replies(),
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -906,6 +911,8 @@ class AgentBot:
                     build_message_target=self._conversation_resolver.build_message_target,
                     delivery_gateway=self._delivery_gateway,
                 ),
+                holds_background_work=self._response_runner.held_reply_for_message,
+                stop_held_work=self._response_runner.stop_held_reply,
             ),
         )
 
@@ -1124,6 +1131,13 @@ class AgentBot:
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
         return self._response_runner.has_active_response_for_target(target)
+
+    async def wake_held_reply(self, hold: HeldReply) -> None:
+        """Admit a runtime source for a held message and wake its existing journal worker."""
+        await self._journal_store.principal(self._journal_principal_id).admit(
+            wake_event(hold, sender_id=self.matrix_id.full_id),
+        )
+        self._journal_dispatcher.wake()
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""

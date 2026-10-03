@@ -72,3 +72,38 @@ async def test_writes_need_ownership(journal_store: EventJournalStore) -> None:
     """A runtime that never took ownership cannot write."""
     with pytest.raises(ToolJobOwnershipLostError):
         await journal_store.tool_jobs("unowned").accept("job", "{}")
+
+
+@pytest.mark.asyncio
+async def test_held_reply_saves_are_unique_generations_and_wakes_name_one(journal_store: EventJournalStore) -> None:
+    """Each save of a hold is a new generation, even after a release; a wake or release names one generation."""
+    holds = journal_store.held_replies()
+    assert await holds.load("hold") is None
+    replaced, first = await holds.save(hold_id="hold", recipient="general", message_event_id="$one", hold_json="{}")
+    assert replaced is None
+    assert first.woken_generation is None
+    assert await holds.mark_woken("hold", first.generation)
+    replaced, second = await holds.save(
+        hold_id="hold",
+        recipient="general",
+        message_event_id="$two",
+        hold_json='{"n": 2}',
+    )
+    assert replaced is not None
+    assert (replaced.generation, replaced.woken_generation) == (first.generation, first.generation)
+    assert second.generation != first.generation
+    assert (second.woken_generation, second.hold_json) == (None, '{"n": 2}')
+    # A wake for the replaced generation no longer applies, and neither does a release of it.
+    assert not await holds.mark_woken("hold", first.generation)
+    assert await holds.delete("hold", generation=first.generation) is None
+    assert await holds.load_for_message("general", "$one") is None
+    assert (await holds.load_for_message("general", "$two")) == second
+    assert await holds.load_for_message("other", "$two") is None
+    assert [saved.hold_id for saved in await holds.load_all()] == ["hold"]
+    assert await holds.delete("hold", generation=second.generation) == second
+    # Saved again after its release, the hold is a generation no earlier wake or release names.
+    _replaced, third = await holds.save(hold_id="hold", recipient="general", message_event_id="$two", hold_json="{}")
+    assert third.generation not in {first.generation, second.generation}
+    assert await holds.delete("hold", generation=second.generation) is None
+    assert await holds.delete("hold") == third
+    assert await holds.load("hold") is None

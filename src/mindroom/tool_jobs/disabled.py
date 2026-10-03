@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from mindroom.event_journal import EventKind
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.runtime import parse_saved_job
@@ -33,11 +34,13 @@ def _parked_work(runtime_paths: RuntimePaths) -> ParkedWork | None:
 
 
 def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: str, event: JournalEvent) -> bool:
-    """Fence saved sources before any handoff."""
+    """Fence saved sources and every held reply's wake before any handoff."""
     if background_tool_jobs_enabled(config, runtime_paths):
         return False
     parked = _parked_work(runtime_paths)
-    return parked is not None and (entity_name, event.event_id) in parked.sources
+    return event.kind is EventKind.HELD_REPLY_WAKE or (
+        parked is not None and (entity_name, event.event_id) in parked.sources
+    )
 
 
 def approval_is_parked(runtime_paths: RuntimePaths, approval_id: str) -> bool:

@@ -27,6 +27,8 @@ class TurnIntent(StrEnum):
     """Semantic intent of one inbound turn after trusted metadata is normalized."""
 
     USER_MESSAGE = "user_message"
+    # The runtime continuing a reply that holds background work, on behalf of that reply's requester.
+    HELD_REPLY_CONTINUATION = "held_reply_continuation"
     MANAGED_MESSAGE = "managed_message"
     ROUTER_HANDOFF = "router_handoff"
     ROUTER_NOTICE = "router_notice"

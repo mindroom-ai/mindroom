@@ -53,6 +53,9 @@ class ReactionDispatcherDeps:
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
     config_confirmation: ConfigConfirmationContext
+    # Whether one of this entity's messages in a room holds background work, and the Stop that ends that work.
+    holds_background_work: Callable[[str, str], Awaitable[bool]]
+    stop_held_work: Callable[[str, int], Awaitable[bool]]
 
 
 @dataclass
@@ -107,10 +110,12 @@ class ReactionDispatcher:
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
     ) -> bool:
-        """Route a stop reaction only to the live run that claimed it."""
+        """Route a stop reaction to the live run that claimed it, or to a message that holds background work."""
         stop_claimed = consumer is SemanticConsumer.STOP_REACTION
         if event.key != "🛑" or (consumer is not None and not stop_claimed):
             return False
+        live = self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to, room.room_id)
+        held = not live and await self.deps.holds_background_work(event.reacts_to, room.room_id)
         if not stop_claimed:
             sender_agent_name = entity_identity_registry(
                 self.deps.runtime.config,
@@ -127,13 +132,20 @@ class ReactionDispatcher:
                 and turn_record.conversation_target is not None
                 and turn_record.conversation_target.room_id == room.room_id
             )
-            if sender_agent_name or not (
-                self.deps.stop_manager.can_handle_stop_reaction(event.reacts_to, room.room_id) or has_stoppable_turn
-            ):
+            if sender_agent_name or not (live or held or has_stoppable_turn):
                 return False
             await self.deps.journal_dispatcher.claim_semantic_consumer(
                 SemanticConsumer.STOP_REACTION,
             )
+        if held:
+            # No turn runs on the message, so the Stop ends the work it holds directly.
+            if await self.deps.stop_held_work(event.reacts_to, await self.deps.journal_dispatcher.receipt_order()):
+                self.deps.logger.info(
+                    "Stop requested for held message",
+                    message_id=event.reacts_to,
+                    requested_by=event.sender,
+                )
+            return True
 
         async def remove_current_stop_button() -> None:
             await self.deps.stop_manager.remove_stop_button(

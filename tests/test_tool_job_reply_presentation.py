@@ -10,19 +10,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.agent import Agent
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.models.response import ModelResponse
+from agno.run.agent import RunCompletedEvent, RunContentEvent
 
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, send_streaming_response
-from mindroom.tool_jobs.completion import _ReadyJobContinuation
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
+from mindroom.tool_jobs.completion import HeldContinuation, _JobJoin
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import (
-    BackgroundWaitChunk,
     ToolTraceEntry,
     deserialize_tool_trace,
 )
@@ -31,7 +30,6 @@ from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_payload_preparation import _preparation
-from tests.test_stale_stream_cleanup import _make_message_event
 from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -168,10 +166,11 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
     config = _config()
     config.background_tool_jobs.enabled = True
 
-    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> _JobJoin:
         if not attempted:
             attempted.add("job")
-            yield _ReadyJobContinuation("Retrieve completed background result")
+            return _JobJoin(prompt="Retrieve completed background result")
+        return _JobJoin()
 
     monkeypatch.setattr("mindroom.response_turn.join_conversation_jobs", join)
     paths = _runtime_paths(tmp_path)
@@ -242,18 +241,27 @@ async def test_blocking_cancellation_without_a_wait_matches_a_disabled_reply(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
-async def test_blocking_wait_cancellation_preserves_latest_presentation(
+async def test_blocking_continuation_cancellation_preserves_the_held_presentation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cancel_source: str,
 ) -> None:
-    """A published wait is the cancellation baseline, including its numbered tools."""
+    """A blocking turn continuing a held message shows nothing new, so cancelling it keeps that message's text and tools."""
     bot = _bot(tmp_path)
     bot.config.memory.backend = "none"
     bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread")
-    request = replace(_plain_request(target), existing_event_id="$response")
+    trace = (ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result"),)
+    request = replace(
+        _plain_request(target),
+        existing_event_id="$response",
+        held_continuation=HeldContinuation(
+            presentation=StreamingPresentation("New analysis.\n\n🔧 `retrieve` [1]", tool_trace=trace),
+            ready_job_ids=frozenset({"job"}),
+            joins=0,
+        ),
+    )
     edits = []
 
     async def edit(
@@ -265,27 +273,12 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(
         *,
         retry_sync_recovery: bool = False,  # noqa: ARG001
     ) -> DeliveredMatrixEvent:
-        edit_id = f"$edit-{len(edits)}"
-        edits.append(
-            _make_message_event(
-                event_id=edit_id,
-                body="* " + text,
-                timestamp_ms=20 + len(edits),
-                sender=bot.matrix_id.full_id,
-                relates_to={"rel_type": "m.replace", "event_id": event_id},
-                new_content=content,
-            ),
-        )
-        return DeliveredMatrixEvent(event_id=edit_id, content_sent=dict(content))
+        edits.append((event_id, content, text))
+        return DeliveredMatrixEvent(event_id=f"$edit-{len(edits)}", content_sent=dict(content))
 
     async def events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        yield RunContentEvent(content="New analysis.")
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_call_id="new-call", tool_name="retrieve"))
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(tool_call_id="new-call", tool_name="retrieve", result="new result"),
-        )
-        yield BackgroundWaitChunk("\n\nWaiting for background work.")
         raise asyncio.CancelledError(cancel_source)
+        yield
 
     monkeypatch.setattr("mindroom.delivery_gateway.edit_message_outcome", edit)
     monkeypatch.setattr("mindroom.ai.stream_response_turn", events)
@@ -307,17 +300,12 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(
     outcome = outcomes[0]
     assert outcome.terminal_status == "cancelled"
     assert outcome.cancel_source == cancel_source
-    assert len(edits) == 2
+    assert len(edits) == 1
     assert outcome.final_visible_body is not None
-    assert "New analysis." in outcome.final_visible_body
+    assert outcome.final_visible_body.startswith("New analysis.\n\n🔧 `retrieve` [1]")
     note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
     assert outcome.final_visible_body.endswith(note)
-    wait_content = edits[0].source["content"]["m.new_content"]
-    assert wait_content["body"].startswith("New analysis.")
-    assert "`retrieve` [1]" in wait_content["body"]
-    trace = deserialize_tool_trace(wait_content.get("io.mindroom.tool_trace", {}).get("events", []))
-    assert trace == [ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result")]
-    assert outcome.tool_trace == tuple(trace)
-    final_content = edits[-1].source["content"]["m.new_content"]
-    assert final_content["io.mindroom.tool_trace"] == wait_content["io.mindroom.tool_trace"]
+    assert outcome.tool_trace == trace
+    final_content = edits[-1][1]
+    assert deserialize_tool_trace(final_content["io.mindroom.tool_trace"]["events"]) == list(trace)
     bot.client.room_redact.assert_not_called()

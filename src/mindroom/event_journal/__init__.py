@@ -26,6 +26,7 @@ from .approvals import (
     UnreadableApprovalCard,
 )
 from .background_approvals import BackgroundApprovalDecision
+from .held_replies import SavedHeldReply
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .journal import validate_ingestion_batch_admission
 from .models import (
@@ -63,7 +64,7 @@ from .models import (
 )
 from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
-from .store import EventJournalStore, PrincipalStore, ToolJobStore, TurnRecordStore
+from .store import EventJournalStore, HeldReplyStore, PrincipalStore, ToolJobStore, TurnRecordStore
 from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
 from .views import (
     AdmissionView,
@@ -102,6 +103,7 @@ __all__ = [
     "EventClass",
     "EventJournalStore",
     "EventKind",
+    "HeldReplyStore",
     "HistoryRecoveryOutcome",
     "HistoryRecoveryRecordView",
     "HistoryRecoveryState",
@@ -131,6 +133,7 @@ __all__ = [
     "ReplayView",
     "RoomHistoryRecovery",
     "RoomMembershipPosition",
+    "SavedHeldReply",
     "SavedToolJob",
     "SemanticConsumer",
     "StoredApprovalCard",

@@ -17,6 +17,7 @@ from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools.function import Function
 
+from mindroom import response_turn as response_turn_module
 from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
 from mindroom.approval_execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
@@ -39,13 +40,13 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import background_wait_notice
+from mindroom.tool_jobs.completion import ReplyBoundaryReport, _JobJoin, reply_boundary_report
 from mindroom.tool_jobs.consumption import set_consumption_storage
-from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.held_replies import _WAITING_NOTICE
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.events import BackgroundWaitChunk, StructuredStreamChunk, ToolTraceEntry
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
@@ -60,12 +61,11 @@ from tests.tool_job_helpers import (
     lookup,
     pending_outcomes,
     tool_job_runtime,
+    wait_for_status,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from mindroom.streaming import StreamingPresentation
 
 
 async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event) -> None:
@@ -84,14 +84,12 @@ async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("wait_timeout", [0, 0.001])
-@pytest.mark.parametrize("taken_over", [False, True])
-async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
+async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # noqa: PLR0915
     tmp_path: Path,
     team: bool,
     wait_timeout: float,
-    taken_over: bool,
 ) -> None:
-    """Approved work stays owned and visibly waiting until a result, or until a newer reply takes it over."""
+    """A resumed approval finishes while its approved work runs on, and its message holds that work."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
@@ -102,9 +100,8 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    started, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    signal = HumanMessageSignal()
-    notices: list[str] = []
+    started, release = asyncio.Event(), asyncio.Event()
+    report = ReplyBoundaryReport()
     executions = 0
 
     async def slow_tool() -> str:
@@ -113,10 +110,6 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
         started.set()
         await release.wait()
         return "retained actual result"
-
-    async def notice(presentation: StreamingPresentation, notice: str | None) -> None:
-        notices.append(presentation.response_text + (notice or ""))
-        waiting.set()
 
     model = DelegationModel(
         id="test",
@@ -159,7 +152,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     approval_calls = (ApprovalCall("approved-call", "add", "leader", 2**62, toolkit_name="calculator"),)
     pending = None
     try:
-        with tool_runtime_context(context), human_message_signal_context(signal), background_wait_notice(notice):
+        with tool_runtime_context(context), reply_boundary_report(report):
             paused = await actor.arun(
                 "Start the approved work",
                 session_id=context.session_id,
@@ -284,45 +277,19 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
 
             pending = asyncio.create_task(resume_team() if team else resume_agent())
             await _wait_for_progress(pending, started)
-            await _wait_for_progress(pending, waiting)
-            assert not pending.done(), "approval returned a final response while accepted work was still running"
-            assert waiting.is_set(), "approval join did not publish visible wait progress"
-            assert "Independent work done." in notices[-1]
-            assert "Waiting for background work" in notices[-1]
+            text = await asyncio.wait_for(pending, 30)
+            assert "Independent work done." in text
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
-            job_id = jobs[0].job_id
-            if taken_over:
-                # A newer message alone does not end the wait; a newer reply joining the same work does.
-                signal.notify()
-                key = (
-                    context.recipient,
-                    owner.room_id,
-                    owner.resolved_thread_id,
-                    owner.requester_id,
-                    False,
-                    frozenset({"leader"}),
-                )
-                newer = runtime.take_hold(key)
-                text = await asyncio.wait_for(pending, 30)
-                runtime.drop_hold(key, newer)
-                assert "Independent work done." in text
-                assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
-                release.set()
-            else:
-                member_model.responses.extend(
-                    [
-                        ModelResponse(
-                            tool_calls=[_call("job", "retrieve", action="wait", job_id=job_id, wait_timeout=0)],
-                        ),
-                        ModelResponse(content="Final result received."),
-                    ],
-                )
-                release.set()
-                text = await asyncio.wait_for(pending, 30)
-                assert "Final result received." in text
-                assert text.count("Independent work done.") == 1
-                assert pending_outcomes(runtime) == []
+            assert (await lookup(runtime, jobs[0].job_id, owner=owner, depth=0)).status == "running"
+            assert report.boundary is not None
+            assert report.boundary.notice == _WAITING_NOTICE
+            assert report.boundary.key.participants == ("leader",)
+            release.set()
+            ready = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
+            await runtime.release_wait(jobs[0].job_id, ready.claim)
+            # Nothing retrieved the outcome; it waits for the turn continuing the held message.
+            assert [job.job_id for job in pending_outcomes(runtime)] == [jobs[0].job_id]
             assert executions == 1
     finally:
         release.set()
@@ -337,7 +304,7 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     tmp_path: Path,
     show_tool_calls: bool,
 ) -> None:
-    """A later native approval retains prose already published during a job wait."""
+    """A native approval after a job join retains the prose the reply published before the join."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader")},
@@ -348,12 +315,9 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    release, waiting = asyncio.Event(), asyncio.Event()
-    notices: list[StreamingPresentation] = []
     executions = 0
 
     async def slow_tool() -> str:
-        await release.wait()
         return "actual result"
 
     async def approved_tool() -> str:
@@ -361,10 +325,23 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
         executions += 1
         return "approved action"
 
-    async def report_wait(presentation: StreamingPresentation, _notice: str | None) -> None:
-        notices.append(presentation)
-        if _notice is not None:
-            waiting.set()
+    original_join = response_turn_module.join_conversation_jobs
+
+    async def join_once_ready(attempted: set[str], **kwargs: object) -> _JobJoin:
+        jobs = await runtime.list_jobs(owner=owner, depth=0)
+        if not attempted:
+            # The join continues only with work that is ready, so let the job finish first.
+            await wait_for_status(runtime, jobs[0].job_id, "completed")
+            model.responses.extend(
+                [
+                    ModelResponse(tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id)]),
+                    ModelResponse(
+                        content="Need approval to continue.",
+                        tool_calls=[_call("approved_tool", "approval")],
+                    ),
+                ],
+            )
+        return await original_join(attempted, **kwargs)
 
     model = DelegationModel(
         id="test",
@@ -436,25 +413,11 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     try:
         with (
             tool_runtime_context(context),
-            background_wait_notice(report_wait),
             patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+            patch.object(response_turn_module, "join_conversation_jobs", new=join_once_ready),
         ):
             pending = asyncio.create_task(run())
-            await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
-            assert "Independent answer already shown." in notices[-1].response_text
-            jobs = await runtime.list_jobs(owner=owner, depth=0)
-            assert len(jobs) == 1
-            model.responses.extend(
-                [
-                    ModelResponse(tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id)]),
-                    ModelResponse(
-                        content="Need approval to continue.",
-                        tool_calls=[_call("approved_tool", "approval")],
-                    ),
-                ],
-            )
-            release.set()
             with pytest.raises(ResponsePausedForApproval) as raised:
                 await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             paused = raised.value.paused
@@ -470,7 +433,6 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
             else:
                 assert "🔧" not in paused.response_text
     finally:
-        release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         await runtime.shutdown()
@@ -497,20 +459,14 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     releases = [asyncio.Event(), asyncio.Event()]
-    waiting = asyncio.Event()
-    notices: list[StreamingPresentation] = []
     calls = 0
+    stage = 0
 
     async def slow_tool() -> str:
         nonlocal calls
         calls += 1
         await releases[calls - 1].wait()
         return "actual result"
-
-    async def report_wait(presentation: StreamingPresentation, _notice: str | None) -> None:
-        notices.append(presentation)
-        if _notice is not None:
-            waiting.set()
 
     model = DelegationModel(
         id="test",
@@ -559,6 +515,41 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
 
     recorder = TurnRecorder(user_message="Start")
     final_trace: list[ToolTraceEntry] = []
+    original_join = response_turn_module.join_conversation_jobs
+
+    async def join_once_ready(attempted: set[str], **kwargs: object) -> _JobJoin:
+        """Let the running job finish before the boundary, which continues only with ready work."""
+        nonlocal stage
+        running = [job for job in await runtime.list_jobs(owner=owner, depth=0) if job.status == "running"]
+        if running:
+            job_id = running[0].job_id
+            if stage == 0:
+                model.responses.extend(
+                    [
+                        ModelResponse(
+                            tool_calls=[_call("job", "retrieve", action="wait", job_id=job_id, wait_timeout=0)],
+                        ),
+                        *(
+                            [
+                                ModelResponse(tool_calls=[_call("slow_tool", "second-call", wait_timeout=0)]),
+                                ModelResponse(content="Second independent stage done."),
+                            ]
+                            if repeat_join
+                            else [ModelResponse(content="Final result received.")]
+                        ),
+                    ],
+                )
+            else:
+                model.responses.extend(
+                    [
+                        ModelResponse(tool_calls=[_call("job", "retrieve-second", action="wait", job_id=job_id)]),
+                        ModelResponse(content="Final result received."),
+                    ],
+                )
+            releases[stage].set()
+            stage += 1
+            await wait_for_status(runtime, job_id, "completed")
+        return await original_join(attempted, **kwargs)
 
     async def run() -> str:
         if not streaming:
@@ -582,10 +573,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             user_id=owner.requester_id,
             turn_recorder=recorder,
         ):
-            if isinstance(chunk, BackgroundWaitChunk):
-                if chunk.content is not None:
-                    waiting.set()
-            elif isinstance(chunk, StructuredStreamChunk):
+            if isinstance(chunk, StructuredStreamChunk):
                 rendered = chunk.content
                 final_trace[:] = chunk.tool_trace or []
             else:
@@ -596,54 +584,13 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     try:
         with (
             tool_runtime_context(context),
-            background_wait_notice(report_wait),
             patch("mindroom.teams._materialize_team_members", return_value=members),
             patch("mindroom.teams.build_materialized_team_instance", return_value=team),
             patch("mindroom.teams.open_bound_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.teams.prepare_materialized_team_execution", new=prepare),
+            patch.object(response_turn_module, "join_conversation_jobs", new=join_once_ready),
         ):
             pending = asyncio.create_task(run())
-            notice_waiter = asyncio.create_task(waiting.wait())
-            try:
-                await asyncio.wait({pending, notice_waiter}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
-                if pending.done():
-                    pending.result()
-                assert waiting.is_set()
-            finally:
-                notice_waiter.cancel()
-                await asyncio.gather(notice_waiter, return_exceptions=True)
-            jobs = await runtime.list_jobs(owner=owner, depth=0)
-            assert len(jobs) == 1
-            model.responses.extend(
-                [
-                    ModelResponse(
-                        tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id, wait_timeout=0)],
-                    ),
-                    *(
-                        [
-                            ModelResponse(tool_calls=[_call("slow_tool", "second-call", wait_timeout=0)]),
-                            ModelResponse(content="Second independent stage done."),
-                        ]
-                        if repeat_join
-                        else [ModelResponse(content="Final result received.")]
-                    ),
-                ],
-            )
-            waiting.clear()
-            releases[0].set()
-            if repeat_join:
-                await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
-                jobs = await runtime.list_jobs(owner=owner, depth=0)
-                second = next(job for job in jobs if job.status == "running")
-                model.responses.extend(
-                    [
-                        ModelResponse(
-                            tool_calls=[_call("job", "retrieve-second", action="wait", job_id=second.job_id)],
-                        ),
-                        ModelResponse(content="Final result received."),
-                    ],
-                )
-                releases[1].set()
             answer = await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
             assert "Final result received." in answer
             assert answer.count("**Team Response**") == 1

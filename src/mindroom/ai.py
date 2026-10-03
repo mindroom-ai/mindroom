@@ -114,13 +114,12 @@ from mindroom.response_turn import (
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
-from mindroom.tool_jobs.completion import delegated_child_context, report_background_wait
+from mindroom.tool_jobs.completion import delegated_child_context
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
-    BackgroundWaitChunk,
     CollectedStreamPresentation,
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -168,13 +167,7 @@ __all__ = [
     "stream_agent_response",
 ]
 AIStreamChunk = (
-    str
-    | BackgroundWaitChunk
-    | StructuredStreamChunk
-    | RunContentEvent
-    | RunCompletedEvent
-    | ToolCallStartedEvent
-    | ToolCallCompletedEvent
+    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
 )
 
 
@@ -559,12 +552,6 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
             for item in _without_quiet_prose(quiet_attempt):
                 yield item
             quiet_attempt.clear()
-            if isinstance(chunk, BackgroundWaitChunk):
-                for item in pending:
-                    yield item
-                pending.clear()
-                yield chunk
-                continue
             if not isinstance(chunk, RunCompletedEvent):
                 pending.append(chunk)
                 continue
@@ -598,7 +585,7 @@ async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partial
         yield item
 
 
-async def collect_streamed_response_content(  # noqa: C901, PLR0912 - Explicit stream event variants.
+async def collect_streamed_response_content(  # noqa: C901 - Explicit stream event variants.
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
@@ -618,14 +605,6 @@ async def collect_streamed_response_content(  # noqa: C901, PLR0912 - Explicit s
             elif isinstance(chunk, StructuredStreamChunk):
                 presentation.append_text(chunk.content)
                 presentation.tool_trace.extend(deepcopy(chunk.tool_trace or ()))
-            elif isinstance(chunk, BackgroundWaitChunk):
-                await report_background_wait(
-                    StreamingPresentation(
-                        response_text=presentation.final_text(),
-                        tool_trace=tuple(deepcopy(presentation.tool_trace)) if presentation.show_tool_calls else (),
-                    ),
-                    chunk.content,
-                )
             elif isinstance(chunk, RunContentEvent):
                 presentation.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):
@@ -637,8 +616,7 @@ async def collect_streamed_response_content(  # noqa: C901, PLR0912 - Explicit s
                 presentation.start_tool(chunk.tool)
             elif isinstance(chunk, ToolCallCompletedEvent):
                 presentation.complete_tool(chunk.tool)
-            # A wait notice leaves the presentation unchanged; publishing it again would erase the notice.
-            if on_update is not None and not isinstance(chunk, BackgroundWaitChunk):
+            if on_update is not None:
                 await on_update()
     except ResponsePausedForApproval as error:
         error.capture_collected_presentation(
@@ -2216,8 +2194,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
-        if run.turn_state.prior_assistant_text:
-            # Joined attempts append to the same visible agent response.
+        if run.prior_response_text or run.turn_state.prior_assistant_text:
+            # Joined attempts, and the turns continuing a held message, append to the same visible agent response.
             yield RunContentEvent(content="\n\n")
         try:
             run_context = await _prepare_agent_run_context(

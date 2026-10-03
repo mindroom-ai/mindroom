@@ -12,9 +12,7 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompleted
 from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
-from mindroom.tool_jobs.completion import background_wait_notice
 from mindroom.tool_system.events import (
-    BackgroundWaitChunk,
     CollectedStreamPresentation,
     ToolTraceEntry,
     tool_markers_match_trace,
@@ -24,8 +22,6 @@ from tests.conftest import make_turn_context, test_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
-
-    from mindroom.streaming import StreamingPresentation
 
 
 @pytest.mark.asyncio
@@ -212,30 +208,6 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
     assert body == "Before. After."
     assert trace == []
     assert seen_kwargs["show_tool_calls"] is False
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("quiet", [False, True])
-async def test_collected_wait_updates_owner_before_requesting_next_chunk(*, quiet: bool) -> None:
-    """A nonstream Matrix response must expose wait progress before its generator parks."""
-    notices: list[tuple[str, str | None]] = []
-
-    async def notice(presentation: StreamingPresentation, notice: str | None) -> None:
-        notices.append((presentation.response_text, notice))
-
-    async def stream() -> AsyncGenerator[object, None]:
-        yield "Independent work done."
-        yield BackgroundWaitChunk(" Waiting for background work")
-        assert notices == [("Independent work done.", " Waiting for background work")]
-        yield " Result received."
-
-    with background_wait_notice(notice):
-        body, _trace = await collect_streamed_response_content(
-            stream(),
-            presentation=CollectedStreamPresentation(show_tool_calls=True),
-            suppress_quiet_attempts=quiet,
-        )
-    assert body == "Independent work done. Result received."
 
 
 @pytest.mark.asyncio

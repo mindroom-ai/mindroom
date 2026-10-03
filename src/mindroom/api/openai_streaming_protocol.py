@@ -23,7 +23,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from mindroom.tool_system.events import (
-    BackgroundWaitChunk,
     StructuredStreamChunk,
     format_tool_completed_event,
     format_tool_started_event,
@@ -426,7 +425,7 @@ def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> st
         return str(event.content)
     if isinstance(event, str):
         return event
-    if isinstance(event, (BackgroundWaitChunk, StructuredStreamChunk)):
+    if isinstance(event, StructuredStreamChunk):
         return None  # Only background-job joins emit these, and the API runs without the Matrix job runtime.
     return format_stream_tool_event(event, tool_state)
 

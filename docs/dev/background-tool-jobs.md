@@ -9,20 +9,21 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  A newer human message in the conversation, or any turn already queued for its lock, releases that wait while accepted work continues; the reply then keeps holding the work at its response boundary.
+  A newer human message in the conversation, or any turn already queued for its lock, releases that wait while accepted work continues; the reply then finishes and its message holds the work.
   Other agents' messages and scheduled turns that arrive during such a wait queue as behind any running reply.
   Neither action pauses a job or authorizes a protected tool.
 - One `job` tool provides scoped list, wait and cancel.
   Complete registered toolkits can be excluded, including plugins.
   Shell is excluded by default and keeps its own execution and cancellation controls.
-- While background work is outstanding, the agent's latest reply in the conversation holds it.
-  After independent work, the reply joins every outstanding job of its agent (or team members) and requester in the conversation, including jobs earlier replies started.
-  Waiting is transient visible progress, and Stop on the waiting reply cancels the work it holds.
-  Results arriving during streaming wait for a safe response boundary.
-  While a reply only waits on background work, it lets the conversation's other turns run and takes its place back to continue with results.
-  A newer reply of the agent with the same participants takes the work over when it joins that work itself; a turn that never joins it, such as another agent's reply, a reply whose participation check stays silent, a silent schedule, or a delegated child running inside its caller, leaves the reply holding.
+- A reply never waits for background work inside its turn.
+  At its response boundary, it continues with every ready outcome of its agent (or team members) and requester in the conversation, including outcomes of jobs earlier replies started.
+  With work still outstanding but nothing ready, the reply finishes, and its message holds that work: it keeps a waiting notice, a streaming status, and its Stop button.
+  When held work becomes ready, ends, or starts waiting for approval, a later turn continues the same message: the model retrieves the results, and the message shows the reply's earlier text followed by the new answer.
+  A newer reply of the agent with the same participants that reaches its response boundary takes the work over, and the older message shows its own reply again without the notice.
+  A turn that never reaches that boundary, such as another agent's reply, a reply whose participation check stays silent, or a delegated child running inside its caller, leaves the message holding.
+  A silent schedule holds its own work without a message, and the turn continuing it is silent too.
   The reply offers each ready outcome to the model once; one the model leaves unretrieved waits for the conversation's next reply.
-  No job completion starts a reply of its own; after a restart the next reply in the conversation retrieves interrupted outcomes.
+  Stop on a held message cancels the work it holds and shows the message as stopped; Stop while a turn continues the message stops that turn and the work like any reply.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
 - A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
@@ -40,9 +41,12 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `tool_jobs/resources.py` | Defer model and storage cleanup until the reply and its detached jobs release them |
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
 | `delegation/job_approvals.py` | Approval cards a background child's job posts and denies when the job ends early |
-| `tool_jobs/completion.py` | The holding reply's join of outstanding jobs and its waiting presentation |
-| `orchestration/tool_job_runtime.py` | Startup, policy revocation, saved Stops, card expiry, retention and shutdown coordination |
-| Response and delivery owners | Serialize replies except while one only waits on background work, preserve published text and tool traces, settle visible delivery |
+| `tool_jobs/completion.py` | The response boundary: ready results to continue with, or the work the reply's message holds |
+| `tool_jobs/held_replies.py` | Which work a message holds, its notice and edits, and the wake source and envelope of a turn continuing it |
+| `event_journal/held_replies.py` | Durable holds, one per conversation, requester, and participants, each save a new generation |
+| `orchestration/tool_job_runtime.py` | Startup, policy revocation, saved Stops, card expiry, held-message wakes, retention and shutdown coordination |
+| `response_runner.py` | Saving, taking over, and releasing holds after each reply, continuing a woken message under the conversation lock, and Stop on a held message |
+| Response and delivery owners | Serialize turns, preserve published text and tool traces, settle visible delivery |
 
 Execution lifetime is independent of a caller's wait.
 Each outcome has one active result claim; only persisted consumption acknowledges it.
@@ -52,8 +56,12 @@ Cancelling, stopping, or restarting a job that waits for approval denies its ope
 Cancellation is saved before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
 Config reload retains active jobs; controls and result admission check current authorization.
-Joins happen only inside replies, so job outcomes need no journal source, turn record, or placeholder of their own.
-A reply joins at most 20 times, apart from its dynamic tool continuations.
+A hold is saved after its reply's final delivery, so the reply's source settles and its turn records like any other; the message then shows the notice.
+The coordinator admits one internal `held_reply_wake` journal source per generation of a hold whose work became ready, ended, or now waits for something else.
+That source's turn edits the held message and never claims it in the turn ledger, whose sole owner stays the reply that sent it; a Stop of that turn settles the owner.
+Under the conversation lock the turn finds which work is ready: it continues with that work, shows a changed notice, or releases a message that holds nothing more.
+A continuation that fails, is stopped, or pauses for approval releases its hold; one a restart interrupts keeps holding, and its wake runs again.
+A message continues with ready results at most 20 times across its own turn and the turns continuing it, apart from dynamic tool continuations; then the next reply takes the remaining work.
 Accepted jobs retain their original source identity, so a still-pending request recovers stored outcomes instead of repeating its tool calls.
 That re-run replaces the interrupted reply, as it does for any recovered request.
 It answers the original request, with a nonpersistent note naming the accepted jobs whose stored outcomes it retrieves instead of repeating their calls.
@@ -75,7 +83,8 @@ Custom events replay as fixed SDK subclasses; plugin class identity and methods 
 Jobs live in the event journal's `tool_jobs` table, so they share the journal's database and backend.
 Job metadata stays in memory, while the outcome's payload is saved with that outcome in one statement and retrieval reads it on demand.
 Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation or Stop saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
-`tests/test_tool_job_fuzz.py`, `tests/test_delegation_job_fuzz.py`, and `tests/test_tool_job_reply_hold_fuzz.py` generate interleaved job, subagent, and conversation lifecycles, including failed saves, follow-ups for this and other agents, Stops, restarts, and crashes, and check these guarantees after every step.
+Holds live in the journal's `held_replies` table and survive restarts; the reply's final delivery already completed, so stale-stream cleanup leaves the held message alone, and recovered outcomes wake it.
+`tests/test_tool_job_fuzz.py`, `tests/test_delegation_job_fuzz.py`, and `tests/test_tool_job_held_reply_fuzz.py` generate interleaved job, subagent, and conversation lifecycles, including failed saves, held messages, wakes racing new replies, Stops, failed continuations, restarts, and crashes, and check these guarantees after every step.
 Consumed results remain for 30 days after the last acknowledged read, longer while response or approval ownership requires them.
 Expiry then deletes the job; its originating turn has finished, so the call cannot run again.
 A Stop recorded while the runtime could not receive it, for example while the feature was disabled, is restored at startup only for jobs that the stopped turn itself started.
@@ -90,8 +99,10 @@ Cancellation cannot undo remote side effects or forcibly stop arbitrary Python t
 Excluded tools retain native behavior.
 Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
-A reply holds only the work of its own requester, so when the agent answers another requester in the conversation, the first requester's work waits for their next message.
-A config reload waits for holding replies like any active reply, applying after at most 10 minutes.
-A waiting reply whose results become ready, or that was stopped or taken over, continues only once the turn running at that moment lets the conversation go.
+A message holds only the work of its own requester, so a reply to another requester in the conversation leaves the first requester's message holding its work.
+A continuation runs only once the turn running at that moment lets the conversation go.
+A held message briefly shows its reply as finished before the waiting notice returns, because the hold is saved after the reply's final delivery.
+Work that a failed continuation, a crash before a hold was saved, or the join limit leaves unheld waits for the requester's next answered message.
+Turning the feature off leaves held messages waiting until it is turned back on.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.

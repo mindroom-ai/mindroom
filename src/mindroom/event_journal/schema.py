@@ -448,6 +448,20 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS held_replies (
+        -- The reply message that holds one conversation's outstanding
+        -- background work between turns, one per recipient, requester, and
+        -- participants. Each save is a new, unique generation; a wake names
+        -- the generation it was admitted for, so a replaced hold ignores it.
+        hold_id TEXT NOT NULL PRIMARY KEY,
+        recipient TEXT NOT NULL,
+        message_event_id TEXT,
+        hold_json TEXT NOT NULL,
+        generation TEXT NOT NULL,
+        woken_generation TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS journal_identity (
         -- Stable database identity checked against the install's journal
         -- binding before opening its turn, delivery, and recovery state.
@@ -543,6 +557,10 @@ _INDEXES = (
     """
     CREATE INDEX IF NOT EXISTS approval_continuations_owner_scan
     ON approval_continuations (entity_name/*bytes*/, approval_id/*bytes*/)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS held_replies_message
+    ON held_replies (recipient, message_event_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_records_anchor

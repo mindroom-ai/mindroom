@@ -390,11 +390,10 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
             waited = await runtime.wait(name, owner=owner, depth=0)
             await runtime.release_wait(name, waited.claim)
         with tool_runtime_context(context):
-            joined = [item async for item in join_conversation_jobs(set())]
-        assert len(joined) == 1
-        assert not isinstance(joined[0], str)
-        assert f'job_id="{"quiet" if silent else "visible"}"' in joined[0].prompt
-        assert f'job_id="{"visible" if silent else "quiet"}"' not in joined[0].prompt
+            joined = await join_conversation_jobs(set(), joins=0)
+        assert joined.prompt is not None
+        assert f'job_id="{"quiet" if silent else "visible"}"' in joined.prompt
+        assert f'job_id="{"visible" if silent else "quiet"}"' not in joined.prompt
     finally:
         await runtime.shutdown()
 

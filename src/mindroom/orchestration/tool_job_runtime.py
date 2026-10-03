@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle: startup recovery, revocation, saved Stops, card denial, and retention."""
+"""Managed tool-job lifecycle: recovery, revocation, saved Stops, card denial, held-message wakes, and retention."""
 
 from __future__ import annotations
 
@@ -20,10 +20,12 @@ from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.disabled import index_parked_work
+from mindroom.tool_jobs.held_replies import conversation_work, decode_held_reply, waiting_notice
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     CONSUMED_RESULT_RETENTION,
+    TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
@@ -63,7 +65,7 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
 
 @dataclass
 class ToolJobRuntimeCoordinator:
-    """Own the background job runtime; replies, not this coordinator, deliver job outcomes."""
+    """Own the background job runtime and wake the held messages whose work changed; replies deliver outcomes."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
@@ -321,11 +323,49 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work, apply saved Stops, and deny the cards of interrupted jobs; failures retry next pass."""
+        """Stop revoked work, apply saved Stops, deny interrupted jobs' cards, and wake held messages; retry failures."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
         for job_id in tuple(self.runtime.unsettled_approvals):
             await settle_child_approvals(self.runtime, job_id)
+        await self._wake_held_replies()
+
+    async def _wake_held_replies(self) -> None:
+        """Admit one wake per saved hold whose work became ready, ended, or now waits for something else."""
+        journal = self._journal
+        if journal is None:
+            return
+        holds = journal.held_replies()
+        for saved in await holds.load_all():
+            if saved.woken_generation == saved.generation:
+                continue
+            try:
+                hold = decode_held_reply(saved)
+            except ValueError:
+                logger.exception(
+                    "Unreadable held reply; it waits for a newer reply to replace it",
+                    hold_id=saved.hold_id,
+                )
+                continue
+            if hold.key.recipient in self._unrestored_stops:
+                # A Stop saved while the runtime was away may still end this work.
+                continue
+            jobs = await conversation_work(self.runtime, hold.key)
+            if (
+                jobs
+                and all(job.status not in TERMINAL_STATUSES for job in jobs)
+                and waiting_notice(jobs) == hold.notice
+            ):
+                continue
+            bot = self.bot_provider(hold.key.recipient)
+            # Synced membership: a bot outside the room costs no homeserver request on every pass.
+            if bot is None or not bot.running or bot.client is None or hold.key.room_id not in bot.client.rooms:
+                continue
+            try:
+                await bot.wake_held_reply(hold)
+                await holds.mark_woken(hold.key.hold_id, hold.generation)
+            except Exception:
+                logger.exception("Waking a held reply failed; retrying", hold_id=saved.hold_id)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""

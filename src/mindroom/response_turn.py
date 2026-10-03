@@ -47,14 +47,13 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.session_context import reread_scope_session
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, join_conversation_jobs, report_background_wait
+from mindroom.tool_jobs.completion import join_conversation_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text, tool_marker_text
+from mindroom.tool_system.events import StructuredStreamChunk, append_stream_text, tool_marker_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -71,7 +70,8 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem
     from mindroom.participation import ParticipationGate
     from mindroom.skill_learning.capture import SkillReviewCapture
-    from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
+    from mindroom.tool_jobs.completion import HeldContinuation
+    from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
 
@@ -322,6 +322,8 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
+    # Set only for a turn that continues a held reply's message with ready background results.
+    held_continuation: HeldContinuation | None = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +690,18 @@ class StreamingTurnAdapter[ChunkT]:
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
+def _turn_run_state(ctx: ResponseTurnContext) -> TurnRunState:
+    """Start a turn's run state, extending what a held message already shows when the turn continues one."""
+    run = TurnRunState()
+    held = ctx.held_continuation
+    if held is not None:
+        run.prior_response_text = held.presentation.response_text
+        run.prior_response_tools = held.presentation.tool_trace
+        run.attempted_job_outcomes.update(held.ready_job_ids)
+        run.job_joins = held.joins + 1
+    return run
+
+
 def _continuation_count_after(run: TurnRunState, joins: int, continuation_count: int) -> int:
     """Spend one dynamic continuation unless the attempt joined ready job results, failing once all are spent."""
     if run.job_joins != joins:
@@ -905,12 +919,6 @@ def _advance_turn_continuation(
     return advanced
 
 
-async def _reread_session_after_waiting(run: TurnRunState) -> None:
-    """Continue from the session as it is now: other turns of the conversation ran while this reply waited."""
-    if run.scope_context is not None:
-        run.scope_context = await run_blocking_until_complete(reread_scope_session, run.scope_context)
-
-
 def _advance_job_continuation(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
@@ -989,7 +997,7 @@ async def run_blocking_response_turn(
     continuation: DynamicContinuationRunState,
 ) -> str:
     """Run one blocking response turn to a final user-visible text."""
-    run = TurnRunState()
+    run = _turn_run_state(ctx)
     try:
         async with (
             response_cli_lifetime() as cli_lifetime,
@@ -1189,27 +1197,13 @@ async def _settle_joined_blocking_attempt(
         completed_tools=settle.recorded_tools,
         interrupted_tools=(),
     )
-    joined_continuation = None
-    waited = False
-    if run.job_joins < JOB_JOIN_LIMIT:
-        async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
-            if isinstance(joined, BackgroundWaitChunk):
-                waited = waited or joined.content is not None
-                await report_background_wait(StreamingPresentation(response_text=response_text), joined.content)
-            else:
-                joined_continuation = _advance_job_continuation(
-                    ctx,
-                    adapter,
-                    sinks,
-                    run,
-                    resolution,
-                    continuation,
-                    joined.prompt,
-                )
-    if joined_continuation is not None:
-        if waited:
-            await _reread_session_after_waiting(run)
-        return joined_continuation
+    join = await join_conversation_jobs(
+        run.attempted_job_outcomes,
+        joins=run.job_joins,
+        agent_names=ctx.tool_job_agent_names,
+    )
+    if join.prompt is not None:
+        return _advance_job_continuation(ctx, adapter, sinks, run, resolution, continuation, join.prompt)
     _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
         sinks.turn_recorder,
@@ -1363,7 +1357,7 @@ async def stream_response_turn[ChunkT](
     continuation: DynamicContinuationRunState,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
-) -> AsyncGenerator[ChunkT | BackgroundWaitChunk | StructuredStreamChunk, None]:
+) -> AsyncGenerator[ChunkT | StructuredStreamChunk, None]:
     """Own the whole response while binding context only during pulls and close."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
@@ -1395,15 +1389,18 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     cli_lifetime: CliTurnLifetime,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
-) -> AsyncGenerator[ChunkT | BackgroundWaitChunk | StructuredStreamChunk, None]:
+) -> AsyncGenerator[ChunkT | StructuredStreamChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
-    run = TurnRunState()
+    run = _turn_run_state(ctx)
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
+            if ctx.held_continuation is not None:
+                # The held message keeps its text and trace; this turn's attempts extend them.
+                yield StructuredStreamChunk(content=run.prior_response_text, tool_trace=list(run.prior_response_tools))
             continuation_count = (
                 resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
             )
@@ -1495,35 +1492,31 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         resolution = replace(resolution, response_text="")
                     elif settle.response_text and join_document is None:
                         yield adapter.make_text_chunk(settle.response_text)
-                    waited = False
-                    if not keep_going and run.job_joins < JOB_JOIN_LIMIT:
-                        async for joined in join_conversation_jobs(
+                    if not keep_going:
+                        join = await join_conversation_jobs(
                             run.attempted_job_outcomes,
+                            joins=run.job_joins,
                             agent_names=ctx.tool_job_agent_names,
-                        ):
-                            if join_document is not None:
-                                yield join_document
-                                join_document = None
-                                # The published document already holds this attempt's text.
-                                resolution = replace(resolution, response_text="")
-                            if isinstance(joined, BackgroundWaitChunk):
-                                waited = waited or joined.content is not None
-                                yield joined
-                            else:
-                                continuation = _advance_job_continuation(
-                                    ctx,
-                                    adapter,
-                                    sinks,
-                                    run,
-                                    resolution,
-                                    continuation,
-                                    joined.prompt,
-                                )
-                                keep_going = True
+                        )
+                        if join_document is not None and (join.prompt is not None or join.holds):
+                            # A continued or held reply keeps its live document, which later turns extend.
+                            yield join_document
+                            join_document = None
+                            # The published document already holds this attempt's text.
+                            resolution = replace(resolution, response_text="")
+                        if join.prompt is not None:
+                            continuation = _advance_job_continuation(
+                                ctx,
+                                adapter,
+                                sinks,
+                                run,
+                                resolution,
+                                continuation,
+                                join.prompt,
+                            )
+                            keep_going = True
                     if join_document is not None and settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
-                    if keep_going and waited:
-                        await _reread_session_after_waiting(run)
                     if not keep_going:
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(

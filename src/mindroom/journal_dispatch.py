@@ -88,6 +88,7 @@ class JournalCallbacks:
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
     on_rtc: _RtcCallback | None = None
+    on_held_reply_wake: Callable[[JournalEvent], Awaitable[bool]] | None = None
     event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
 
@@ -201,7 +202,7 @@ class JournalDispatcher:
             return True
         return self._has_live_owner(event.event_id)
 
-    async def _run_event(self, event: JournalEvent) -> bool:
+    async def _run_event(self, event: JournalEvent) -> bool:  # noqa: PLR0911 - Ordered dispatch ownership gates.
         """Run one journal event's callback and report whether it may settle.
 
         True means the event's semantic work is over. False means something in
@@ -237,6 +238,9 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
+        if event.kind is EventKind.HELD_REPLY_WAKE:
+            callback = self.callbacks.on_held_reply_wake
+            return await callback(event) if callback is not None else False
         try:
             matrix_event = parse_journal_event(event)
         except JournalCorruptionError:

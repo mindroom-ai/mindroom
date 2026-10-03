@@ -133,6 +133,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
 | `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
+| `event_journal/held_replies.py` | Durable holds of reply messages on outstanding background work, each save a new generation that wakes name |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
@@ -294,7 +295,8 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
-| `tool_jobs/completion.py` | The holding reply's join of its conversation's outstanding jobs and transient waiting presentation |
+| `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with, or the work its message holds |
+| `tool_jobs/held_replies.py` | Which work a reply message holds, its waiting notice and edits, and the wake that continues it |
 | `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |

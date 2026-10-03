@@ -143,7 +143,6 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_jobs.control import released_while_waiting
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -1502,43 +1501,6 @@ async def test_user_stop_cancels_live_response_before_terminalizing_under_its_lo
 
     assert await stop_task is True
     finalize.assert_awaited_once_with(False)
-
-
-@pytest.mark.asyncio
-async def test_user_stop_lets_a_waiting_reply_settle_before_finalizing(tmp_path: Path) -> None:
-    """A reply waiting on background work gave its lock up, so STOP waits for it to settle its own cancellation."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread", reply_to_event_id="$event")
-    order: list[str] = []
-    waiting = asyncio.Event()
-
-    async def waiting_reply(_target: MessageTarget) -> None:
-        try:
-            async with released_while_waiting():
-                waiting.set()
-                await asyncio.Event().wait()
-        finally:
-            order.append("reply settled")
-
-    reply = asyncio.create_task(
-        runner._lifecycle_coordinator.run_locked_response(
-            target=target,
-            response_envelope=_envelope(target, source_event_id="$event"),
-            pipeline_timing=None,
-            locked_operation=waiting_reply,
-        ),
-    )
-    await asyncio.wait_for(waiting.wait(), 5)
-    bot.stop_manager.set_current("$response", target, reply)
-
-    async def finalize(_approval_settled: bool) -> bool:
-        order.append("stop finalized")
-        return True
-
-    assert await runner.finalize_user_stop("$response", "$source", target, 7, Mock(return_value=True), finalize)
-    assert order == ["reply settled", "stop finalized"]
-    assert reply.cancelled()
 
 
 @pytest.mark.asyncio

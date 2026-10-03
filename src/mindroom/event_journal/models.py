@@ -57,6 +57,8 @@ class EventKind(StrEnum):
     MESSAGE = "message"
     MEDIA = "media"
     SCHEDULE_TRIGGER = "schedule_trigger"
+    # A runtime source, not a Matrix event: background work a held reply waits on changed, so a turn may continue it.
+    HELD_REPLY_WAKE = "held_reply_wake"
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
@@ -74,7 +76,9 @@ class EventKind(StrEnum):
 # pending alone does not mean that. Thread membership is derived from content
 # for every readable kind alike, so a pending reaction or approval can sit
 # in a thread and be mistaken for an unanswered turn.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
+TURN_BACKED_KINDS = frozenset(
+    {EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER, EventKind.HELD_REPLY_WAKE},
+)
 
 
 class SemanticConsumer(StrEnum):

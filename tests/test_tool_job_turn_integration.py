@@ -35,7 +35,6 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
@@ -389,7 +388,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             ),
         )
 
-    chunks: list[str | BackgroundWaitChunk] = []
+    chunks: list[object] = []
 
     async def drive_stream() -> None:
         async for chunk in stream_response_turn(
@@ -432,7 +431,6 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             assert ready.status == ("failed" if fails else "completed")
             assert not ready.consumed
             assert len(pending_outcomes(runtime)) == 1
-            assert not any(isinstance(chunk, BackgroundWaitChunk) for chunk in chunks)
 
             model.release_text.set()
             await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)

@@ -138,15 +138,31 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.completion import (
-    background_wait_edit,
-    background_wait_notice,
+    JOB_JOIN_LIMIT,
+    HeldContinuation,
+    ReplyBoundary,
+    ReplyBoundaryReport,
+    completion_prompt,
     recovered_jobs_note,
-    reported_wait_presentation,
+    reply_boundary_report,
 )
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.held_replies import (
+    HeldReply,
+    continuation_envelope,
+    conversation_work,
+    decode_held_reply,
+    encode_held_reply,
+    held_edit,
+    holds_job,
+    parse_wake_event_id,
+    released_edit,
+    stopped_edit,
+    waiting_notice,
+)
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, get_background_runtime
 from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import StructuredStreamChunk, deserialize_tool_trace, serialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -158,8 +174,9 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
-from mindroom.turn_origin import SenderKind
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, TurnRecord
+from mindroom.turn_store import record_user_stop_terminal
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -217,7 +234,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import HeldReplyStore, JournalEvent, PrincipalStore, SavedHeldReply
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -228,10 +245,12 @@ if TYPE_CHECKING:
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
+    from mindroom.turn_store import TurnStore
 
     from .response_admission import ResponseAdmissionGate
 
@@ -239,6 +258,8 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+# The prompt of a held message's continuation until its lock decides which ready work it retrieves.
+_HELD_REPLY_PROMPT = "Internal runtime update, not a new human request: background work this reply holds changed."
 
 
 async def _cancel_pending_responses(
@@ -537,6 +558,9 @@ class ResponseRequest:
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
     source_handoff: asyncio.Event | None = None
+    # Set only for a turn continuing a held reply's message, and once its lock is held, the ready work it retrieves.
+    held_reply: HeldReply | None = None
+    held_continuation: HeldContinuation | None = None
 
     def __post_init__(self) -> None:
         """Require the envelope to name the source driving this response."""
@@ -850,6 +874,8 @@ class ResponseRunnerDeps:
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
     register_approval_interruption: Callable[[str, str], None]
+    turn_store: TurnStore
+    held_replies: HeldReplyStore
 
 
 @dataclass(frozen=True)
@@ -1478,7 +1504,10 @@ class ResponseRunner:
                     request_body=request.response_envelope.body,
                     transport_sender_id=request.response_envelope.sender_id,
                     source_kind=request.response_envelope.source_kind,
-                    requires_background_tool_jobs=self._approval_responses.requires_background_jobs(paused, plan.calls),
+                    requires_background_tool_jobs=(
+                        self._approval_responses.requires_background_jobs(paused, plan.calls)
+                        or request.response_envelope.origin.intent is TurnIntent.HELD_REPLY_CONTINUATION
+                    ),
                     attachment_ids=tuple(request.attachment_ids or ()),
                     mentioned_agents=request.response_envelope.mentioned_agents,
                     hook_source=request.response_envelope.hook_source,
@@ -1661,24 +1690,14 @@ class ResponseRunner:
             else nullcontext()
         )
         async with progress_scope as progress:
-
-            async def report_wait(presentation: StreamingPresentation, notice: str | None) -> None:
-                edit = background_wait_edit(target, claimed.response_event_id, presentation, notice)
-                if progress is None:
-                    await self.deps.delivery_gateway.edit_text(edit)
-                else:
-                    # Streamed progress owns this reply's edits until its terminal delivery.
-                    await progress(StructuredStreamChunk(content=edit.new_text, tool_trace=edit.tool_trace))
-
-            with background_wait_notice(report_wait):
-                result = await self._continue_entity_call(
-                    claimed,
-                    request=request,
-                    target=target,
-                    tool_trace_collector=tool_trace,
-                    progress=progress,
-                    cli_approval_handler=cli_approval_handler,
-                )
+            result = await self._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=tool_trace,
+                progress=progress,
+                cli_approval_handler=cli_approval_handler,
+            )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
             show_tool_calls = claimed.show_tool_calls
@@ -2431,6 +2450,7 @@ class ResponseRunner:
         restart_message: str,
         user_stop_message: str,
         interrupted_message: str,
+        held_continuation: HeldContinuation | None,
     ) -> FinalDeliveryOutcome:
         """Settle one blocking-mode cancellation through the visible note or a no-event outcome."""
         cancel_source = classify_cancel_source(exc)
@@ -2450,7 +2470,8 @@ class ResponseRunner:
                     existing_event_is_placeholder=existing_event_is_placeholder,
                     cancel_source=cancel_source,
                     identity=response_identity,
-                    visible_presentation=reported_wait_presentation(),
+                    # A blocking turn shows nothing until it finishes, so a continued held message still shows its reply.
+                    visible_presentation=held_continuation.presentation if held_continuation is not None else None,
                 ),
             )
         return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
@@ -2682,17 +2703,13 @@ class ResponseRunner:
     ) -> bool:
         """Cancel the live response, then durably finalize its turn under the same lock."""
         cancellation_requested = False
-        stopped_task: asyncio.Task[None] | None = None
         self._user_stop_receipt_orders.setdefault(message_id, set()).add(stop_receipt_order)
 
         async def cancel_live_response() -> None:
-            nonlocal cancellation_requested, stopped_task
+            nonlocal cancellation_requested
             if cancellation_requested:
                 return
-            live_task = self.deps.stop_manager.active_task(message_id)
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
-            if cancellation_requested:
-                stopped_task = live_task
 
         async def finalize_locked() -> bool:
             edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
@@ -2716,11 +2733,6 @@ class ResponseRunner:
             return False if unresolved_final else await finalize(approval_settled)
 
         try:
-            await cancel_live_response()
-            if stopped_task is not None:
-                # A reply that only waited on background work had given its lock up; it takes the lock back to settle
-                # its own cancellation, and this Stop must finalize after it rather than first.
-                await asyncio.wait({stopped_task})
             return await self._lifecycle_coordinator.run_locked_target_operation(
                 target=target,
                 while_waiting=cancel_live_response,
@@ -2981,22 +2993,13 @@ class ResponseRunner:
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
-        """Refuse a source whose jobs a Stop ended, and bind wait progress to the ordinary response owner."""
+        """Refuse a source whose jobs a Stop ended."""
         source_event_id = request.response_envelope.source_event_id
         if await response_was_stopped(source_event_id, self.deps.runtime_paths, self.deps.agent_name):
             if request.on_no_response_handled is not None:
                 await request.on_no_response_handled()
             return None
-
-        async def report_wait(presentation: StreamingPresentation, notice: str | None) -> None:
-            event_id = early_placeholder.placeholder_event_id or request.existing_event_id
-            if event_id is not None and not _is_silent_schedule_response(request):
-                await self.deps.delivery_gateway.edit_text(
-                    background_wait_edit(target, event_id, presentation, notice),
-                )
-
-        with background_wait_notice(report_wait):
-            return await locked_operation(target, early_placeholder)
+        return await locked_operation(target, early_placeholder)
 
     async def _settle_unauthorized_approval_continuation(
         self,
@@ -3099,6 +3102,256 @@ class ResponseRunner:
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local CLI owners and return sources still owned by the journal."""
         return self._cli_approval_waits.wake(source_event_ids)
+
+    def _held_reply(self, saved: SavedHeldReply) -> HeldReply | None:
+        """Read one saved hold; an unreadable one holds nothing this runtime can continue."""
+        try:
+            return decode_held_reply(saved)
+        except ValueError:
+            self.deps.logger.exception("held_reply_unreadable", hold_id=saved.hold_id)
+            return None
+
+    async def _redact_stop_button(self, hold: HeldReply) -> None:
+        """Remove the Stop button a released message kept while it held work."""
+        if hold.stop_button_event_id is None:
+            return
+        try:
+            await self._client().room_redact(hold.key.room_id, hold.stop_button_event_id, reason="Response completed")
+        except Exception as error:
+            # The message no longer holds anything; a leftover button only finds nothing to stop.
+            self.deps.logger.warning("held_reply_stop_button_cleanup_failed", error=str(error))
+
+    async def _release_held_message(self, hold: HeldReply, *, stopped: bool = False) -> None:
+        """Show a message as its reply finished, or as stopped, once it holds nothing any more."""
+        if hold.message_event_id is not None:
+            await self.deps.delivery_gateway.edit_text(stopped_edit(hold) if stopped else released_edit(hold))
+        await self._redact_stop_button(hold)
+
+    async def _save_held_reply(self, hold: HeldReply) -> None:
+        """Make a message the holder of its work, releasing the message that held it before."""
+        replaced, _saved = await self.deps.held_replies.save(
+            hold_id=hold.key.hold_id,
+            recipient=hold.key.recipient,
+            message_event_id=hold.message_event_id,
+            hold_json=encode_held_reply(hold),
+        )
+        previous = self._held_reply(replaced) if replaced is not None else None
+        if previous is not None and previous.message_event_id != hold.message_event_id:
+            await self._release_held_message(previous)
+        if hold.message_event_id is not None:
+            await self.deps.delivery_gateway.edit_text(held_edit(hold))
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is not None:
+            # Work may have become ready before this hold existed to be woken for it.
+            runtime.changed.set()
+
+    async def _settle_held_reply(
+        self,
+        request: ResponseRequest,
+        final_outcome: FinalDeliveryOutcome,
+        boundary: ReplyBoundary | None,
+        *,
+        stop_button_event_id: str | None,
+    ) -> None:
+        """Let a finished reply's message hold its outstanding work, and release whatever nothing holds any more."""
+        continued = request.held_reply
+        if boundary is None:
+            if continued is not None and final_outcome.resolved_cancel_source not in {"sync_restart", "interrupted"}:
+                # The continuation failed, was stopped, or paused for approval before its boundary, so its message
+                # holds nothing any more. An interrupted one keeps holding, and its wake runs it again.
+                await self.deps.held_replies.delete(continued.key.hold_id, generation=continued.generation)
+            return
+        message_id = final_outcome.final_visible_event_id
+        if (
+            boundary.notice is not None
+            and final_outcome.terminal_status == "completed"
+            and (message_id is not None or boundary.key.silent)
+        ):
+            await self._save_held_reply(
+                HeldReply(
+                    key=boundary.key,
+                    target=request.response_envelope.target,
+                    source_kind=request.response_envelope.source_kind,
+                    message_event_id=message_id,
+                    presentation=StreamingPresentation(
+                        response_text=final_outcome.final_visible_body or "",
+                        tool_trace=final_outcome.tool_trace,
+                    ),
+                    extra_content=dict(final_outcome.extra_content or {}),
+                    notice=boundary.notice,
+                    stop_button_event_id=stop_button_event_id,
+                    joins=boundary.joins,
+                ),
+            )
+            return
+        released = await self.deps.held_replies.delete(boundary.key.hold_id)
+        previous = self._held_reply(released) if released is not None else None
+        if previous is not None and previous.message_event_id != message_id:
+            await self._release_held_message(previous)
+
+    async def _hold_on_message(self, message_id: str | None) -> HeldReply | None:
+        """Return the hold one of this entity's messages carries; only an instance running background jobs has any."""
+        if message_id is None or get_background_runtime(self.deps.runtime_paths) is None:
+            return None
+        saved = await self.deps.held_replies.load_for_message(self.deps.agent_name, message_id)
+        return self._held_reply(saved) if saved is not None else None
+
+    async def held_reply_for_message(self, message_id: str, room_id: str) -> bool:
+        """Whether one of this entity's messages in a room holds outstanding work, so a Stop on it ends that work."""
+        hold = await self._hold_on_message(message_id)
+        return hold is not None and hold.key.room_id == room_id
+
+    async def stop_held_reply(self, message_id: str, stop_receipt_order: int) -> bool:
+        """End the work a message holds while no turn runs on it, and show the message as stopped."""
+        hold = await self._hold_on_message(message_id)
+        if hold is None:
+            return False
+
+        async def stop_locked() -> bool:
+            held = await self._hold_on_message(message_id)
+            if held is None:
+                # A turn released the message while this Stop waited for the conversation.
+                return True
+            runtime = get_background_runtime(self.deps.runtime_paths)
+            if runtime is not None:
+
+                async def held_by_message(job: BackgroundJob) -> bool:
+                    return holds_job(held.key, job)
+
+                await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
+            await self.deps.held_replies.delete(held.key.hold_id, generation=held.generation)
+            await self._release_held_message(held, stopped=True)
+            return True
+
+        return await self._lifecycle_coordinator.run_locked_target_operation(
+            target=hold.target,
+            while_waiting=None,
+            locked_operation=stop_locked,
+        )
+
+    async def handoff_held_reply_wake(self, event: JournalEvent) -> bool:
+        """Transfer a held reply's wake to a detached response owner; it settles once that turn is done."""
+        if not self.has_live_inbox_response(event.event_id):
+            self.track_inbox_response(
+                self._continue_held_reply(event),
+                name=f"held_reply:{event.event_id}",
+                room_id=event.room_id,
+                source_event_ids=(event.event_id,),
+                recovery_proof_ready=lambda: True,
+            )
+        return False
+
+    async def _continue_held_reply(self, event: JournalEvent) -> None:
+        """Run the turn a wake admitted for a held message, then settle the wake."""
+        wake = parse_wake_event_id(event.event_id)
+        saved = await self.deps.held_replies.load(wake[0]) if wake is not None else None
+        hold = self._held_reply(saved) if saved is not None else None
+        if (
+            wake is not None
+            and hold is not None
+            and hold.generation == wake[1]
+            and hold.key.recipient == self.deps.agent_name
+        ):
+            source_handoff = asyncio.Event()
+            await self._generate_held_continuation(self._held_reply_request(hold, event.event_id, source_handoff))
+            if source_handoff.is_set():
+                # An approval pause owns the wake now and settles it when it ends.
+                return
+            await self._lifecycle_coordinator.run_locked_target_operation(
+                target=hold.target,
+                while_waiting=None,
+                locked_operation=partial(self._release_unstarted_continuation, hold),
+            )
+        await self.deps.approval_store.settle(event.event_id)
+
+    async def _release_unstarted_continuation(self, hold: HeldReply) -> None:
+        """Release a hold whose continuation never began, such as one its requester may no longer run."""
+        # Every turn that begins on a hold saves or releases it, so an unchanged generation means none began.
+        if await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation) is not None:
+            await self._release_held_message(hold)
+
+    def _held_reply_request(self, hold: HeldReply, wake_id: str, source_handoff: asyncio.Event) -> ResponseRequest:
+        """Build the turn that continues a held message; its lock decides what that turn retrieves."""
+        envelope = continuation_envelope(
+            hold,
+            source_event_id=wake_id,
+            sender_id=self.deps.matrix_full_id,
+            prompt=_HELD_REPLY_PROMPT,
+        )
+        turns = self.deps.turn_store
+
+        async def record_user_stop(response_event_id: str, stop_receipt_order: int) -> None:
+            # The reply that sent the message owns its turn; a continuation only extends the message.
+            owner = turns.turn_record_for_response_event_id(response_event_id)
+            if owner is not None:
+                await record_user_stop_terminal(turns, owner, response_event_id, stop_receipt_order)
+
+        return ResponseRequest(
+            thread_history=(),
+            prompt=envelope.body,
+            response_envelope=envelope,
+            sources=ResponseSources((wake_id,), (wake_id,)),
+            existing_event_id=hold.message_event_id,
+            user_id=hold.key.requester_id,
+            on_user_stop_handled=record_user_stop,
+            source_handoff=source_handoff,
+            held_reply=hold,
+        )
+
+    async def _generate_held_continuation(self, request: ResponseRequest) -> None:
+        """Continue as this agent, or as the team whose members hold the work."""
+        hold = request.held_reply
+        assert hold is not None
+        config = self.deps.runtime.config
+        team = config.teams.get(self.deps.agent_name)
+        if team is None and hold.key.participants == (self.deps.agent_name,):
+            await self.generate_response(request)
+            return
+        # An ad hoc team has no configured roster; the participants the hold names are its members.
+        member_names, team_mode = (
+            (team.agents, team.mode) if team is not None else (hold.key.participants, "coordinate")
+        )
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
+        await self.generate_team_response_helper(
+            request,
+            team_agents=[registry.current_ids[name] for name in member_names],
+            team_mode=team_mode,
+        )
+
+    async def _resume_held_reply(self, request: ResponseRequest) -> ResponseRequest | None:
+        """Under the conversation lock, continue a held message with ready work, or leave it as its work stands."""
+        hold = request.held_reply
+        if hold is None:
+            return request
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is None:
+            # The wake stays pending until a runtime can tell what the held work is.
+            msg = "Tool job runtime is not ready for a held reply continuation"
+            raise RuntimeError(msg)
+        saved = await self.deps.held_replies.load(hold.key.hold_id)
+        if saved is None or saved.generation != hold.generation:
+            # A newer turn saved or released the hold since the wake.
+            return None
+        jobs = await conversation_work(runtime, hold.key)
+        ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
+        if ready and hold.joins < JOB_JOIN_LIMIT:
+            prompt = completion_prompt(ready)
+            return replace(
+                request,
+                prompt=prompt,
+                response_envelope=replace(request.response_envelope, body=prompt),
+                held_continuation=HeldContinuation(
+                    presentation=hold.presentation,
+                    ready_job_ids=frozenset(job.job_id for job in ready),
+                    joins=hold.joins,
+                ),
+            )
+        if jobs and hold.joins < JOB_JOIN_LIMIT:
+            # The work changed without becoming ready, so the message shows what it waits for now.
+            await self._save_held_reply(replace(hold, notice=waiting_notice(jobs)))
+        elif await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation) is not None:
+            await self._release_held_message(hold)
+        return None
 
     async def recover_approval_final(self, approval_id: str) -> bool:
         """Finalize one frozen FINAL under its original bot principal."""
@@ -3504,6 +3757,7 @@ class ResponseRunner:
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
+            held_continuation=request.held_continuation,
         )
 
     def _notify_interrupted_response_recoverable(
@@ -3648,6 +3902,10 @@ class ResponseRunner:
         reply_entity_names: tuple[str, ...] = (),
     ) -> ResponseRequest | None:
         """Pass locked replay, authorization, and terminal-source gates before setup."""
+        resumed = await self._resume_held_reply(request)
+        if resumed is None:
+            return None
+        request = resumed
         if not await self._locked_turn_can_begin(
             request,
             history_scope=history_scope,
@@ -4010,18 +4268,36 @@ class ResponseRunner:
     ) -> str | None:
         """Run generation and settle its terminal lifecycle exactly once."""
         deferred_error: BaseException | None = None
+        report = ReplyBoundaryReport()
+        stop_button_event_id: str | None = None
+        # A turn on a held message, such as one continuing it or an edit regenerating it, reuses its Stop button.
+        held = request.held_reply or await self._hold_on_message(request.existing_event_id)
+
+        def keep_stop_button(reaction_event_id: str | None) -> bool:
+            """Keep the Stop button of a message that goes on holding outstanding work after its reply."""
+            nonlocal stop_button_event_id
+            outcome = progress.delivery_outcome
+            boundary = report.boundary
+            if boundary is None or boundary.notice is None or outcome is None or outcome.terminal_status != "completed":
+                return False
+            stop_button_event_id = reaction_event_id
+            return True
+
         try:
-            # The attempt runs against the event the turn already adopted, which
-            # `progress` was seeded with, so it has no new event to report back.
-            await self._run_cancellable_response(
-                target=target,
-                response_function=response_function,
-                existing_event_id=request.existing_event_id,
-                user_id=user_id,
-                run_id=run_id,
-                on_cancelled=progress.note_task_cancelled,
-                show_stop_button=not _is_silent_schedule_response(request),
-            )
+            with reply_boundary_report(report):
+                # The attempt runs against the event the turn already adopted, which
+                # `progress` was seeded with, so it has no new event to report back.
+                await self._run_cancellable_response(
+                    target=target,
+                    response_function=response_function,
+                    existing_event_id=request.existing_event_id,
+                    user_id=user_id,
+                    run_id=run_id,
+                    on_cancelled=progress.note_task_cancelled,
+                    show_stop_button=not _is_silent_schedule_response(request),
+                    stop_button_event_id=held.stop_button_event_id if held is not None else None,
+                    keep_stop_button=keep_stop_button,
+                )
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:
                 raise
@@ -4142,6 +4418,13 @@ class ResponseRunner:
             final_outcome,
             cancel_source=cancel_source,
             source_handled=source_handled,
+        )
+        # Last, so a failure to hold or release leaves the turn's own settlement complete.
+        await self._settle_held_reply(
+            request,
+            final_outcome,
+            report.boundary,
+            stop_button_event_id=stop_button_event_id,
         )
         if deferred_error is not None:
             if source_handled and request.on_deferred_outcome_handled is not None:
@@ -4463,6 +4746,7 @@ class ResponseRunner:
             system_enrichment_items=request.system_enrichment_items,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
+            held_continuation=request.held_continuation,
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=prepared_prompt,
@@ -4694,6 +4978,7 @@ class ResponseRunner:
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
                             interrupted_message="Team non-streaming response interrupted — traceback for diagnosis",
+                            held_continuation=delivery_request.held_continuation,
                         ),
                     )
                     return
@@ -4842,6 +5127,8 @@ class ResponseRunner:
         run_id: str | None = None,
         on_cancelled: Callable[[str], None] | None = None,
         show_stop_button: bool = True,
+        stop_button_event_id: str | None = None,
+        keep_stop_button: Callable[[str | None], bool] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -4860,6 +5147,8 @@ class ResponseRunner:
                 user_id=user_id,
                 run_id=run_id,
                 on_cancelled=on_cancelled,
+                stop_button_event_id=stop_button_event_id,
+                keep_stop_button=keep_stop_button,
             ),
         )
 
@@ -5246,6 +5535,7 @@ class ResponseRunner:
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
                     interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
+                    held_continuation=request.held_continuation,
                 ),
             )
         except Exception as error:
