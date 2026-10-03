@@ -97,15 +97,24 @@ def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[Ap
 
 
 def refuse_unapproved_executions(run: RunOutput | TeamRunOutput, calls: Sequence[ApprovalCall]) -> None:
-    """Reject a continuation that would run anything except these approved calls with their saved arguments."""
+    """Reject a continuation that would run anything except each approved call once with its saved arguments."""
     approved = {call.tool_call_id: call for call in calls}
-    for tool in (*(run.tools or ()), *(r.tool_execution for r in run.requirements or () if r.tool_execution)):
-        if not continuation_executes(tool):
-            continue
-        call = approved.get(tool.tool_call_id or "")
-        if call is None or tool.tool_name != call.tool_name or not call.binds_arguments(tool.tool_args):
-            msg = "Paused run would execute a call its saved approval does not cover; retry the request"
-            raise RuntimeError(msg)
+    # One entry may appear in both lists, but stored copies within either list would each run.
+    for tools in (run.tools or (), [r.tool_execution for r in run.requirements or () if r.tool_execution]):
+        matched: set[str] = set()
+        for tool in tools:
+            if not continuation_executes(tool):
+                continue
+            call = approved.get(tool.tool_call_id or "")
+            if (
+                call is None
+                or call.tool_call_id in matched
+                or tool.tool_name != call.tool_name
+                or not call.binds_arguments(tool.tool_args)
+            ):
+                msg = "Paused run would execute a call its saved approval does not cover; retry the request"
+                raise RuntimeError(msg)
+            matched.add(call.tool_call_id)
 
 
 @contextmanager

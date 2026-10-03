@@ -61,6 +61,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     EditTextRequest,
@@ -3597,7 +3598,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
 
 @pytest.mark.parametrize(
     ("mutation", "approved"),
-    [(None, True), ("rewritten", True), ("planted", True), ("planted", False)],
+    [(None, True), ("rewritten", True), ("planted", True), ("planted", False), ("copied", True)],
 )
 @pytest.mark.asyncio
 async def test_agent_continuation_runs_only_approved_calls(
@@ -3666,6 +3667,17 @@ async def test_agent_continuation_runs_only_approved_calls(
                 confirmed=True,
             ),
         ]
+    elif mutation == "copied":
+        # Delegation state routes the run through the delegated driver, which forwards every stored requirement.
+        pending = (paused.requirements or [])[0]
+        copy = RunRequirement.from_dict(pending.to_dict())
+        copy.confirm()
+        paused.tools = []
+        paused.requirements = [pending, copy]
+        paused.metadata = {
+            **(paused.metadata or {}),
+            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+        }
     agent.db.upsert_run(paused, session_id="session-1")
     continuation = ApprovalContinuation(
         approval_id="approval-rewritten",
