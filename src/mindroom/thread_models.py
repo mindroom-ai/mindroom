@@ -69,6 +69,11 @@ def _save_thread_record(
     write_bounded_override_records(path, overrides, max_records=_MAX_TRACKED_THREADS)
 
 
+def _configured_entities(config: Config) -> set[str]:
+    """Return the names of the entities a thread override may govern under one config."""
+    return {*config.agents, *config.teams, ROUTER_AGENT_NAME}
+
+
 def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> OverrideRecord | None:
     """Return the override record stored for one thread root, if any."""
     if thread_id is None:
@@ -98,11 +103,11 @@ def resolve_thread_model_override(
     An override naming a model that no longer exists in the config is stale:
     runtime resolution, `!model`, and the `thread_model` tool must all ignore
     it rather than apply or report it as active. An override of an entity
-    that is no longer configured is left out, since no requester can address
-    that entity to reset it.
+    that is no longer configured is left out; the next reset of the thread
+    removes it.
     """
     record = _get_thread_model_override(runtime_paths, thread_id)
-    configured_entities = {*config.agents, *config.teams, ROUTER_AGENT_NAME}
+    configured_entities = _configured_entities(config)
     entity_models = {
         entity: model
         for entity, model in ({} if record is None else _entity_models(record)).items()
@@ -136,18 +141,31 @@ def set_thread_model_override(
     _save_thread_record(path, overrides, thread_id, record)
 
 
-def clear_thread_model_override(runtime_paths: RuntimePaths, thread_id: str, *, entity_names: Iterable[str]) -> bool:
-    """Remove one thread's model override for the given entities; return whether any was present."""
+def clear_thread_model_override(
+    runtime_paths: RuntimePaths,
+    thread_id: str,
+    *,
+    entity_names: Iterable[str],
+    config: Config,
+) -> bool:
+    """Remove one thread's model override for the given entities; return whether any was present.
+
+    Overrides of entities that are no longer configured go too, so a name configured again starts without one.
+    """
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
     record = overrides.get(thread_id)
+    if record is None:
+        return False
+    configured_entities = _configured_entities(config)
     fields = _entity_fields(entity_names)
-    if record is None or fields.isdisjoint(record):
+    removed = fields | _entity_fields(entity for entity in _entity_models(record) if entity not in configured_entities)
+    if removed.isdisjoint(record):
         return False
     _save_thread_record(
         path,
         overrides,
         thread_id,
-        {field: value for field, value in record.items() if field not in fields},
+        {field: value for field, value in record.items() if field not in removed},
     )
-    return True
+    return not fields.isdisjoint(record)

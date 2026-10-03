@@ -163,6 +163,7 @@ class ThreadModelTools(Toolkit):
             context.runtime_paths,
             thread_id,
             entity_names=self._addressable_entities(context),
+            config=context.config,
         )
         return self._payload(
             "ok",

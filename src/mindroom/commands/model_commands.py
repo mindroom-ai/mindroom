@@ -43,7 +43,7 @@ def _apply_model_selection(
     """Persist one explicit operation synchronously and return text plus any error."""
     entity_names = addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index)
     if request.operation == "reset":
-        return _clear_thread_model(runtime_paths, thread_id, entity_names), None
+        return _clear_thread_model(config, runtime_paths, thread_id, entity_names), None
     if request.model not in config.models:
         error = f"Unknown model `{request.model}`. Refresh the model picker."
         return f"❌ {error}", error
@@ -59,9 +59,14 @@ def _apply_model_selection(
     return text, None
 
 
-def _clear_thread_model(runtime_paths: RuntimePaths, thread_id: str, entity_names: tuple[str, ...]) -> str:
+def _clear_thread_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    thread_id: str,
+    entity_names: tuple[str, ...],
+) -> str:
     """Remove the override of the entities the requester may address and describe it for either command path."""
-    if clear_thread_model_override(runtime_paths, thread_id, entity_names=entity_names):
+    if clear_thread_model_override(runtime_paths, thread_id, entity_names=entity_names, config=config):
         return (
             "✅ Thread model override removed for the agents and teams you may address; "
             "room-level model selection applies to them again."
@@ -195,6 +200,7 @@ def handle_model_command(
             return _THREAD_REQUIRED_MESSAGE
         if requested.lower() in _RESET_ARGUMENTS:
             return _clear_thread_model(
+                config,
                 runtime_paths,
                 thread_id,
                 addressable_responder_names(requester_user_id, room_id, config, runtime_paths, membership_index),

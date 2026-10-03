@@ -88,9 +88,10 @@ def test_store_roundtrip(tmp_path: Path) -> None:
     assert _stored_model(runtime_paths, THREAD_ID) == "large"
     assert _stored_model(runtime_paths, "$other:localhost") is None
 
-    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",)) is True
+    config = _config_with_models(tmp_path)
+    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is True
     assert _stored_model(runtime_paths, THREAD_ID) is None
-    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",)) is False
+    assert clear_thread_model_override(runtime_paths, THREAD_ID, entity_names=("test_agent",), config=config) is False
 
 
 def test_store_ignores_corrupt_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -418,9 +419,19 @@ def test_model_command_show(tmp_path: Path) -> None:
 
 
 def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path) -> None:
-    """A removed agent's thread override is not reported, so `!model` agrees with `!model reset`."""
+    """A removed agent's thread override is not reported, and a reset removes it before the agent is re-added."""
     config = _config_with_models(tmp_path)
     runtime_paths = runtime_paths_for(config)
+    readded_config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": AgentConfig(display_name="Test Agent", model="default"),
+                "removed_agent": AgentConfig(display_name="Removed Agent", model="default"),
+            },
+            models=config.models,
+        ),
+        runtime_paths,
+    )
     set_thread_model_override(
         runtime_paths,
         thread_id=THREAD_ID,
@@ -430,10 +441,10 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path) -> 
         entity_names=("test_agent", "removed_agent"),
     )
 
-    def model_command(args_text: str) -> str:
+    def model_command(args_text: str, command_config: Config = config) -> str:
         return handle_model_command(
             args_text,
-            config=config,
+            config=command_config,
             runtime_paths=runtime_paths,
             membership_index=isolated_membership_index(),
             room_id=ROOM_ID,
@@ -444,6 +455,14 @@ def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path) -> 
     assert "`removed_agent`" not in model_command("")
     assert "✅" in model_command("reset")
     assert "No thread model override" in model_command("")
+    assert "No thread model override" in model_command("", readded_config)
+    runtime_model = readded_config.resolve_runtime_model(
+        entity_name="removed_agent",
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+        runtime_paths=runtime_paths,
+    )
+    assert runtime_model.model_name == "default"
 
 
 def test_model_help_describes_room_level_fallback() -> None:
