@@ -58,8 +58,10 @@ def test_release_builds_apple_silicon_macos_app(release_workflow: str, macos_bui
 
 def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) -> None:
     """The app installs `mindroom==<app version>`, so it must not ship before that release is on PyPI."""
+    jobs = yaml.safe_load(release_workflow)["jobs"]
     macos_job = release_workflow.split("  build_macos_app:\n", 1)[1].split("\n  update_homebrew_tap:", 1)[0]
-    assert "\n    needs: deploy\n" in macos_job
+    assert jobs["build_macos_helper"]["needs"] == "deploy"
+    assert jobs["build_macos_app"]["needs"] == "build_macos_helper"
     # Retrying a release whose wheel is already on PyPI must still publish the app.
     assert "skip-existing: true" in release_workflow
     assert "APP_VERSION: ${{ inputs.release_ref }}" in macos_job
@@ -107,16 +109,23 @@ def test_locked_source_builds_were_reviewed_for_build_pins(project: Path, source
     assert source_only <= source_builds
 
 
-def test_macos_helper_builds_before_signing_secrets_exist(release_workflow: str) -> None:
-    """Python build code for the helper runs before the signing keychain and without Apple credentials."""
-    steps = yaml.safe_load(release_workflow)["jobs"]["build_macos_app"]["steps"]
-    names = [step.get("name") for step in steps]
-    helper = steps[names.index("Build desktop helper")]
-    app = steps[names.index("Build notarized macOS DMG")]
+def test_macos_helper_builds_in_a_job_without_secrets(release_workflow: str) -> None:
+    """Python build code for the helper runs on its own runner, so it cannot tamper with the signing job."""
+    jobs = yaml.safe_load(release_workflow)["jobs"]
+    helper_job = jobs["build_macos_helper"]
+    app_steps = jobs["build_macos_app"]["steps"]
+    upload = next(
+        step for step in helper_job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    download = next(step for step in app_steps if str(step.get("uses", "")).startswith("actions/download-artifact@"))
+    app = next(step for step in app_steps if step.get("name") == "Build notarized macOS DMG")
 
-    assert names.index("Build desktop helper") < names.index("Import Developer ID certificate")
-    assert helper["run"] == "macos/build-desktop-helper.sh"
-    assert "env" not in helper
+    assert helper_job["permissions"] == {"contents": "read"}
+    assert "secrets." not in json.dumps(helper_job)
+    assert "github.token" not in json.dumps(helper_job)
+    assert any(step.get("run") == "macos/build-desktop-helper.sh" for step in helper_job["steps"])
+    assert not any("build-desktop-helper" in step.get("run", "") for step in app_steps)
+    assert download["with"]["name"] == upload["with"]["name"]
     assert app["env"]["SKIP_DESKTOP_HELPER_BUILD"] == "1"
 
 
