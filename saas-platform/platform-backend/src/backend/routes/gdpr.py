@@ -325,6 +325,7 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allo
         raise HTTPException(status_code=409, detail="This account deletion can no longer be cancelled")
     # The account is active again, so a cached pending-deletion sign-in must not limit its next request.
     invalidate_account_auth_cache(account_id)
+    instance_lifecycle.restart_teardown_grace(account_id)
     try:
         await instance_lifecycle.resume_account_billing(account_id)
     except stripe.StripeError:

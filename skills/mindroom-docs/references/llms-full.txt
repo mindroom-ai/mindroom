@@ -25902,7 +25902,7 @@ If a teardown, the hard delete, or the auth user deletion fails, the account kee
 The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion and claims it at once, runs the same teardown, calls `hard_delete_account`, and then deletes the auth user, which takes the account row with it.
 When a step fails it answers `500` and keeps the account row, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
 The nightly run, and any reconcile of an account pending deletion, marks instances that an older release's soft delete left `deprovisioned` while their deployment kept running as `running` again; the lifecycle then holds them, or keeps them running for an entitled subscription.
-A held instance of an account pending deletion is never uninstalled by its own teardown date, even when `cleanupScheduler.teardownGraceDays` is shorter than 7 days; the account's cleanup removes it once the customer can no longer cancel, and until then its teardown date keeps moving forward, so a restored account's instance gets the full grace period.
+A held instance of an account pending deletion is never uninstalled by its own teardown date, even when `cleanupScheduler.teardownGraceDays` is shorter than 7 days; the account's cleanup removes it once the customer can no longer cancel, until then its teardown date keeps moving forward, and cancelling the deletion restarts the teardown grace period of every held instance, so a restored account's instance gets the full grace period.
 
 ## Release Deployment
 

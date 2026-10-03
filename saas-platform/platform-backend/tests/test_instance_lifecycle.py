@@ -1514,6 +1514,28 @@ def test_cancelled_deletion_restarts_instances_only_for_a_subscription_stripe_st
     assert (platform.instance()["lifecycle_stopped_at"] is None) is restarted
 
 
+def test_cancelled_deletion_gives_a_held_instance_its_full_teardown_grace_period_again(platform: Platform) -> None:
+    # While the account was pending deletion, the teardown date of the held instance passed before anything moved it.
+    now = datetime.now(UTC)
+    _pending_deletion(platform, days_ago=3)
+    platform.db.tables["subscriptions"].append(_subscription("cancelled"))
+    platform.db.tables["instances"].append(
+        _instance(
+            "stopped",
+            lifecycle_stopped_at=(now - timedelta(days=3)).isoformat(),
+            teardown_after=(now - timedelta(hours=2)).isoformat(),
+        )
+    )
+    _stripe_lists(platform)
+    platform.stripe.Subscription.retrieve.return_value = _stripe_subscription("canceled")
+
+    assert _cancel_deletion(platform).status_code == 200
+
+    platform.uninstall.assert_not_awaited()
+    assert platform.instance()["status"] == "stopped"
+    assert datetime.fromisoformat(platform.instance()["teardown_after"]) >= now + timedelta(days=30)
+
+
 def test_fresh_provision_confirms_the_stored_status_with_stripe(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active", tier="pro"))
     platform.stripe.api_key = "sk_test"

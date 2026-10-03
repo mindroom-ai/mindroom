@@ -67,6 +67,7 @@ def mock_lifecycle():
         patch(f"{lifecycle}.resume_subscriptions", new=AsyncMock()) as resume_subscriptions,
         patch(f"{lifecycle}.cancel_unpaid_subscriptions", new=AsyncMock()) as cancel_unpaid,
         patch(f"{lifecycle}.reconcile_account_instances", new=AsyncMock(return_value=[])) as reconcile,
+        patch(f"{lifecycle}.restart_teardown_grace") as restart_teardown_grace,
     ):
         yield MagicMock(
             end_account_billing_at_period_end=end_billing,
@@ -74,6 +75,7 @@ def mock_lifecycle():
             resume_subscriptions=resume_subscriptions,
             cancel_unpaid_subscriptions=cancel_unpaid,
             reconcile_account_instances=reconcile,
+            restart_teardown_grace=restart_teardown_grace,
         )
 
 
@@ -414,6 +416,7 @@ class TestGDPREndpoints:
         mock_supabase.table.assert_called_once_with("accounts")
         # Billing the deletion set to end renews again, and held instances resume only when their subscription is
         # entitled.
+        mock_lifecycle.restart_teardown_grace.assert_called_once_with(mock_user["account_id"])
         mock_lifecycle.resume_account_billing.assert_awaited_once_with(mock_user["account_id"])
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
         assert "Stripe could not resume" not in data["message"]

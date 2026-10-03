@@ -226,6 +226,21 @@ async def resume_account_billing(account_id: str) -> None:
         await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
 
 
+def restart_teardown_grace(account_id: str) -> None:
+    """Give the held instances of an account whose deletion was cancelled their full teardown grace period again.
+
+    While the account was pending deletion, `_teardown` moved a held instance's date only once it was due, so the date
+    may already have passed.
+    """
+    sb = ensure_supabase()
+    if instance_ids := [instance["instance_id"] for instance in _account_instances(sb, account_id)]:
+        now = datetime.now(UTC)
+        teardown_after = now + timedelta(days=INSTANCE_TEARDOWN_GRACE_DAYS)
+        sb.table("instances").update({"teardown_after": teardown_after.isoformat(), "updated_at": now.isoformat()}).in_(
+            "instance_id", instance_ids
+        ).not_.is_("lifecycle_stopped_at", "null").execute()
+
+
 async def resume_subscriptions(scheduled: list[ScheduledBillingEnd]) -> None:
     """Undo the end that `end_account_billing_at_period_end` set on exactly these subscriptions."""
     for scheduled_end in scheduled:
