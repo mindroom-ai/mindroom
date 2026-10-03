@@ -240,6 +240,7 @@ Show or switch the model that the agents, teams, and router you may address use 
 ```
 
 The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
 `!model reset` likewise removes the override only for the entities you may address.
 
 `!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
@@ -361,7 +362,7 @@ Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
 Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
 It stores the new value only when redaction leaves that value unchanged.
-`!config set` refuses a value containing the `***redacted***` marker, which only appears in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
+`!config set` refuses a value containing the `***redacted***` marker or a URL password masked as `user:***@host`, which only appear in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
 A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 Unconfirmed changes expire after 24 hours.
 

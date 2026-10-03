@@ -194,6 +194,7 @@ describe('SettingsPage', () => {
     it('should request account deletion with confirmation', async () => {
       const deletionResponse = {
         status: 'deletion_scheduled',
+        message: 'Your account is scheduled for deletion. Stopping your hosted instances failed and is retried automatically. Paid subscriptions end at the end of their current billing period unless you cancel the deletion.',
         grace_period_days: 7
       }
       ;(api.requestAccountDeletion as jest.Mock).mockResolvedValue(deletionResponse)
@@ -208,8 +209,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(api.requestAccountDeletion).toHaveBeenCalledWith(true)
-        expect(screen.getByText(/account deletion scheduled/i)).toBeInTheDocument()
-        expect(screen.getByText(/Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion\. After 7 days, scheduled cleanup removes your hosted instances and account data when enabled\./)).toBeInTheDocument()
+        expect(screen.getByText(/Stopping your hosted instances failed and is retried automatically\. Paid subscriptions end at the end of their current billing period unless you cancel the deletion\. After 7 days, scheduled cleanup removes your hosted instances and account data when enabled\./)).toBeInTheDocument()
         expect(screen.getByText(/Within those 7 days, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
       })
 
@@ -241,7 +241,10 @@ describe('SettingsPage', () => {
     it('should cancel account deletion successfully', async () => {
       const deletedAccount = { ...mockAccount, deleted_at: '2025-01-01T00:00:00Z' }
       ;(api.getAccount as jest.Mock).mockResolvedValue(deletedAccount)
-      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({ status: 'success' })
+      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({
+        status: 'success',
+        message: 'Account deletion request has been cancelled. Stripe could not resume your subscription, so it still ends at the end of its billing period; resume it from the billing page.'
+      })
 
       render(<SettingsPage />)
 
@@ -254,7 +257,7 @@ describe('SettingsPage', () => {
 
       await waitFor(() => {
         expect(api.cancelAccountDeletion).toHaveBeenCalled()
-        expect(screen.getByText(/deletion has been cancelled/i)).toBeInTheDocument()
+        expect(screen.getByText(/Stripe could not resume your subscription, so it still ends at the end of its billing period; resume it from the billing page\./)).toBeInTheDocument()
       })
     })
 
@@ -283,9 +286,13 @@ describe('SettingsPage', () => {
       jest.useFakeTimers()
       ;(api.requestAccountDeletion as jest.Mock).mockResolvedValue({
         status: 'deletion_scheduled',
+        message: 'Your account is scheduled for deletion.',
         grace_period_days: 7
       })
-      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({ status: 'success' })
+      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({
+        status: 'success',
+        message: 'Account deletion request has been cancelled.'
+      })
       mockSupabase.auth.signOut.mockResolvedValue(undefined)
     })
 
@@ -314,7 +321,7 @@ describe('SettingsPage', () => {
       await scheduleDeletion()
       await cancelDeletion()
 
-      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      expect(screen.getByText('Account deletion request has been cancelled.')).toBeInTheDocument()
       expect(screen.getByText('Danger Zone')).toBeInTheDocument()
       expect(screen.queryByText('Account Deletion Pending')).not.toBeInTheDocument()
       await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
@@ -332,7 +339,7 @@ describe('SettingsPage', () => {
       }))
       await cancelDeletion()
 
-      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      expect(screen.getByText('Account deletion request has been cancelled.')).toBeInTheDocument()
       await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
       expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
       expect(mockRouter.push).not.toHaveBeenCalled()

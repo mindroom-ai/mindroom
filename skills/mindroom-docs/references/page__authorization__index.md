@@ -135,6 +135,7 @@ An agent's or team's reply, including a raw `m.room.message` an agent sends with
 A mentioned agent or team then acts for that human: it applies its own `access` to the human and does not respond when that excludes them, and it runs with the human as requester for credentials, requester-private instances, memory, learning, and approvals.
 The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise run with that human as requester, so they reach only the entities the human may address.
 MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the human must send those personally.
+A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the human by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.

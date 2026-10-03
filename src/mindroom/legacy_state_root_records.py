@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Primary records kept inside worker-mounted state roots.
 # Legacy format: `invited_rooms.json`, `pending_room_invites.json`, and `personal_rooms/<sha256>.json` in `agents/<entity>/`, and `agent_modes.json` in `agents/<agent>/` or `private_instances/<scope>/<agent>/`, which the static-runner sidecar mounts read-write.
-# Last legacy release: v2026.10.34; replacement: the next release keeps them at the same relative paths below `tracking/`.
+# Last legacy release: v2026.10.37; replacement: v2026.10.38 keeps them at the same relative paths below `tracking/`.
 # Handling: before serving, once per storage root, every old file that is a regular file reached without links and holds a valid record moves below `tracking/`, unless a record already exists there; anything else stays behind with a warning, and a receipt stops later starts from reading worker-written entries again.
 # Coverage: tests/test_legacy_state_root_records.py::test_startup_moves_valid_records_once,
 # tests/test_legacy_state_root_records.py::test_planted_entries_stay_behind_without_stopping_startup.
@@ -101,19 +101,24 @@ def _read_valid(storage_root: Path, relative: Path, is_valid: Callable[[Path, by
     return payload
 
 
+def _json(payload: bytes) -> object:
+    # Decode strictly as the runtime readers do; json.loads on bytes also accepts a BOM and UTF-16 or UTF-32 text.
+    return json.loads(payload.decode("utf-8"))
+
+
 def _is_room_list(_relative: Path, payload: bytes) -> bool:
-    value = json.loads(payload)
+    value = _json(payload)
     return isinstance(value, list) and all(isinstance(room_id, str) for room_id in value)
 
 
 def _is_invite_map(_relative: Path, payload: bytes) -> bool:
-    value = json.loads(payload)
+    value = _json(payload)
     return isinstance(value, dict) and all(isinstance(inviter, str) for inviter in value.values())
 
 
 def _is_object(_relative: Path, payload: bytes) -> bool:
     # The agent-mode reader keeps only the valid choices of an object.
-    return isinstance(json.loads(payload), dict)
+    return isinstance(_json(payload), dict)
 
 
 def _is_personal_room(relative: Path, payload: bytes) -> bool:

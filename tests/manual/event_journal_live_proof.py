@@ -347,7 +347,7 @@ async def prove_edit_redaction(
 
     request = next(r for r in page.refresh_pending if r.logical_event_id == original)
     installed = await hydrator.refresh(request)
-    findings.record("the point refetch installs a server revision", installed)
+    findings.record("the point refetch installs a server revision", bool(installed))
 
     page = await store.read_conversation(room_id=room_id, thread_id=None, limit=50)
     bodies = [str(message.content.get("body")) for message in page.messages]

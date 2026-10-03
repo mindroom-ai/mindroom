@@ -368,6 +368,54 @@ async def test_one_turn_downloads_a_bounded_number_of_thread_history_media(
 
 
 @pytest.mark.asyncio
+async def test_failing_older_thread_history_media_cannot_hold_back_newer_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The download budget goes to the newest media first, and the result keeps history order.
+
+    Spent oldest first, earlier media that keeps failing used the whole budget
+    each time its failure memory ran out, so newer media never arrived. Media
+    the budget left out still arrives on a later turn.
+    """
+    limit = attachments_module._MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN
+    monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 1024)
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            b"%PDF-1.7 small" if "/media/download/localhost/good" in path else b"x" * 4096,
+        ),
+    )
+
+    history = [
+        make_visible_message(event_id=event_id, content={"msgtype": "m.file", "body": "f.pdf", "url": mxc})
+        for event_id, mxc in [
+            ("$good-old", "mxc://localhost/good"),
+            *((f"$huge{index}", "mxc://localhost/huge") for index in range(limit)),
+            ("$good-new", "mxc://localhost/good"),
+        ]
+    ]
+
+    attachment_ids = await attachments_module.register_thread_history_media_attachments(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        thread_history=history,
+    )
+
+    assert attachment_ids == [_attachment_id_for_event("$good-new")]
+    attachment_ids = await attachments_module.register_thread_history_media_attachments(
+        client,
+        tmp_path,
+        room_id="!room:localhost",
+        thread_id=None,
+        thread_history=history,
+    )
+    assert attachment_ids == [_attachment_id_for_event("$good-old"), _attachment_id_for_event("$good-new")]
+
+
+@pytest.mark.asyncio
 async def test_matrix_media_named_by_many_events_is_stored_once(tmp_path: Path) -> None:
     """Each event keeps its own record, but events naming one upload share its single copy."""
     client = make_matrix_client_mock()

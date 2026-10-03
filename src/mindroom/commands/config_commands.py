@@ -236,8 +236,9 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         if marker_location is not None:
             field_path = ".".join((config_path_str, *marker_location))
             return (
-                f"❌ `{field_path}` contains the redaction marker `{REDACTED}`, which `!config show` and "
-                "`!config get` print in place of a hidden value. Set that field to its real value instead."
+                f"❌ `{field_path}` contains the redaction marker `{REDACTED}` or a masked URL password, which "
+                "`!config show` and `!config get` print in place of a hidden value. "
+                "Set that field to its real value instead."
                 f"\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
             ), None
 

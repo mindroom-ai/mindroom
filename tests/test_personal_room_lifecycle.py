@@ -443,6 +443,63 @@ async def test_live_trigger_failing_during_a_pass_keeps_reconciliation_pending(c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("second_trigger", "retried_reinvite"), [("rejoin", False), ("command", True)])
+async def test_successful_live_trigger_retires_only_the_retry_it_covers(
+    coordination: Coordination,
+    second_trigger: str,
+    retried_reinvite: bool,
+) -> None:
+    """A later rejoin that succeeds satisfies a failed rejoin, so an owner who leaves again is not re-invited.
+
+    A command carries no re-invite request, so its success leaves the failed rejoin's request pending.
+    """
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None, None]
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
+    if second_trigger == "rejoin":
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+    else:
+        assert await lifecycle.handle_command(LOBBY, command())
+
+    await lifecycle._reconcile()
+
+    assert coordination.owner.ensure.await_args == call(
+        "@alice:localhost",
+        LOBBY.room_id,
+        lifecycle.runtime.client,
+        reinvite_departed_owner=retried_reinvite,
+    )
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_rejoin_failing_during_its_owners_reconciliation_keeps_the_reinvite_pending(
+    coordination: Coordination,
+) -> None:
+    """An attempt that started without a re-invite request cannot settle one a rejoin added while it ran."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    reinvites = []
+
+    async def ensure(*_args: object, reinvite_departed_owner: bool) -> None:
+        reinvites.append(reinvite_departed_owner)
+        if len(reinvites) == 1:
+            await lifecycle.member_event(LOBBY, lobby_rejoin())
+        elif len(reinvites) == 2:
+            msg = "Personal-room invite failed"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    assert not lifecycle._reconciled
+    await lifecycle._reconcile()
+
+    assert reinvites == [False, True, True]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
 async def test_live_trigger_preserves_cancellation(coordination: Coordination) -> None:
     """Shutdown cancellation still stops an onboarding-room trigger instead of settling it."""
     coordination.owner.ensure.side_effect = asyncio.CancelledError

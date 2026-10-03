@@ -19,11 +19,9 @@ from typing import TYPE_CHECKING
 from mindroom import constants
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
-    CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
-    credentials_encryption_key_value,
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
@@ -209,7 +207,6 @@ def tool_runtime_paths_with_request_env(
     execution_env: dict[str, str],
     *,
     include_base_execution_env: bool = True,
-    include_credentials_encryption_key: bool = False,
     trusted_env_overlay: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
@@ -242,12 +239,6 @@ def tool_runtime_paths_with_request_env(
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
-    if include_credentials_encryption_key:
-        credentials_encryption_key = credentials_encryption_key_value(
-            runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
-        )
-        if credentials_encryption_key is not None:
-            process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,

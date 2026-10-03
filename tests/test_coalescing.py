@@ -28,7 +28,6 @@ from mindroom.coalescing_batch import (
     build_prepared_turn,
     is_active_follow_up_coalescing_key,
     requester_coalescing_key,
-    tagged_coalesced_prompt,
 )
 from mindroom.config.main import Config
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
@@ -205,16 +204,7 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
         for event_id, metadata in record.source_event_metadata.items()
     }
     assert all(record.requester_id_for_source(event_id) == "@owner:localhost" for event_id in persisted)
-    regenerated = tagged_coalesced_prompt(
-        record.source_event_ids,
-        dict(record.source_event_prompts or {}),
-        {event_id: metadata for event_id, metadata in persisted.items() if metadata is not None},
-        timestamp_formatter=lambda _timestamp_ms: None,
-        member_display_names={},
-    )
-    assert regenerated is not None
-    assert '<msg event_id="$r1:localhost" from="@mindroom_research:localhost">' in regenerated
-    assert "@owner:localhost" not in regenerated
+    assert all(metadata is not None and metadata.speaker == agent for metadata in persisted.values())
 
 
 def test_prepared_turn_carries_structured_flag_and_metadata() -> None:

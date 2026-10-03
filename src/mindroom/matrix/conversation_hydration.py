@@ -61,6 +61,7 @@ from mindroom.event_journal import (
     visible_content,
 )
 from mindroom.event_journal.projection import is_newer_revision
+from mindroom.event_journal.reads import PAGE_CONTENT_BUDGET_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -1147,12 +1148,14 @@ class ConversationHydrator:
                 )
             start = next_start
 
-    async def refresh(self, request: RefreshRequest) -> bool:
+    async def refresh(self, request: RefreshRequest) -> int | None:
         """Refetch one logical message whose visible revision was redacted.
 
-        Returns whether the projection was updated. A ``False`` result leaves
-        the message hidden and its refresh token durable, so the next strict
-        read tries again rather than serving anything stale.
+        Returns the size of the content the projection now stores for the
+        message, 0 once the message is removed, or ``None`` when the projection
+        was not updated. ``None`` leaves the message hidden and its refresh
+        token durable, so the next strict read tries again rather than serving
+        anything stale.
         """
         original = await self._client().room_get_event(request.room_id, request.logical_event_id)
         if not isinstance(original, nio.RoomGetEventResponse):
@@ -1161,7 +1164,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
+            return None
         readable_original = readable_event(self._client(), original.event)
         if readable_original is None:
             # Unreadable is not deleted, and the branch below would treat it as
@@ -1176,7 +1179,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
+            return None
         projected = _projected_from_event(request.room_id, readable_original, self_sender=self.self_sender)
         if projected is None or projected.redacts_event_id is not None:
             # The whole logical message is gone, not just the revision that was
@@ -1184,7 +1187,7 @@ class ConversationHydrator:
             # row is the conditional form of that -- it holds the refresh token
             # and membership epoch this request was issued under, which
             # projecting the redaction would bypass.
-            return await self.store.drop_refetched_message(request)
+            return 0 if await self.store.drop_refetched_message(request) else None
         unreadable = _UnreadableHistory(revision_of=(request.logical_event_id, projected.sender))
         relations = await self._fetch_relations(
             request.room_id,
@@ -1281,6 +1284,16 @@ class ConversationHydrator:
         The next strict read is what runs this. There is no background refresh
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
+
+        A page lists its debts newest first, and refetching stops once what it
+        stored passes the page's content budget. Debts cost that budget nothing
+        until resolved, so otherwise one read would download and store every
+        attachment its debts name, even when all of them name one large file.
+        The read that follows ends its page at or before the last message
+        refetched here, leaving the rest as history behind its cursor.
         """
+        stored_bytes = 0
         for request in requests:
-            await self.refresh(request)
+            if stored_bytes > PAGE_CONTENT_BUDGET_BYTES:
+                return
+            stored_bytes += await self.refresh(request) or 0

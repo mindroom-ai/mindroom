@@ -46,9 +46,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
     approval_denial_context,
-    approved_executions_context,
     record_approval_denials,
-    refuse_unapproved_executions,
     required_approval_tool_names,
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
@@ -127,6 +125,7 @@ from mindroom.team_exact_members import (
     resolve_team_materializable_agent_names,
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.events import (
@@ -2387,6 +2386,9 @@ def resolve_team_turn_models(
     active_model_name: str | None = None,
 ) -> TeamTurnModelSelection:
     """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    # A configured team's access reaches its members, so its thread override governs them during its turns.
+    if active_model_name is None and thread_id is not None and team_name in config.teams:
+        active_model_name = resolve_thread_model_override(runtime_paths, thread_id, config=config).active.get(team_name)
     if active_model_name is not None:
         return TeamTurnModelSelection(
             team_model_name=active_model_name,
@@ -2598,12 +2600,12 @@ def _team_approval_events(
     )
 
 
-def _member_calls_by_run(
+def _member_approval_denials(
     member_id: str | None,
     calls: Mapping[str, ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> dict[str, list[ApprovalCall]]:
-    """Bind saved member calls to their persisted native run identities."""
+    """Bind denied member calls to their persisted native run identities."""
     calls_by_run: dict[str, list[ApprovalCall]] = {}
     for requirement in requirements:
         tool = requirement.tool_execution
@@ -2615,20 +2617,6 @@ def _member_calls_by_run(
             raise RuntimeError(msg)
         calls_by_run.setdefault(requirement.member_run_id, []).append(call)
     return calls_by_run
-
-
-def _enter_member_approval_contexts(
-    stack: ExitStack,
-    member: Agent,
-    calls: Sequence[ApprovalCall],
-    decisions: Mapping[str, bool],
-    requirements: Sequence[RunRequirement],
-) -> None:
-    """Allow only this member's approved stored calls to run, and apply its exact denials."""
-    approved = {call.tool_call_id: call for call in calls if decisions.get(call.tool_call_id)}
-    denied = {call.tool_call_id: call for call in calls if not decisions.get(call.tool_call_id)}
-    stack.enter_context(approved_executions_context(member, _member_calls_by_run(member.id, approved, requirements)))
-    stack.enter_context(approval_denial_context(member, _member_calls_by_run(member.id, denied, requirements)))
 
 
 def _approval_history_scope(
@@ -2772,9 +2760,11 @@ async def continue_paused_team_run(
             requirements=requirements,
         )
         validate_approval_tool_owners(members.agents, approved_calls, requirements)
-        refuse_unapproved_executions(persisted, approved_calls)
+        denied_calls = {call.tool_call_id: call for call in local_calls if not decisions.get(call.tool_call_id)}
         for member in members.agents:
-            _enter_member_approval_contexts(stack, member, local_calls, decisions, requirements)
+            stack.enter_context(
+                approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)),
+            )
             if member.model is not None:
                 install_approval_receipt_hooks(member.model, member.fallback_config)
         presentation = _TeamStreamPresentation.restore(

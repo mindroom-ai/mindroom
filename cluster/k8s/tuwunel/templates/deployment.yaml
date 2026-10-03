@@ -12,6 +12,9 @@ metadata:
 spec:
   # Tuwunel does not support horizontal scaling against one database.
   replicas: 1
+  {{- if ne .Values.progressDeadlineSeconds nil }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | int64 }}
+  {{- end }}
   strategy:
     type: Recreate
   selector:
@@ -35,6 +38,9 @@ spec:
       {{- end }}
     spec:
       enableServiceLinks: false
+      {{- if ne .Values.terminationGracePeriodSeconds nil }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | int64 }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

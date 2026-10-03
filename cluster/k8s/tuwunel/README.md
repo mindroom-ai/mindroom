@@ -89,6 +89,30 @@ The callback URL defaults to `<clientBaseUrl>/_matrix/client/unstable/login/sso/
 `tuwunel.oidc.extraConfig` appends raw TOML inside the `[[global.identity_provider]]` block for less common options such as `userid_claims`, `trusted`, or `unique_id_fallbacks`.
 For multiple identity providers, use a fully custom config through `config.existingConfigMap`.
 
+## Structured Settings
+
+`tuwunel.settings` renders Tuwunel options into the `[global]` section of the chart-rendered `tuwunel.toml`.
+Unlike the raw `tuwunel.extraConfig` string, Helm merges these maps key by key across values files, so an environment overlay can change one option without restating the others.
+
+```yaml
+tuwunel:
+  serverName: example.com
+  settings:
+    login_with_password: false
+    auto_join_rooms: ["#lobby:{{ .Values.tuwunel.serverName }}"]
+    max_request_size: 104857600
+    default_power_level_content_override:
+      users_default: 50
+```
+
+- Strings, numbers, booleans, and lists of them become TOML values, and integral numbers stay TOML integers.
+- Nested maps become `[global.<key>]` tables, rendered after `tuwunel.extraConfig`.
+- Strings are rendered with `tpl`, so shared values can derive environment-specific names such as room aliases from `tuwunel.serverName`.
+- A `null` value omits an option set by an earlier values file.
+- Options the chart already renders, such as `server_name`, `port`, or `well_known`, are rejected; use their dedicated values.
+- Set each option in one place: an option set both here and in `tuwunel.extraConfig`, as a `[global]` key or a `[global.<key>]` table, makes `tuwunel.toml` invalid, and the chart does not detect it.
+- Arrays of tables still belong in `tuwunel.extraConfig`.
+
 ## Custom Config
 
 Operators with a fully custom `tuwunel.toml` can bypass chart rendering entirely:
@@ -137,12 +161,12 @@ The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` a
 
 Tuwunel's `max_request_size` caps every request body, including media uploads, and Tuwunel advertises it to clients as `m.upload.size` from `/_matrix/client/v1/media/config`.
 Tuwunel defaults it to 24 MiB and refuses to start with a value below 10,000,000 bytes.
-The chart has no dedicated value, so set it through `tuwunel.extraConfig` or a `TUWUNEL_MAX_REQUEST_SIZE` entry in `env.extra`:
+Set it through `tuwunel.settings`, described in [Structured Settings](#structured-settings):
 
 ```yaml
 tuwunel:
-  extraConfig: |
-    max_request_size = 104857600  # 100 MiB
+  settings:
+    max_request_size: 104857600  # 100 MiB
 ```
 
 Every proxy between clients and Tuwunel must accept a body of at least that size, or uploads that Tuwunel advertises as allowed fail with `413` at the proxy before they reach the homeserver.
@@ -156,12 +180,35 @@ MindRoom uploads attachments and long-message sidecars to the same homeserver, a
 A long message whose sidecar upload Tuwunel rejects is delivered as a truncated preview.
 MindRoom itself limits incoming media and the files agents attach to 64 MiB whatever the homeserver accepts, as described in [File & Video Attachments](../../../docs/attachments.md).
 
-## Upgrading Tuwunel
+## Upgrades and Database Migrations
 
-A Tuwunel release can migrate the database on its first start, and Tuwunel runs those migrations before it opens its HTTP listener.
-Current releases log `Database migration in progress` every 15 seconds while they work, honor a stop request between migration steps, and resume from the last finished step on the next start.
-Killing the process mid-migration, for example after a failed probe, an out-of-memory kill, an eviction, or an expired termination grace period, can leave the database mid-write and require a restore.
-The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a newer release and start an unplanned migration, so pin `image.tag` or `image.digest` and change it only as part of this procedure.
+The first start after a Tuwunel upgrade can run a one-time database migration, and the listener does not open until it finishes.
+Current releases log `Database migration in progress` every 15 seconds while they work and resume from the last finished step on the next start.
+Tuwunel stops a migration only at its next safe point, and a kill before then leaves the database half migrated with no repair path.
+Such a kill can come from a failed probe, an out-of-memory kill, an eviction, or an expired termination grace period, and recovering from it requires a restore.
+The chart therefore sets `terminationGracePeriodSeconds: 1800`, following [Tuwunel's Kubernetes guidance](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/deploying/kubernetes.md), instead of the Kubernetes default of 30 seconds.
+GKE Autopilot limits the grace period to 600 seconds (25 seconds for Spot Pods) and lowers larger values with a warning, so set `terminationGracePeriodSeconds: 600` there.
+Lower it on other platforms that cap the grace period, or set it to `null` to use the Kubernetes default.
+
+For large databases, raise `probes.startup.failureThreshold` so the startup probe budget covers the longest expected migration, because a failing startup probe restarts the container.
+The `Recreate` strategy starts the replacement pod only after the old pod stops, and the old pod can take up to `terminationGracePeriodSeconds` to stop.
+Kubernetes' default progress deadline of 600 seconds is shorter than the 1800-second grace period, so a slow shutdown alone can make Kubernetes report the rollout as stalled.
+Set `progressDeadlineSeconds` above the old pod's shutdown time plus the startup probe budget so Kubernetes does not report the rollout as stalled while the old pod stops and the migration runs.
+The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds, and leaving it unset or `null` preserves the Kubernetes default.
+This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
+
+```yaml
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 180 # 30 minutes
+progressDeadlineSeconds: 4200 # 30-minute shutdown + 30-minute startup + margin
+terminationGracePeriodSeconds: 1800
+```
+
+The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a newer release and start an unplanned migration, so pin `image.tag` or `image.digest` and change it only as part of the procedure below.
+
+### Upgrade Procedure
 
 1. Read the release notes of every Tuwunel release between the running and the target version, and note database migrations and supported upgrade paths.
 2. Record the running image tag or digest and the values used to deploy it.
@@ -193,10 +240,9 @@ The default `latest` tag with `pullPolicy: Always` lets any pod restart pull a n
        failureThreshold: 720  # 1 hour
    ```
 
-   Kubernetes defaults apply to the Deployment's rollout and shutdown timers unless the Deployment sets them.
-   `progressDeadlineSeconds` (default 600 seconds) only marks a slow rollout as failed and does not stop the pod, and `helm upgrade --wait` gives up after its own `--timeout` (default 5 minutes) without stopping the pod either.
+   An expired `progressDeadlineSeconds` only marks a slow rollout as failed and does not stop the pod, and `helm upgrade --wait` gives up after its own `--timeout` (default 5 minutes) without stopping the pod either.
    Do not combine the upgrade with Helm's automatic rollback on failure (`--atomic` in Helm 3), which would replace the migrating pod with the old image when that timeout expires.
-   `terminationGracePeriodSeconds` (default 30 seconds) bounds how long a stopping pod can finish its current migration step before it is killed, so avoid stopping the pod while a migration runs.
+   Avoid stopping the pod while a migration runs, because it is killed once `terminationGracePeriodSeconds` expires.
 8. Follow the pod log until the migration finishes and `/_matrix/client/versions` answers, then scale the MindRoom runtime back up and confirm that agents sync, reply, and can read existing media.
    The startup probe can return to its default afterwards.
 
@@ -214,5 +260,5 @@ Writes accepted after the snapshot are lost.
 - The image defaults to the fork's `latest` tag with `pullPolicy: Always`; pin `image.tag` or `image.digest` for reproducible production deployments.
 - The MindRoom fork's compact-edit collapsing for streaming responses is enabled by default; set `tuwunel.compactEdits: false` to disable it.
 - The release image runs Tuwunel as root, so the chart sets no restrictive container security context by default; tighten `podSecurityContext` and `securityContext` to match your policy.
-- Any Tuwunel option without a dedicated value can be set through `tuwunel.extraConfig` (raw TOML in `[global]`) or `TUWUNEL_*` environment overrides in `env.extra`.
+- Any Tuwunel option without a dedicated value can be set through `tuwunel.settings`, `tuwunel.extraConfig` (raw TOML in `[global]`), or `TUWUNEL_*` environment overrides in `env.extra`.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector, and `storage.existingClaim` when adopting an existing data PVC.
