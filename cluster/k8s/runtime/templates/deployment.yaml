@@ -12,6 +12,7 @@
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- $envFrom := include "mindroom-runtime.keyedList" (dict "value" .Values.env.envFrom "path" "env.envFrom") | fromJsonArray -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -413,17 +414,17 @@ spec:
                   name: {{ $entry.existingSecret }}
                   key: {{ $entry.key }}
             {{- end }}
-            {{- with .Values.env.extra }}
+            {{- with include "mindroom-runtime.envList" (list . .Values.env.extra "env.extra") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or $generatesApiKey .Values.env.envFrom }}
+          {{- if or $generatesApiKey $envFrom }}
           envFrom:
             {{- if $generatesApiKey }}
             # Worker tool code can reach this API; listed first so a MINDROOM_API_KEY from env.extra or env.envFrom wins.
             - secretRef:
                 name: {{ $fullname }}-api-key
             {{- end }}
-            {{- with .Values.env.envFrom }}
+            {{- with $envFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- end }}
@@ -513,7 +514,7 @@ spec:
               mountPath: /etc/agent-vault-access
               readOnly: true
             {{- end }}
-            {{- with .Values.extraVolumeMounts }}
+            {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
         {{- if eq .Values.workers.backend "static_runner" }}
@@ -615,6 +616,6 @@ spec:
             # bootstrap publishes the token; the tool errors cleanly until then.
             optional: true
         {{- end }}
-        {{- with .Values.extraVolumes }}
+        {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumes "path" "extraVolumes" "nameKey" "name") | fromJsonArray }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

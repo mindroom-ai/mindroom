@@ -303,6 +303,81 @@ env:
       value: '[{"service": "my_gateway", "credentials": {"api_key": {"env": "MY_GATEWAY_API_KEY"}}}]'
 ```
 
+## Layering Values Files
+
+Helm replaces lists wholesale when it merges several values files, so an environment overlay cannot change one list entry without restating the whole list.
+`env.extra`, `env.envFrom`, `workers.kubernetes.agentVault.server.extraEnv`, `workers.kubernetes.agentVault.server.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+
+- Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
+- An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
+- A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
+- An env map entry may be a plain string or number as shorthand for `value`.
+- Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
+
+String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv`, and `egressProxy.noProxy` entries, are rendered with `tpl`.
+Shared values can therefore reference the release namespace or other values instead of repeating environment-specific names.
+Write `{{ "{{" }}` for a literal `{{`.
+A `null` in `workers.kubernetes.extraEnv` removes an inherited worker variable.
+
+```yaml
+# shared-values.yaml
+matrix:
+  serverName: chat.example.com
+env:
+  extra:
+    MINDROOM_PUBLIC_URL: "https://{{ .Values.matrix.serverName }}"
+    OPENAI_BASE_URL: "http://llm-proxy.{{ .Release.Namespace }}.svc.cluster.local:8080/v1"
+    OPENAI_API_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: mindroom-secrets
+          key: OPENAI_API_KEY
+    UPSTREAM_JWT_AUDIENCE:
+      value: shared-audience
+  envFrom:
+    10-secrets:
+      secretRef:
+        name: mindroom-secrets
+extraVolumes:
+  session-state:
+    persistentVolumeClaim:
+      claimName: mindroom-session-state
+  knowledge-db:
+    persistentVolumeClaim:
+      claimName: mindroom-knowledge-db
+extraVolumeMounts:
+  session-state:
+    mountPath: /app/session_state
+  knowledge-db:
+    mountPath: /app/agent_data/knowledge_db
+```
+
+```yaml
+# staging-values.yaml, passed after shared-values.yaml
+matrix:
+  serverName: staging.example.com
+env:
+  extra:
+    OPENAI_API_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: staging-secrets
+    UPSTREAM_JWT_AUDIENCE:
+      value: null
+      valueFrom:
+        secretKeyRef:
+          name: staging-secrets
+          key: UPSTREAM_JWT_AUDIENCE
+  envFrom:
+    10-secrets:
+      secretRef:
+        name: staging-secrets
+extraVolumes:
+  knowledge-db: null
+extraVolumeMounts:
+  knowledge-db: null
+```
+
 ## Control-Plane NetworkPolicy
 
 The chart can create an optional NetworkPolicy for the control-plane pod, so operators can restrict runtime API ingress to an edge proxy and known clients.
@@ -419,7 +494,7 @@ The chart rejects the unsafe default combination of chart-managed approved egres
 
 Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` entries, including `valueFrom` Secret references.
 Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
-Both lists default to empty and apply only to the chart-managed Agent Vault server.
+Both default to empty, accept the map form described in [Layering Values Files](#layering-values-files), and apply only to the chart-managed Agent Vault server.
 Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
 The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
 

@@ -80,7 +80,7 @@
 {{- $mountPaths = append $mountPaths (clean .Values.stateStorage.syncContinuity.mountPath) -}}
 {{- end -}}
 {{- end -}}
-{{- range .Values.extraVolumeMounts -}}
+{{- range include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray -}}
 {{- if .mountPath -}}
 {{- $mountPaths = append $mountPaths (clean .mountPath) -}}
 {{- end -}}
@@ -221,7 +221,7 @@
 {{- fail (printf "providerCredentials[%d].key is required" $index) -}}
 {{- end -}}
 {{- $envName := index $providerCredentialEnvMap $entry.provider -}}
-{{- range $extraEnv := $.Values.env.extra -}}
+{{- range $extraEnv := include "mindroom-runtime.envList" (list $ $.Values.env.extra "env.extra") | fromJsonArray -}}
 {{- if eq (default "" $extraEnv.name) $envName -}}
 {{- fail (printf "providerCredentials[%d] and env.extra both set %s; remove one of them" $index $envName) -}}
 {{- end -}}
@@ -306,9 +306,9 @@
 {{- if $agentVault.server.smtp.enabled -}}
 {{- $managedVaultEnv = concat $managedVaultEnv (list "AGENT_VAULT_SMTP_HOST" "AGENT_VAULT_SMTP_PORT" "AGENT_VAULT_SMTP_TLS_MODE" "AGENT_VAULT_SMTP_FROM_NAME" "AGENT_VAULT_SMTP_USERNAME" "AGENT_VAULT_SMTP_PASSWORD" "AGENT_VAULT_SMTP_FROM") -}}
 {{- end -}}
-{{- range $index, $entry := $agentVault.server.extraEnv -}}
+{{- range $entry := include "mindroom-runtime.envList" (list $ $agentVault.server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray -}}
 {{- if has (default "" $entry.name) $managedVaultEnv -}}
-{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv[%d] cannot override chart-managed %s" $index $entry.name) -}}
+{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv cannot override chart-managed %s" $entry.name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

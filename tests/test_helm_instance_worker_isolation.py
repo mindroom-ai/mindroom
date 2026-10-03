@@ -2265,7 +2265,7 @@ def test_runtime_chart_agent_vault_server_rejects_managed_environment(env_name: 
 
     if env_name == "AGENT_VAULT_MASTER_PASSWORD" or smtp_enabled:
         assert completed.returncode != 0
-        assert f"server.extraEnv[0] cannot override chart-managed {env_name}" in completed.stderr
+        assert f"server.extraEnv cannot override chart-managed {env_name}" in completed.stderr
     else:
         completed.check_returncode()
         docs = [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]

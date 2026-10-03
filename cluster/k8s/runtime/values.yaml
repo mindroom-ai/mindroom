@@ -246,11 +246,14 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
+# The env lists, Agent Vault server env lists, extraVolumes, and extraVolumeMounts accept
+# either a list or a map keyed by entry name; see "Layering Values Files" in the README.
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
-  extra: []
+  # String values are rendered with tpl, for example "{{ .Release.Namespace }}".
+  extra: null
   # Raw Kubernetes EnvFromSource entries appended to the MindRoom container.
-  envFrom: []
+  envFrom: null
 
 apiAuth:
   # Worker tool code can reach the primary API, on localhost from the static_runner sidecar or over the
@@ -369,6 +372,7 @@ workers:
     ownerDeploymentName: ""
     nodeName: ""
     colocateWithControlPlaneNode: false
+    # Worker env vars as NAME: value; string values are rendered with tpl and null removes an entry.
     extraEnv: {}
     extraLabels: {}
     extraAnnotations: {}
@@ -458,9 +462,9 @@ workers:
         masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
         # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
         # Cannot override the chart-managed master password or enabled SMTP settings.
-        extraEnv: []
+        extraEnv: null
         # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
-        envFrom: []
+        envFrom: null
         persistence:
           enabled: true
           size: 1Gi
@@ -581,6 +585,7 @@ egressProxy:
     namespace: ""
     port: 3128
     scheme: http
+  # Entries are rendered with tpl, for example "api.{{ .Release.Namespace }}.svc.cluster.local".
   noProxy:
     - localhost
     - 127.0.0.1
@@ -688,5 +693,5 @@ approvedEgress:
 
 initContainers: []
 extraContainers: []
-extraVolumes: []
-extraVolumeMounts: []
+extraVolumes: null
+extraVolumeMounts: null
