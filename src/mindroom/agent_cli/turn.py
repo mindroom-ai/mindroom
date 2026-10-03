@@ -459,7 +459,7 @@ class LiveTurnTools(TurnToolBridge):
         parent = f"native-{uuid4().hex}"
         try:
             async with self._window(parent):
-                with bound_agent_cli_shell_env(replace(self.shell_env, window=parent)):
+                with bound_agent_cli_shell_env(self.shell_env, window=parent):
                     result = await run()
         finally:
             media = self._media.pop(parent, [])
@@ -480,7 +480,7 @@ class LiveTurnTools(TurnToolBridge):
             raise RuntimeError(msg)
         entrypoint = binding.function.entrypoint
         assert entrypoint is not None
-        with bound_agent_cli_shell_env(replace(self.shell_env, window=window)):
+        with bound_agent_cli_shell_env(self.shell_env, window=window):
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(**arguments)
             # Sync calls must finish before the owning operation's lifetime ends.

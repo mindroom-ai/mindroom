@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 
 if TYPE_CHECKING:
@@ -46,9 +46,9 @@ _CURRENT: ContextVar[AgentCliShellEnv | None] = ContextVar("agent_cli_shell_env"
 
 
 @contextmanager
-def bound_agent_cli_shell_env(shell_env: AgentCliShellEnv) -> Iterator[None]:
-    """Export the response's CLI environment to shell commands started in this context."""
-    token = _CURRENT.set(shell_env)
+def bound_agent_cli_shell_env(shell_env: AgentCliShellEnv, *, window: str) -> Iterator[None]:
+    """Export the response's CLI environment, naming the shell command's ``window``, to commands started here."""
+    token = _CURRENT.set(replace(shell_env, window=window))
     try:
         yield
     finally:

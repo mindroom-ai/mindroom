@@ -5609,7 +5609,8 @@ async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
 
     with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
         with bound_agent_cli_shell_env(
-            AgentCliShellEnv("http://host.docker.internal:8765", "response-grant", window="bash-1"),
+            AgentCliShellEnv("http://host.docker.internal:8765", "response-grant"),
+            window="bash-1",
         ):
             minimal = await entrypoint(command)
         ordinary = await entrypoint(command)

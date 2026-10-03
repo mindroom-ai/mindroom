@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import time
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Never
 from uuid import uuid4
@@ -50,6 +51,7 @@ from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.run import RunContext
@@ -348,6 +350,51 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
     await owner.close()
 
 
+_COMMAND_TAG: ContextVar[str] = ContextVar("command_tag", default="none")
+
+
+@pytest.mark.asyncio
+async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp_path: Path) -> None:
+    """A call from the earlier of two running commands sees that command's context, not the newer one's."""
+
+    async def tag() -> str:
+        return _COMMAND_TAG.get()
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [tag], authorize)
+    first_open = asyncio.Event()
+    second_open = asyncio.Event()
+    first_called = asyncio.Event()
+    seen = {}
+
+    async def first() -> str:
+        first_open.set()
+        await second_open.wait()
+        seen["first"] = (await _settled_receipt(owner, "tag"))["outcome"]
+        first_called.set()
+        return "first"
+
+    async def second() -> str:
+        second_open.set()
+        await first_called.wait()
+        return "second"
+
+    async def run(label: str, command: Callable[[], Awaitable[str]]) -> object:
+        _COMMAND_TAG.set(label)
+        return await owner.run_native_shell(command)
+
+    async with asyncio.timeout(3):
+        first_task = asyncio.create_task(run("first", first))
+        await first_open.wait()
+        await asyncio.create_task(run("second", second))
+        await first_task
+
+    assert seen["first"] == "first"
+    await owner.close()
+
+
 @pytest.mark.asyncio
 async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_open(tmp_path: Path) -> None:
     """A shell command started through the CLI calls the CLI in its parent command's window, not the newest one."""
@@ -421,14 +468,17 @@ async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_anoth
     owner = await _native_owner(tmp_path, [change], authorize)
     leave = asyncio.Event()
 
+    opened = asyncio.Event()
+
     async def hold_open_window() -> None:
         async with owner._window("open"):
+            opened.set()
             await leave.wait()
 
     async with owner._window("closed"):
         pass
     holder = asyncio.create_task(hold_open_window())
-    await asyncio.sleep(0)
+    await opened.wait()
     try:
         for window, message in (
             (None, "did not name its shell command"),
