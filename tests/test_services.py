@@ -1040,29 +1040,40 @@ def test_requested_login_service_saves_usable_shell_provider_keys(tmp_path: Path
 
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
+    "env_line",
+    ["MATRIX_HOMESERVER=https://mindroom.chat", "MINDROOM_API_KEY=${MINDROOM_API_KEY}"],
+    ids=["other-keys", "shell-reference"],
+)
 def test_service_install_keeps_the_shell_dashboard_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     entry_point: str,
+    env_line: str,
 ) -> None:
-    """A dashboard key only exported in the shell is saved to `.env`, so the service never listens without it."""
+    """A dashboard key only exported in the shell is saved to `.env`, so the service never listens without it.
+
+    A `.env` line that reads the key from the shell does not hold it for the service, which runs without this shell.
+    """
     # Quotes, ` #` and a trailing space would change or vanish in an unquoted `.env` line, and `$` must stay literal.
     key = 'shell$key \'dash"board" #key '
+    # python-dotenv expands `${NAME}` from this process's environment, which stands in for the installing shell.
+    monkeypatch.setenv("MINDROOM_API_KEY", key)
+    (tmp_path / ".env").write_text(f"{env_line}\n", encoding="utf-8")
     runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
-    (tmp_path / ".env").write_text("MATRIX_HOMESERVER=https://mindroom.chat\n", encoding="utf-8")
     manager = _login_service_manager()
 
     if entry_point == "run --service":
         assert start_login_service(runtime_paths, manager) is True
     else:
         monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
-        monkeypatch.setenv("MINDROOM_API_KEY", key)
         with patch("mindroom.cli.service._get_service_manager", return_value=manager):
             result = runner.invoke(app, ["service", "install", "-y"])
         assert result.exit_code == 0, result.output
 
     manager.install_service.assert_called_once_with()
     # The service sees only its unit's paths and `.env`, never this shell.
+    monkeypatch.delenv("MINDROOM_API_KEY")
     service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
     assert service_runtime.env_value("MINDROOM_API_KEY") == key
     assert dashboard_requires_credential(service_runtime)
