@@ -1692,6 +1692,31 @@ class TestSidecarResolution:
 
         assert client.downloads == ["mxc://s/long"]
 
+    async def test_an_unedited_message_whose_relations_fill_the_walk_reads_whole(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only falling back from an edit that was on screen is unproven, so a long thread root needs no notice."""
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        reaction = {
+            "event_id": "$reaction",
+            "sender": BOB,
+            "origin_server_ts": 2_000,
+            "type": "m.reaction",
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$long", "key": "x"}},
+        }
+        client = FakeClient(
+            events={"$long": source},
+            relations={"$long": [reaction]},
+            sidecars={"mxc://s/long": self._payload("whole")},
+        )
+
+        assert await hydrator(alice, client, max_fetched_events=1).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["whole"]
+
     async def test_a_streamed_answer_downloads_only_the_revision_that_won(
         self,
         alice: PrincipalStore,
@@ -1929,6 +1954,65 @@ class TestPointRefetch:
             (await refreshes(alice))[0],
         )
         assert await bodies(alice) == ["second"]
+
+    @pytest.mark.parametrize(
+        ("ceiling", "expected"),
+        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        ids=["edits_past_ceiling", "edit_before_ceiling"],
+    )
+    async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
+        self,
+        alice: PrincipalStore,
+        ceiling: int,
+        expected: str,
+    ) -> None:
+        """A walk stopped before any of the sender's edits cannot vouch for the original.
+
+        Relations arrive newest first, so enough reactions sent after the
+        surviving edit end the walk before it. Installing the original as
+        though it had never been edited would let any room member roll the
+        message back. An edit by the sender found before the ceiling is still
+        their newest and needs no notice.
+        """
+        await admit_all(
+            alice,
+            [
+                raw("$m", "first"),
+                raw("$e1", "second", ts=2_000, replaces="$m"),
+                raw("$e2", "third", ts=3_000, replaces="$m"),
+            ],
+        )
+        deletion = parse(redaction("$r", "$e2", ts=4_000))
+        await alice.admit(
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
+        )
+        reactions = [
+            {
+                "event_id": f"$reaction{index}",
+                "sender": BOB,
+                "origin_server_ts": 5_000 + index,
+                "type": "m.reaction",
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$m", "key": str(index)}},
+            }
+            for index in range(3)
+        ]
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    raw("$e1", "second", ts=2_000, replaces="$m"),
+                    raw("$e2", "third", ts=3_000, replaces="$m", redacted=True),
+                    *reactions,
+                ],
+            },
+        )
+
+        assert await hydrator(alice, client, max_fetched_events=ceiling).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == [expected]
+        assert await refreshes(alice) == ()
 
     async def test_the_original_is_restored_once_superseded_edits_are_purged(
         self,

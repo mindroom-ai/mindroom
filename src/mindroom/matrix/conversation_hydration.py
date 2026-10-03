@@ -379,14 +379,19 @@ class _Walk:
     It forces ``complete`` down, because a conversation missing an event nobody
     could read is not whole. It is kept as its own field anyway, because
     "stopped early" and "read everything and understood some of it" call for
-    opposite responses from a point refetch: the first still found the newest
-    revision, since relations arrive newest first, and the second may have
-    dropped exactly the edit it was sent to fetch.
+    opposite responses from a point refetch: the first still found the sender's
+    newest edit if it found any of theirs, since relations arrive newest first,
+    and the second may have dropped exactly the edit it was sent to fetch.
+
+    ``ceiling_reached`` is what lets a point refetch tell those apart, because
+    an unreadable event forces ``complete`` down as well. Only the relation
+    walk sets it.
     """
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
     unreadable: _UnreadableHistory = field(default_factory=_UnreadableHistory)
+    ceiling_reached: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -962,6 +967,7 @@ class ConversationHydrator:
         admitted = 0
         fetched = 0
         complete = True
+        ceiling_reached = False
         if unreadable is None:
             unreadable = _UnreadableHistory()
         client = self._client()
@@ -1009,6 +1015,7 @@ class ConversationHydrator:
                                     break
                     if fetched >= self.max_fetched_events:
                         complete = False
+                        ceiling_reached = True
                         # Said out loud for the same reason the room walk says
                         # it: this is not the window being met, it is a
                         # conversation whose remaining relations cost more than
@@ -1029,7 +1036,12 @@ class ConversationHydrator:
                 f"conversation would be missing indirectly related events"
             )
             raise _HydrationError(msg) from error
-        return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
+        return _Walk(
+            events=tuple(events),
+            complete=complete,
+            unreadable=unreadable,
+            ceiling_reached=ceiling_reached,
+        )
 
     async def _fetch_room(self, room_id: str) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
@@ -1195,6 +1207,18 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
+            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+        elif (
+            relations.ceiling_reached
+            and revision.event_id == request.logical_event_id
+            and request.revision_event_id != request.logical_event_id
+        ):
+            # Relations arrive newest first, so a sender's edit found before the
+            # ceiling is still their newest. Finding none proves nothing once
+            # the screen held an edit, because anyone in the room can push the
+            # sender's surviving edits past the ceiling with relations of their
+            # own. The original gets the same notice rather than passing as
+            # unedited, and the debt still settles: another walk stops there too.
             content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
         return await self.store.install_refetched_revision(
             request,

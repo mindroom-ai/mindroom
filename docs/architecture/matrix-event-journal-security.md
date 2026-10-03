@@ -166,6 +166,8 @@ When such an edit cannot be read and is newer than every readable revision, the 
 
 Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
 
+When the screen held an edit and the relation walk stops at its event ceiling before finding any edit by the original sender, the refetch installs the original with the same notice, because other members' relations can push the sender's surviving edits past the ceiling.
+
 Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
