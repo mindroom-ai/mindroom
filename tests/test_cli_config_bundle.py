@@ -373,7 +373,7 @@ def _apply(source: Path, target: Path, *args: str) -> tuple[int, dict[str, objec
         ("applies", ["--rollback-on-failure"], "applied", 0, "candidate"),
         ("rejects", ["--rollback-on-failure"], "rolled_back", 3, "previous"),
         ("rejects", [], "failed", 2, "candidate"),
-        ("rejects_both", ["--rollback-on-failure"], "unconfirmed", 4, "previous"),
+        ("rejects_then_stalls", ["--rollback-on-failure"], "unconfirmed", 4, "previous"),
         ("keeps_previous", ["--rollback-on-failure"], "pending", 1, "candidate"),
         ("needs_restart", ["--rollback-on-failure"], "restart_required", 5, "candidate"),
         ("disconnects", ["--rollback-on-failure"], "unconfirmed", 4, "candidate"),
@@ -399,8 +399,8 @@ def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
             return {"status": "applied", "fingerprint": previous_fingerprint}
         if runtime == "disconnects":
             return None
-        if runtime == "rejects_both" or (runtime == "rejects" and current != previous_fingerprint):
-            return {"status": "failed", "fingerprint": current}
+        if runtime == "rejects_then_stalls" or (runtime == "rejects" and current != previous_fingerprint):
+            return {"status": "failed", "fingerprint": _fingerprint_of(source)}
         return {"status": "restart_required" if runtime == "needs_restart" else "applied", "fingerprint": current}
 
     _serve_runtime(monkeypatch, respond)
@@ -412,7 +412,7 @@ def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
     assert (target / "config.yaml").read_text() == expected
     if active == "previous":
         assert receipt["rollback"]["digest"] == first["digest"]
-        assert receipt["rollback_runtime_status"] == ("applied" if status == "rolled_back" else "failed")
+        assert receipt["rollback_runtime_status"] == ("applied" if status == "rolled_back" else "pending")
         assert (tmp_path / "active.previous/config.yaml").read_text() == "agents: {}\n# candidate\n"
     else:
         assert receipt["rollback"] is None
