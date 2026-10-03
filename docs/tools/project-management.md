@@ -110,7 +110,7 @@ Only one workspace template renders at a time, and a call that arrives while ano
 Outside Linux, which is the only platform that enforces that memory limit, workspace templates may only substitute `{{ NAME }}`.
 A workspace template file holds at most 64 KiB, and one `apply_template` call reads at most 64 KiB of template text, renders at most 65,536 characters within 5 seconds, and expands to at most 100 todos, sub-templates included.
 One `list_templates` call examines at most 1,024 entries of `todo/templates`, reads at most 1 MiB of workspace template files, and stops listing workspace templates with a warning when the next file would exceed that.
-Workspace templates the call skips once that budget is spent still hide the built-in template of the same name, as they do for `apply_template`.
+Any workspace template file hides the built-in template of the same name, even one the call skips or cannot read, because `apply_template` uses the workspace file.
 Each workspace template render starts a process, so one call fits roughly 80 workspace sub-template renders in those 5 seconds.
 
 ### Native Auto-Poke

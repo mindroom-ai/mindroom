@@ -778,6 +778,29 @@ def test_list_templates_charges_unreadable_workspace_templates_against_its_budge
     assert "`parallel-review-loop`" in listing
 
 
+@pytest.mark.parametrize("unlisted", ["unscanned", "unparseable"])
+def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted: str,
+) -> None:
+    """A workspace template the listing leaves out still hides the built-in of its name, because apply_template uses it."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    if unlisted == "unscanned":
+        # The entry scan stops before reaching the template, as when worker code fills the window with other entries.
+        monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 0)
+        _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: Workspace todo\n"))
+    else:
+        _write_workspace_template(config, "mindroom-dev", 'name: mindroom-dev\nversion: "1"\ntodos: [\n')
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
+
+
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
     """A workspace template that shadows a built-in name should not inherit the built-in schema."""
     config = _config(tmp_path)
