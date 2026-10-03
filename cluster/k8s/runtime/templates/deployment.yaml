@@ -509,7 +509,7 @@ spec:
             {{- range .Values.stateStorage.extraSubPaths }}
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" $ }}
               mountPath: {{ .mountPath }}
-              subPath: {{ default .name .subPath }}
+              subPath: {{ default .name .subPath | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.sessionStorage.enabled }}

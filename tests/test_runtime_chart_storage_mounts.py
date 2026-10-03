@@ -14,6 +14,7 @@ from mindroom.runtime_env_policy import SESSION_STORAGE_PATH_ENV
 
 RUNTIME_CHART_DIR = Path(__file__).resolve().parents[1] / "cluster" / "k8s" / "runtime"
 _BASE_VALUES: dict[str, Any] = {"eventCache": {"postgres": {"auth": {"password": "test-password"}}}}
+_STATE = {"enabled": True, "existingClaim": "mindroom-state"}
 
 
 def _helm_template(tmp_path: Path, values: dict[str, Any]) -> subprocess.CompletedProcess[str]:
@@ -98,6 +99,26 @@ def test_state_storage_extra_subpaths_are_mounted_and_prepared_by_the_init_conta
     ]
 
 
+def test_state_storage_extra_subpaths_stay_strings_when_they_look_like_numbers_or_booleans(tmp_path: Path) -> None:
+    """Subpaths YAML would otherwise retype, from name or subPath, still render as strings."""
+    docs = _render(
+        tmp_path,
+        {
+            "stateStorage": {
+                **_STATE,
+                "extraSubPaths": [
+                    {"name": "2026", "mountPath": "/app/a"},
+                    {"name": "b", "mountPath": "/app/b", "subPath": "on"},
+                ],
+            },
+        },
+    )
+    mounts = {mount["mountPath"]: mount for mount in _runtime_container(docs)["volumeMounts"]}
+
+    assert mounts["/app/a"]["subPath"] == "2026"
+    assert mounts["/app/b"]["subPath"] == "on"
+
+
 def test_session_storage_creates_a_pvc_and_points_the_runtime_at_it(tmp_path: Path) -> None:
     """Chart-managed session storage gets its own PVC, mount, and session storage path."""
     docs = _render(
@@ -145,9 +166,6 @@ def test_knowledge_storage_can_create_a_pvc(tmp_path: Path) -> None:
         "accessModes": ["ReadWriteMany"],
         "resources": {"requests": {"storage": "10Gi"}},
     }
-
-
-_STATE = {"enabled": True, "existingClaim": "mindroom-state"}
 
 
 @pytest.mark.parametrize(
