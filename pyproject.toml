@@ -531,8 +531,9 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
-# Exact pins for everything uv installs into isolated build environments, so release, desktop-helper,
-# and image builds run build code fixed by this revision rather than whatever PyPI serves that day.
+# Exact version pins for everything uv installs into isolated build environments, so release, desktop-helper,
+# and image builds install only the build package versions this revision names.
+# uv checks no file hashes here, so a file later added to a pinned release on PyPI can still be installed.
 # uv build, uv sync (through uv.lock), and uv pip run with --project all read these.
 # hatchling, hatch-vcs, and their requirements build this project; editable installs add editables.
 # Locked dependencies that publish only sdists build with setuptools; pyscreeze adds wheel,
