@@ -111,17 +111,12 @@ def _load_identity(trusted_base_path: Path, scope_root: Path, record_path: Path)
 
 def _primary_record_path(trusted_base_path: Path, scope_root: Path) -> Path:
     """Return the primary's copy of one scope record, below the tracking directory that no worker mounts."""
+    # Same storage-relative layout as `constants.primary_records_dir`, which needs runtime paths this store lacks.
     return trusted_base_path / "tracking" / scope_root.relative_to(trusted_base_path) / _RECORD_FILENAME
 
 
-def _write_primary_record(trusted_base_path: Path, scope_root: Path, identity: PrivateInstanceIdentity) -> None:
-    write_json_file_durable(
-        _primary_record_path(trusted_base_path, scope_root),
-        _identity_payload(identity),
-        indent=2,
-        sort_keys=True,
-        trailing_newline=True,
-    )
+def _write_record(record_path: Path, identity: PrivateInstanceIdentity) -> None:
+    write_json_file_durable(record_path, _identity_payload(identity), indent=2, sort_keys=True, trailing_newline=True)
 
 
 def ensure_private_instance_identity(
@@ -146,7 +141,7 @@ def ensure_private_instance_identity(
         # Handling: the requester's next turn copies its matching record; until then the thread exporter gives that instance no target and clears its export tree.
         # Coverage: tests/test_private_instance_identity.py::test_private_instances_for_agent_ignores_a_record_the_primary_never_wrote.
         if not _primary_record_path(trusted_base_path, scope_root).exists():
-            _write_primary_record(trusted_base_path, scope_root, identity)
+            _write_record(_primary_record_path(trusted_base_path, scope_root), identity)
         return identity
 
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=True)
@@ -158,14 +153,8 @@ def ensure_private_instance_identity(
         if _scope_has_preexisting_data(trusted_scope_root):
             return None
         # The copy comes first, so a scope record the primary wrote always has one.
-        _write_primary_record(trusted_base_path, trusted_scope_root, requested_identity)
-        write_json_file_durable(
-            trusted_scope_root / _RECORD_FILENAME,
-            _identity_payload(requested_identity),
-            indent=2,
-            sort_keys=True,
-            trailing_newline=True,
-        )
+        _write_record(_primary_record_path(trusted_base_path, trusted_scope_root), requested_identity)
+        _write_record(trusted_scope_root / _RECORD_FILENAME, requested_identity)
         return requested_identity
 
 

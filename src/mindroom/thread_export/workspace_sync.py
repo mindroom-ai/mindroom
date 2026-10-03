@@ -447,7 +447,7 @@ def _private_targets(
             continue
         if instance.requester_id is None:
             logger.warning(
-                "Clearing exports of private instance without valid core identity",
+                "Clearing exports of private instance without an owner the primary recorded",
                 agent_name=agent_name,
                 instance_root=str(instance.state_root),
             )
