@@ -348,7 +348,7 @@ def persist_stopped_attempt_snapshot(
         assert isinstance(earlier.metadata, dict)
         if earlier.metadata.get(_STOPPED_ATTEMPT_KEY) == attempt:
             return
-        run_id = earlier.run_id
+        run_id = earlier.run_id or run_id
         if isinstance(earlier.content, str) and earlier.content:
             snapshot = replace(
                 snapshot,
