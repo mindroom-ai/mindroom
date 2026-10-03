@@ -536,25 +536,17 @@ async def _resume(
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
-        # Several backend replicas may resume a torn-down instance at once; only the one that claims it while it
-        # is still deprovisioned deploys it and mints its key.
-        await _reprovision(
-            sb,
-            instance_id,
-            subscription,
-            resume_lifecycle_hold=True,
-            expected_status="deprovisioned" if torn_down else None,
-        )
+        await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
     # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
-    current = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
+    current = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash,status") or {}
     try:
         await set_instance_openrouter_key_disabled(current, disabled=False)
     except OpenRouterKeyNotFoundError:
         # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one.
         update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
-        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=True)
+        await _reprovision(sb, current, subscription, resume_lifecycle_hold=True)
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
@@ -595,7 +587,7 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     alignment = _plan_alignment(instance, subscription["tier"])
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
-        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=False)
+        await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
         try:
             await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
@@ -607,18 +599,14 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
 
 
 async def _reprovision(
-    sb: Client,
-    instance_id: Any,
-    subscription: dict[str, Any],
-    *,
-    resume_lifecycle_hold: bool,
-    expected_status: str | None = None,
+    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], *, resume_lifecycle_hold: bool
 ) -> None:
     """Redeploy an instance for its subscription's tier.
 
     Only resuming a hold passes `resume_lifecycle_hold`; any other redeploy stays stopped when a hold, or an account
     deletion, lands while it runs.
-    With `expected_status`, the redeploy claims the instance only while it still has that status.
+    The redeploy claims the instance only while it still has the status this run read, so instead of overlapping a
+    provision that claimed it since, such as a redeploy by another backend replica, it gets `InstanceClaimLostError`.
     """
     await provision_instance(
         sb,
@@ -626,11 +614,11 @@ async def _reprovision(
             "subscription_id": subscription["id"],
             "account_id": subscription["account_id"],
             "tier": subscription["tier"],
-            "instance_id": instance_id,
+            "instance_id": instance["instance_id"],
         },
         background_tasks=None,
         resume_lifecycle_hold=resume_lifecycle_hold,
-        expected_status=expected_status,
+        expected_status=instance["status"],
     )
 
 

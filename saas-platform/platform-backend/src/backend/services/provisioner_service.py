@@ -729,7 +729,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
     Runs that claim the instance without a condition may each create a key, but only the first one recorded is
-    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying.
+    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying. Such a run can
+    still revoke a key that another run recorded but has not published yet, so the lifecycle claims with
+    `expected_status`.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")

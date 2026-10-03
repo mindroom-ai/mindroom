@@ -347,6 +347,42 @@ async def test_resume_of_a_torn_down_instance_another_replica_claimed_mints_no_k
     assert platform.instance()["lifecycle_stopped_at"] is not None
 
 
+@pytest.mark.asyncio
+async def test_plan_redeploy_never_revokes_the_key_another_replica_recorded_but_has_not_published(
+    platform: Platform,
+) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    read_instances = FakeQuery.execute
+
+    def claim_after_read(query: FakeQuery) -> FakeResult:
+        # Another replica claims the instance right after this run read it, and records its new key before it
+        # writes the key into the still empty instance Secret.
+        result = read_instances(query)
+        if query.table_name == "instances" and query.action == "select":
+            platform.instance().update({"status": "provisioning", "openrouter_key_hash": "hash_other"})
+        return result
+
+    service = "backend.services.provisioner_service"
+    with (
+        patch("backend.services.instance_lifecycle.provision_instance", provision_instance),
+        patch.object(FakeQuery, "execute", claim_after_read),
+        patch(f"{service}.OPENROUTER_PROVISIONING_API_KEY", "sk-or-v1-management"),
+        patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
+        patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
+        patch(f"{service}.set_openrouter_key_limit", Mock()),
+        patch(f"{service}.delete_openrouter_key") as delete_key,
+        patch(f"{service}.create_openrouter_key") as mint,
+    ):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    delete_key.assert_not_called()
+    mint.assert_not_called()
+    assert summary.errors == []
+    assert platform.instance()["openrouter_key_hash"] == "hash_other"
+    assert platform.instance()["status"] == "provisioning"
+
+
 def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active"))
     platform.db.tables["instances"].append(_instance("stopped"))
