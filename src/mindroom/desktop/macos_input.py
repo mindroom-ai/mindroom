@@ -83,8 +83,8 @@ def drag(
     if before_press is not None:
         before_press()
     point = start
+    check(start)
     try:
-        check(start)
         _mouse(api.kCGEventLeftMouseDown, start, api.kCGMouseButtonLeft)
         for step in range(1, 21):
             target = (

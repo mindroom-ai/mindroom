@@ -95,7 +95,8 @@ final class DesktopControlStore: ObservableObject {
     }
 
     var replaceSessionMessage: String {
-        "This replaces the saved login on \(status.pairing.homeserver ?? "") with a new device on \(homeserver). You will need to connect the new device again."
+        let saved = status.pairing.homeserver.map { " on \($0)" } ?? ""
+        return "This replaces the saved login\(saved) with a new device on \(homeserver). You will need to connect the new device again."
     }
 
     var canEditBrowserConfiguration: Bool {
