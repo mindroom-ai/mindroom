@@ -70,6 +70,14 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # Remove when: MoviePy cleans temporary audio on every encoding exit.
 # Coverage: tests/test_moviepy_caption_output.py.
 
+# AGNO_COMPAT: MoviePy embed_captions names its default output from the last dot anywhere in the path.
+# Reason: Agno splits video_path at its last dot, so an extensionless video below a dotted or ./ directory
+# gets an output named after that directory and written outside it.
+# Upstream issue: Tracking gap; default-output tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: The SDK names the default output after the video's file name, beside the video.
+# Coverage: tests/test_moviepy_video_tools.py::test_default_caption_output_lands_next_to_the_input.
+
 # AGNO_COMPAT: MoviePyVideoTools reads and writes model-chosen media paths by name.
 # Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
 # in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
@@ -401,9 +409,10 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         all_caption_clips = []
         staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX))
         try:
-            # If no output path provided, create one based on input video
+            # If no output path provided, write one next to the input video, named after its file name
             if output_path is None:
-                output_path = video_path.rsplit(".", 1)[0] + "_captioned.mp4"
+                source = Path(video_path)
+                output_path = str(source.with_name(f"{source.stem}_captioned.mp4"))
 
             # Load video
             video = VideoFileClip(self._stage_video(video_path, staging))
