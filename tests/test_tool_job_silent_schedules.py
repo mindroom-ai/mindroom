@@ -452,7 +452,7 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
         await runtime.shutdown()
         runtime = tool_job_runtime(bot.runtime_paths.storage_root)
         await runtime.recover()
-        restored = pending_outcome(runtime, job_id, 0)
+        restored = pending_outcome(runtime, job_id)
         assert restored is not None
         assert restored.source_kind == SILENT_SCHEDULE_SOURCE_KIND
         assert owner.room_id is not None

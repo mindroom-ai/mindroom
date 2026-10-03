@@ -1,7 +1,7 @@
 """Generated tool job lifecycles checked against invariants that must hold on every path.
 
-Execution, approval continuation, cancellation, Stop, revocation, result consumption, failed saves, orderly restart,
-and crash recovery interleave at await boundaries.
+Execution, approval waits, cancellation, Stop, revocation, result consumption, failed saves, orderly restart, and crash
+recovery interleave at await boundaries.
 Blocking work runs inline, so an idle event loop marks the end of each step and a crash lands between two awaits.
 The oracle keeps the facts a caller observed and the outcome precedence the runtime documents, not its bookkeeping.
 """
@@ -18,12 +18,10 @@ from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import (
-    READY_STATUSES,
     TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
     JobClaim,
-    JobContinuationError,
     ToolJobRuntime,
     read_job_snapshot,
     saved_job_paths,
@@ -38,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-type Finish = Literal["completed", "failed", "raise", "pause", "self_cancel"]
+type Finish = Literal["completed", "failed", "raise", "self_cancel"]
 type Cleanup = Literal["none", "completed", "failed", "cancelled", "raise", "park", "classify"]
 type _Cause = Literal["cancel", "shutdown", "restart"]
 
@@ -50,9 +48,7 @@ _IDLE_ROUNDS = 10_000
 _LONG_RESULT = "x" * 600
 _WRITE = runtime_module.write_json_file_durable
 # Steps that act on the whole runtime; every other step needs its job to exist, except the one that starts it.
-_RUNTIME_ACTIONS = frozenset(
-    {"deliver", "restart", "restart_stop", "crash", "crash_shutdown", "fail_write", "die_on_write"},
-)
+_RUNTIME_ACTIONS = frozenset({"restart", "restart_stop", "crash", "crash_shutdown", "fail_write", "die_on_write"})
 _PAYLOAD_SUFFIX = ".result.json"
 
 
@@ -63,6 +59,8 @@ class Script:
     finish: Finish = "completed"
     # Parks until an explicit release instead of finishing at once.
     block: bool = False
+    # Waits for its approval cards while parked, as a paused background child does.
+    approval: bool = False
     # Cancelled while parked, it parks again until released, then re-raises or completes anyway.
     stubborn: bool = False
     unwind_completes: bool = False
@@ -75,7 +73,6 @@ class Action:
 
     kind: Literal[
         "start",
-        "continue",
         "release",
         "wait",
         "ack",
@@ -83,7 +80,6 @@ class Action:
         "cancel",
         "stop",
         "revoke",
-        "deliver",
         "restart",
         "restart_stop",
         "crash",
@@ -95,8 +91,6 @@ class Action:
     script: Script = Script()
     # The adapter cleanup every settlement of a started job runs.
     cleanup: Cleanup = "none"
-    # A continuation presents the previous generation.
-    stale: bool = False
     # A save fault lets this many eligible saves land first.
     skip: int = 0
 
@@ -124,11 +118,10 @@ class _Job:
     cleanup_gate: asyncio.Event = field(default_factory=asyncio.Event)
     observed: BackgroundJob | None = None
     stop_order: int | None = None
-    consumed: int | None = None
+    consumed: bool = False
     consumer: str | None = None
-    # What stopped each generation, in order; the first cause stands.
-    causes: dict[int, list[_Cause]] = field(default_factory=dict)
-    continued: set[int] = field(default_factory=set)
+    # What stopped the job, in order; the first cause stands.
+    causes: list[_Cause] = field(default_factory=list)
 
 
 class JobFuzzRunner:
@@ -152,9 +145,8 @@ class JobFuzzRunner:
         self._patch = pytest.MonkeyPatch()
         self._patch.setattr(runtime_module, "write_json_file_durable", self._write)
         self.jobs: dict[str, _Job] = {}
-        self.admissions: dict[tuple[str, int], _Admission] = {}
+        self.admissions: dict[str, _Admission] = {}
         self.claims: dict[str, _Claim] = {}
-        self.owed_withdrawals: set[str] = set()
         self.violations: list[str] = []
         self.runtime = self._open()
 
@@ -186,17 +178,15 @@ class JobFuzzRunner:
         await self.check()
 
     async def finish(self) -> None:
-        """Release all parked work: every job must become ready and every withdrawn card reported."""
+        """Release all parked work: every job must settle; then an orderly restart must change nothing."""
         self._fault = None
         self._release_all()
         await self._idle()
         await self.check()
         for job_id, entry in self.runtime._entries.items():
-            assert entry.job.status in READY_STATUSES, (job_id, entry.job.status)
+            assert entry.job.status in TERMINAL_STATUSES, (job_id, entry.job.status)
             assert entry.task is None or entry.task.done(), job_id
             assert entry.drain is None, job_id
-        await self._deliver()
-        assert not self.owed_withdrawals
         await self._restart()
         await self.check()
 
@@ -236,12 +226,22 @@ class JobFuzzRunner:
             return None
         return BackgroundOutcome(model.cleanup, f"cleanup {model.cleanup}")
 
-    def _operation(self, job_id: str, generation: int, script: Script) -> Callable[[], Awaitable[BackgroundOutcome]]:
-        admission = self.admissions[job_id, generation] = _Admission(script)
+    def _operation(self, job_id: str, script: Script) -> Callable[[], Awaitable[BackgroundOutcome]]:
+        admission = self.admissions[job_id] = _Admission(script)
+
+        async def awaiting(*, awaiting: bool) -> None:
+            try:
+                await self.runtime.set_awaiting_approval(job_id, awaiting=awaiting)
+            except OSError:
+                # A failed status save fails the operation, which the runtime settles as failed.
+                admission.exit = "failed"
+                raise
 
         async def operation() -> BackgroundOutcome:
             admission.executions += 1
-            if script.block:
+            if script.approval:
+                await awaiting(awaiting=True)
+            if script.block or script.approval:
                 try:
                     await admission.gate.wait()
                 except asyncio.CancelledError:
@@ -252,14 +252,16 @@ class JobFuzzRunner:
                         raise
                     admission.exit = "completed"
                     return BackgroundOutcome("completed", "Finished while unwinding")
-            return _finish(admission, generation)
+            if script.approval:
+                await awaiting(awaiting=False)
+            return _finish(admission)
 
         return operation
 
     def _refused(self, job_id: str) -> Callable[[], Awaitable[BackgroundOutcome]]:
         async def operation() -> BackgroundOutcome:
-            self.violations.append(f"{job_id}: a refused continuation ran")
-            return BackgroundOutcome("failed", "refused continuation ran")
+            self.violations.append(f"{job_id}: a refused start ran")
+            return BackgroundOutcome("failed", "refused start ran")
 
         return operation
 
@@ -267,12 +269,9 @@ class JobFuzzRunner:
         return self.runtime._entries[job_id].job
 
     def _cause(self, job_id: str, cause: _Cause) -> None:
-        """Record why work stopped: running work at its generation, a paused approval at the fresh one it gets."""
-        job = self._current(job_id)
-        if job.status in TERMINAL_STATUSES or (job.status == "awaiting_approval" and cause != "cancel"):
-            return
-        generation = job.generation + 1 if job.status == "awaiting_approval" else job.generation
-        self.jobs[job_id].causes.setdefault(generation, []).append(cause)
+        """Record why work stopped while it still ran."""
+        if self._current(job_id).status not in TERMINAL_STATUSES:
+            self.jobs[job_id].causes.append(cause)
 
     async def _start(self, action: Action, job_id: str) -> None:
         options = {"tool_name": "tool", "depth": 0, "adapter": {}, "owner": job_owner()}
@@ -281,40 +280,13 @@ class JobFuzzRunner:
                 await self.runtime.start(job_id, operation=self._refused(job_id), **options)
             return
         self.jobs[job_id] = _Job(action.cleanup)
-        _, claim = await self.runtime.start(job_id, operation=self._operation(job_id, 0, action.script), **options)
+        _, claim = await self.runtime.start(job_id, operation=self._operation(job_id, action.script), **options)
         assert claim is not None
-        assert claim.generation == 0
         self.claims[job_id] = _Claim(claim, self._epoch, ready=False)
 
-    async def _continue(self, action: Action, job_id: str) -> None:
-        current = self._current(job_id)
-        expected = current.generation - 1 if action.stale else current.generation
-        applies = current.status == "awaiting_approval" and not action.stale and self.jobs[job_id].stop_order is None
-        generation = current.generation + 1
-        operation = self._operation(job_id, generation, action.script) if applies else self._refused(job_id)
-
-        async def resume() -> BackgroundJob:
-            return await self.runtime.continue_job(
-                job_id,
-                owner=job_owner(),
-                depth=0,
-                expected_generation=expected,
-                operation=operation,
-                adapter={"generation": generation},
-            )
-
-        if not applies:
-            with pytest.raises(JobContinuationError):
-                await resume()
-            return
-        resumed = await resume()
-        assert resumed.generation == generation
-        self.jobs[job_id].continued.add(current.generation)
-
     async def _release(self, _action: Action, job_id: str) -> None:
-        for (owner, _generation), admission in self.admissions.items():
-            if owner == job_id:
-                admission.gate.set()
+        if (admission := self.admissions.get(job_id)) is not None:
+            admission.gate.set()
         self.jobs[job_id].cleanup_gate.set()
 
     def _release_all(self) -> None:
@@ -332,10 +304,9 @@ class JobFuzzRunner:
             timeout=0,
             claim=None if held is None else held.claim,
         )
-        if result.job.status in READY_STATUSES:
-            # The only waiter always gets the ready generation's claim.
+        if result.job.status in TERMINAL_STATUSES:
+            # The only waiter always gets the outcome's claim.
             assert result.claim is not None
-            assert result.claim.generation == result.job.generation
             self.claims[job_id] = _Claim(result.claim, self._epoch, ready=True)
         else:
             assert result.claim is None
@@ -348,15 +319,15 @@ class JobFuzzRunner:
         del self.claims[job_id]
         self._sources += 1
         source = f"$source{self._sources}"
-        if held.epoch != self._epoch or held.claim.generation != self._current(job_id).generation:
-            # A claim from an earlier process, or on a generation a cancellation replaced, consumes nothing.
+        if held.epoch != self._epoch:
+            # A claim from an earlier process consumes nothing.
             with pytest.raises(ValueError, match="no longer belongs"):
                 await self.runtime.acknowledge_wait(job_id, held.claim, source_event_id=source)
             return
         await self.runtime.acknowledge_wait(job_id, held.claim, source_event_id=source)
         model = self.jobs[job_id]
-        if model.consumed != held.claim.generation:
-            model.consumed, model.consumer = held.claim.generation, source
+        if not model.consumed:
+            model.consumed, model.consumer = True, source
 
     async def _drop(self, _action: Action, job_id: str) -> None:
         if (held := self.claims.pop(job_id, None)) is not None:
@@ -388,14 +359,6 @@ class JobFuzzRunner:
         self._cause(job_id, "cancel")
         await self.runtime.cancel_revoked(denied=lambda job: job.job_id == job_id)
 
-    async def _deliver(self, _action: Action | None = None, _job_id: str | None = None) -> None:
-        """Report withdrawn approval cards as the delivery coordinator does, on its own schedule."""
-        taken = self.runtime.take_withdrawn_approvals()
-        for job_id in taken:
-            # A withdrawn card can never belong to a pause that is still current.
-            assert self._current(job_id).status != "awaiting_approval", job_id
-        self.owed_withdrawals -= taken
-
     async def _restart(self, action: Action | None = None, job_id: str | None = None) -> None:
         """Shut down in order, optionally Stopping a job while shutdown drains, then recover."""
         for owner in self.jobs:
@@ -423,7 +386,6 @@ class JobFuzzRunner:
             assert self._faults > faults, shutdown.exception()
             await self._lose_process()
             return
-        await self._deliver()
         await self._reopen()
 
     async def _restart_stop(self, action: Action, job_id: str) -> None:
@@ -446,12 +408,12 @@ class JobFuzzRunner:
             saved = read_job_snapshot(root / f"{job_id}.json")
             # Observation resumes from what was saved; memory a failed save never wrote is gone.
             model.observed = saved
-            if saved.status not in READY_STATUSES:
+            if saved.status not in TERMINAL_STATUSES:
                 # A shutdown under way left nothing durable; a saved cancellation or Stop did.
                 cancelled = saved.status == "cancel_requested" or saved.user_stop_receipt_order is not None
-                model.causes[saved.generation] = ["cancel", "restart"] if cancelled else ["restart"]
+                model.causes = ["cancel", "restart"] if cancelled else ["restart"]
                 # So did an outcome execution stopped with but no settlement saved.
-                if (admission := self.admissions.get((job_id, saved.generation))) is not None:
+                if (admission := self.admissions.get(job_id)) is not None:
                     admission.exit = None
         self._crashing = True
         await self._end_tasks()
@@ -463,8 +425,7 @@ class JobFuzzRunner:
     def _forget(self, job_id: str) -> None:
         del self.jobs[job_id]
         self.claims.pop(job_id, None)
-        for key in [key for key in self.admissions if key[0] == job_id]:
-            del self.admissions[key]
+        self.admissions.pop(job_id, None)
 
     def _resync(self) -> None:
         """After a failed save, keep what the runtime holds: a step it did not accept changed nothing."""
@@ -475,20 +436,12 @@ class JobFuzzRunner:
                 continue
             job, model = entry.job, self.jobs[job_id]
             model.stop_order = job.user_stop_receipt_order
-            model.consumed, model.consumer = job.consumed_generation, job.consumed_by_source
-            model.continued = {generation for generation in model.continued if generation < job.generation}
-            for key in [key for key in self.admissions if key[0] == job_id and key[1] > job.generation]:
-                del self.admissions[key]
-            for generation in [generation for generation in model.causes if generation > job.generation]:
-                del model.causes[generation]
-            if job.status == "awaiting_approval" and job.user_stop_receipt_order is not None:
-                # A saved Stop still owes this pause its cancellation, which recovery settles if nothing else does.
-                model.causes[job.generation + 1] = ["cancel"]
-            if job.status == "running" and job.generation in model.causes:
+            model.consumed, model.consumer = job.consumed, job.consumed_by_source
+            if job.status in {"running", "awaiting_approval"}:
                 # A cancellation that took effect would have saved its request.
-                model.causes[job.generation] = [cause for cause in model.causes[job.generation] if cause != "cancel"]
-            if (claim := entry.live_claim) is not None:
-                self.claims[job_id] = _Claim(claim, self._epoch, ready=job.status in READY_STATUSES)
+                model.causes = [cause for cause in model.causes if cause != "cancel"]
+            if (claim := entry.claim) is not None:
+                self.claims[job_id] = _Claim(claim, self._epoch, ready=job.status in TERMINAL_STATUSES)
 
     async def _end_tasks(self) -> None:
         current = asyncio.current_task()
@@ -517,12 +470,10 @@ class JobFuzzRunner:
         assert set(saved) == set(self.jobs)
         for job_id, before in saved.items():
             after = self._current(job_id)
-            stopped_pause = before.status == "awaiting_approval" and before.user_stop_receipt_order is not None
-            if before.status in READY_STATUSES and not stopped_pause:
+            if before.status in TERMINAL_STATUSES:
                 assert after == before, job_id
             else:
                 assert after.status in TERMINAL_STATUSES, (job_id, after.status)
-                assert after.generation == before.generation + int(stopped_pause), job_id
 
     async def _idle(self) -> None:
         """Yield until no task is runnable; with blocking work inline, every waiter then awaits a test gate."""
@@ -543,11 +494,11 @@ class JobFuzzRunner:
             if entry.saved:
                 assert read_job_snapshot(root / f"{job_id}.json") == job, job_id
             self._observe(job)
-        # The saved current generations' payloads exist and a replaced generation's file is gone; a failed save may
-        # leave the payload it wrote before its metadata until a retry or recovery settles it.
+        # Saved outcomes' payloads exist; a failed save may leave the payload it wrote before its metadata until a
+        # retry or recovery settles it.
         payloads = {
             saved: {
-                f"{entry.job.job_id}.g{entry.job.generation}{_PAYLOAD_SUFFIX}"
+                f"{entry.job.job_id}{_PAYLOAD_SUFFIX}"
                 for entry in self.runtime._entries.values()
                 if entry.job.has_result_payload and entry.saved is saved
             }
@@ -570,56 +521,28 @@ class JobFuzzRunner:
 
     def _pending(self, job_id: str) -> bool:
         job, model, held = self._current(job_id), self.jobs[job_id], self.claims.get(job_id)
-        claimed = held is not None and held.epoch == self._epoch and held.claim.generation == job.generation
-        return (
-            job.status in READY_STATUSES
-            and model.consumed != job.generation
-            and model.stop_order is None
-            and not claimed
-        )
+        claimed = held is not None and held.epoch == self._epoch
+        return job.status in TERMINAL_STATUSES and not model.consumed and model.stop_order is None and not claimed
 
     def _observe(self, job: BackgroundJob) -> None:
         model = self.jobs[job.job_id]
         previous, model.observed = model.observed, job
         assert job.user_stop_receipt_order == model.stop_order, job.job_id
-        assert (job.consumed_generation, job.consumed_by_source) == (model.consumed, model.consumer), job.job_id
+        assert (job.consumed, job.consumed_by_source) == (model.consumed, model.consumer), job.job_id
         if previous is not None:
-            self._transition(model, previous, job)
+            _check_transition(previous, job)
         if job.status in TERMINAL_STATUSES and (previous is None or previous.status not in TERMINAL_STATUSES):
             reason = job.result if job.status == "interrupted" else None
-            assert (job.status, reason) == self._expected(job.job_id, job.generation), job.job_id
+            assert (job.status, reason) == self._expected(job.job_id), job.job_id
 
-    def _transition(self, model: _Job, previous: BackgroundJob, job: BackgroundJob) -> None:
-        assert job.generation in {previous.generation, previous.generation + 1}, job.job_id
-        if job.generation > previous.generation:
-            # Only a continuation or a cancelled pause starts a generation.
-            assert previous.status == "awaiting_approval", job.job_id
-        elif previous.status == "awaiting_approval":
-            assert job.status == "awaiting_approval", job.job_id
-        elif previous.status == "cancel_requested":
-            assert job.status == "cancel_requested" or job.status in TERMINAL_STATUSES, job.job_id
-        if (
-            previous.status == "awaiting_approval"
-            and job.generation > previous.generation
-            and previous.generation not in model.continued
-        ):
-            # A pause that ended without its approval owes the withdrawal of the card that presented it.
-            self.owed_withdrawals.add(job.job_id)
-        if previous.status in TERMINAL_STATUSES:
-            assert (job.status, job.generation, job.result) == (
-                previous.status,
-                previous.generation,
-                previous.result,
-            ), job.job_id
-
-    def _expected(self, job_id: str, generation: int) -> tuple[str, str | None]:
-        """The documented outcome precedence for one settled generation."""
+    def _expected(self, job_id: str) -> tuple[str, str | None]:
+        """The documented outcome precedence for one settled job."""
         model = self.jobs[job_id]
-        admission = self.admissions.get((job_id, generation))
+        admission = self.admissions.get(job_id)
         exit_status = None if admission is None else admission.exit
-        causes = model.causes.get(generation, [])
+        causes = model.causes
         if not causes:
-            assert exit_status in TERMINAL_STATUSES, (job_id, generation, exit_status)
+            assert exit_status in TERMINAL_STATUSES, (job_id, exit_status)
             return exit_status, None
         # A cleanup that completed or failed outranks what execution stopped with.
         decided = {"completed": "completed", "failed": "failed", "raise": "failed"}.get(model.cleanup)
@@ -634,7 +557,15 @@ class JobFuzzRunner:
         return "interrupted", _SHUT_DOWN if causes[0] == "shutdown" else _RESTARTED
 
 
-def _finish(admission: _Admission, generation: int) -> BackgroundOutcome:
+def _check_transition(previous: BackgroundJob, job: BackgroundJob) -> None:
+    if previous.status == "cancel_requested":
+        assert job.status == "cancel_requested" or job.status in TERMINAL_STATUSES, job.job_id
+    if previous.status in TERMINAL_STATUSES:
+        # A settled outcome never changes again.
+        assert (job.status, job.result) == (previous.status, previous.result), job.job_id
+
+
+def _finish(admission: _Admission) -> BackgroundOutcome:
     finish = admission.script.finish
     if finish == "raise":
         admission.exit = "failed"
@@ -643,10 +574,6 @@ def _finish(admission: _Admission, generation: int) -> BackgroundOutcome:
     if finish == "self_cancel":
         admission.exit = "cancelled"
         raise asyncio.CancelledError
-    if finish == "pause":
-        admission.exit = "awaiting_approval"
-        payload = encode_result_payload(ToolResultPayload("paused")) if admission.script.payload else None
-        return BackgroundOutcome("awaiting_approval", approval_state={"generation": generation}, result_payload=payload)
     admission.exit = finish
     if not admission.script.payload:
         return BackgroundOutcome(finish, finish)

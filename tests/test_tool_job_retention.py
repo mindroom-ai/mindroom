@@ -24,7 +24,12 @@ from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
 from tests.response_runner_helpers import _bot
-from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    completed_delegation_job,
+    lookup,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -148,13 +153,13 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         directory = paths.storage_root / "tool_jobs"
         assert ("old" in runtime._entries) is not expired
         assert {path.name for path in directory.glob("old.*")} == (
-            set() if expired else {"old.json", "old.g0.result.json"}
+            set() if expired else {"old.json", "old.result.json"}
         )
         if expired:
             with pytest.raises(JobAccessError, match="not available"):
-                await runtime.lookup("old", owner=owner, depth=0)
+                await lookup(runtime, "old", owner=owner, depth=0)
         else:
-            saved = await runtime.lookup("old", owner=owner, depth=0)
+            saved = await lookup(runtime, "old", owner=owner, depth=0)
             assert await runtime.read_payload(saved) == {"value": "saved result"}
     finally:
         await coordinator.stop()

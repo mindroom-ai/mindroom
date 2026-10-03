@@ -55,15 +55,16 @@ from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    awaiting_approval,
     completed_delegation_job,
-    job_child,
-    job_owner,
     keep_child,
+    lookup,
     managed_team_config,
     pending_outcomes,
     start_delegation_job,
     team_coordinator,
     tool_job_runtime,
+    wait_for_status,
 )
 
 if TYPE_CHECKING:
@@ -237,7 +238,7 @@ async def test_revocation_cancels_hidden_work(tmp_path: Path, approval: bool) ->
     async def operation() -> BackgroundOutcome:
         started.set()
         if approval:
-            return BackgroundOutcome("awaiting_approval")
+            return await awaiting_approval(coordinator.runtime, child.delegation_id)
         await asyncio.Event().wait()
         raise AssertionError
 
@@ -250,8 +251,7 @@ async def test_revocation_cancels_hidden_work(tmp_path: Path, approval: bool) ->
         await start_delegation_job(coordinator.runtime, child, owner=fixture.owner, operation=operation, cancel=cleanup)
         await started.wait()
         if approval:
-            waited = await coordinator.runtime.wait(child.delegation_id, owner=fixture.owner, depth=0)
-            await coordinator.runtime.release_wait(child.delegation_id, waited.claim)
+            await wait_for_status(coordinator.runtime, child.delegation_id, "awaiting_approval")
         config.agents["lead"].delegate_to.clear()
         await coordinator._reconcile()
         assert await coordinator.runtime.list_jobs(owner=fixture.owner, depth=0) == []
@@ -336,7 +336,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     restored = team_coordinator(tmp_path, managed_team_config(tmp_path))
     await restored.initialize()
     await restored.runtime.recover()
-    job = await restored.runtime.lookup(fixture.job_id, owner=fixture.owner, depth=0)
+    job = await lookup(restored.runtime, fixture.job_id, owner=fixture.owner, depth=0)
     assert job.status == "interrupted"
     await restored.stop()
 
@@ -456,7 +456,7 @@ async def test_job_worker_retries_transient_authorization_scan(
         await asyncio.wait_for(retried.wait(), JOB_TEST_TIMEOUT)
         assert coordinator._task is worker
         assert not worker.done()
-        assert (await runtime.lookup(fixture.job_id, owner=fixture.owner, depth=0)).status == "running"
+        assert (await lookup(runtime, fixture.job_id, owner=fixture.owner, depth=0)).status == "running"
     finally:
         release.set()
         await asyncio.wait_for(coordinator.stop(), JOB_TEST_TIMEOUT)
@@ -745,39 +745,37 @@ async def test_sync_keeps_the_journal_of_an_initialize_that_ran_before_config(tm
 
 
 @pytest.mark.asyncio
-async def test_cancelled_pause_cards_expire_once_and_retry_after_a_failed_expiry(tmp_path: Path) -> None:
-    """The coordinator keeps a cancelled pause until its cards expire, then forgets it."""
+async def test_interrupted_job_cards_are_denied_once_the_approval_runtime_can(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delegation a restart interrupted denies its approval cards, retrying until an approval runtime is ready."""
     coordinator = ToolJobRuntimeCoordinator(
         test_runtime_paths(tmp_path),
         lambda: managed_team_config(tmp_path),
         lambda _: None,
         AgentReplyMembershipIndex(),
     )
-    runtime = tool_job_runtime(tmp_path)
-    coordinator._runtime = runtime
+    coordinator._runtime = tool_job_runtime(tmp_path)
+    monkeypatch.setattr(delegation_recovery, "interrupt_child", AsyncMock())
+    settled: list[str] = []
+    ready = False
 
-    async def pause() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
+    async def settle(job_id: str) -> bool:
+        settled.append(job_id)
+        return ready
 
-    expired: list[set[str]] = []
-    outcomes = iter([False, True])
-
-    async def expire_job_cards(job_ids: set[str]) -> bool:
-        expired.append(set(job_ids))
-        return next(outcomes)
-
-    manager = MagicMock(expire_job_cards=expire_job_cards)
+    monkeypatch.setattr(runtime_module, "settle_child_approvals", settle)
+    job = replace(completed_delegation_job(), status="running", result=None)
     try:
-        job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=pause)
-        waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
-        await runtime.cancel(job.job_id, owner=job_owner(), depth=0)
-        with patch.object(runtime_module.approval_manager, "get_approval_store", return_value=manager):
-            for _ in range(3):
-                await coordinator._expire_withdrawn_approval_cards()
+        await coordinator._interrupt_child(job)
+        await coordinator._reconcile()
+        ready = True
+        await coordinator._reconcile()
+        await coordinator._reconcile()
     finally:
-        await runtime.shutdown()
-    assert expired == [{job.job_id}, {job.job_id}]
+        await coordinator.runtime.shutdown()
+    assert settled == [job.job_id, job.job_id, job.job_id]
 
 
 @pytest.mark.asyncio

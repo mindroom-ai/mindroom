@@ -30,7 +30,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
-    pending_outcomes,
+    lookup,
     start_job,
     tool_job_runtime,
 )
@@ -106,47 +106,6 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
         agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
         names = [name for toolkit in agent.tools for name in toolkit.get_async_functions()]
         assert names.count("job") == 1
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -> None:
-    """Only native job wait projects external approval."""
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    try:
-        await start_job(
-            runtime,
-            "native",
-            tool_name="delegate",
-            depth=0,
-            kind="delegation",
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        waited = await runtime.wait("native", owner=owner, depth=0)
-        await runtime.release_wait("native", waited.claim)
-        model = DelegationModel(
-            id="test",
-            responses=[ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="native")])],
-        )
-        install_tool_job_execution(model)
-        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)])
-        with tool_runtime_context(context):
-            response = await agent.arun("wait", session_id=context.session_id)
-        assert response.requirements
-        assert response.requirements[0].needs_external_execution
-        assert response.requirements[0].tool_execution.approval_type == "mindroom_job_wait"
     finally:
         await runtime.shutdown()
 
@@ -264,7 +223,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         results = response.member_responses[0].tools
         assert json.loads(results[0].result)[0]["job_id"] == "member-job"
         assert results[1].result == "saved member answer"
-        assert (await runtime.lookup("member-job", owner=owner, depth=0)).consumed
+        assert (await lookup(runtime, "member-job", owner=owner, depth=0)).consumed
     finally:
         storage.close()
         await runtime.shutdown()
@@ -331,7 +290,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         tool = response.tools[0]
         assert tool.tool_call_error is (status == "failed")
         assert tool.result == expected_result
-        assert (await runtime.lookup("ordinary", owner=owner, depth=0)).consumed
+        assert (await lookup(runtime, "ordinary", owner=owner, depth=0)).consumed
     finally:
         storage.close()
         await runtime.shutdown()
@@ -449,7 +408,7 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
                 with pytest.raises(asyncio.CancelledError):
                     await waiting
             else:
-                (tmp_path / "tool_jobs" / "read.g0.result.json").unlink()
+                (tmp_path / "tool_jobs" / "read.result.json").unlink()
                 release.set()
                 assert await waiting == "Tool job is not available in this conversation."
         retried = await runtime.wait("read", owner=owner, depth=0, timeout=0)
@@ -511,44 +470,10 @@ async def test_cancel_acknowledges_only_saved_management_result(
         with tool_runtime_context(context):
             response = await run()
         assert json.loads(response.tools[0].result)["status"] == "cancelled"
-        job = await runtime.lookup("cancelled", owner=owner, depth=0)
+        job = await lookup(runtime, "cancelled", owner=owner, depth=0)
         assert job.consumed is not save_fails
     finally:
         storage.close()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_generic_wait_keeps_a_paused_child_approval(tmp_path: Path) -> None:
-    """Without the native projection, waiting on a paused child reports it and leaves its approval unconsumed."""
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    await start_job(
-        runtime,
-        "paused",
-        tool_name="delegate",
-        depth=0,
-        kind="delegation",
-        adapter={},
-        owner=owner,
-        operation=operation,
-    )
-    try:
-        with tool_runtime_context(context):
-            assert json.loads(await JobTools(paths, owner).job("wait", "paused"))["status"] == "awaiting_approval"
-        job = await runtime.lookup("paused", owner=owner, depth=0)
-        assert job.status == "awaiting_approval"
-        assert not job.consumed
-        assert pending_outcomes(runtime) != []
-    finally:
         await runtime.shutdown()
 
 

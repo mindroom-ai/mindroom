@@ -560,11 +560,11 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
         depth=0,
         source_event_id="$saved",
         status="completed",
-        payload_generation=0,
+        has_result_payload=True,
     )
-    (directory / "saved.json").write_text(json.dumps({"schema_version": 7, **asdict(saved)}))
+    (directory / "saved.json").write_text(json.dumps({"schema_version": 8, **asdict(saved)}))
     # Payload files are not job metadata, so parking neither reads nor warns about them.
-    (directory / "saved.g0.result.json").write_text("{}")
+    (directory / "saved.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
     instance = pin_background_tool_jobs(Config(), paths)
     with capture_logs() as logs:

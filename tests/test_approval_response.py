@@ -16,7 +16,7 @@ from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
 
 from mindroom.approval_execution import _collect_agent_continuation
-from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval_response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval_tools import approval_denial_context
 from mindroom.event_journal import ApprovalCall
 from mindroom.response_turn import PausedAttempt
@@ -419,14 +419,18 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
     origins = {("general", "add"): owner, ("other", "add"): "calculator"}
     if owner is None:
         with pytest.raises(RuntimeError, match="toolkit origin"):
-            await coordinator.plan_pause(
+            await plan_approval_calls(
                 ((tool, "call-1", "add", "general"),),
+                config=coordinator.config(),
+                runtime_paths=coordinator.runtime_paths,
                 requester_id="@user:localhost",
                 toolkit_owners=origins,
             )
     else:
-        plan = await coordinator.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-1", "add", "general"),),
+            config=coordinator.config(),
+            runtime_paths=coordinator.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners=origins,
         )

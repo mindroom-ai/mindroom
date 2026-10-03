@@ -144,7 +144,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_a_team_reply(tmp_p
             assert len(joined) == 1
             assert not isinstance(joined[0], str)
             assert 'job_id="member"' in joined[0].prompt
-        assert pending_outcome(runtime, "member", 0) is not None
+        assert pending_outcome(runtime, "member") is not None
     finally:
         await runtime.shutdown()
 
@@ -180,10 +180,10 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
         config.agents[changed_agent].worker_scope = "user"
         assert await runtime.list_jobs(owner=owner, depth=0) == []
         assert pending_outcomes(runtime) == []
-        assert pending_outcome(runtime, job.job_id, job.generation) is None
+        assert pending_outcome(runtime, job.job_id) is None
         with tool_runtime_context(context):
             assert [item async for item in join_conversation_jobs(set())] == []
-        for control in (runtime.lookup, runtime.wait, runtime.cancel):
+        for control in (runtime.wait, runtime.cancel):
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)
     finally:

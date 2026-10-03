@@ -19,7 +19,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import READY_STATUSES, TERMINAL_STATUSES, BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import message_origin, test_runtime_paths
@@ -189,7 +189,7 @@ class ReplyHoldFuzzRunner:
         with tool_runtime_context(self.context):
             for _ in range(step.jobs):
                 await self._start_job(reply.source, hold=step.hold)
-            attempted: set[tuple[str, int]] = set()
+            attempted: set[str] = set()
             while reply.joins < JOB_JOIN_LIMIT:
                 prompt = None
                 async for item in join_conversation_jobs(attempted):
@@ -300,12 +300,12 @@ class ReplyHoldFuzzRunner:
             assert live == self.model.replies[-1:], [job.job_id for job in outstanding]
         if live:
             # A holding reply retrieves every ready outcome as soon as it is ready.
-            ready = [job.job_id for job in outstanding if job.status in READY_STATUSES]
+            ready = [job.job_id for job in outstanding if job.status in TERMINAL_STATUSES]
             assert not ready, ready
         for job in self._jobs():
             consumer = self.model.consumers.get(job.job_id)
             # An outcome is retrieved once, by a reply no older than the turn that started the job.
-            assert job.consuming_source == consumer, (job.job_id, job.consuming_source, consumer)
+            assert job.consumed_by_source == consumer, (job.job_id, job.consumed_by_source, consumer)
             if consumer is not None:
                 assert self.model.orders[consumer] >= self.model.orders[self.model.sources[job.job_id]]
             if job.user_stop_receipt_order is not None and consumer is not None:

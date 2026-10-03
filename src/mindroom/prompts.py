@@ -608,8 +608,8 @@ Your workspace contains the corresponding receipt at .mindroom/delegation_receip
 
 
 DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept wait_timeout like other managed calls, so a child can keep working as a job.
-A human follow-up releases the wait while the child continues working.
-Once the wait is released, a child tool that requires approval pauses only the child.
+A newer message you answer releases the wait while the child continues working.
+A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
 Waiting neither restarts the child nor grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
 Direct API calls and nested delegation wait within their existing execution owner.

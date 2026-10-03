@@ -11,13 +11,13 @@ from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
 from mindroom.tool_jobs.consumption import consume_tool_job, restore_control, retain_claim
-from mindroom.tool_jobs.runtime import JobAccessError, format_job_handle, get_background_runtime, job_summary
+from mindroom.tool_jobs.runtime import format_job_handle, get_background_runtime, job_summary
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from agno.tools.function import Function, FunctionCall
+    from agno.tools.function import Function
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
@@ -63,12 +63,13 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Managed tool calls accept wait_timeout: omitted or null waits until completion or human input, "
+                "Managed tool calls accept wait_timeout: omitted or null waits until completion or a newer message you "
+                "answer, "
                 "zero returns a job_id immediately, and a positive number bounds waiting without cancelling work. "
                 "Only use wait_timeout when the tool schema exposes it; excluded toolkits keep their native controls, "
                 "so a shell handle is checked or killed with check_shell_command or kill_shell_command. "
                 "Calls made inside an already running job stay with that job and accept no separate wait budget. "
-                "Human follow-ups release waits while work continues. "
+                "A newer message you answer releases waits while work continues. "
                 'Use job(action="list") to rediscover jobs and their status after a new turn, '
                 'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to stop one. '
                 "Only the agent that started a job can access it; teams must ask that member to manage it."
@@ -149,7 +150,7 @@ class JobTools(Toolkit):
             job_id: Exact job ID, required except for list.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
-            wait_timeout: Seconds to wait; null waits until completion or human input, zero returns immediately.
+            wait_timeout: Seconds to wait; null waits until completion or a newer message, zero returns immediately.
 
         Returns:
             Scoped job summaries, the original result, or an error message.
@@ -172,10 +173,7 @@ class JobTools(Toolkit):
                 return "job_id is required for this action."
             if action == "wait":
                 waited = await runtime.wait(job_id, owner=owner, depth=0, timeout=wait_timeout)
-                if waited.claim is not None and waited.job.status == "awaiting_approval":
-                    # Only the native delegation projection can present a child's pending approval.
-                    await runtime.release_wait(job_id, waited.claim)
-                elif waited.claim is not None:
+                if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return format_job_handle(waited.job)
             if action != "cancel":
@@ -188,26 +186,3 @@ class JobTools(Toolkit):
         except ValueError as error:
             # Unavailable jobs and invalid limits, offsets, or wait budgets are the model's to correct.
             return str(error)
-
-
-async def project_native_job_wait(call: FunctionCall, *, depth: int) -> None:
-    """Project only the reserved native wait into the persisted approval driver."""
-    toolkit = _job_toolkit(call.function)
-    if toolkit is None or (call.arguments or {}).get("action") != "wait":
-        return
-    context = get_tool_runtime_context()
-    runtime = get_background_runtime(context.runtime_paths) if context is not None else None
-    job_id = (call.arguments or {}).get("job_id")
-    if runtime is None or not isinstance(job_id, str):
-        return
-    try:
-        job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth, include_approval_state=False)
-    except JobAccessError:
-        return
-    if job.kind != "delegation":
-        return
-    call.function = call.function.model_copy()
-    call.function.external_execution = True
-    call.function.external_execution_silent = True
-    call.function.requires_confirmation = False
-    call.function.approval_type = "mindroom_job_wait"

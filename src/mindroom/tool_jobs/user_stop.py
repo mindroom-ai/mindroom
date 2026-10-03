@@ -73,7 +73,7 @@ async def stop_conversation_jobs(
             return False
         # Consumption can precede completion of the reply that read the outcome, or of its approval continuation.
         if job.consumed and job.status in TERMINAL_STATUSES:
-            for owned_source in (job.source_event_id, job.consuming_source):
+            for owned_source in (job.source_event_id, job.consumed_by_source):
                 if owned_source is not None and (
                     await store.is_pending(owned_source)
                     or await store.approval_continuation_for_source(owned_source) is not None

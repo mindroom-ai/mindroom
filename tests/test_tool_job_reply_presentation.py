@@ -168,9 +168,9 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
     config = _config()
     config.background_tool_jobs.enabled = True
 
-    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
         if not attempted:
-            attempted.add(("job", 0))
+            attempted.add("job")
             yield _ReadyJobContinuation("Retrieve completed background result")
 
     monkeypatch.setattr("mindroom.response_turn.join_conversation_jobs", join)

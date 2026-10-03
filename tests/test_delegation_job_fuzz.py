@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from hypothesis import HealthCheck, settings
@@ -63,11 +63,11 @@ class SubagentLifecycles(RuleBasedStateMachine):
         """Wait for a child's job from a parent turn."""
         self._step("wait", index=index, budget=budget)
 
-    @precondition(lambda self: self.runner.presentations)
-    @rule(index=_INDEXES, decisions=st.lists(st.booleans(), min_size=1, max_size=2).map(tuple))
-    def approve(self, index: int, decisions: tuple[bool, ...]) -> None:
-        """Resolve a presented child approval, current or stale."""
-        self._step("approve", index=index, decisions=decisions)
+    @precondition(lambda self: self.runner.approvals.pending())
+    @rule(index=_INDEXES, approve=st.booleans())
+    def approve(self, index: int, approve: bool) -> None:
+        """Answer one approval card a child's job posted."""
+        self._step("approve", index=index, approve=approve)
 
     @precondition(lambda self: self._has_job())
     @rule(kind=st.sampled_from(("cancel", "stop")), index=_INDEXES)
@@ -100,7 +100,7 @@ class SubagentLifecycles(RuleBasedStateMachine):
 
 @pytest.mark.timeout(900)
 def test_generated_subagent_lifecycles_keep_effects_and_traces_exact() -> None:
-    """No interleaving runs an unapproved or repeated effect, replays a child, or leaves a presented call unsettled."""
+    """No interleaving runs an unapproved or repeated effect, replays a child, or leaves an orphaned card answerable."""
     run_state_machine_as_test(
         SubagentLifecycles,
         settings=settings(
@@ -124,7 +124,7 @@ def test_generated_subagent_lifecycles_keep_effects_and_traces_exact() -> None:
         pytest.param(
             [
                 Step("delegate", script=ChildScript(approvals=1)),
-                Step("approve", decisions=(True,)),
+                Step("approve"),
                 Step("crash"),
             ],
             id="crash-after-approved-child-completed",
@@ -132,10 +132,22 @@ def test_generated_subagent_lifecycles_keep_effects_and_traces_exact() -> None:
         pytest.param(
             [
                 Step("delegate", script=ChildScript(approvals=1, hold_tool=True)),
-                Step("approve", decisions=(True,)),
+                Step("approve"),
                 Step("cancel"),
             ],
             id="cancel-during-approved-tool",
+        ),
+        pytest.param(
+            [Step("delegate", script=ChildScript(approvals=1)), Step("cancel")],
+            id="cancel-while-awaiting-approval-denies-the-card",
+        ),
+        pytest.param(
+            [Step("delegate", script=ChildScript(approvals=1)), Step("crash")],
+            id="crash-while-awaiting-approval-denies-the-card",
+        ),
+        pytest.param(
+            [Step("delegate", script=ChildScript(approvals=2)), Step("approve", approve=False), Step("approve")],
+            id="denied-then-approved-calls-in-one-child",
         ),
     ],
 )
@@ -153,25 +165,26 @@ async def test_subagent_lifecycle_regressions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("corruption", ["unapproved", "repeated", "unsettled"])
+@pytest.mark.parametrize("corruption", ["unapproved", "repeated", "orphaned_card"])
 async def test_subagent_fuzz_oracle_detects_corruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     corruption: str,
 ) -> None:
-    """The fuzzer must fail when an effect runs unapproved or twice, or a presented call stays unsettled."""
+    """The fuzzer must fail when an effect runs unapproved or twice, or a card outlives the job that posted it."""
     runner = DelegationFuzzRunner(tmp_path, monkeypatch)
     try:
         await runner.step(Step("delegate", script=ChildScript(approvals=1)))
         if corruption == "unapproved":
             runner.executed["w0-0"] += 1
         elif corruption == "repeated":
-            await runner.step(Step("approve", decisions=(True,)))
+            await runner.step(Step("approve"))
             runner.executed["w0-0"] += 1
         else:
-            await runner.step(Step("approve", decisions=(True,)))
-            await runner.step(Step("wait"))
-            runner.turns.append(replace(runner.closed_turns[-1], decided=("missing-call",)))
+            monkeypatch.setattr(runner.approvals, "settle_pending_background_approvals", AsyncMock(return_value=0))
+            with pytest.raises(AssertionError):
+                await runner.step(Step("cancel"))
+            return
         with pytest.raises(AssertionError):
             await runner.step(Step("release"))
     finally:

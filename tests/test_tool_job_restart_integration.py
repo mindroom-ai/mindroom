@@ -60,6 +60,7 @@ from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_u
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    lookup,
     pending_outcomes,
     tool_job_runtime,
 )
@@ -232,7 +233,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
             with pytest.raises(asyncio.CancelledError):
                 await interrupted_task
 
-        before_restart = await runtime.lookup(job_id, owner=owner, depth=0)
+        before_restart = await lookup(runtime, job_id, owner=owner, depth=0)
         assert not before_restart.consumed
         assert len(pending_outcomes(runtime)) == 1
         await runtime.shutdown()
@@ -240,7 +241,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         restored = tool_job_runtime(paths.storage_root)
         await restored.recover()
         register_background_runtime(paths, restored)
-        recovered = await restored.lookup(job_id, owner=owner, depth=0)
+        recovered = await lookup(restored, job_id, owner=owner, depth=0)
         assert recovered.result == "retained after restart"
         assert not recovered.consumed
 
@@ -279,7 +280,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         assert retrieved.result == "retained after restart"
         assert _provider_tool_content(final_model, "recovered-wait") == "retained after restart"
         assert executions == 1
-        assert (await restored.lookup(job_id, owner=owner, depth=0)).consumed
+        assert (await lookup(restored, job_id, owner=owner, depth=0)).consumed
         assert pending_outcomes(restored) == []
     finally:
         release.set()

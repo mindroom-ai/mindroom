@@ -14,7 +14,6 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
-from mindroom.delegation.background import cancel_retained_delegation
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
@@ -190,9 +189,7 @@ async def _cancel_delegations(
     for child in state.children:
         if child.status not in {"completed", "failed", "cancelled", "denied"}:
             if background is not None and background.has_job(child.delegation_id):
-                # The job runtime owns this child; only the pending approval generation this run saved may end it.
-                if child.delegation_id == state.pending_child_id:
-                    await cancel_retained_delegation(background, child, generation=state.pending_job_generation)
+                # The job runtime owns this child and its approvals; its own cancellation settles it.
                 continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for requirement_id, hook_state in state.hooks.items():

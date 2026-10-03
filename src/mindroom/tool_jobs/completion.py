@@ -15,7 +15,7 @@ from mindroom.constants import (
 )
 from mindroom.delivery_gateway import EditTextRequest
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
-from mindroom.tool_jobs.runtime import READY_STATUSES, JobAccessError, get_background_runtime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError, get_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -89,16 +89,14 @@ def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
     calls = []
     for job in jobs:
         member = f" through member {job.owner.agent_name}" if job.owner.transport_agent_name else ""
-        # Retrieving an approval pause presents it; once approved, the call waits for the approved work's outcome.
-        budget = "" if job.status == "awaiting_approval" else ", wait_timeout=0"
-        calls.append(f'job(action="wait", job_id="{job.job_id}"{budget}){member}')
+        calls.append(f'job(action="wait", job_id="{job.job_id}", wait_timeout=0){member}')
     return "; ".join(calls)
 
 
 def _completion_prompt(jobs: Sequence[BackgroundJob]) -> str:
     """Ask once for rich native result retrieval after the runtime has finished waiting."""
     return (
-        "Internal runtime update, not a new human request. Background work has reached a result or approval boundary. "
+        "Internal runtime update, not a new human request. Background work has finished. "
         "Retrieve these stored outcomes once using the native job tool, then continue the conversation: "
         + _retrieval_calls(jobs)
     )
@@ -122,7 +120,7 @@ class _ReadyJobContinuation:
 
 
 async def join_conversation_jobs(
-    attempted: set[tuple[str, int]],
+    attempted: set[str],
     *,
     agent_names: Sequence[str] | None = None,
 ) -> AsyncIterator[BackgroundWaitChunk | _ReadyJobContinuation]:
@@ -147,23 +145,20 @@ async def join_conversation_jobs(
             requester_id=context.requester_id,
             source_kind=context.source_kind,
         )
-        return [
-            job
-            for job in jobs
-            if job.owner.agent_name in participants and (job.job_id, job.generation) not in attempted
-        ]
+        return [job for job in jobs if job.owner.agent_name in participants and job.job_id not in attempted]
 
     try:
         jobs = await pending()
         if human.is_set() or not jobs:
             return
-        ready = [job for job in jobs if job.status in READY_STATUSES]
+        ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
         if not ready:
-            yield BackgroundWaitChunk("⏳ Waiting for background work…")
+            approval = any(job.status == "awaiting_approval" for job in jobs)
+            yield BackgroundWaitChunk("⏳ Waiting for approval…" if approval else "⏳ Waiting for background work…")
             ready = await _wait_until_ready(runtime, jobs, human, pending)
             yield BackgroundWaitChunk(None)
         if ready and not human.is_set():
-            attempted.update((job.job_id, job.generation) for job in ready)
+            attempted.update(job.job_id for job in ready)
             yield _ReadyJobContinuation(_completion_prompt(ready))
     finally:
         if signal is not None:
@@ -183,7 +178,7 @@ async def _wait_until_ready(
     while jobs and not ready and not human.is_set():
         unavailable |= await _wait_for_ready_jobs(runtime, jobs, human)
         jobs = [job for job in await pending() if job.job_id not in unavailable]
-        ready = [job for job in jobs if job.status in READY_STATUSES]
+        ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
     return ready
 
 
@@ -227,7 +222,7 @@ async def join_approval_jobs[RunT](
     agent_names: Sequence[str] | None = None,
 ) -> RunT:
     """Join ready jobs after a reconstructed approval, at most `JOB_JOIN_LIMIT` times."""
-    attempted: set[tuple[str, int]] = set()
+    attempted: set[str] = set()
     for _ in range(JOB_JOIN_LIMIT):
         if not is_complete(response):
             break

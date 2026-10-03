@@ -31,7 +31,6 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace, tool_markers_match_trace
 
@@ -193,6 +192,69 @@ def continuation_target(
     )
 
 
+async def plan_approval_calls(
+    identified: tuple[tuple[ToolExecution, str, str, str], ...],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    toolkit_owners: Mapping[tuple[str, str], str | None],
+) -> _ApprovalPausePlan:
+    """Evaluate policy once and normalize exact calls with integer deadlines."""
+    approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
+    decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
+    for tool, tool_call_id, tool_name, invoking_agent in identified:
+        requires_approval, timeout_seconds = await evaluate_tool_approval(
+            config,
+            runtime_paths,
+            tool_name,
+            dict(tool.tool_args or {}),
+            invoking_agent,
+        )
+        tool_authored_confirmation = (
+            tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
+        )
+        requires_approval = requires_approval or tool_authored_confirmation
+        decisions[tool_call_id] = (
+            None
+            if requires_approval and approver_id is not None
+            else ContinuationDecision.DENIED
+            if requires_approval
+            else ContinuationDecision.APPROVED,
+            timeout_seconds,
+            requires_approval,
+        )
+    now = datetime.now(UTC)
+    calls = tuple(
+        ApprovalCall(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            invoking_agent=invoking_agent,
+            toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
+            expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
+            decision=decisions[tool_call_id][0],
+            reason=(
+                "No approval recipient is configured; the tool was denied safely."
+                if decisions[tool_call_id][0] is ContinuationDecision.DENIED
+                else None
+            ),
+            human_approval_required=decisions[tool_call_id][2],
+        )
+        for _tool, tool_call_id, tool_name, invoking_agent in identified
+    )
+    if any(call.toolkit_name is None for call in calls):
+        msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
+        raise RuntimeError(msg)
+    gated_calls = tuple(call for call in calls if call.decision is None)
+    return _ApprovalPausePlan(
+        tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
+        calls=calls,
+        waiting_text=(
+            "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls) if gated_calls else None
+        ),
+    )
+
+
 @dataclass
 class ApprovalResponseCoordinator:
     """Own approval policy, card publication, and visible terminal settlement."""
@@ -210,70 +272,6 @@ class ApprovalResponseCoordinator:
             msg = f"Could not create approval continuation {continuation.approval_id!r}"
             raise RuntimeError(msg)
         return created
-
-    async def plan_pause(
-        self,
-        identified: tuple[tuple[ToolExecution, str, str, str], ...],
-        *,
-        requester_id: str,
-        toolkit_owners: Mapping[tuple[str, str], str | None],
-    ) -> _ApprovalPausePlan:
-        """Evaluate policy once and normalize exact calls with integer deadlines."""
-        config = self.config()
-        approver_id = resolve_tool_approval_approver(config, self.runtime_paths, requester_id)
-        decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
-        for tool, tool_call_id, tool_name, invoking_agent in identified:
-            requires_approval, timeout_seconds = await evaluate_tool_approval(
-                config,
-                self.runtime_paths,
-                tool_name,
-                dict(tool.tool_args or {}),
-                invoking_agent,
-            )
-            tool_authored_confirmation = (
-                tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
-            )
-            requires_approval = requires_approval or tool_authored_confirmation
-            decisions[tool_call_id] = (
-                None
-                if requires_approval and approver_id is not None
-                else ContinuationDecision.DENIED
-                if requires_approval
-                else ContinuationDecision.APPROVED,
-                timeout_seconds,
-                requires_approval,
-            )
-        now = datetime.now(UTC)
-        calls = tuple(
-            ApprovalCall(
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                invoking_agent=invoking_agent,
-                toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
-                expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
-                decision=decisions[tool_call_id][0],
-                reason=(
-                    "No approval recipient is configured; the tool was denied safely."
-                    if decisions[tool_call_id][0] is ContinuationDecision.DENIED
-                    else None
-                ),
-                human_approval_required=decisions[tool_call_id][2],
-            )
-            for _tool, tool_call_id, tool_name, invoking_agent in identified
-        )
-        if any(call.toolkit_name is None for call in calls):
-            msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
-            raise RuntimeError(msg)
-        gated_calls = tuple(call for call in calls if call.decision is None)
-        return _ApprovalPausePlan(
-            tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
-            calls=calls,
-            waiting_text=(
-                "Waiting for approval: " + ", ".join(f"`{call.tool_name}`" for call in gated_calls)
-                if gated_calls
-                else None
-            ),
-        )
 
     async def _publish_cards(
         self,
@@ -326,10 +324,6 @@ class ApprovalResponseCoordinator:
                 cards=tuple(cards),
             ):
                 raise RuntimeError(failure_reason)
-            # The job coordinator expires cards recorded before a job's cancellation; these may postdate it.
-            withdrawn = self._cancelled_job_ids(plan.calls)
-            if withdrawn:
-                await manager.expire_job_cards(withdrawn)
         elif (
             await self.store.activate_approval_continuation(
                 continuation.approval_id,
@@ -362,18 +356,9 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
-    def _cancelled_job_ids(self, calls: tuple[ApprovalCall, ...]) -> set[str]:
-        """Name the jobs whose presented approval pause ended before its cards were recorded."""
-        runtime = get_background_runtime(self.runtime_paths)
-        if runtime is None:
-            return set()
-        # A job-owned child's call is projected as `<job_id>:<child call id>`.
-        job_ids = {call.tool_call_id.partition(":")[0] for call in calls if call.decision is None}
-        return {job_id for job_id in job_ids if runtime.has_job(job_id) and not runtime.awaits_approval(job_id)}
-
     def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
         """Recognize a paused call that can resume only through the job runtime."""
-        if paused.job_owned_child or any(call.toolkit_name == "job" for call in calls):
+        if any(call.toolkit_name == "job" for call in calls):
             return True
         config = self.config()
         if not background_tool_jobs_enabled(config, self.runtime_paths):
@@ -398,8 +383,10 @@ class ApprovalResponseCoordinator:
         """Replace one claim with Agno's next exact pause generation."""
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await self.plan_pause(
+        plan = await plan_approval_calls(
             identified,
+            config=self.config(),
+            runtime_paths=self.runtime_paths,
             requester_id=current.requester_id,
             toolkit_owners=paused.toolkit_owners,
         )

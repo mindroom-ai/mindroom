@@ -42,6 +42,7 @@ from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streamin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    lookup,
     pending_outcomes,
     tool_job_runtime,
 )
@@ -133,11 +134,11 @@ async def _wait_until_ready(
     owner: ToolExecutionIdentity,
 ) -> BackgroundJob:
     while True:
-        job = await runtime.lookup(job_id, owner=owner, depth=0)
+        job = await lookup(runtime, job_id, owner=owner, depth=0)
         if job.status not in {"running", "cancel_requested"}:
             return job
         runtime.changed.clear()
-        job = await runtime.lookup(job_id, owner=owner, depth=0)
+        job = await lookup(runtime, job_id, owner=owner, depth=0)
         if job.status not in {"running", "cancel_requested"}:
             return job
         await asyncio.wait_for(runtime.changed.wait(), JOB_TEST_TIMEOUT)
@@ -249,7 +250,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         assert first.tools is not None
         job_id = json.loads(cast("str", first.tools[0].result))["job_id"]
         assert "released" in str(first.content)
-        assert (await runtime.lookup(job_id, owner=owner, depth=0)).status == "running"
+        assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
 
         signal.clear()
         model.responses.extend(
@@ -266,7 +267,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         with tool_runtime_context(context), human_message_signal_context(signal):
             second_pending = asyncio.create_task(run_turn("Check the earlier report"))
             await asyncio.wait_for(model.list_observed.wait(), JOB_TEST_TIMEOUT)
-            assert (await runtime.lookup(job_id, owner=owner, depth=0)).status == "running"
+            assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
             assert job_id in str(model.seen_messages[-1].content)
             release.set()
             ready = await _wait_until_ready(runtime, job_id, owner=owner)
@@ -281,7 +282,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         assert wait_result == "durable report"
         assert _provider_tool_content(model, "wait-call") == "durable report"
         assert executions == 1
-        assert (await runtime.lookup(job_id, owner=owner, depth=0)).consumed
+        assert (await lookup(runtime, job_id, owner=owner, depth=0)).consumed
         assert pending_outcomes(runtime) == []
     finally:
         release.set()
@@ -437,7 +438,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
 
         assert executions == 1
-        saved = await runtime.lookup(job_id, owner=owner, depth=0)
+        saved = await lookup(runtime, job_id, owner=owner, depth=0)
         assert saved.consumed
         assert pending_outcomes(runtime) == []
         retrieval = next(

@@ -26,7 +26,10 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import start_delegation_job
+from tests.tool_job_helpers import (
+    lookup,
+    start_delegation_job,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,12 +59,10 @@ def delegation_context(tmp_path: Path) -> ToolRuntimeContext:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("after_projection", [False, True])
 async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
     delegation_context: ToolRuntimeContext,
-    after_projection: bool,
 ) -> None:
-    """Retrieving a deleted delegation, even through an earlier SDK projection, is unavailable and never reruns it."""
+    """Retrieving a deleted delegation is unavailable and never reruns it."""
     config, paths = delegation_context.config, delegation_context.runtime_paths
     owner = build_execution_identity_from_runtime_context(delegation_context)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: config, lambda _: None, AgentReplyMembershipIndex())
@@ -100,20 +101,12 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
     )
     install_tool_job_execution(model)
     actor = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage, telemetry=False)
-    paused = None
     try:
         await start_delegation_job(runtime, child, owner=owner, operation=operation)
         waited = await runtime.wait(child.delegation_id, owner=owner, depth=0)
         await runtime.acknowledge_wait(child.delegation_id, waited.claim)
         async with execution_resources():
             with tool_runtime_context(delegation_context):
-                if after_projection:
-                    paused = await actor.arun(
-                        "Read the receipt",
-                        session_id=owner.session_id,
-                        user_id=owner.requester_id,
-                    )
-                    assert paused.status is RunStatus.paused
                 await runtime.expire_consumed(
                     before=datetime.now(UTC) + timedelta(days=31),
                     source_finished=source_finished,
@@ -124,8 +117,8 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
                 await runtime.recover()
                 register_background_runtime(paths, runtime)
                 with pytest.raises(JobAccessError, match="not available"):
-                    await runtime.lookup(child.delegation_id, owner=owner, depth=0)
-                response = paused or await actor.arun(
+                    await lookup(runtime, child.delegation_id, owner=owner, depth=0)
+                response = await actor.arun(
                     "Read the receipt",
                     session_id=owner.session_id,
                     user_id=owner.requester_id,

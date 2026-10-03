@@ -9,11 +9,11 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom import approval_manager
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
+from mindroom.delegation.job_approvals import settle_child_approvals
 from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
@@ -77,8 +77,8 @@ class ToolJobRuntimeCoordinator:
     # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
     # bot exists to read its journal.
     _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
-    # Jobs whose approval cards still need expiring; a failed expiry retries next pass.
-    _withdrawn_approvals: set[str] = field(default_factory=set, init=False)
+    # Jobs a restart interrupted whose approval cards still need denying; each pass retries them.
+    _unsettled_approvals: set[str] = field(default_factory=set, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
         """Pin execution mode, then claim job storage or index parked ownership, before dispatch can start."""
@@ -121,7 +121,7 @@ class ToolJobRuntimeCoordinator:
         if config is None:
             msg = "Cannot settle a background job without runtime configuration."
             raise RuntimeError(msg)
-        return await reconcile_delegation(
+        outcome = await reconcile_delegation(
             job,
             cleanup=partial(
                 interrupt_stopped_child,
@@ -131,6 +131,10 @@ class ToolJobRuntimeCoordinator:
             ),
             runtime_paths=self.runtime_paths,
         )
+        # A job interrupted while it waited for approvals leaves its cards answerable until they are denied.
+        if not await settle_child_approvals(job.job_id):
+            self._unsettled_approvals.add(job.job_id)
+        return outcome
 
     def _authorized(self, job: BackgroundJob) -> bool:
         """Grant access only on a proven grant; unresolved membership fails closed."""
@@ -304,7 +308,7 @@ class ToolJobRuntimeCoordinator:
             self._instance = self._runtime = self._journal = None
             self._initialized = False
             self._unrestored_stops.clear()
-            self._withdrawn_approvals.clear()
+            self._unsettled_approvals.clear()
 
     async def _run(self) -> None:
         next_retention = 0.0
@@ -321,17 +325,12 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def _reconcile(self) -> None:
-        """Stop revoked work, apply saved Stops, and expire withdrawn approval cards; failures retry next pass."""
+        """Stop revoked work, apply saved Stops, and deny the cards of interrupted jobs; failures retry next pass."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
-        await self._expire_withdrawn_approval_cards()
-
-    async def _expire_withdrawn_approval_cards(self) -> None:
-        """Expire the cards of job approval pauses that can never resume, so the replies waiting on them resume."""
-        self._withdrawn_approvals |= self.runtime.take_withdrawn_approvals()
-        manager = approval_manager.get_approval_store()
-        if manager is None or (self._withdrawn_approvals and await manager.expire_job_cards(self._withdrawn_approvals)):
-            self._withdrawn_approvals.clear()
+        for job_id in tuple(self._unsettled_approvals):
+            if await settle_child_approvals(job_id):
+                self._unsettled_approvals.discard(job_id)
 
     async def _expire_consumed_results(self) -> None:
         """Keep consumed jobs for the retention period and as long as response or approval work owns them."""
@@ -350,7 +349,7 @@ class ToolJobRuntimeCoordinator:
             if job.source_event_id is None or (entity, job.owner.session_id) in protected_sessions:
                 return False
             # The reply that consumed the outcome may still need it to recover, like the turn that started the job.
-            sources = {source for source in (job.source_event_id, job.consuming_source) if source is not None}
+            sources = {source for source in (job.source_event_id, job.consumed_by_source) if source is not None}
             for source in sources:
                 key = (entity, source)
                 if key not in finished:

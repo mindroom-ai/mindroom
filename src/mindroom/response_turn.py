@@ -347,7 +347,7 @@ class TurnRunState:
     unseen_event_ids: list[str] = field(default_factory=list)
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
-    attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
+    attempted_job_outcomes: set[str] = field(default_factory=set)
     # Continuations with ready job results, which do not spend the dynamic tool continuation budget.
     job_joins: int = 0
     prior_response_text: str = ""
@@ -432,8 +432,6 @@ class PausedAttempt:
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     cli_call: dict[str, object] | None = None
-    # The paused approvals belong to a delegated child that a background job owns.
-    job_owned_child: bool = False
     continuation_count: int = 0
 
 
@@ -508,7 +506,6 @@ def paused_attempt_from_response(
                 paused,
                 approval_agent_name=delegation.pending_agent_name,
                 delegation_storage_bindings=delegation.storage_bindings,
-                job_owned_child=delegation.pending_job_generation is not None,
             )
             if paused is not None
             else None

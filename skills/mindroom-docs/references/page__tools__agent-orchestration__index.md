@@ -274,6 +274,7 @@ MindRoom gives the delegated agent any already-published last-good knowledge ind
 Interactive questions are disabled for delegated runs.
 `run_subagent` does not create a Matrix conversation thread.
 If a delegated Matrix run requests approval, MindRoom posts the native approval request to the source room and thread while durably retaining the paused parent-child continuation.
+With background tool jobs, a managed child's job posts these approval cards itself and keeps waiting for the decisions, so the parent reply never pauses for them.
 Detached OpenAI-compatible runs retain their existing restriction on approval-gated and room-context tools.
 If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
 Empty tasks and follow-up messages are rejected.
@@ -285,7 +286,7 @@ The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
 Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
-After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
+After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval of a child outside background jobs remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 ### Background jobs
@@ -371,8 +372,10 @@ Still-authorized deferred tools remain discoverable without loading them or conn
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
-Native child approvals retain the existing persisted parent-child continuation and approval cards.
-After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+A managed child that needs approval stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
+The reply holding the job keeps waiting and shows that it waits for approval; pressing **Stop** or cancelling the job denies its open cards.
+A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the next reply reports the interruption.
+These cards offer no automatic approval option.
 Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.

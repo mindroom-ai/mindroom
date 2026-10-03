@@ -48,8 +48,16 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["explicit", "automatic", "invalid", "resumed", "resumed_invalid"])
-@pytest.mark.parametrize("execution", ["inline", "foreground", "detached", "excluded"])
+@pytest.mark.parametrize(
+    ("mode", "execution"),
+    [
+        (mode, execution)
+        for mode in ("explicit", "automatic", "invalid", "resumed", "resumed_invalid")
+        for execution in ("inline", "foreground", "detached", "excluded")
+        # A managed child asks for its own approvals through job cards, so only unmanaged children resume a parent.
+        if not (mode.startswith("resumed") and execution in {"foreground", "detached"})
+    ],
+)
 async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR0912, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

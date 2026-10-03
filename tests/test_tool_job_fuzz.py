@@ -1,4 +1,4 @@
-"""Shrinkable generated lifecycles for background tool jobs across Stop, approvals, restarts, and crashes."""
+"""Shrinkable generated lifecycles for background tool jobs across Stop, approval waits, restarts, and crashes."""
 
 from __future__ import annotations
 
@@ -22,13 +22,14 @@ if TYPE_CHECKING:
 
 _LIVE = ("running", "cancel_requested", "awaiting_approval")
 _JOB_STEPS = (
-    *("wait", "wait", "ack", "drop", "present"),
+    *("wait", "wait", "ack", "drop"),
     *("cancel", "cancel", "stop", "stop", "revoke", "restart_stop"),
 )
 _SCRIPTS = st.builds(
     Script,
-    finish=st.sampled_from(("completed", "failed", "raise", "pause", "pause", "self_cancel")),
+    finish=st.sampled_from(("completed", "failed", "raise", "self_cancel")),
     block=st.booleans(),
+    approval=st.booleans(),
     stubborn=st.booleans(),
     unwind_completes=st.booleans(),
     payload=st.booleans(),
@@ -36,7 +37,7 @@ _SCRIPTS = st.builds(
 _CLEANUPS: st.SearchStrategy[Cleanup] = st.sampled_from(
     ("none", "none", "none", "completed", "failed", "cancelled", "raise", "park", "classify", "classify"),
 )
-_PAUSED = Script(finish="pause")
+_AWAITING = Script(approval=True, stubborn=True)
 _PARKED = Script(block=True, stubborn=True)
 
 
@@ -95,17 +96,11 @@ class JobLifecycles(RuleBasedStateMachine):
         """Start an existing job again, which its saved ownership refuses."""
         self._step("start", self._target(data))
 
-    @precondition(lambda self: self._slots("awaiting_approval"))
-    @rule(data=st.data(), script=_SCRIPTS)
-    def approve(self, data: st.DataObject, script: Script) -> None:
-        """Continue a paused job with its current approval generation."""
-        self._step("continue", self._target(data, "awaiting_approval"), script=script)
-
-    @precondition(lambda self: self._slots("running", "cancel_requested"))
+    @precondition(lambda self: self._slots(*_LIVE))
     @rule(data=st.data())
     def release(self, data: st.DataObject) -> None:
-        """Let parked execution or cleanup finish."""
-        self._step("release", self._target(data, "running", "cancel_requested"))
+        """Let parked execution finish, decide its approvals, or let its cleanup finish."""
+        self._step("release", self._target(data, *_LIVE))
 
     @precondition(lambda self: self._slots())
     @rule(data=st.data())
@@ -118,15 +113,12 @@ class JobLifecycles(RuleBasedStateMachine):
     @precondition(lambda self: self._slots())
     @rule(data=st.data(), kind=st.sampled_from(_JOB_STEPS))
     def act(self, data: st.DataObject, kind: str) -> None:
-        """Wait, consume, release a claim, cancel, Stop, revoke, or present an approval for one job."""
-        if kind == "present":
-            self._step("continue", self._target(data), stale=data.draw(st.booleans()))
-        else:
-            self._step(kind, self._target(data))
+        """Wait, consume, release a claim, cancel, Stop, or revoke one job."""
+        self._step(kind, self._target(data))
 
-    @rule(kind=st.sampled_from(("deliver", "restart", "crash", "crash", "crash_shutdown")))
+    @rule(kind=st.sampled_from(("restart", "crash", "crash", "crash_shutdown")))
     def lifecycle(self, kind: str) -> None:
-        """Report withdrawn cards, or restart or crash the process."""
+        """Restart or crash the process."""
         self._step(kind)
 
     @rule(kind=st.sampled_from(("fail_write", "die_on_write")), skip=st.integers(0, 2))
@@ -147,7 +139,7 @@ class JobLifecycles(RuleBasedStateMachine):
 @pytest.mark.timeout(900)
 @pytest.mark.usefixtures("inline_blocking_work")
 def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
-    """No interleaving loses, replays, relabels, or leaks a job, a consumed result, or an approval card."""
+    """No interleaving loses, replays, relabels, or leaks a job or a consumed result."""
     run_state_machine_as_test(
         JobLifecycles,
         settings=settings(
@@ -167,17 +159,16 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
     [
         pytest.param([Action("start", script=_PARKED), Action("cancel"), Action("crash")], id="cancel-then-crash"),
         pytest.param(
-            [Action("start", script=_PAUSED), Action("cancel"), Action("crash"), Action("deliver")],
-            id="cancelled-pause-crash-before-card-expiry",
+            [Action("start", script=_AWAITING), Action("cancel"), Action("crash")],
+            id="cancelled-approval-wait-then-crash",
         ),
         pytest.param(
             [
-                Action("start", script=_PAUSED),
+                Action("start", script=_AWAITING),
                 Action("start", job=1, script=_PARKED),
                 Action("restart_stop"),
-                Action("continue", script=_PAUSED),
             ],
-            id="stop-pause-during-shutdown",
+            id="stop-approval-wait-during-shutdown",
         ),
         pytest.param(
             [
@@ -193,12 +184,16 @@ def test_generated_job_lifecycles_preserve_outcomes_and_ownership() -> None:
         ),
         pytest.param(
             [
-                Action("start", script=_PAUSED),
+                Action("start", script=_AWAITING),
                 Action("fail_write", skip=1),
                 Action("stop"),
-                Action("continue", script=_PAUSED),
+                Action("release"),
             ],
             id="stop-saved-but-cancellation-save-failed",
+        ),
+        pytest.param(
+            [Action("start", script=_AWAITING), Action("fail_write"), Action("release")],
+            id="failed-approval-status-save-fails-the-job",
         ),
         pytest.param(
             [Action("start", script=Script(payload=True, block=True)), Action("die_on_write"), Action("release")],
@@ -221,12 +216,12 @@ async def test_job_lifecycle_regressions(tmp_path: Path, actions: list[Action]) 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("inline_blocking_work")
-@pytest.mark.parametrize("corruption", ["disk", "outcome", "replay", "withdrawal", "consumption"])
+@pytest.mark.parametrize("corruption", ["disk", "outcome", "replay", "consumption"])
 async def test_job_fuzz_oracle_detects_corruption(tmp_path: Path, corruption: str) -> None:
-    """The fuzzer must fail when saved state, outcomes, execution counts, cards, or consumption lie."""
+    """The fuzzer must fail when saved state, outcomes, execution counts, or consumption lie."""
     runner = JobFuzzRunner(tmp_path)
     try:
-        await runner.step(Action("start", script=_PAUSED))
+        await runner.step(Action("start", script=_AWAITING))
         await runner.step(Action("start", job=1))
         entries, root = runner.runtime._entries, tmp_path / "tool_jobs"
         if corruption == "disk":
@@ -236,16 +231,10 @@ async def test_job_fuzz_oracle_detects_corruption(tmp_path: Path, corruption: st
             runner.jobs["job1"].observed = None
             entries["job1"].saved = False
         elif corruption == "replay":
-            runner.admissions["job1", 0].executions += 1
-        elif corruption == "consumption":
-            entries["job1"].job = replace(entries["job1"].job, consumed_generation=0)
-            entries["job1"].saved = False
+            runner.admissions["job1"].executions += 1
         else:
-            await runner.step(Action("cancel"))
-            runner.runtime.take_withdrawn_approvals()
-            with pytest.raises(AssertionError):
-                await runner.finish()
-            return
+            entries["job1"].job = replace(entries["job1"].job, consumed=True)
+            entries["job1"].saved = False
         with pytest.raises(AssertionError):
             await runner.check()
     finally:

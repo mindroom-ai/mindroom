@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from functools import partial, wraps
-from inspect import signature
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from agno.models.base import Model
 from agno.tools.function import Function
 
-from mindroom.custom_tools.job import project_native_job_wait
 from mindroom.tool_jobs.agno_execution import (
     declares_wait_timeout,
     execute_owned_tool_call,
@@ -19,11 +17,10 @@ from mindroom.tool_jobs.agno_execution import (
     wrap_tool_execution,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
 
     from agno.models.fallback import FallbackConfig
     from agno.tools.function import FunctionCall
@@ -90,7 +87,7 @@ def _wrap_tool_schemas(
                 "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
                 "description": (
                     "Seconds to wait for this call, without cancelling its execution. "
-                    "Omit or pass null to wait until completion or a human follow-up; "
+                    "Omit or pass null to wait until completion or a newer message you answer; "
                     "zero returns a job handle immediately."
                 ),
             }
@@ -136,35 +133,5 @@ def install_tool_job_execution(
         if namespace.get("_mindroom_tool_jobs"):
             continue
         namespace["_format_tools"] = _wrap_tool_schemas(candidate._format_tools, depth=depth)
-        namespace["arun_function_calls"] = _wrap_job_wait_dispatch(candidate.arun_function_calls, depth=depth)
         namespace["arun_function_call"] = wrap_tool_execution(candidate.arun_function_call, depth=depth)
         namespace["_mindroom_tool_jobs"] = True
-
-
-# AGNO_COMPAT: Project native job-wait approvals before SDK admission.
-# Reason: Agno has no public per-call metadata hook before a confirmation pause.
-# Upstream issue: No matching argument-sensitive public extension point identified.
-# Upstream PR: None identified.
-# Remove when: SDK supports per-call external approval requirements.
-# Coverage: tests/test_job_tools.py::test_only_native_job_wait_projects_external_approval
-def _wrap_job_wait_dispatch(
-    original: Callable[..., AsyncIterator[Any]],
-    *,
-    depth: int,
-) -> Callable[..., AsyncIterator[Any]]:
-    parameters = signature(original)
-    if "skip_pause_check" not in parameters.parameters:
-        msg = "Unsupported SDK tool dispatch signature"
-        raise RuntimeError(msg)
-
-    async def dispatch(function_calls: list[FunctionCall], *args: object, **kwargs: object) -> AsyncIterator[Any]:
-        arguments = parameters.bind(function_calls, *args, **kwargs).arguments
-        if not arguments.get("skip_pause_check", False):
-            for call in function_calls:
-                await project_native_job_wait(call, depth=depth)
-        stream = original(function_calls, *args, **kwargs)
-        async with closing_async_stream(stream):
-            async for event in stream:
-                yield event
-
-    return dispatch

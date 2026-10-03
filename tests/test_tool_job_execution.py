@@ -61,6 +61,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    lookup,
     pending_outcomes,
     tool_job_runtime,
     wait_for_status,
@@ -120,7 +121,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
         assert encoding_threads[0] != loop_thread
         owner = build_execution_identity_from_runtime_context(context)
         listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
-        payload = await read_result_payload(runtime, await runtime.lookup(listed.job_id, owner=owner, depth=0))
+        payload = await read_result_payload(runtime, await lookup(runtime, listed.job_id, owner=owner, depth=0))
         if kind == "stream":
             assert payload.value == text * 2
         else:
@@ -201,7 +202,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
                 saved = read_job_snapshot(tmp_path / "tool_jobs" / f"{job_id}.json")
                 assert (saved.status, saved.result) == ("completed", "completed before cancellation")
                 # Shutdown has closed the runtime, so decode the saved payload file itself.
-                payload_file = tmp_path / "tool_jobs" / f"{job_id}.g0.result.json"
+                payload_file = tmp_path / "tool_jobs" / f"{job_id}.result.json"
                 assert _decode_result_payload(json.loads(payload_file.read_text())).state_delta == {
                     "changed": {"before_present": False, "before": None, "present": True, "value": "encoded state"},
                 }
@@ -369,7 +370,7 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
         assert job.result == text[:500]
         assert job.summary_truncated
         files = sorted((tmp_path / "tool_jobs").glob(f"{job.job_id}.*"))
-        assert [path.name for path in files] == [f"{job.job_id}.g0.result.json", f"{job.job_id}.json"]
+        assert [path.name for path in files] == [f"{job.job_id}.json", f"{job.job_id}.result.json"]
         saved = "".join(path.read_text() for path in files)
         for marker in ("chunk 0060 ", "chunk 0100 ", "chunk 0180 "):
             assert saved.count(marker) == 1
@@ -688,7 +689,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
-            saved = await restored.lookup(jobs[0].job_id, owner=owner, depth=0)
+            saved = await lookup(restored, jobs[0].job_id, owner=owner, depth=0)
             assert saved.source_event_id == "$original-request"
             assert saved.owner == owner
             assert saved.consumed is not save_fails

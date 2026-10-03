@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
-from weakref import WeakKeyDictionary, ref
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
@@ -21,20 +20,9 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from weakref import ReferenceType
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-@dataclass
-class _RetainedDelegation:
-    child: ReferenceType[DelegationChild]
-    adapter: dict[str, Any]
-
-
-# Native live objects remain adapter-owned; durable generic records contain only JSON snapshots.
-_retained: WeakKeyDictionary[ToolJobRuntime, dict[str, _RetainedDelegation]] = WeakKeyDictionary()
 
 
 def _child_snapshot(child: DelegationChild) -> dict[str, Any]:
@@ -48,31 +36,6 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
     return DelegationChild(**job.adapter["child"])
-
-
-def _retain(runtime: ToolJobRuntime, job_id: str, binding: _RetainedDelegation) -> None:
-    """Remember one live child, forgetting children no operation still holds."""
-    retained = _retained.setdefault(runtime, {})
-    for stale in [key for key, item in retained.items() if item.child() is None]:
-        del retained[stale]
-    retained[job_id] = binding
-
-
-def _retained_delegation(runtime: ToolJobRuntime, job: BackgroundJob) -> tuple[DelegationChild, dict[str, Any]]:
-    """Recover or reuse the exact live child and adapter owned by one operation."""
-    binding = _retained.get(runtime, {}).get(job.job_id)
-    child = binding.child() if binding is not None else None
-    if child is None:
-        child = delegation_child(job)
-        binding = _RetainedDelegation(ref(child), job.adapter)
-        _retain(runtime, job.job_id, binding)
-    assert binding is not None
-    return child, binding.adapter
-
-
-def retained_child(runtime: ToolJobRuntime, job: BackgroundJob) -> DelegationChild:
-    """Recover or reuse the exact mutable native object retained by an active operation."""
-    return _retained_delegation(runtime, job)[0]
 
 
 def delegation_outcome(status: Literal["completed", "failed", "cancelled", "denied"], text: str) -> BackgroundOutcome:
@@ -139,104 +102,26 @@ async def start_delegation(
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
     cancel: Callable[[DelegationChild], Awaitable[None]],
-    output_path: str | None = None,
 ) -> tuple[BackgroundJob, JobClaim | None]:
     """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
     if child.caller_agent_name != owner.agent_name:
         msg = "Child caller does not match its job owner."
         raise SubagentSessionError(msg)
     context = get_tool_runtime_context()
-    adapter = {"child": _child_snapshot(child), "output_path": output_path}
+    adapter = {"child": _child_snapshot(child)}
 
     async def cleanup(job: BackgroundJob) -> BackgroundOutcome | None:
         return await reconcile_delegation(job, cleanup=cancel, child=child)
 
-    try:
-        return await runtime.start(
-            child.delegation_id,
-            tool_name="delegate",
-            depth=child.depth - 1,
-            kind="delegation",
-            source_event_id=context.membership_turn_id if context is not None else None,
-            source_kind=context.source_kind if context is not None else None,
-            adapter=adapter,
-            owner=owner,
-            operation=partial(_run_refreshing_snapshot, operation, child, adapter),
-            cancel=cleanup,
-        )
-    finally:
-        if runtime.owns_execution(child.delegation_id, adapter):
-            _retain(runtime, child.delegation_id, _RetainedDelegation(ref(child), adapter))
-
-
-async def continue_delegation(
-    runtime: ToolJobRuntime,
-    job_id: str,
-    *,
-    owner: ToolExecutionIdentity,
-    depth: int,
-    expected_generation: int | None,
-    operation: Callable[[], Awaitable[BackgroundOutcome]],
-) -> BackgroundJob:
-    """Continue native approval work under the existing generic job."""
-    job = await runtime.lookup(job_id, owner=owner, depth=depth)
-    child, adapter = _retained_delegation(runtime, job)
-    # Continuation metadata is applied atomically with its outcome by the runtime.
-    return await runtime.continue_job(
-        job_id,
-        owner=owner,
-        depth=depth,
-        expected_generation=expected_generation,
-        operation=partial(_run_refreshing_snapshot, operation, child, adapter),
+    return await runtime.start(
+        child.delegation_id,
+        tool_name="delegate",
+        depth=child.depth - 1,
+        kind="delegation",
+        source_event_id=context.membership_turn_id if context is not None else None,
+        source_kind=context.source_kind if context is not None else None,
         adapter=adapter,
+        owner=owner,
+        operation=partial(_run_refreshing_snapshot, operation, child, adapter),
+        cancel=cleanup,
     )
-
-
-def owns_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:
-    """Recognize cancellation handoff only for the exact admitted live native child."""
-    retained = _retained.get(runtime, {}).get(child.delegation_id)
-    return (
-        retained is not None
-        and retained.child() is child
-        and runtime.owns_execution(child.delegation_id, retained.adapter)
-    )
-
-
-async def cancel_retained_delegation(
-    runtime: ToolJobRuntime,
-    child: DelegationChild,
-    *,
-    generation: int | None,
-) -> bool:
-    """Cancel trusted parent ownership of one exact generation, even after public delegation authority changes."""
-
-    def matches(job: BackgroundJob) -> bool:
-        # A stale approval card names an older generation and must never cancel the newer work that replaced it.
-        if job.kind != "delegation" or job.generation != generation:
-            return False
-        retained = delegation_child(job)
-        return (
-            retained.caller_agent_name,
-            retained.child_agent_name,
-            retained.session_id,
-            retained.run_id,
-            retained.depth,
-            retained.execution_identity,
-        ) == (
-            child.caller_agent_name,
-            child.child_agent_name,
-            child.session_id,
-            child.run_id,
-            child.depth,
-            child.execution_identity,
-        )
-
-    job = await runtime.cancel_owned(child.delegation_id, matches=matches)
-    if job is None:
-        return False
-    retained = delegation_child(job)
-    child.status = retained.status
-    child.result = await delegation_result(runtime, job)
-    child.run_id = retained.run_id
-    child.model_name = retained.model_name
-    return True

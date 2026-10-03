@@ -57,6 +57,7 @@ from tests.identity_helpers import entity_ids
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
+    lookup,
     pending_outcomes,
     tool_job_runtime,
 )
@@ -295,7 +296,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                 signal.notify()
                 text = await asyncio.wait_for(pending, 30)
                 assert "Independent work done." in text
-                assert (await runtime.lookup(job_id, owner=owner, depth=0)).status == "running"
+                assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
                 release.set()
             else:
                 member_model.responses.extend(

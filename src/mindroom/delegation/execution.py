@@ -31,14 +31,12 @@ from mindroom.approval_tools import (
     validate_approval_tool_owners,
 )
 from mindroom.delegation.background import (
-    continue_delegation,
     delegation_outcome,
     delegation_result,
-    owns_delegation,
-    retained_child,
     start_delegation,
 )
 from mindroom.delegation.hooks import after_delegation, before_delegation
+from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
@@ -67,10 +65,8 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import (
-    READY_STATUSES,
     BackgroundOutcome,
     JobAccessError,
-    JobContinuationError,
     format_job_handle,
     get_background_runtime,
 )
@@ -103,7 +99,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.delegation.state import ChildResponseRunner, DelegationHookState
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_jobs.runtime import ToolJobRuntime
@@ -153,14 +149,7 @@ def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequi
         for requirement in response.requirements or ()
         if requirement.needs_external_execution
         and requirement.tool_execution is not None
-        and (
-            requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent"}
-            or (
-                requirement.tool_execution.tool_name == "job"
-                and requirement.tool_execution.approval_type == "mindroom_job_wait"
-                and (requirement.tool_execution.tool_args or {}).get("action") == "wait"
-            )
-        )
+        and requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent"}
     ]
 
 
@@ -487,13 +476,7 @@ async def _continue_child(
     )
 
 
-def _pending_child(
-    state: DelegationState,
-    child: DelegationChild,
-    outcome: _ChildOutcome,
-    *,
-    job_generation: int | None = None,
-) -> None:
+def _pending_child(state: DelegationState, child: DelegationChild, outcome: _ChildOutcome) -> None:
     from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415
 
     response = outcome.response
@@ -507,7 +490,6 @@ def _pending_child(
         msg = "Delegated child paused without supported exact approval requirements"
         raise RuntimeError(msg)
     state.pending_child_id = child.delegation_id
-    state.pending_job_generation = job_generation
     state.pending_agent_name = paused.approval_agent_name or child.child_agent_name
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
@@ -553,9 +535,8 @@ async def _complete_approved_child_tools(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> list[dict[str, object]]:
-    """Publish each resumed tool's retained result in the parent's live trace, returning the unfinished ones."""
-    unfinished = []
+) -> None:
+    """Publish each resumed tool's retained result in the parent's live trace."""
     for pending_tool in pending_tools:
         call_id = str(pending_tool["tool_call_id"])
         completed_tool = await _resolved_child_tool(
@@ -566,9 +547,6 @@ async def _complete_approved_child_tools(
         )
         if completed_tool is not None:
             on_event(_child_completion_event(response, completed_tool))
-        else:
-            unfinished.append(pending_tool)
-    return unfinished
 
 
 def _settle_pending_child_tools(
@@ -577,17 +555,16 @@ def _settle_pending_child_tools(
     on_event: Callable[[object], None],
     *,
     reason: str,
-    error: bool = True,
 ) -> None:
-    """Close the current approval generation's visible tools after an interruption or a bounded wait."""
+    """Close the current approval generation's visible tools after an interruption."""
     for pending_tool in pending_tools:
-        settled_tool = ToolExecution.from_dict(pending_tool)
-        settled_tool.requires_confirmation = False
-        settled_tool.requires_user_input = False
-        settled_tool.external_execution_required = False
-        settled_tool.result = reason
-        settled_tool.tool_call_error = error
-        on_event(_child_completion_event(response, settled_tool))
+        cancelled_tool = ToolExecution.from_dict(pending_tool)
+        cancelled_tool.requires_confirmation = False
+        cancelled_tool.requires_user_input = False
+        cancelled_tool.external_execution_required = False
+        cancelled_tool.result = reason
+        cancelled_tool.tool_call_error = True
+        on_event(_child_completion_event(response, cancelled_tool))
 
 
 def _child_completion_event(
@@ -676,36 +653,38 @@ async def _background_child_outcome(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool] | None,
-    denial_reasons: dict[str, str | None] | None,
-    approval_calls: Sequence[ApprovalCall],
-    fresh: bool,
     output_request: ToolOutputFileRequest | None = None,
 ) -> BackgroundOutcome:
-    """Keep child execution, liveness and settlement owned by its background job."""
+    """Keep child execution, approvals, liveness and settlement owned by its background job."""
+    run = partial(
+        _run_child,
+        child,
+        run_child=run_child,
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_identity=owner,
+        refresh_scheduler=refresh_scheduler,
+    )
     # Settlement stays inside this claim, so recovery cannot take a child that failed before its terminal state.
     async with subagent_liveness(child, runtime_paths):
         primary_error: Exception | None = None
         try:
-            outcome = await _run_child(
-                child,
-                run_child=run_child,
-                config=config,
-                runtime_paths=runtime_paths,
-                caller_identity=owner,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                approval_calls=approval_calls,
-                fresh=fresh,
-            )
-            if outcome.response.status == RunStatus.paused:
-                return BackgroundOutcome(
-                    status="awaiting_approval",
-                    approval_state={
-                        "response": outcome.response.to_dict(),
-                        "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
-                    },
+            outcome = await run(decisions=None, denial_reasons=None, approval_calls=(), fresh=True)
+            while outcome.response.status == RunStatus.paused:
+                # The job, not a parent reply, asks for the child's approvals and resumes it with the decisions.
+                decisions, denial_reasons, calls = await request_child_approvals(
+                    child,
+                    outcome.response,
+                    outcome.toolkit_owners,
+                    owner=owner,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
+                outcome = await run(
+                    decisions=decisions,
+                    denial_reasons=denial_reasons,
+                    approval_calls=calls,
+                    fresh=False,
                 )
         except asyncio.CancelledError:
             await interrupt_stopped_child(child, config=config, runtime_paths=runtime_paths)
@@ -760,6 +739,71 @@ async def _background_child_outcome(
             status,
             _finalize_delegation_output(_child_result_text(child, receipt), output_request),
         )
+
+
+async def _settle_background_wait(
+    state: DelegationState,
+    child: DelegationChild,
+    result: str,
+    *,
+    hook_state: DelegationHookState,
+    persist: Callable[[DelegationState], Awaitable[None]],
+    resolve_result: Callable[..., str],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Close the parent call with what its wait returned; the child's job keeps owning the child."""
+    # The job already applied the output policy to the child's result.
+    result = resolve_result(result, output_request=None)
+    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
+    await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
+    await persist(state)
+
+
+async def _await_background_child(
+    background: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    fresh: bool,
+    release_liveness: Callable[[], Awaitable[None]],
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    cancel: Callable[[DelegationChild], Awaitable[None]],
+    owner: ToolExecutionIdentity,
+    depth: int,
+    wait_timeout: float | None,
+    settle: Callable[[str], Awaitable[None]],
+) -> None:
+    """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
+
+    The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
+    child, and a parent claim held across the wait would block cancel cleanup.
+    """
+    context = get_tool_runtime_context()
+    source_event_id = context.membership_turn_id if context is not None else None
+    claim = None
+    try:
+        if fresh:
+            _, claim = await start_delegation(background, child, owner=owner, operation=operation, cancel=cancel)
+        await release_liveness()
+        waited = await background.wait(child.delegation_id, owner=owner, depth=depth, timeout=wait_timeout, claim=claim)
+    except JobAccessError as error:
+        await background.release_wait(child.delegation_id, claim)
+        if not background.has_job(child.delegation_id):
+            # No job owns the child yet, so it settles as an ordinary child failure.
+            raise
+        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
+        await settle(str(error))
+        return
+    except BaseException:
+        await background.release_wait(child.delegation_id, claim)
+        raise
+    try:
+        result = await delegation_result(background, waited.job) if waited.claim is not None else None
+        await settle(result or format_job_handle(waited.job))
+        if waited.claim is not None:
+            await background.acknowledge_wait(child.delegation_id, waited.claim, source_event_id=source_event_id)
+    finally:
+        await background.release_wait(child.delegation_id, waited.claim)
 
 
 async def _resolve_delegation_target(
@@ -867,7 +911,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         raise RuntimeError(msg)
     # Bind this exact parent call and its presentation before resolving the target.
     pending_id = previous_state.pending_child_id
-    pending_generation = previous_state.pending_job_generation
     prior_pending_tools = previous_state.pending_tools
     prior_tool_sources = previous_state.pending_tool_sources
     tool = requirement.tool_execution
@@ -901,8 +944,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         on_event=on_event,
     )
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
-    excluded = tool.tool_name != "job" and toolkit_is_background_excluded("delegate", config, runtime_paths)
-    # A saved approval keeps its accepted owner when startup policy changes.
+    excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
+    # A child saved before a crash keeps its accepted owner when startup policy changes.
     if retained is not None:
         if background is not None and not background.has_job(retained.delegation_id):
             background = None
@@ -914,99 +957,54 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             resolve_result("wait_timeout is unavailable for the excluded delegate toolkit.")
             return False
     try:
-        wait_timeout = read_wait_timeout(
-            tool.tool_args,
-            owned_execution=(job_owns_execution() or delegation_depth > 0) and tool.tool_name != "job",
-        )
+        wait_timeout = read_wait_timeout(tool.tool_args, owned_execution=job_owns_execution() or delegation_depth > 0)
     except ValueError as error:
         tool.tool_call_error = True
         resolve_result(str(error))
         return False
     args = application_arguments(tool.tool_args) or {}
     model = args.get("model") if tool.tool_name == "run_subagent" else None
-    background_job = None
-    retrieval_output = None
-    if tool.tool_name == "job":
-        prepared_retrieval = _prepare_delegation_output(
+    target = await _resolve_delegation_target(
+        tool,
+        retained,
+        caller_identity=caller_identity,
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=delegation_depth,
+    )
+    if isinstance(target, str):
+        resolve_result(target)
+        return False
+
+    # Recheck current authorization and output policy, including resumed calls.
+    authorization = authorize_delegation(
+        caller,
+        target.agent_name,
+        target.task,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=caller_identity,
+        depth=delegation_depth,
+        model=model,
+    )
+    output_request = None
+    if not isinstance(authorization, str):
+        prepared_output = _prepare_delegation_output(
             caller,
             config,
             runtime_paths,
             caller_identity,
             args.get(OUTPUT_PATH_ARGUMENT),
-            tool_name="job",
+            tool_name=tool.tool_name or "run_subagent",
         )
-        if isinstance(prepared_retrieval, dict):
-            resolve_result(json.dumps(prepared_retrieval))
-            return False
-        retrieval_output = prepared_retrieval
-        job_id = args.get("job_id")
-        if background is None or not isinstance(job_id, str):
-            resolve_result("Cannot wait: a managed Matrix job and string job_id are required.")
-            return False
-        try:
-            background_job = await background.lookup(
-                job_id,
-                owner=caller_identity,
-                depth=delegation_depth,
-                include_approval_state=False,
-            )
-        except JobAccessError as error:
-            if pending_id == job_id and on_event is not None:
-                _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
-            resolve_result(str(error))
-            return False
-        retained = retained_child(background, background_job)
-        target = _DelegationTarget(retained.child_agent_name, retained.task)
-    else:
-        target = await _resolve_delegation_target(
-            tool,
-            retained,
-            caller_identity=caller_identity,
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=delegation_depth,
-        )
-    if isinstance(target, str):
-        resolve_result(target)
-        return False
-
-    # Recheck current authorization and output policy for launches and resumed approvals.
-    # Retrieving a finished job's result only reads it; the lookup already checked current access.
-    authorization: Config | str = config
-    output_request = None
-    if background_job is None or background_job.status == "awaiting_approval":
-        authorization = authorize_delegation(
-            caller,
-            target.agent_name,
-            target.task,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=caller_identity,
-            depth=delegation_depth,
-            model=model,
-        )
-        if not isinstance(authorization, str):
-            output_path = args.get(OUTPUT_PATH_ARGUMENT)
-            output_tool_name = tool.tool_name or "run_subagent"
-            if background_job is not None:
-                output_path = background_job.adapter.get("output_path")
-                assert retained is not None
-                output_tool_name = "continue_subagent" if retained.previous_delegation_id else "run_subagent"
-            prepared_output = _prepare_delegation_output(
-                caller,
-                config,
-                runtime_paths,
-                caller_identity,
-                output_path,
-                tool_name=output_tool_name,
-            )
-            if isinstance(prepared_output, dict):
-                authorization = json.dumps(prepared_output)
-            else:
-                output_request = prepared_output
+        if isinstance(prepared_output, dict):
+            authorization = json.dumps(prepared_output)
+        else:
+            output_request = prepared_output
     if isinstance(authorization, str):
         if retained is not None:
-            if background_job is not None:
+            if background is not None:
+                # The child's job keeps settling it; this parent call only stops waiting for it.
                 state.children = [item for item in state.children if item.delegation_id != retained.delegation_id]
             else:
                 await interrupt_child(
@@ -1042,11 +1040,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         await persist(state)
         return True
     if state.gates.get(requirement_key) is False:
-        resolve_result(
-            "Job result retrieval denied by requester."
-            if tool.tool_name == "job"
-            else "Delegation denied by requester; child was not executed.",
-        )
+        resolve_result("Delegation denied by requester; child was not executed.")
         return False
     if requirement.id not in state.hooks:
         state.hooks[requirement.id] = await before_delegation(
@@ -1118,143 +1112,36 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     # Persist the child before execution, with startup covered by cleanup.
                     await persist(state)
                 if background is not None:
-                    context = get_tool_runtime_context()
-                    source_event_id = context.membership_turn_id if context is not None else None
-                    if not fresh and background_job is None:
-                        background_job = await background.lookup(
-                            child.delegation_id,
-                            owner=caller_identity,
-                            depth=delegation_depth,
-                            include_approval_state=False,
-                        )
-                        child = retained_child(background, background_job)
-                        state.children = [
-                            replace(child, parent_requirement_id=requirement.id)
-                            if item.delegation_id == child.delegation_id
-                            else item
-                            for item in state.children
-                        ]
-                    operation = partial(
-                        _background_child_outcome,
+                    await _await_background_child(
+                        background,
                         child,
-                        owner=caller_identity,
-                        run_child=run_child,
-                        config=authorization,
-                        runtime_paths=runtime_paths,
-                        refresh_scheduler=refresh_scheduler,
-                        decisions=child_decisions,
-                        denial_reasons=child_reasons,
-                        approval_calls=child_calls,
                         fresh=fresh,
-                        output_request=output_request,
-                    )
-                    claim = None
-                    try:
-                        if child_decisions is not None:
-                            background_job = await continue_delegation(
-                                background,
-                                child.delegation_id,
-                                owner=caller_identity,
-                                depth=delegation_depth,
-                                expected_generation=pending_generation,
-                                operation=operation,
-                            )
-                        elif background_job is None:
-                            background_job, claim = await start_delegation(
-                                background,
-                                child,
-                                owner=caller_identity,
-                                operation=operation,
-                                output_path=(
-                                    output_request.path.requested_path
-                                    if output_request is not None and output_request.path is not None
-                                    else None
-                                ),
-                                cancel=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
-                            )
-                        await liveness.aclose()
-                        waited = await background.wait(
-                            child.delegation_id,
+                        release_liveness=liveness.aclose,
+                        operation=partial(
+                            _background_child_outcome,
+                            child,
                             owner=caller_identity,
-                            depth=delegation_depth,
-                            timeout=wait_timeout,
-                            claim=claim,
-                        )
-                    except JobAccessError as error:
-                        await background.release_wait(child.delegation_id, claim)
-                        if background_job is None:
-                            # No job owns the child yet, so it settles as an ordinary child failure.
-                            raise
-                        # Revoked access or a closed runtime ends this wait; the parent's call reports it.
-                        reason = resolve_result(str(error))
-                        if child_decisions is not None and on_event is not None:
-                            _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
-                        state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
-                        await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=reason)
-                        await persist(state)
-                        return False
-                    except BaseException:
-                        await background.release_wait(child.delegation_id, claim)
-                        raise
-                    background_job = waited.job
-                    child = retained_child(background, background_job)
-                    try:
-                        if child_decisions is not None and on_event is not None:
-                            unfinished = await _complete_approved_child_tools(
-                                response,
-                                prior_pending_tools,
-                                prior_tool_sources,
-                                on_event,
-                                config=config,
-                                runtime_paths=runtime_paths,
-                            )
-                            if background_job.status not in READY_STATUSES:
-                                # A bounded or released wait can end before the approved tools finish; the job owns them.
-                                _settle_pending_child_tools(
-                                    response,
-                                    unfinished,
-                                    on_event,
-                                    reason=f"Approved; background job {child.delegation_id} now owns it.",
-                                    error=False,
-                                )
-                        if background_job.status == "awaiting_approval" and waited.claim is not None:
-                            saved = background_job.approval_state
-                            child_outcome = _ChildOutcome(
-                                RunOutput.from_dict(saved["response"]),
-                                {(agent, name): toolkit for agent, name, toolkit in saved["toolkit_owners"]},
-                            )
-                            # Only a presented approval makes the child part of this parent; a denied or blocked
-                            # retrieval must leave it untouched.
-                            if not any(item.delegation_id == child.delegation_id for item in state.children):
-                                state.children.append(replace(child, parent_requirement_id=requirement.id))
-                            _pending_child(state, child, child_outcome, job_generation=background_job.generation)
-                            await persist(state)
-                            await background.acknowledge_wait(
-                                child.delegation_id,
-                                waited.claim,
-                                source_event_id=source_event_id,
-                            )
-                            return True
-                        result = (
-                            await delegation_result(background, background_job) if waited.claim is not None else None
-                        ) or format_job_handle(background_job)
-                        result = resolve_result(result, output_request=retrieval_output)
-                        state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
-                        await after_delegation(
-                            hook_state,
+                            run_child=run_child,
+                            config=authorization,
+                            runtime_paths=runtime_paths,
+                            refresh_scheduler=refresh_scheduler,
+                            output_request=output_request,
+                        ),
+                        cancel=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
+                        owner=caller_identity,
+                        depth=delegation_depth,
+                        wait_timeout=wait_timeout,
+                        settle=partial(
+                            _settle_background_wait,
+                            state,
+                            child,
+                            hook_state=hook_state,
+                            persist=persist,
+                            resolve_result=resolve_result,
                             config=config,
                             runtime_paths=runtime_paths,
-                            result=result,
-                        )
-                        await persist(state)
-                        if waited.claim is not None:
-                            await background.acknowledge_wait(
-                                child.delegation_id,
-                                waited.claim,
-                                source_event_id=source_event_id,
-                            )
-                    finally:
-                        await background.release_wait(child.delegation_id, waited.claim)
+                        ),
+                    )
                     return False
                 child_outcome = await _run_child(
                     child,
@@ -1281,11 +1168,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     _pending_child(state, child, child_outcome)
                     await persist(state)
                     return True
-            except JobContinuationError:
-                # The native driver decides whether a newer pause superseded this approval.
-                raise
             except asyncio.CancelledError:
-                if background is not None and (background_job is not None or owns_delegation(background, child)):
+                if background is not None and background.has_job(child.delegation_id):
                     state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                     await after_delegation(
                         hook_state,
@@ -1309,7 +1193,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 await persist(state)
                 raise
             except Exception as error:
-                if background is not None and (background_job is not None or owns_delegation(background, child)):
+                if background is not None and background.has_job(child.delegation_id):
                     state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                     await after_delegation(
                         hook_state,
@@ -1376,23 +1260,7 @@ def prepare_delegation_state(
     return state, previous_state
 
 
-async def _newer_pause(
-    entity: Agent | Team,
-    response: RunOutput | TeamRunOutput,
-    resolved: DelegationState,
-) -> RunOutput | TeamRunOutput | None:
-    """Return the parent run's latest saved output when it already presents a newer pause than `resolved`."""
-    if response.run_id is None:
-        return None
-    latest = await entity.aget_run_output(response.run_id, session_id=response.session_id)
-    if latest is None:
-        return None
-    latest_state = DelegationState.from_metadata(latest.metadata)
-    pending = (resolved.pending_child_id, resolved.pending_job_generation)
-    return latest if (latest_state.pending_child_id, latest_state.pending_job_generation) != pending else None
-
-
-async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
+async def drive_delegations(  # noqa: C901, PLR0912
     entity: Agent | Team,
     response: RunOutput | TeamRunOutput,
     *,
@@ -1436,48 +1304,26 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
         if not external and any(not item.is_resolved() for item in response.requirements or ()):
             return response
         for requirement in external:
-            try:
-                waiting = await advance_delegation_call(
-                    requirement,
-                    response=response,
-                    state=state,
-                    previous_state=previous_state,
-                    persist=partial(persist_delegation_state, entity, response),
-                    agent_name=agent_name,
-                    run_child=run_child,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                    decisions=decisions,
-                    denial_reasons=denial_reasons,
-                    approval_calls=approval_calls,
-                    member_config_names=member_config_names,
-                    on_event=on_event,
-                    background=background,
-                )
-            except JobContinuationError as error:
-                # A duplicate card must not overwrite a newer pause saved
-                # by this same parent run, or touch another parent's child.
-                if (latest := await _newer_pause(entity, response, previous_state)) is not None:
-                    return latest
-                reason = str(error)
-                _resolve_delegation_requirement(requirement, reason, response, agent_name, on_event)
-                state.children = [
-                    item for item in state.children if item.delegation_id != previous_state.pending_child_id
-                ]
-                if on_event is not None:
-                    _settle_pending_child_tools(response, previous_state.pending_tools, on_event, reason=reason)
-                await after_delegation(
-                    state.hooks[requirement.id],
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    result=reason,
-                )
-                await persist_delegation_state(entity, response, state)
-                continue
-            if waiting:
+            if await advance_delegation_call(
+                requirement,
+                response=response,
+                state=state,
+                previous_state=previous_state,
+                persist=partial(persist_delegation_state, entity, response),
+                agent_name=agent_name,
+                run_child=run_child,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                decisions=decisions,
+                denial_reasons=denial_reasons,
+                approval_calls=approval_calls,
+                member_config_names=member_config_names,
+                on_event=on_event,
+                background=background,
+            ):
                 return response
         await persist_delegation_state(entity, response, state)
         if isinstance(response, RunOutput):

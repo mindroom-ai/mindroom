@@ -2219,9 +2219,9 @@ async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_join
             ),
         )
 
-    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
         if len(attempted) < joins:
-            attempted.add(("job", len(attempted)))
+            attempted.add(f"job{len(attempted)}")
             yield _ReadyJobContinuation("Retrieve the result")
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
@@ -2246,9 +2246,9 @@ async def test_job_join_follows_spent_dynamic_continuations(monkeypatch: pytest.
         text = "final" if attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1 else "after join"
         return CompletedAttempt(response_text=text, replayable_text=text, has_visible_content=True)
 
-    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
         if not attempted:
-            attempted.add(("job", 0))
+            attempted.add("job")
             yield _ReadyJobContinuation("Retrieve the result")
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
@@ -2287,8 +2287,8 @@ async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(completed())
 
-    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
-        attempted.add(("job", len(attempted)))
+    async def join(attempted: set[str], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        attempted.add(f"job{len(attempted)}")
         yield _ReadyJobContinuation("Retrieve the result")
 
     monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)

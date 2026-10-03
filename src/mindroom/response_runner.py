@@ -28,6 +28,7 @@ from mindroom.approval_response import (
     ApprovalResponseCoordinator,
     continuation_target,
     identify_approval_tools,
+    plan_approval_calls,
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
@@ -1394,8 +1395,10 @@ class ResponseRunner:
         )
         approval_id = uuid4().hex
         try:
-            plan = await self._approval_responses.plan_pause(
+            plan = await plan_approval_calls(
                 identified_tools,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
                 requester_id=requester_id,
                 toolkit_owners=paused.toolkit_owners,
             )

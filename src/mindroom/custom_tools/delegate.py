@@ -166,7 +166,7 @@ class DelegateTools(Toolkit):
         background_guidance = (
             "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
             "and a positive number bounds the wait while work continues. "
-            "A human follow-up releases the wait while the child keeps working. "
+            "A newer message you answer releases the wait while the child keeps working. "
             if background
             else ""
         )

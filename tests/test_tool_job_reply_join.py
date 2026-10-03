@@ -53,11 +53,13 @@ from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
+    lookup,
     managed_team_config,
     pending_outcome,
     pending_outcomes,
     start_job,
     tool_job_runtime,
+    wait_for_status,
 )
 
 
@@ -152,13 +154,13 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         assert not pending_outcomes(runtime)
         await runtime.release_wait("quiet", waited.claim)
-        released = pending_outcome(runtime, "quiet", 0)
+        released = pending_outcome(runtime, "quiet")
         assert released is not None
         assert released.result == "tool failed"
         assert [job.job_id for job in pending_outcomes(runtime)] == ["quiet"]
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         await runtime.acknowledge_wait("quiet", waited.claim)
-        assert pending_outcome(runtime, "quiet", 0) is None
+        assert pending_outcome(runtime, "quiet") is None
         assert not pending_outcomes(runtime)
     finally:
         await runtime.shutdown()
@@ -192,7 +194,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             assert "Waiting" in (await anext(stream)).content
             signal.notify()
             assert [item.content async for item in stream] == [None]
-            assert (await runtime.lookup("quiet", owner=owner, depth=0)).status == "running"
+            assert (await lookup(runtime, "quiet", owner=owner, depth=0)).status == "running"
             signal.clear()
             finish.set()
             waited = await runtime.wait("quiet", owner=owner, depth=0)
@@ -201,7 +203,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             assert len(items) == 1
             assert 'job_id="quiet"' in items[0].prompt
             assert [item async for item in join_conversation_jobs(attempted)] == []
-            assert pending_outcome(runtime, "quiet", 0) is not None
+            assert pending_outcome(runtime, "quiet") is not None
     finally:
         await runtime.shutdown()
 
@@ -334,7 +336,7 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
                 )
         assert len(prompts) == 2
         assert 'job_id="quiet"' in prompts[1]
-        assert pending_outcome(runtime, "quiet", 0) is not None
+        assert pending_outcome(runtime, "quiet") is not None
     finally:
         await runtime.shutdown()
 
@@ -395,7 +397,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
             assert recovered.prompt == request.prompt
             assert "Execution stopped; side effects may have happened." not in note
             if not authorized:
-                assert pending_outcome(runtime, "retained", 0) is None
+                assert pending_outcome(runtime, "retained") is None
         else:
             assert recovered is request
     finally:
@@ -453,8 +455,8 @@ def test_blocking_wait_preserves_formatted_mention_on_recovery(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(tmp_path: Path) -> None:
-    """A pending approval reaches the existing native wait path without a join deadlock."""
+async def test_join_holds_a_job_awaiting_approval_until_its_outcome(tmp_path: Path) -> None:
+    """A job waiting for its approval cards keeps the reply waiting, says so, and is retrieved once it finishes."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
     context = replace(
@@ -464,38 +466,27 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
     )
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    release = asyncio.Event()
-
-    async def running() -> BackgroundOutcome:
-        await release.wait()
-        return BackgroundOutcome("completed", "done")
+    decided = asyncio.Event()
 
     async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", "Approval required")
+        await runtime.set_awaiting_approval("approval", awaiting=True)
+        await decided.wait()
+        await runtime.set_awaiting_approval("approval", awaiting=False)
+        return BackgroundOutcome("completed", "approved and done")
 
     try:
-        await start_job(runtime, "running", tool_name="tool", depth=0, adapter={}, owner=owner, operation=running)
-        await start_job(
-            runtime,
-            "approval",
-            tool_name="delegation",
-            depth=0,
-            adapter={},
-            owner=owner,
-            operation=approval,
-        )
-        waited = await runtime.wait("approval", owner=owner, depth=0)
-        await runtime.release_wait("approval", waited.claim)
+        await start_job(runtime, "approval", tool_name="delegate", depth=0, adapter={}, owner=owner, operation=approval)
+        await wait_for_status(runtime, "approval", "awaiting_approval")
         with tool_runtime_context(context):
-            async with asyncio.timeout(1):
-                items = [item async for item in join_conversation_jobs(set())]
-        assert len(items) == 1
-        assert not isinstance(items[0], str)
-        assert 'job_id="approval"' in items[0].prompt
-        assert 'job_id="running"' not in items[0].prompt
-        assert pending_outcome(runtime, "approval", 0) is not None
+            stream = join_conversation_jobs(set())
+            assert (await anext(stream)).content == "⏳ Waiting for approval…"
+            decided.set()
+            items = [item async for item in stream]
+        assert [item.content for item in items[:-1]] == [None]
+        assert 'job_id="approval", wait_timeout=0' in items[-1].prompt
+        assert pending_outcome(runtime, "approval") is not None
     finally:
-        release.set()
+        decided.set()
         await runtime.shutdown()
 
 
@@ -572,7 +563,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
         assert recorder.assistant_text == "Independent work done"
         assert recorder.claim_interrupted_persistence()
         if failure_boundary == "join_cancel":
-            assert (await runtime.lookup("retained", owner=owner, depth=0)).status == "running"
+            assert (await lookup(runtime, "retained", owner=owner, depth=0)).status == "running"
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -625,9 +616,10 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
         await runtime.shutdown()
 
 
-def test_join_prompt_lets_an_approved_retrieval_wait_for_the_approved_work() -> None:
-    """A ready result needs no wait; an approval pause's retrieval has no budget, so approving it waits for its work."""
+def test_join_prompt_retrieves_each_finished_outcome_without_waiting() -> None:
+    """Every joined job has finished, so each retrieval call reads its outcome without a wait budget."""
     done = completed_delegation_job()
-    paused = replace(done, status="awaiting_approval")
-    assert f'job(action="wait", job_id="{done.job_id}", wait_timeout=0)' in _completion_prompt([done])
-    assert f'job(action="wait", job_id="{paused.job_id}")' in _completion_prompt([paused])
+    failed = replace(done, job_id="other", status="failed")
+    prompt = _completion_prompt([done, failed])
+    assert f'job(action="wait", job_id="{done.job_id}", wait_timeout=0)' in prompt
+    assert 'job(action="wait", job_id="other", wait_timeout=0)' in prompt

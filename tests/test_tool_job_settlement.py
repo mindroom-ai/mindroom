@@ -17,7 +17,13 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, job_owner, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    job_owner,
+    lookup,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -109,14 +115,14 @@ async def test_outcome_write_failure_preserves_returned_value_until_storage_reco
             assert waited.job.status == "completed"
             assert waited.job.result == "retained output"
             assert await runtime.read_payload(waited.job) == {"artifact": [1, 2]}
-            assert not (tmp_path / "tool_jobs" / "write-failure.g0.result.json").exists()
+            assert not (tmp_path / "tool_jobs" / "write-failure.result.json").exists()
             assert (tmp_path / "effect.txt").read_text() == "once"
         await runtime.acknowledge_wait("write-failure", waited.claim)
         await runtime.shutdown()
         restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
-            saved = await restored.lookup("write-failure", owner=job_owner(), depth=0)
+            saved = await lookup(restored, "write-failure", owner=job_owner(), depth=0)
             assert saved.status == "completed"
             assert saved.result == "retained output"
             assert await restored.read_payload(saved) == {"artifact": [1, 2]}
@@ -177,7 +183,7 @@ async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: P
         snapshot = json.loads((tmp_path / "tool_jobs" / "returned.json").read_text())
         assert snapshot["status"] == "completed"
         assert snapshot["result"] == "exact result"
-        assert json.loads((tmp_path / "tool_jobs" / "returned.g0.result.json").read_text()) == {"retained": [1, 2]}
+        assert json.loads((tmp_path / "tool_jobs" / "returned.result.json").read_text()) == {"retained": [1, 2]}
     finally:
         release.set()
         if stopping is not None:
@@ -312,7 +318,7 @@ async def test_shutdown_save_failure_still_drains_every_job_and_releases_lease(
         restored = tool_job_runtime(tmp_path)
         try:
             await restored.recover()
-            assert (await restored.lookup("second", owner=job_owner(), depth=0)).status == "interrupted"
+            assert (await lookup(restored, "second", owner=job_owner(), depth=0)).status == "interrupted"
         finally:
             await restored.shutdown()
         if failure is not None:

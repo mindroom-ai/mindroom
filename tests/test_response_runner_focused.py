@@ -40,7 +40,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import get_agent_session
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval_response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -143,8 +143,6 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import _TeamStreamPresentation
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
@@ -180,7 +178,6 @@ from tests.test_response_turn import (
     _dynamic_tool_execution,
     _streaming_adapter,
 )
-from tests.tool_job_helpers import job_child, job_owner, start_delegation_job, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -3446,14 +3443,13 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "toolkit_name", "wait_argument", "feature_enabled", "job_child", "expected"),
+    ("tool_name", "toolkit_name", "wait_argument", "feature_enabled", "expected"),
     [
-        ("job", "job", False, False, False, True),
-        ("job", "custom", False, False, False, False),
-        ("inspect", "test_toolkit", False, False, False, False),
-        ("report", "reports", True, False, False, False),
-        ("report", "reports", True, True, False, True),
-        ("write_report", "file", False, True, True, True),
+        ("job", "job", False, False, True),
+        ("job", "custom", False, False, False),
+        ("inspect", "test_toolkit", False, False, False),
+        ("report", "reports", True, False, False),
+        ("report", "reports", True, True, True),
     ],
     ids=[
         "native-job-toolkit",
@@ -3461,7 +3457,6 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
         "ordinary",
         "wait-argument-feature-disabled",
         "wait-argument-feature-enabled",
-        "background-child-approval",
     ],
 )
 @pytest.mark.asyncio
@@ -3471,7 +3466,6 @@ async def test_pause_writer_persists_background_tool_job_ownership(
     toolkit_name: str,
     wait_argument: bool,
     feature_enabled: bool,
-    job_child: bool,
     expected: bool,
 ) -> None:
     """The suspension writer records whether a paused call can resume only through background jobs."""
@@ -3491,7 +3485,6 @@ async def test_pause_writer_persists_background_tool_job_ownership(
                 ),
             ),
             toolkit_owners={("general", tool_name): toolkit_name},
-            job_owned_child=job_child,
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -3863,8 +3856,10 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         patch("mindroom.approval_response.resolve_tool_approval_approver", side_effect=resolve_approver),
         patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate_policy),
     ):
-        await runner._approval_responses.plan_pause(
+        await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3934,8 +3929,10 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         patch("mindroom.approval_response.resolve_tool_approval_approver", return_value=None),
         patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-1", "dangerous", "general"),),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
@@ -3962,11 +3959,13 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
             new=AsyncMock(side_effect=[(True, 60.0), (False, 60.0)]),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (human_tool, "call-human", "publish_report", "general"),
                 (policy_tool, "call-policy", "read_report", "general"),
             ),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
         )
@@ -3991,11 +3990,13 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         ),
         patch("mindroom.approval_response.evaluate_tool_approval", side_effect=evaluate),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (automatic, "call-auto", "conditional_read", "general"),
                 (gated, "call-gated", "conditional_write", "general"),
             ),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={
                 ("general", "conditional_read"): "test_toolkit",
@@ -4040,72 +4041,6 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_cards_recorded_after_their_job_was_cancelled_expire_on_publication(tmp_path: Path) -> None:
-    """A job cancelled between its approval pause and card publication cannot resume, so only its card expires."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def pause() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval", approval_state={"toolkit_owners": []})
-
-    try:
-        cancelled = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=pause)
-        paused = await start_delegation_job(runtime, job_child("c" * 32), owner=job_owner(), operation=pause)
-        for job in (cancelled, paused):
-            waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
-            await runtime.acknowledge_wait(job.job_id, waited.claim)
-        await runtime.cancel(cancelled.job_id, owner=job_owner(), depth=0)
-        tools = tuple(
-            ToolExecution(tool_call_id=f"{job.job_id}:write", tool_name="write_file", tool_args={})
-            for job in (cancelled, paused)
-        )
-        with (
-            patch("mindroom.approval_response.resolve_tool_approval_approver", return_value="@user:localhost"),
-            patch("mindroom.approval_response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
-        ):
-            plan = await runner._approval_responses.plan_pause(
-                tuple((tool, tool.tool_call_id, "write_file", "child") for tool in tools),
-                requester_id="@user:localhost",
-                toolkit_owners={("child", "write_file"): "coding"},
-            )
-        continuation = ApprovalContinuation(
-            approval_id="approval-jobs",
-            run_id="run-1",
-            session_id="session-1",
-            entity_kind="agent",
-            entity_name="general",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            requester_id="@user:localhost",
-            response_event_id="$thinking",
-            sources=ResponseSources(("$source",), ("$source",)),
-            calls=plan.calls,
-            state="waiting",
-        )
-        approval_store = MagicMock(
-            prepare_detached_approval=AsyncMock(return_value=object()),
-            reserve_and_publish=AsyncMock(return_value=True),
-            expire_job_cards=AsyncMock(return_value=True),
-        )
-        with patch("mindroom.approval_response.approval_manager.get_approval_store", return_value=approval_store):
-            await runner._approval_responses._publish_cards(
-                continuation,
-                plan,
-                target=_target(thread_id="$thread"),
-                failure_reason="card failed",
-            )
-    finally:
-        await runtime.shutdown()
-
-    approval_store.reserve_and_publish.assert_awaited_once()
-    approval_store.expire_job_cards.assert_awaited_once_with({cancelled.job_id})
-
-
-@pytest.mark.asyncio
 async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path: Path) -> None:
     """A fully gated batch must retain its current visible approval behavior."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -4122,11 +4057,13 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             new=AsyncMock(return_value=(True, 60.0)),
         ),
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             (
                 (first, "call-1", "dangerous_one", "general"),
                 (second, "call-2", "dangerous_two", "general"),
             ),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
         )
@@ -5266,8 +5203,10 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         "mindroom.approval_response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-native", "native_confirmation", "general"),),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
         )
@@ -5305,8 +5244,10 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         "mindroom.approval_response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-exempt", function.name, "general"),),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )
@@ -5358,8 +5299,10 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         "mindroom.approval_response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
-        plan = await runner._approval_responses.plan_pause(
+        plan = await plan_approval_calls(
             ((tool, "call-script", function.name, "general"),),
+            config=runner._approval_responses.config(),
+            runtime_paths=runner._approval_responses.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
         )

@@ -13,7 +13,7 @@ from agno.models.response import ToolExecution
 from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval_receipt import build_approval_receipt
-from mindroom.approval_response import ApprovalResponseCoordinator
+from mindroom.approval_response import ApprovalResponseCoordinator, plan_approval_calls
 from mindroom.approval_transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
@@ -149,8 +149,10 @@ async def test_only_policy_pause_offers_timed_approval(
         requires_confirmation=True,
         approval_type=approval_type,
     )
-    plan = await coordinator.plan_pause(
+    plan = await plan_approval_calls(
         ((tool, "call-authored", "shell", "code"),),
+        config=coordinator.config(),
+        runtime_paths=coordinator.runtime_paths,
         requester_id="@human:test",
         toolkit_owners={("code", "shell"): "test_toolkit"},
     )
@@ -247,8 +249,10 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 requires_confirmation=True,
                 approval_type="mindroom_policy",
             )
-            plan = await coordinator.plan_pause(
+            plan = await plan_approval_calls(
                 ((tool, "call-" + name, "shell", "code"),),
+                config=coordinator.config(),
+                runtime_paths=coordinator.runtime_paths,
                 requester_id="@human:test",
                 toolkit_owners={("code", "shell"): "test_toolkit"},
             )

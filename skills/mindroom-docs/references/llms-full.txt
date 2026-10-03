@@ -12921,6 +12921,7 @@ MindRoom gives the delegated agent any already-published last-good knowledge ind
 Interactive questions are disabled for delegated runs.
 `run_subagent` does not create a Matrix conversation thread.
 If a delegated Matrix run requests approval, MindRoom posts the native approval request to the source room and thread while durably retaining the paused parent-child continuation.
+With background tool jobs, a managed child's job posts these approval cards itself and keeps waiting for the decisions, so the parent reply never pauses for them.
 Detached OpenAI-compatible runs retain their existing restriction on approval-gated and room-context tools.
 If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
 Empty tasks and follow-up messages are rejected.
@@ -12932,7 +12933,7 @@ The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
 Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
-After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
+After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval of a child outside background jobs remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 ### Background jobs
@@ -13018,8 +13019,10 @@ Still-authorized deferred tools remain discoverable without loading them or conn
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
-Native child approvals retain the existing persisted parent-child continuation and approval cards.
-After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+A managed child that needs approval stays inside its job: the job posts one approval card per gated call into the conversation, reports `awaiting_approval`, and resumes the child with the decisions.
+The reply holding the job keeps waiting and shows that it waits for approval; pressing **Stop** or cancelling the job denies its open cards.
+A restart interrupts a job that waits for approval and denies its cards, like any other unfinished job; the next reply reports the interruption.
+These cards offer no automatic approval option.
 Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
 Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
@@ -22277,7 +22280,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Tool preparation does not expose the per-run Function copy the provider calls. | Expose the bound per-run Function from public preparation; no issue or PR identified. | `agno_compat_prepared_tools.py`; BashPresentationFunction reports its prepared copy so the CLI checkpoint can match provider calls exactly. |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
-| Application tools lack a public accepted-execution owner, framework waiting metadata, and per-call native wait projection. | Add ownership around approved FunctionCalls, provider-schema metadata hooks, and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Application tools lack a public accepted-execution owner and framework waiting metadata. | Add ownership around approved FunctionCalls and provider-schema metadata hooks. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | The Skills tool entrypoints are private methods with no hook for when an agent loads a skill, so the skill learner cannot count workspace skill loads without overriding `_get_skill_instructions`. | Tracking gap: call a hook when a skill's instructions or files are loaded; no matching issue or PR identified. | `_MindroomSkills` in `tool_system/skills.py`; usage coverage in `tests/test_skills.py`. |
@@ -22356,7 +22359,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
 | `tool_jobs/agno_compat_functions.py` | Private Function actor and run-context access plus asynchronous dispatch classification. | `tool_jobs/agno_execution.py` owns detached context copies and job eligibility; `tool_jobs/consumption.py` owns exact-owner acknowledgement. |
-| `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection, exact-call native requirements, and per-call completion ownership for nested SDK dispatch inside an accepted job. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, wait semantics derived from current policy, execution, result claims, and cancellation; internal SDK model calls keep their existing owner and inherited authority. |
+| `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection, and per-call completion ownership for nested SDK dispatch inside an accepted job. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, wait semantics derived from current policy, execution, result claims, and cancellation; internal SDK model calls keep their existing owner and inherited authority. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs, retained terminal metadata, and cache-write usage preservation. | `openai_models.py` retains provider classes and canonical history/replay policy. |
 | `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, continuation adaptation, and preservation of terminal usage across failures and retries. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |

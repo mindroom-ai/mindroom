@@ -32,12 +32,15 @@ from tests.test_event_journal_store import ROOM, admit
 from tests.test_user_stop_convergence import _CountingGateway
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
+    awaiting_approval,
     job_owner,
+    lookup,
     pending_outcome,
     pending_outcomes,
     start_job,
     tool_job_runtime,
     user_stopped,
+    wait_for_status,
 )
 
 if TYPE_CHECKING:
@@ -135,10 +138,10 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
             )
         # Merely sending a follow-up has not cancelled any accepted work.
         for job_id, (source_owner, _) in jobs.items():
-            assert (await runtime.lookup(job_id, owner=source_owner, depth=0)).status == "running"
+            assert (await lookup(runtime, job_id, owner=source_owner, depth=0)).status == "running"
         await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=100)
         for job_id, (source_owner, _) in jobs.items():
-            job = await runtime.lookup(job_id, owner=source_owner, depth=0)
+            job = await lookup(runtime, job_id, owner=source_owner, depth=0)
             if job_id in {"earlier", "current", "member"}:
                 assert job.user_stop_receipt_order == 100
                 await runtime.cancel(job_id, owner=source_owner, depth=0)
@@ -179,7 +182,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         await started.wait()
         await asyncio.wait_for(runtime.stop_jobs(receipt_order=7, matches=selected), JOB_TEST_TIMEOUT)
         await asyncio.wait_for(cleaning.wait(), JOB_TEST_TIMEOUT)
-        saved = await runtime.lookup("active", owner=job_owner(), depth=0)
+        saved = await lookup(runtime, "active", owner=job_owner(), depth=0)
         assert saved.status == "cancel_requested"
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
@@ -197,7 +200,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
     restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        saved = await restored.lookup("active", owner=job_owner(), depth=0)
+        saved = await lookup(restored, "active", owner=job_owner(), depth=0)
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
         assert pending_outcomes(restored) == []
@@ -259,7 +262,7 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
         await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=old.receipt_order)
         assert user_stopped(runtime, "older-edit")
         assert not user_stopped(runtime, "newer-edit")
-        assert (await runtime.lookup("newer-edit", owner=owner, depth=0)).status == "running"
+        assert (await lookup(runtime, "newer-edit", owner=owner, depth=0)).status == "running"
     finally:
         await runtime.shutdown()
 
@@ -345,7 +348,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         assert user_stopped(runtime, "ready") is enabled
         if enabled:
             assert pending_outcomes(runtime) == []
-            assert pending_outcome(runtime, "ready", 0) is None
+            assert pending_outcome(runtime, "ready") is None
     finally:
         if coordinator is not None:
             await coordinator.stop()
@@ -388,7 +391,7 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
         await runtime.release_wait("ready", waited.claim)
         monkeypatch.setattr(runtime_module, "write_json_file_durable", counting_writer)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-        stopped = await runtime.lookup("ready", owner=job_owner(), depth=0)
+        stopped = await lookup(runtime, "ready", owner=job_owner(), depth=0)
         await runtime.stop_jobs(receipt_order=100, matches=_every_job)
         await runtime.stop_jobs(receipt_order=50, matches=_every_job)
     finally:
@@ -397,7 +400,7 @@ async def test_replayed_stop_saves_its_mark_once_across_restart(
     try:
         await restored.recover()
         await restored.stop_jobs(receipt_order=100, matches=_every_job)
-        replayed = await restored.lookup("ready", owner=job_owner(), depth=0)
+        replayed = await lookup(restored, "ready", owner=job_owner(), depth=0)
     finally:
         await restored.shutdown()
     assert writes == ["ready.json"]
@@ -421,101 +424,16 @@ async def test_slow_stop_matching_leaves_jobs_accessible(tmp_path: Path) -> None
         await start_job(runtime, "held", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=_completed)
         stop = asyncio.create_task(runtime.stop_jobs(receipt_order=100, matches=slow_match))
         await judging.wait()
-        seen = await asyncio.wait_for(runtime.lookup("held", owner=job_owner(), depth=0), 30)
+        seen = await asyncio.wait_for(lookup(runtime, "held", owner=job_owner(), depth=0), 30)
         assert seen.user_stop_receipt_order is None
         release.set()
         await stop
-        assert (await runtime.lookup("held", owner=job_owner(), depth=0)).user_stop_receipt_order == 100
+        assert (await lookup(runtime, "held", owner=job_owner(), depth=0)).user_stop_receipt_order == 100
     finally:
         release.set()
         if stop is not None:
             await asyncio.gather(stop, return_exceptions=True)
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_stop_reaches_an_approval_continued_while_it_was_judged(tmp_path: Path) -> None:
-    """An approval continued while Stop was judging its paused generation still gets stopped in its new generation."""
-    runtime = tool_job_runtime(tmp_path)
-    judging, release, continued = asyncio.Event(), asyncio.Event(), asyncio.Event()
-
-    async def awaiting() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    async def resumed() -> BackgroundOutcome:
-        continued.set()
-        await asyncio.Event().wait()
-        raise AssertionError
-
-    async def held_match(_job: BackgroundJob) -> bool:
-        judging.set()
-        await release.wait()
-        return True
-
-    stop = None
-    try:
-        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=awaiting)
-        waited = await runtime.wait("paused", owner=job_owner(), depth=0)
-        await runtime.release_wait("paused", waited.claim)
-        stop = asyncio.create_task(runtime.stop_jobs(receipt_order=100, matches=held_match))
-        await judging.wait()
-        await asyncio.wait_for(
-            runtime.continue_job(
-                "paused",
-                owner=job_owner(),
-                depth=0,
-                expected_generation=0,
-                operation=resumed,
-                adapter={},
-            ),
-            30,
-        )
-        await continued.wait()
-        release.set()
-        await stop
-        settled = await runtime.wait("paused", owner=job_owner(), depth=0)
-        await runtime.release_wait("paused", settled.claim)
-        assert settled.job.user_stop_receipt_order == 100
-        assert settled.job.status == "cancelled"
-    finally:
-        release.set()
-        if stop is not None:
-            await asyncio.gather(stop, return_exceptions=True)
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_approval_stopped_during_shutdown_is_cancelled_on_restart(tmp_path: Path) -> None:
-    """Shutdown leaves a Stopped approval paused, so recovery cancels it with its cleanup as live cancellation would.
-
-    Like live cancellation of an approval, the cancelled outcome takes a fresh generation that stale claims cannot own.
-    """
-    cleaned: list[str] = []
-
-    async def awaiting() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    async def cleanup(job: BackgroundJob) -> None:
-        cleaned.append(job.job_id)
-
-    runtime = tool_job_runtime(tmp_path)
-    try:
-        await start_job(runtime, "paused", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=awaiting)
-        waited = await runtime.wait("paused", owner=job_owner(), depth=0)
-        await runtime.release_wait("paused", waited.claim)
-        await runtime.quiesce()
-        await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-        assert (await runtime.lookup("paused", owner=job_owner(), depth=0)).status == "awaiting_approval"
-    finally:
-        await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path, cancel=cleanup)
-    try:
-        await restored.recover()
-        job = await restored.lookup("paused", owner=job_owner(), depth=0)
-        assert await restored.stoppable_jobs() == []
-    finally:
-        await restored.shutdown()
-    assert (job.status, job.generation, job.user_stop_receipt_order, cleaned) == ("cancelled", 1, 100, ["paused"])
 
 
 @pytest.mark.asyncio
@@ -602,7 +520,7 @@ async def test_stop_during_shutdown_marks_jobs_without_failing(tmp_path: Path) -
         assert await reconciler.finalize("$reply", 100, AsyncMock())
         release.set()
         await quiesce
-        job = await runtime.lookup("active", owner=owner, depth=0)
+        job = await lookup(runtime, "active", owner=owner, depth=0)
         assert job.status == "interrupted"
         assert job.user_stop_receipt_order == 100
     finally:
@@ -659,7 +577,7 @@ async def test_saved_stop_reaches_jobs_of_a_bot_that_appears_after_startup(tmp_p
         else:
             await coordinator._reconcile()
         assert user_stopped(coordinator.runtime, "ready")
-        assert pending_outcome(coordinator.runtime, "ready", 0) is None
+        assert pending_outcome(coordinator.runtime, "ready") is None
     finally:
         await coordinator.stop()
 
@@ -762,7 +680,7 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
         )
         reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, RetiredGateway()))
         assert await reconciler.finalize("$reply", 100, AsyncMock())
-        job = await runtime.lookup("active", owner=owner, depth=0)
+        job = await lookup(runtime, "active", owner=owner, depth=0)
         turn = bot._turn_store.get_turn_record("$source")
         assert turn.user_stop_receipt_order == 100
         assert turn.response_event_id is None
@@ -810,7 +728,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
     register_background_runtime(paths, runtime)
 
     async def awaiting() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
+        return await awaiting_approval(runtime, "older-approval-job")
 
     try:
         await start_job(
@@ -823,8 +741,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
             owner=owner,
             operation=awaiting,
         )
-        waiting = await runtime.wait("older-approval-job", owner=owner, depth=0)
-        await runtime.release_wait("older-approval-job", waiting.claim)
+        await wait_for_status(runtime, "older-approval-job", "awaiting_approval")
         original_request = _plain_request(target, source_event_id="$first")
         if owned_approval:
             continuation = ApprovalContinuation(

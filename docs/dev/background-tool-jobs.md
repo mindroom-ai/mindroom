@@ -22,30 +22,31 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   No job completion starts a reply of its own; after a restart the next reply in the conversation retrieves interrupted outcomes.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
-- A restart preserves outcomes and approvals, interrupts abandoned local execution, and never automatically reruns a tool.
-  Recovery rechecks current permissions and room membership before any saved approval runs.
+- A restart preserves outcomes, interrupts abandoned local execution including jobs waiting for approval, and never automatically reruns a tool.
+- A background child that needs approval asks through cards its job posts, and the job stays `awaiting_approval` until the decisions arrive.
   Turning the feature off parks saved work.
 
 ## Ownership
 
 | Owner | Responsibility |
 | --- | --- |
-| `tool_jobs/runtime.py` | One accepted execution, durable generations, result claims, cancellation and retention |
+| `tool_jobs/runtime.py` | One accepted execution, its durable outcome, result claims, cancellation and retention |
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
 | `tool_jobs/agno_compat_*.py` | Explicit, version-checked SDK bindings; no application authorization policy |
 | `tool_jobs/agno_execution.py` and `consumption.py` | Exact call execution and acknowledgement after the SDK saves consumption |
 | `tool_jobs/resources.py` | Defer model and storage cleanup until the reply and its detached jobs release them |
 | `delegation/background.py` | Native child identity and cleanup inside the generic execution owner |
+| `delegation/job_approvals.py` | Approval cards a background child's job posts and denies when the job ends early |
 | `tool_jobs/completion.py` | The holding reply's join of outstanding jobs and its waiting presentation |
 | `orchestration/tool_job_runtime.py` | Startup, policy revocation, saved Stops, card expiry, retention and shutdown coordination |
 | Response and delivery owners | Serialize replies, preserve published text and tool traces, settle visible delivery |
 
 Execution lifetime is independent of a caller's wait.
-Each outcome generation has one active result claim; only persisted consumption acknowledges it.
-Consumption records the reply that first consumed each generation, so that unfinished reply can recover after the model reads the result.
-Approval continuations bind both job ID and generation, so stale cards cannot mutate newer work.
-Cancelling a job during its approval pause expires the card presenting that pause, which resumes the reply waiting on it.
-Cancellation publishes its generation before cleanup and stays pending until owned work settles.
+Each outcome has one active result claim; only persisted consumption acknowledges it.
+Consumption records the reply that first consumed the outcome, so that unfinished reply can recover after the model reads the result.
+A job's approval cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
+Cancelling, stopping, or restarting a job that waits for approval denies its open cards.
+Cancellation is saved before cleanup and stays pending until owned work settles.
 Permission revocation uses internal ownership to stop execution, even though public discovery and control are no longer authorized.
 Config reload retains active jobs; controls and result admission check current authorization.
 Joins happen only inside replies, so job outcomes need no journal source, turn record, or placeholder of their own.
@@ -68,7 +69,7 @@ Each job stores its full result once, in one typed payload whose durable envelop
 Managed generator events retain their SDK family, serialized fields, and captured result text.
 Custom events replay as fixed SDK subclasses; plugin class identity and methods are not restored from saved data.
 
-Job metadata stays in memory, while each generation's payload is a separate file that retrieval reads on demand.
+Job metadata stays in memory, while the outcome's payload is a separate file that retrieval reads on demand.
 A payload file is written before the metadata that references it, so a crash in between leaves the job running for recovery to interrupt.
 Only work that a shutdown, restart, or event-loop teardown cut short is interrupted; a cancellation or Stop saved before a crash still settles as cancelled, and a child settlement saved before a crash stands.
 `tests/test_tool_job_fuzz.py`, `tests/test_delegation_job_fuzz.py`, and `tests/test_tool_job_reply_hold_fuzz.py` generate interleaved job, subagent, and conversation lifecycles, including failed saves, follow-ups for this and other agents, Stops, restarts, and crashes, and check these guarantees after every step.

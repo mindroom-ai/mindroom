@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from ast import literal_eval
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,7 +17,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_outcome
-from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -29,7 +27,12 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, regist
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    lookup,
+    start_delegation_job,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -39,7 +42,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -137,7 +139,7 @@ async def test_job_retrieval_applies_workspace_output_policy(output_agent: _Outp
         assert receipt["path"] == "results/job.txt"
     else:
         assert receipt["auto_saved"] is True
-    saved_job = await case.runtime.lookup(job_id, owner=case.owner, depth=0)
+    saved_job = await lookup(case.runtime, job_id, owner=case.owner, depth=0)
     assert (await read_result_payload(case.runtime, saved_job)).value == _LARGE_RESULT
 
 
@@ -149,14 +151,14 @@ async def test_job_output_path_is_validated_before_claiming_result(output_agent:
     assert response.tools
     assert not response.tools[0].tool_call_error
     assert literal_eval(response.tools[0].result)["mindroom_tool_output"]["status"] == "error"
-    saved = await case.runtime.lookup(job_id, owner=case.owner, depth=0)
+    saved = await lookup(case.runtime, job_id, owner=case.owner, depth=0)
     assert not saved.consumed
     assert not (case.workspace.parent / "escape.txt").exists()
 
 
 @pytest.mark.parametrize("explicit", [False, True])
 async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _OutputAgent, explicit: bool) -> None:
-    """External native waits retain their identity and apply the retrieval output policy."""
+    """Retrieving a subagent's saved result applies the retrieval output policy."""
     case = output_agent
     child = prepare_child_turn(
         "leader",
@@ -171,28 +173,15 @@ async def test_native_delegation_job_wait_redirects_saved_result(output_agent: _
     async def completed() -> BackgroundOutcome:
         return delegation_outcome("completed", _LARGE_RESULT)
 
-    async def never_run(_child: DelegationChild, **_kwargs: object) -> str:
-        msg = "Retrieval must not execute the child again"
-        raise AssertionError(msg)
-
     job = await start_delegation_job(case.runtime, child, owner=case.owner, operation=completed)
     ready = await case.runtime.wait(job.job_id, owner=case.owner, depth=0)
     await case.runtime.release_wait(job.job_id, ready.claim)
     case.agent.db = create_session_storage("leader", case.config, case.paths, case.owner)
     arguments = {"mindroom_output_path": "results/child.txt"} if explicit else {}
-    paused = await case.call("job", action="wait", job_id=job.job_id, **arguments)
-    assert paused.status == RunStatus.paused
-    response = await drive_delegations(
-        case.agent,
-        paused,
-        run_child=never_run,
-        agent_name="leader",
-        config=case.config,
-        runtime_paths=case.paths,
-        execution_identity=case.owner,
-    )
+    response = await case.call("job", action="wait", job_id=job.job_id, **arguments)
+    assert response.status == RunStatus.completed
     assert response.tools
     assert not response.tools[0].tool_call_error
-    receipt = json.loads(response.tools[0].result)["mindroom_tool_output"]
+    receipt = literal_eval(response.tools[0].result)["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     assert (case.workspace / receipt["path"]).read_bytes() == _LARGE_RESULT.encode()

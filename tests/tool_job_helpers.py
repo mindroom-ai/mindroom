@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from copy import deepcopy
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -18,7 +20,7 @@ from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.runtime import READY_STATUSES, BackgroundJob, BackgroundOutcome, ToolJobRuntime
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, BackgroundJob, BackgroundOutcome, ToolJobRuntime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -55,21 +57,24 @@ def tool_job_runtime(
     return ToolJobRuntime(storage_root, authorize=authorize, authorize_execution=authorize_execution, cancel=cancel)
 
 
+async def lookup(runtime: ToolJobRuntime, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
+    """Inspect an exact job as a caller would reach it, failing like any access when that caller cannot see it."""
+    async with runtime._lock:
+        return deepcopy(runtime._entry(job_id, owner, depth).job)
+
+
 def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
     """Ready outcomes a holding reply would still deliver: unconsumed, not stopped, unclaimed, and authorized."""
     return [
         entry.job
         for entry in runtime._entries.values()
-        if entry.job.status in READY_STATUSES and runtime._unconsumed(entry)
+        if entry.job.status in TERMINAL_STATUSES and runtime._unconsumed(entry)
     ]
 
 
-def pending_outcome(runtime: ToolJobRuntime, job_id: str, generation: int) -> BackgroundJob | None:
-    """The pending outcome of one exact job generation, if a holding reply would still deliver it."""
-    return next(
-        (job for job in pending_outcomes(runtime) if (job.job_id, job.generation) == (job_id, generation)),
-        None,
-    )
+def pending_outcome(runtime: ToolJobRuntime, job_id: str) -> BackgroundJob | None:
+    """The pending outcome of one job, if a holding reply would still deliver it."""
+    return next((job for job in pending_outcomes(runtime) if job.job_id == job_id), None)
 
 
 def user_stopped(runtime: ToolJobRuntime, job_id: str) -> bool:
@@ -226,3 +231,10 @@ async def finish_delegation_job(coordinator: ToolJobRuntimeCoordinator) -> Backg
     result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     await coordinator.runtime.release_wait(job.job_id, result.claim)
     return result.job
+
+
+async def awaiting_approval(runtime: ToolJobRuntime, job_id: str) -> BackgroundOutcome:
+    """Wait for approval cards forever, as a paused background child does until a decision or cancellation."""
+    await runtime.set_awaiting_approval(job_id, awaiting=True)
+    await asyncio.Event().wait()
+    raise AssertionError
