@@ -987,7 +987,7 @@ See the [journal binding and migration commands](../cli.md#journal) before movin
 An agent or team that mentions another agent or team in its reply wakes it.
 When the reply was written for a person, the mentioned entity answers for that person, who must still be a joined member of the room; see [Responder access](../authorization.md#responder-access).
 `defaults.max_consecutive_agent_replies` defaults to `50` and accepts any positive integer.
-Once a conversation has that many consecutive agent or team messages since a person last wrote there, mentions in further agent messages wake nobody.
+Once a conversation has that many consecutive agent or team messages since a person last wrote there, counting the message itself, mentions in agent messages wake nobody, so `1` stops agents from waking each other.
 The next message from a person in that conversation starts the count again.
 For a room-level conversation the count covers the room's messages outside threads.
 
