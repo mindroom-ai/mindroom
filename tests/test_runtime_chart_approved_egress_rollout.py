@@ -15,7 +15,7 @@ RUNTIME_CHART_DIR = Path(__file__).resolve().parents[1] / "cluster" / "k8s" / "r
 PROXY_NAME = "mindroom-runtime-egress-proxy"
 
 
-def _render(tmp_path: Path, approved_egress: dict[str, Any]) -> list[dict[str, Any]]:
+def _render_text(tmp_path: Path, approved_egress: dict[str, Any]) -> str:
     helm = shutil.which("helm")
     if helm is None:
         pytest.skip("helm is required for rendered chart checks")
@@ -32,7 +32,11 @@ def _render(tmp_path: Path, approved_egress: dict[str, Any]) -> list[dict[str, A
         capture_output=True,
         text=True,
     )
-    return [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]
+    return completed.stdout
+
+
+def _render(tmp_path: Path, approved_egress: dict[str, Any]) -> list[dict[str, Any]]:
+    return [doc for doc in yaml.safe_load_all(_render_text(tmp_path, approved_egress)) if isinstance(doc, dict)]
 
 
 def _deployment(docs: list[dict[str, Any]], name: str) -> dict[str, Any]:
@@ -67,6 +71,19 @@ def test_inline_allowlist_checksum_keeps_pod_annotations_and_squid_checksum(tmp_
 
     assert set(_proxy_annotations(docs)) == {"example.test/owner", "checksum/allowlist", "checksum/squid-config"}
     assert _proxy_annotations(docs)["checksum/allowlist"] == hashlib.sha256(b"").hexdigest()
+
+
+def test_chart_allowlist_checksum_replaces_a_pod_annotation_with_the_same_key(tmp_path: Path) -> None:
+    """A stale user annotation must not render a duplicate key or override the chart-computed checksum."""
+    text = _render_text(
+        tmp_path,
+        {"allowlist": {"domains": ["example.com"]}, "podAnnotations": {"checksum/allowlist": "stale"}},
+    )
+
+    assert text.count("checksum/allowlist:") == 1
+    assert _proxy_annotations(
+        [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)],
+    ) == {"checksum/allowlist": hashlib.sha256(b"example.com\n").hexdigest()}
 
 
 def test_existing_allowlist_configmap_uses_operator_supplied_checksum(tmp_path: Path) -> None:
