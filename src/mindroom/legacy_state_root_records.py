@@ -101,19 +101,24 @@ def _read_valid(storage_root: Path, relative: Path, is_valid: Callable[[Path, by
     return payload
 
 
+def _json(payload: bytes) -> object:
+    # Decode strictly as the runtime readers do; json.loads on bytes also accepts a BOM and UTF-16 or UTF-32 text.
+    return json.loads(payload.decode("utf-8"))
+
+
 def _is_room_list(_relative: Path, payload: bytes) -> bool:
-    value = json.loads(payload)
+    value = _json(payload)
     return isinstance(value, list) and all(isinstance(room_id, str) for room_id in value)
 
 
 def _is_invite_map(_relative: Path, payload: bytes) -> bool:
-    value = json.loads(payload)
+    value = _json(payload)
     return isinstance(value, dict) and all(isinstance(inviter, str) for inviter in value.values())
 
 
 def _is_object(_relative: Path, payload: bytes) -> bool:
     # The agent-mode reader keeps only the valid choices of an object.
-    return isinstance(json.loads(payload), dict)
+    return isinstance(_json(payload), dict)
 
 
 def _is_personal_room(relative: Path, payload: bytes) -> bool:
