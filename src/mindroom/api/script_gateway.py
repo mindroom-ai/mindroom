@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import (
@@ -213,10 +214,21 @@ async def get_script_call(
 class _GatewayListenerServer(uvicorn.Server):
     """Uvicorn server that leaves process signals to the primary API server it runs beside."""
 
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.stop_requested = False
+
     @contextmanager
     def capture_signals(self) -> Iterator[None]:
         """Install no handlers; the primary server owns shutdown signals."""
         yield
+
+    async def on_tick(self, counter: int) -> bool:
+        """End the main loop once the owner leaves, always through Uvicorn's shutdown.
+
+        Uvicorn skips its shutdown, leaving the listener serving, when `should_exit` is already set as startup ends.
+        """
+        return self.stop_requested or await super().on_tick(counter)
 
 
 def _listener_port(runtime_paths: RuntimePaths) -> int | None:
@@ -261,9 +273,8 @@ async def serve_script_gateway_listener(
     logger.info("script_gateway_listener_started", host=host, port=port)
     try:
         yield
-    except BaseException:
-        serve_task.cancel()
-        await asyncio.wait({serve_task})
-        raise
-    server.should_exit = True
-    await serve_task
+    finally:
+        server.stop_requested = True
+        # Uvicorn's shutdown closes the listener and its connections, so owner cancellation must not interrupt it.
+        await run_coroutine_until_complete(asyncio.wait({serve_task}))
+    serve_task.result()

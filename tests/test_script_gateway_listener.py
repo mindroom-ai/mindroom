@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import socket
 from contextlib import closing
@@ -46,6 +47,11 @@ def _free_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _assert_port_released(port: int) -> None:
+    """Binding the port again succeeds only when no listener still holds it."""
+    socket.create_server(("127.0.0.1", port)).close()
 
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str]) -> RuntimePaths:
@@ -102,6 +108,81 @@ async def test_listener_serves_only_script_gateway_routes(tmp_path: Path) -> Non
     async with httpx.AsyncClient() as client:
         with pytest.raises(httpx.ConnectError):
             await client.get(f"http://127.0.0.1:{port}{_GATEWAY_PREFIX}/runs/run-1/calls/call-1")
+
+
+@pytest.mark.asyncio
+async def test_listener_closes_when_its_owner_is_cancelled_while_serving(tmp_path: Path) -> None:
+    """Cancelling the owning task closes the listener and its open connections before cancellation propagates."""
+    port = _free_port()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    serving = asyncio.Event()
+
+    async def own_listener() -> None:
+        async with (
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client,
+            serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=_ReceiptBroker(), log_level="INFO"),
+        ):
+            assert (await client.get("/api/health")).status_code == 404
+            serving.set()
+            await asyncio.Event().wait()
+
+    owner = asyncio.create_task(own_listener())
+    await serving.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    _assert_port_released(port)
+
+
+@pytest.mark.asyncio
+async def test_listener_finishes_closing_when_its_owner_is_cancelled_during_shutdown(tmp_path: Path) -> None:
+    """A cancellation that arrives while the listener shuts down cannot leave it serving."""
+    port = _free_port()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    leaving = asyncio.Event()
+
+    async def own_listener() -> None:
+        async with serve_script_gateway_listener(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=_ReceiptBroker(),
+            log_level="INFO",
+        ):
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                assert (await client.get("/api/health")).status_code == 404
+            # The owner leaves the body without awaiting, so the cancellation below lands in listener shutdown.
+            leaving.set()
+
+    owner = asyncio.create_task(own_listener())
+    await leaving.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    _assert_port_released(port)
+
+
+@pytest.mark.asyncio
+async def test_listener_closes_when_the_context_body_raises(tmp_path: Path) -> None:
+    """A failure in the owner's body closes the listener and propagates unchanged."""
+    port = _free_port()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+
+    async def fail_inside_listener() -> None:
+        async with serve_script_gateway_listener(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=_ReceiptBroker(),
+            log_level="INFO",
+        ):
+            msg = "primary API failed"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="primary API failed"):
+        await fail_inside_listener()
+
+    _assert_port_released(port)
 
 
 @pytest.mark.asyncio

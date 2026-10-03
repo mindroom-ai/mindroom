@@ -1668,6 +1668,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.bounded_bytes",
     "mindroom.logging_config",
     "mindroom.script_runs.broker",
