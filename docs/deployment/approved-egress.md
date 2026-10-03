@@ -42,6 +42,7 @@ Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but ski
 The proxy reads the static allowlist only at startup.
 The chart hashes inline `approvedEgress.allowlist.domains` into the proxy pod template, so changing them rolls the proxy.
 With `approvedEgress.allowlist.existingConfigMap`, the chart cannot see the content, so restart the proxy Deployment after editing that ConfigMap, or put a content hash in `approvedEgress.podAnnotations`.
+MindRoom's own copy of the allowlist refreshes only when its pod restarts, so after removing a domain also restart the MindRoom Deployment; until then `request_network_access` reports that domain as already allowed and creates no grant, while the proxy blocks it.
 
 ## Agent Vault Chaining
 
