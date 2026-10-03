@@ -110,7 +110,7 @@ def test_only_in_progress_streams_are_unfinished(status: str | None) -> None:
 def _streamed(
     body: str = PARTIAL,
     *,
-    status: str = STREAM_STATUS_STREAMING,
+    status: str | None = STREAM_STATUS_STREAMING,
     trace: tuple[ToolTraceEntry, ...] = TRACE,
     latest_edit: str = "$edit-a",
 ) -> ResolvedVisibleMessage:
@@ -291,8 +291,9 @@ async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
         nio.EncryptionError("missing session key"),
         nio.exceptions.RemoteProtocolError("relations page failed"),
         _streamed("Thinking...", status=STREAM_STATUS_PENDING, trace=()),
+        _streamed("You selected: 1 Yes\n\nProcessing your response...", status=None, trace=()),
     ],
-    ids=["unreadable", "undecryptable", "unlisted_edits", "nothing_shown"],
+    ids=["unreadable", "undecryptable", "unlisted_edits", "nothing_shown", "selection_acknowledgement"],
 )
 async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
     tmp_path: Path,
@@ -359,6 +360,46 @@ async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> No
     assert first_account.startswith("Half of the report")
     assert "The `counter` tool finished" in first_account
     assert second_account == "\n\n(turn stopped before completion)"
+
+
+@pytest.mark.asyncio
+async def test_an_attempt_after_compaction_starts_a_record_compaction_has_not_seen(tmp_path: Path) -> None:
+    """Reusing an archived record's id would make compaction delete the new account as resurrected."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = request.response_envelope.target
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+
+    async def fold(visible: ResolvedVisibleMessage) -> None:
+        with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
+            await runner._with_interrupted_attempt(
+                request,
+                resolved_target=target,
+                history_scope=HistoryScope(kind="agent", scope_id="general"),
+                execution_identity=identity,
+            )
+
+    await fold(_streamed())
+    storage = runner.deps.state_writer.create_storage(identity)
+    try:
+        session = get_agent_session(storage, target.session_id)
+        assert session is not None
+        (archived,) = session.runs
+        storage.delete_session(target.session_id)
+    finally:
+        storage.close()
+    await fold(_streamed("A new start", trace=(), latest_edit="$edit-b"))
+
+    storage = runner.deps.state_writer.create_storage(identity)
+    try:
+        session = get_agent_session(storage, target.session_id)
+    finally:
+        storage.close()
+    assert session is not None
+    (record,) = session.runs
+    assert record.run_id != archived.run_id
+    assert cast("str", record.content).startswith("A new start")
 
 
 @pytest.mark.asyncio

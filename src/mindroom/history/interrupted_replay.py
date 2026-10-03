@@ -323,18 +323,32 @@ def persist_stopped_attempt_snapshot(
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
 ) -> None:
-    """Fold one stopped attempt into its turn's single interrupted replay record.
+    """Fold one stopped attempt into its turn's live interrupted replay record.
 
     A turn that stops again before its new attempt shows the earlier work
     would otherwise lose that work's account, so each newly read attempt is
-    appended to what the record already holds. One record per turn keeps all
-    attempts inside even the smallest history window.
+    appended to the record its reply already has. One record per turn keeps
+    every attempt inside even the smallest history window. ``run_id`` names a
+    new record only: once compaction archives the live one, its summary holds
+    the earlier attempts and later ones start a record compaction has not seen.
     """
     session = _load_persisted_session(storage=storage, session_id=session_id, is_team=is_team)
-    earlier = next((run for run in (session.runs if session is not None else None) or () if run.run_id == run_id), None)
-    if earlier is not None and isinstance(earlier.metadata, dict):
+    response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    earlier = next(
+        (
+            run
+            for run in (session.runs if session is not None else None) or ()
+            if isinstance(run.metadata, dict)
+            and _STOPPED_ATTEMPT_KEY in run.metadata
+            and run.metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id
+        ),
+        None,
+    )
+    if earlier is not None:
+        assert isinstance(earlier.metadata, dict)
         if earlier.metadata.get(_STOPPED_ATTEMPT_KEY) == attempt:
             return
+        run_id = earlier.run_id
         if isinstance(earlier.content, str) and earlier.content:
             snapshot = replace(
                 snapshot,

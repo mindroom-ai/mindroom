@@ -85,8 +85,8 @@ Interrupted callbacks remain pending for exact replay, including edited messages
 A crash leaves the same pending state as orderly shutdown, and in both the interrupted reply stays visibly streaming until replay adopts it and answers again in place.
 When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and folds them into an interrupted replay record in the turn's history before answering, with a transient instruction not to repeat calls that may already have taken effect.
 Only visible work can be recorded: tool calls hidden by `show_tool_calls: false` leave no trace, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the record and instruction.
-Every stopped attempt of a turn is folded into that turn's one record, keyed by the reply it adopts, so stopping again before the new attempt shows the earlier tools keeps every account inside even the smallest history window.
-A recovered reply that cannot be read back, or that is still in progress without showing any work, gets only an instruction warning that side effects may already have happened.
+Every stopped attempt of a turn is folded into that turn's live record, found by the reply it adopts, so stopping again before the new attempt shows the earlier tools keeps every account inside even the smallest history window; once compaction archives that record, later attempts start a new one beside its summary.
+A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, gets only an instruction warning that side effects may already have happened.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.

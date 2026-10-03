@@ -2531,7 +2531,7 @@ class ResponseRunner:
         execution_identity: ToolExecutionIdentity,
         run_id: str,
     ) -> None:
-        """Fold one stopped attempt, named by its last visible edit, into the turn's record."""
+        """Fold one stopped attempt, named by its last visible edit, into the turn's live record."""
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
         try:
             persist_stopped_attempt_snapshot(
@@ -3651,9 +3651,9 @@ class ResponseRunner:
             message = None
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
         if message is None or unfinished is None:
-            if message is None or message.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
-                # Unreadable, or stopped before showing anything such as hidden or
-                # non-streamed tool calls: unknown work, not absent work.
+            if message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+                # Unreadable, or stopped before showing anything (an acknowledgement,
+                # hidden or non-streamed tool calls): unknown work, not absent work.
                 return _with_interrupted_attempt_instruction(request, _UNKNOWN_ATTEMPT_INSTRUCTION)
             return request
         completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
@@ -3682,8 +3682,8 @@ class ResponseRunner:
                 session_scope=history_scope,
                 session_id=resolved_target.session_id,
                 execution_identity=execution_identity,
-                # One record per turn, keyed by the reply every attempt adopts.
-                run_id=str(uuid5(NAMESPACE_URL, event_id)),
+                # Names a new record after the attempt that starts it.
+                run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
             ),
         )
         self.deps.logger.info(
