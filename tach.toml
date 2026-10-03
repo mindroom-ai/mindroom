@@ -1668,7 +1668,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.bounded_bytes",
+    "mindroom.logging_config",
     "mindroom.script_runs.broker",
     "mindroom.script_runs.models",
     "mindroom.script_runs.store",
@@ -2646,6 +2648,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.event_journal_open",
     "mindroom.api.main",
+    "mindroom.api.script_gateway",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.config.main",
@@ -6469,7 +6472,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["bind_script_tool_broker", "router"]
+expose = ["bind_script_tool_broker", "router", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]

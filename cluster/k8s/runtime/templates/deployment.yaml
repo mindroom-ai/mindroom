@@ -191,6 +191,11 @@ spec:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}
               protocol: TCP
+            {{- if .Values.scriptGateway.enabled }}
+            - name: script-gateway
+              containerPort: {{ .Values.scriptGateway.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
@@ -330,6 +335,15 @@ spec:
               value: {{ .Values.workers.kubernetes.scriptResources.defaultProfile | quote }}
             - name: MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON
               value: {{ toJson .Values.workers.kubernetes.scriptResources.profiles | quote }}
+            {{- if .Values.scriptGateway.enabled }}
+            - name: MINDROOM_SCRIPT_GATEWAY_PORT
+              value: {{ .Values.scriptGateway.port | quote }}
+            - name: MINDROOM_SCRIPT_GATEWAY_URL
+              value: {{ printf "http://%s:%v/api/script-gateway" (include "mindroom-runtime.scriptGatewayHost" .) .Values.scriptGateway.port | quote }}
+            # Backed by the required worker egress NetworkPolicy, which opens only the gateway port on this pod.
+            - name: MINDROOM_SCRIPT_GATEWAY_ISOLATED
+              value: "true"
+            {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}

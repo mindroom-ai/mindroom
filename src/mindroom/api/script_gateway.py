@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Protocol, cast
+import asyncio
+import socket
+from contextlib import asynccontextmanager, contextmanager
+from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
+import uvicorn
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
@@ -23,16 +29,27 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+
+    from mindroom.constants import RuntimePaths
+
 __all__ = [
     "ScriptCallReceiptResponse",
     "ScriptToolCallRequestModel",
     "bind_script_tool_broker",
     "get_script_call",
     "router",
+    "serve_script_gateway_listener",
     "submit_script_call",
 ]
 
+logger = get_logger(__name__)
+
 _MAX_REQUEST_BYTES = 64 * 1024
+_LISTENER_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
+# Matches the primary API's shutdown grace; Uvicorn cancels gateway requests still open after it.
+_LISTENER_SHUTDOWN_GRACE_SECONDS = 5
 
 
 class _ScriptGatewayBroker(Protocol):
@@ -194,3 +211,79 @@ async def get_script_call(
     except ScriptCallPreparationPendingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ScriptCallReceiptResponse.from_domain(receipt)
+
+
+class _GatewayListenerServer(uvicorn.Server):
+    """Uvicorn server that leaves process signals to the primary API server it runs beside."""
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self.stop_requested = False
+
+    @contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        """Install no handlers; the primary server owns shutdown signals."""
+        yield
+
+    async def on_tick(self, counter: int) -> bool:
+        """End the main loop once the owner leaves, always through Uvicorn's shutdown.
+
+        Uvicorn skips its shutdown, leaving the listener serving, when `should_exit` is already set as startup ends.
+        """
+        return self.stop_requested or await super().on_tick(counter)
+
+
+def _listener_port(runtime_paths: RuntimePaths) -> int | None:
+    raw_port = (runtime_paths.env_value(_LISTENER_PORT_ENV) or "").strip()
+    if not raw_port:
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        msg = f"{_LISTENER_PORT_ENV} must be a TCP port from 1 to 65535."
+        raise ValueError(msg)
+    return port
+
+
+@asynccontextmanager
+async def serve_script_gateway_listener(
+    runtime_paths: RuntimePaths,
+    *,
+    host: str,
+    broker: _ScriptGatewayBroker | None,
+    log_level: str,
+) -> AsyncIterator[None]:
+    """Serve only the script gateway routes on `MINDROOM_SCRIPT_GATEWAY_PORT` while the primary API runs.
+
+    The listener's app contains nothing but this router, so a network path that
+    reaches only this port cannot reach any other primary API route.
+    """
+    port = _listener_port(runtime_paths)
+    if port is None:
+        yield
+        return
+    gateway_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    gateway_app.include_router(router)
+    bind_script_tool_broker(gateway_app, broker)
+    server = _GatewayListenerServer(
+        uvicorn.Config(
+            gateway_app,
+            lifespan="off",
+            log_level=log_level.lower(),
+            ws="none",
+            timeout_graceful_shutdown=_LISTENER_SHUTDOWN_GRACE_SECONDS,
+        ),
+    )
+    listener = socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET)
+    serve_task = asyncio.create_task(server.serve(sockets=[listener]), name="script_gateway_listener")
+    logger.info("script_gateway_listener_started", host=host, port=port)
+    try:
+        yield
+    finally:
+        server.stop_requested = True
+        # Uvicorn's shutdown closes the listener, then cancels requests still open after the grace period,
+        # so owner cancellation must not interrupt it.
+        await run_coroutine_until_complete(asyncio.wait({serve_task}))
+    serve_task.result()
