@@ -327,8 +327,10 @@ class ChatUITools(Toolkit):
 
         Use a canvas when seeing or clicking beats reading or typing: dashboards,
         reports, charts, slides, menus, forms, pickers, and multi-step flows. Pass the
-        page as ``html``, or as ``path`` to an HTML file in your workspace, which suits
-        pages you build and refine such as slides. Pages up to 4 MB are supported.
+        page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
+        to an HTML file, which suits pages you build and refine such as slides. Pages up
+        to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
+        whatever the user types into it could leave the panel.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
         and JavaScript; external scripts, styles, fonts, images, and network requests
@@ -358,7 +360,7 @@ class ChatUITools(Toolkit):
         Args:
             title: Short single-line panel title.
             html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
-            path: Workspace path of an HTML file to show instead of html.
+            path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
 
         """
@@ -436,34 +438,50 @@ class ChatUITools(Toolkit):
     async def _read_canvas_page(self, html: str | None, path: str | None) -> bytes | str:
         """Return the page as UTF-8 bytes, read from the workspace when a path is given."""
         if html:
-            page = html.encode("utf-8")
+            try:
+                page = html.encode("utf-8")
+            except UnicodeEncodeError:
+                return self._canvas_error("Canvas HTML must be valid Unicode text.")
         else:
             assert path is not None
-            try:
-                authorized = resolve_agent_file(
-                    path,
-                    workspace_root=self._workspace_root,
-                    file_access=self._file_access,
-                    field_name="Canvas path",
-                )
-                page = await asyncio.to_thread(
-                    read_regular_file_within_root,
-                    authorized.root,
-                    authorized.relative,
-                    max_bytes=_CANVAS_PAGE_MAX_BYTES,
-                )
-            except (OSError, ValueError) as exc:
-                return self._canvas_error(str(exc), path=path)
-            try:
-                text = page.decode("utf-8")
-            except UnicodeDecodeError:
-                return self._canvas_error("Canvas file must be UTF-8 text.", path=path)
-            if not text.strip():
-                return self._canvas_error("Canvas file is empty.", path=path)
+            file_page = await self._read_canvas_file(path)
+            if isinstance(file_page, str):
+                return file_page
+            page = file_page
         if len(page) > _CANVAS_PAGE_MAX_BYTES:
             return self._canvas_error(
                 f"Canvas page is {len(page)} bytes; the limit is {_CANVAS_PAGE_MAX_BYTES}.",
             )
+        return page
+
+    async def _read_canvas_file(self, path: str) -> bytes | str:
+        """Read one non-empty UTF-8 page through the agent's file access."""
+        try:
+            authorized = resolve_agent_file(
+                path,
+                workspace_root=self._workspace_root,
+                file_access=self._file_access,
+                field_name="Canvas path",
+            )
+            page = await asyncio.to_thread(
+                read_regular_file_within_root,
+                authorized.root,
+                authorized.relative,
+                max_bytes=_CANVAS_PAGE_MAX_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            message = (
+                f"Canvas file is larger than the {_CANVAS_PAGE_MAX_BYTES}-byte limit."
+                if "size limit" in str(exc)
+                else str(exc)
+            )
+            return self._canvas_error(message, path=path)
+        try:
+            text = page.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._canvas_error("Canvas file must be UTF-8 text.", path=path)
+        if not text.strip():
+            return self._canvas_error("Canvas file is empty.", path=path)
         return page
 
     @staticmethod
@@ -488,14 +506,16 @@ class ChatUITools(Toolkit):
         canvas_event_id: str | None,
     ) -> dict[str, object] | str:
         """Carry a page inside the event when an edit of it fits, otherwise as uploaded media."""
-        inline: dict[str, object] = {"title": title, "html": page.decode("utf-8")}
-        probe = _canvas_edit_content(
-            canvas_event_id or _CANVAS_SIZE_PROBE_EVENT_ID,
-            cls._canvas_replacement(body, {**metadata, "canvas": inline}),
-            body,
-        )
-        if calculate_event_size(probe) <= EDIT_MESSAGE_SIZE_LIMIT:
-            return inline
+        # Serialized JSON is never smaller than the UTF-8 page, so larger pages skip the measurement.
+        if len(page) < EDIT_MESSAGE_SIZE_LIMIT:
+            inline: dict[str, object] = {"title": title, "html": page.decode("utf-8")}
+            probe = _canvas_edit_content(
+                canvas_event_id or _CANVAS_SIZE_PROBE_EVENT_ID,
+                cls._canvas_replacement(body, {**metadata, "canvas": inline}),
+                body,
+            )
+            if calculate_event_size(probe) <= EDIT_MESSAGE_SIZE_LIMIT:
+                return inline
         # Encrypted rooms get an encrypted upload; the event carries only the reference.
         mxc_uri, upload = await upload_media_bytes_as_mxc(
             context.client,

@@ -19,6 +19,7 @@ import pytest
 import mindroom.custom_tools.agno_compat_moviepy as moviepy_module
 import mindroom.custom_tools.attachments as attachments_module
 import mindroom.custom_tools.browser as browser_module
+import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.custom_tools.coding as coding_module
 import mindroom.custom_tools.e2b as e2b_module
 import mindroom.custom_tools.gmail as gmail_module
@@ -34,6 +35,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
+from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
@@ -44,6 +46,7 @@ from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 from mindroom.tools.agno_compat_groq import MindRoomGroqTools
 from mindroom.tools.agno_compat_openai import MindRoomOpenAITools
 from mindroom.tools.file import file_tools
+from tests.chat_ui_contract_fixture import make_chat_ui_context, sent_chat_ui_content
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
 from tests.test_e2b_tools import _FakeSandbox
@@ -269,6 +272,23 @@ async def _read_dag_file(
     return tool.read_dag_file(raw_path) == _TEXT
 
 
+async def _show_canvas_path(
+    tmp_path: Path,
+    _monkeypatch: pytest.MonkeyPatch,
+    workspace: Path,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    context = make_chat_ui_context(tmp_path / "chat-ui")
+    tool = ChatUITools(tool_output_workspace_root=workspace, file_access=file_access)
+    with tool_runtime_context(context):
+        result = json.loads(await tool.show_canvas(title="Contract", path=raw_path))
+    if result["status"] != "ok":
+        return False
+    action = sent_chat_ui_content(context)["io.mindroom.ui_action"]
+    return isinstance(action, dict) and action["canvas"]["html"] == _TEXT
+
+
 async def _read_with_file_tool(
     _tmp_path: Path,
     _monkeypatch: pytest.MonkeyPatch,
@@ -303,6 +323,7 @@ _PROBES = (
     _ToolProbe("groq", "transcribe_audio", _transcribe_with_groq, groq_module),
     _ToolProbe("moviepy_video_tools", "extract_audio", _extract_audio_with_moviepy, moviepy_module),
     _ToolProbe("airflow", "read_dag_file", _read_dag_file, airflow_module, "doc.txt"),
+    _ToolProbe("chat_ui", "show_canvas", _show_canvas_path, chat_ui_module, "doc.txt"),
     # `file` and `coding` resolve paths themselves and read through descriptors pinned
     # from their base directory; their own link-swap test is below.
     _ToolProbe("file", "read_file", _read_with_file_tool, None, "doc.txt"),

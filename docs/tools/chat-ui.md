@@ -119,10 +119,14 @@ chat_ui.show_canvas(
 
 ### Pages and files
 
-Pass the page as `html`, or as `path` to an HTML file in the agent's workspace.
+Pass the page as `html`, or as a workspace-relative `path` (for example `slides/deck.html`) to an HTML file in the agent's workspace.
 A path suits pages the agent builds and refines, such as a slide deck: edit the file, then call `show_canvas` again with the same `path` and the canvas ID to show the new version.
-Paths follow the agent's `file_access` setting, so with the default `workspace` access they must stay inside the workspace.
+Paths follow the agent's `file_access` setting, like [`matrix_message` attachments](matrix-message.md): with the default `workspace` access they must stay inside the workspace, and with `unrestricted` access any file the MindRoom process can read can be shown.
+The file is read by the MindRoom process, so `~` means that process's home rather than a worker's home; prefer workspace-relative paths.
 The page must be UTF-8 text and at most 4 MB.
+
+Agents should only show pages they wrote.
+A canvas always appears as the agent's own, so showing a downloaded page or a file from an untrusted source would present someone else's page, with the same risk that what the user types into it can leave the panel.
 
 ### Design
 
@@ -171,6 +175,7 @@ A canvas shown outside a thread can be updated from any thread of that room, bec
 
 A page whose edit fits a Matrix event (27,000 bytes of serialized event, about 24,000 characters of plain ASCII HTML) travels inside the event.
 A larger page, up to 4 MB, is uploaded as Matrix media (encrypted in end-to-end encrypted rooms) and the event carries only a reference that MindRoom Chat downloads, decrypts, and caches.
+Every update of a large page uploads a new copy, and Matrix does not let users delete uploaded media, so iterate on large pages sparingly.
 The tool reports an error for pages above 4 MB or when the upload fails.
 
 ### Sandbox and limits
