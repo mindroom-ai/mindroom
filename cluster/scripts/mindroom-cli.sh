@@ -3,7 +3,7 @@
 # MindRoom SaaS Platform CLI Helper
 # Usage: ./scripts/mindroom-cli.sh [command]
 
-set -e
+set -eo pipefail
 
 # Get script directory and find .env file
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
