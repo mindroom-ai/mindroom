@@ -16,6 +16,7 @@ from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
 
 _STAGING_PREFIX = "mindroom-moviepy-"
+# Worker code can write the workspace, including sparse files whose logical size far exceeds the disk they use.
+_MAX_STAGED_VIDEO_BYTES = 1 << 30
 # FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
 _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav,mp3,flac,aac"
 
@@ -75,9 +78,10 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav
 # Upstream issue: Tracking gap; upstream tracking has not been verified.
 # Upstream PR: None identified.
 # Remove when: the toolkit accepts caller-supplied input readers and output writers;
-# retain resolution under file_access, private FFmpeg staging, the plain-media check,
-# and streamed no-follow publication.
+# retain resolution under file_access, private FFmpeg staging capped against worker-written sparse files,
+# the plain-media check, and streamed no-follow publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access,
+# tests/test_moviepy_video_tools.py::test_oversized_inputs_fail_before_staging_past_the_limit,
 # tests/test_moviepy_video_tools.py::test_video_inputs_refuse_playlists_and_manifests,
 # tests/test_moviepy_video_tools.py::test_outputs_publish_without_buffering_the_rendered_file, and
 # tests/test_file_access_contract.py::test_outside_files_follow_file_access.
@@ -144,8 +148,11 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             **kwargs,
         )
 
-    def _stage_input(self, raw_path: str, field_name: str, staging: Path) -> str:
-        """Copy one authorized input into the staging directory, keeping its suffix for format detection."""
+    def _stage_input(self, raw_path: str, field_name: str, staging: Path, max_bytes: int) -> str:
+        """Copy one authorized input into the staging directory, keeping its suffix for format detection.
+
+        The copy fails before it writes more than ``max_bytes``.
+        """
         authorized = resolve_agent_file(
             raw_path,
             workspace_root=self._workspace_root,
@@ -154,12 +161,16 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         )
         staged = staging / f"{field_name}{Path(authorized.name).suffix}"
         with authorized.open() as source, staged.open("xb") as target:
-            shutil.copyfileobj(source, target)
+            while chunk := source.read(1 << 16):
+                if target.tell() + len(chunk) > max_bytes:
+                    msg = f"{field_name} '{raw_path}' exceeds the {max_bytes >> 20} MiB input limit."
+                    raise ValueError(msg)
+                target.write(chunk)
         return str(staged)
 
     def _stage_video(self, raw_path: str, staging: Path) -> str:
         """Stage one video input that FFmpeg reads as a plain media file, never as a playlist or manifest."""
-        staged = self._stage_input(raw_path, "video_path", staging)
+        staged = self._stage_input(raw_path, "video_path", staging, _MAX_STAGED_VIDEO_BYTES)
         _require_plain_media(staged)
         return staged
 
@@ -397,7 +408,9 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             video = VideoFileClip(self._stage_video(video_path, staging))
 
             # Read caption file and parse SRT
-            srt_content = Path(self._stage_input(srt_path, "srt_path", staging)).read_text(encoding="utf-8")
+            srt_content = Path(self._stage_input(srt_path, "srt_path", staging, MAX_READ_BYTES)).read_text(
+                encoding="utf-8",
+            )
 
             # Parse SRT and get word timing
             words = self.parse_srt(srt_content)

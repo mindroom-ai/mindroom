@@ -255,6 +255,28 @@ def test_media_paths_follow_file_access(
     assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]
 
 
+def test_oversized_inputs_fail_before_staging_past_the_limit(
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse worker-written inputs far above the staging caps are refused instead of copied to their full size."""
+    from mindroom.custom_tools import agno_compat_moviepy as adapter  # noqa: PLC0415
+
+    toolkit, factories = caption_renderer
+    monkeypatch.setattr(adapter, "_MAX_STAGED_VIDEO_BYTES", 1 << 20)
+    monkeypatch.setattr(adapter, "MAX_READ_BYTES", 1 << 20)
+    for name in ("big.mp4", "big.srt"):
+        with (tmp_path / name).open("wb") as sparse:
+            sparse.truncate(8 << 20)
+
+    assert "video_path 'big.mp4' exceeds the 1 MiB input limit" in toolkit.extract_audio("big.mp4", "audio.wav")
+    assert "srt_path 'big.srt' exceeds the 1 MiB input limit" in toolkit.embed_captions("input.mp4", "big.srt")
+    assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]
+    assert not (tmp_path / "audio.wav").exists()
+    assert not (tmp_path / "input_captioned.mp4").exists()
+
+
 def test_outputs_publish_without_buffering_the_rendered_file(
     caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
