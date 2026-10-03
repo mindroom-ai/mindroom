@@ -2499,6 +2499,217 @@ def test_runtime_chart_agent_vault_server_environment(
     assert runtime["envFrom"] == [{"secretRef": {"name": "mindroom-runtime-api-key"}}]
 
 
+_VAULT_API_PORT = {"protocol": "TCP", "port": 14321}
+_VAULT_PROXY_PORT = {"protocol": "TCP", "port": 14322}
+_VAULT_BASE_EGRESS = [
+    {"ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+    {"ports": [{"protocol": "TCP", "port": 80}, {"protocol": "TCP", "port": 443}]},
+]
+
+
+def _agent_vault_server_values(**server: object) -> dict[str, Any]:
+    return {
+        "workers": {
+            "kubernetes": {"agentVault": {"server": {"enabled": True, "image": "example.test/vault:test", **server}}},
+        },
+    }
+
+
+def _agent_vault_network_policies(tmp_path: Path, values: dict[str, Any]) -> list[dict[str, Any]]:
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump(values), encoding="utf-8")
+    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
+    return [
+        doc
+        for doc in docs
+        if doc["kind"] == "NetworkPolicy"
+        and doc["spec"]["podSelector"].get("matchLabels", {}).get("app.kubernetes.io/component") == "agent-vault"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy"),
+    [
+        # Vault-first: workers send tool egress to agentVault.proxyUrl directly.
+        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False),
+        # Squid-first: only approved egress forwards token-bearing traffic to the proxy port.
+        (True, True, [_VAULT_API_PORT], True),
+        # Approved egress with an external proxyUrl: nothing in the chart uses the proxy port.
+        (True, False, [_VAULT_API_PORT], False),
+    ],
+    ids=["vault-first", "squid-first", "external-proxy"],
+)
+def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clients(
+    tmp_path: Path,
+    approved_egress: bool,
+    parent_proxy: bool,
+    worker_ports: list[dict[str, Any]],
+    squid_reaches_proxy: bool,
+) -> None:
+    """Workers, the control plane, and the vault Jobs reach the API; the proxy port follows the egress chain."""
+    agent_vault: dict[str, Any] = {
+        "enabled": True,
+        "cliImage": "example.test/vault:test",
+        "ownerEmail": "owner@example.test",
+        "workerCaConfigMapName": "agent-vault-ca",
+        "server": {"enabled": True},
+        "bootstrap": {"enabled": True, "kubectlImage": "example.test/kubectl:test"},
+        "accessTool": {
+            "enabled": True,
+            "uiBaseUrl": "https://example.test/agent-vault",
+            "emailDomain": "example.test",
+        },
+        "accessGrants": {
+            "enabled": True,
+            "grants": [{"email": "maintainer@example.test", "workerScope": "shared", "agent": "helper"}],
+        },
+    }
+    if approved_egress and not parent_proxy:
+        agent_vault["proxyUrl"] = "http://vault-proxy.example.test:8080"
+    values: dict[str, Any] = {
+        "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+        "workers": {
+            "backend": "kubernetes",
+            "sandbox": {"proxyToken": {"value": "test-token"}},
+            "kubernetes": {
+                "namespace": "mindroom-workers",
+                "extraLabels": {"mindroom.ai/instance": "demo"},
+                "agentVault": agent_vault,
+            },
+        },
+    }
+    if approved_egress:
+        values["approvedEgress"] = {
+            "enabled": True,
+            "image": {"tag": "v0.1.0"},
+            "parentProxy": {"enabled": parent_proxy},
+        }
+
+    [policy] = _agent_vault_network_policies(tmp_path, values)
+
+    expected_ingress = [
+        {
+            "from": [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
+                    "podSelector": {
+                        "matchLabels": {
+                            "mindroom.ai/component": "worker",
+                            "app.kubernetes.io/managed-by": "mindroom",
+                            "app.kubernetes.io/name": "mindroom-worker",
+                            "mindroom.ai/instance": "demo",
+                        },
+                    },
+                },
+            ],
+            "ports": worker_ports,
+        },
+        {
+            "from": [
+                {
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "mindroom-runtime",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "runtime",
+                        },
+                    },
+                },
+                {
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "agent-vault-bootstrap",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "agent-vault-bootstrap",
+                        },
+                    },
+                },
+                {
+                    "podSelector": {
+                        "matchLabels": {
+                            "app.kubernetes.io/name": "agent-vault-access-grants",
+                            "app.kubernetes.io/instance": "mindroom-runtime",
+                            "app.kubernetes.io/component": "agent-vault-access-grants",
+                        },
+                    },
+                },
+            ],
+            "ports": [_VAULT_API_PORT],
+        },
+    ]
+    if squid_reaches_proxy:
+        expected_ingress.append(
+            {
+                "from": [
+                    {
+                        "podSelector": {
+                            "matchLabels": {
+                                "app.kubernetes.io/name": "mindroom-runtime-egress-proxy",
+                                "app.kubernetes.io/instance": "mindroom-runtime",
+                                "app.kubernetes.io/component": "approved-egress-proxy",
+                            },
+                        },
+                    },
+                ],
+                "ports": [_VAULT_PROXY_PORT],
+            },
+        )
+    assert policy["metadata"]["name"] == "agent-vault"
+    assert policy["spec"]["ingress"] == expected_ingress
+    assert policy["spec"]["egress"] == _VAULT_BASE_EGRESS
+
+
+@pytest.mark.parametrize("smtp_enabled", [False, True])
+def test_runtime_chart_agent_vault_server_network_policy_fences_egress(tmp_path: Path, smtp_enabled: bool) -> None:
+    """The vault egresses only to DNS, web upstreams, and enabled SMTP; without in-chart clients it admits nothing."""
+    values = _agent_vault_server_values(
+        smtp={"enabled": smtp_enabled, "host": "smtp.example.test", "port": 2525, "existingSecret": "vault-smtp"},
+    )
+
+    [policy] = _agent_vault_network_policies(tmp_path, values)
+
+    smtp_egress = [{"ports": [{"protocol": "TCP", "port": 2525}]}] if smtp_enabled else []
+    assert policy["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    assert policy["spec"]["ingress"] == []
+    assert policy["spec"]["egress"] == _VAULT_BASE_EGRESS + smtp_egress
+
+
+def test_runtime_chart_agent_vault_server_network_policy_appends_extra_rules(tmp_path: Path) -> None:
+    """Deployer-owned vault clients and destinations extend the chart rules."""
+    ui_proxy_rule = {
+        "from": [
+            {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "vault-ui"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "vault-ui-proxy"}},
+            },
+        ],
+        "ports": [_VAULT_API_PORT],
+    }
+    database_rule = {"to": [{"ipBlock": {"cidr": "192.0.2.0/24"}}], "ports": [{"protocol": "TCP", "port": 5432}]}
+    values = _agent_vault_server_values(
+        networkPolicy={"name": "vault-fence", "extraIngress": [ui_proxy_rule], "extraEgress": [database_rule]},
+    )
+
+    [policy] = _agent_vault_network_policies(tmp_path, values)
+
+    assert policy["metadata"]["name"] == "vault-fence"
+    assert policy["spec"]["ingress"] == [ui_proxy_rule]
+    assert policy["spec"]["egress"] == [*_VAULT_BASE_EGRESS, database_rule]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [{}, _agent_vault_server_values(networkPolicy={"create": False})],
+    ids=["server-disabled", "policy-disabled"],
+)
+def test_runtime_chart_agent_vault_server_network_policy_can_be_disabled(
+    tmp_path: Path,
+    values: dict[str, Any],
+) -> None:
+    """No vault policy renders without the chart-managed server or when the deployer opts out."""
+    assert _agent_vault_network_policies(tmp_path, values) == []
+
+
 def test_runtime_chart_agent_vault_access_tool_sets_owner_email() -> None:
     """The self-service access tool must know the owner used by worker token minting."""
     docs = _render_chart(

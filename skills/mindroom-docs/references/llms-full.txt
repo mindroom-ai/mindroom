@@ -24916,6 +24916,7 @@ Workers still need Agent Vault API access (`apiUrl`, usually port `14321`) so th
 When the chart also manages the Agent Vault server, the worker NetworkPolicy includes that API egress automatically.
 For an externally managed Agent Vault server, add an egress rule for the API endpoint only.
 Do not add worker egress directly to the Agent Vault MITM proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants; that bypasses the Squid-first policy path.
+The chart-managed Agent Vault server has its own NetworkPolicy that by default admits only in-chart vault clients and limits vault egress; see `workers.kubernetes.agentVault.server.networkPolicy` in `cluster/k8s/runtime/README.md`.
 
 For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 
