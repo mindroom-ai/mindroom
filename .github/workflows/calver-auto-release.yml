@@ -25,7 +25,7 @@ jobs:
     steps:
       - name: Create release
         id: create_release
-        uses: basnijholt/calver-auto-release@v1.0.8
+        uses: basnijholt/calver-auto-release@a4bde6f0ba9c10c77be94680d4a187c12cf72c3d # v1.0.8
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 

@@ -13,6 +13,7 @@ from mindroom.desktop import macos_capture, macos_input
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityBackend,
+    AccessibilityError,
     AccessibilityState,
     DesktopApp,
     DesktopRect,
@@ -344,14 +345,14 @@ class PyAutoGuiDesktopProvider:
     ) -> None:
         """Scroll at the center of one current semantic element."""
         self._check_emergency_stop()
-        element = self._accessibility.element_for_action(app_id, state_id, element_index)
+        element, process_id = self._accessibility.element_for_action(app_id, state_id, element_index)
         if element.bounds is None:
             msg = f"Accessibility element {element_index} has no scrollable screen bounds."
             raise DesktopProviderError(msg)
         clicks = _scroll_clicks(direction, pages)
         x, y = _rect_center(element.bounds)
         self._mapped_display(DesktopRect(x, y, 1, 1))
-        self._scroll_input(direction, clicks, x, y, process_id=None)
+        self._scroll_input(direction, clicks, x, y, process_id=process_id)
 
     def perform_action(
         self,
@@ -509,13 +510,20 @@ class PyAutoGuiDesktopProvider:
 
     def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
         """Return a check for right before each Quartz pointer event: the fail-safe, then the window at the point."""
+        posted = False
 
         # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
         def check(point: tuple[int, int]) -> None:
+            nonlocal posted
             self._check_emergency_stop()
             if process_id is not None and macos_input.window_owner_at(point) != process_id:
+                if not posted:
+                    msg = "Another window covers the allowed app at the pointer; nothing was sent."
+                    raise AccessibilityError(msg)
                 msg = "Another window covers the allowed app at the pointer; input stopped and its outcome may be partial."
                 raise AccessibilityActionOutcomeUnknownError(msg)
+            # Every passing check is followed by an event.
+            posted = True
 
         return check
 

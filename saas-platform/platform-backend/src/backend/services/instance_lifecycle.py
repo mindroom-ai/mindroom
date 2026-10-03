@@ -164,9 +164,13 @@ async def reconcile_subscription_instances(
                 if not entitled:
                     await _hold(sb, instance, subscription, now, summary)
                 elif instance.get("lifecycle_stopped_at"):
-                    await _resume(sb, instance, subscription, summary)
+                    await _resume(sb, instance, subscription, now, summary)
                 else:
                     await _align_plan(sb, instance, subscription)
+            except InstanceClaimLostError:
+                # The run that claimed the instance first owns its deploy, so this run neither enables a key, clears
+                # the hold, nor records an error.
+                logger.info("Instance %s is already being reprovisioned; skipping it", instance.get("instance_id"))
             except Exception as exc:  # noqa: BLE001
                 _record_error(sb, instance, exc, now, summary)
 
@@ -224,6 +228,21 @@ async def resume_account_billing(account_id: str) -> None:
     """Undo `end_account_billing_at_period_end` after an account deletion is cancelled; a Stripe error propagates."""
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
         await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
+
+
+def restart_teardown_grace(account_id: str) -> None:
+    """Give the held instances of an account whose deletion was cancelled their full teardown grace period again.
+
+    While the account was pending deletion, `_teardown` moved a held instance's date only once it was due, so the date
+    may already have passed.
+    """
+    sb = ensure_supabase()
+    if instance_ids := [instance["instance_id"] for instance in _account_instances(sb, account_id)]:
+        now = datetime.now(UTC)
+        teardown_after = now + timedelta(days=INSTANCE_TEARDOWN_GRACE_DAYS)
+        sb.table("instances").update({"teardown_after": teardown_after.isoformat(), "updated_at": now.isoformat()}).in_(
+            "instance_id", instance_ids
+        ).not_.is_("lifecycle_stopped_at", "null").execute()
 
 
 async def resume_subscriptions(scheduled: list[ScheduledBillingEnd]) -> None:
@@ -331,13 +350,13 @@ def _end_customer_billing_at_period_end(customer_id: str) -> list[ScheduledBilli
     scheduled: list[ScheduledBillingEnd] = []
     try:
         for subscription in _customer_subscriptions(customer_id):
-            if subscription.status in _UNBILLED_STRIPE_STATUSES or subscription.metadata.get(DELETION_BILLING_MARKER):
+            if subscription.status in _UNBILLED_STRIPE_STATUSES:
                 continue
             chosen_end = subscription.cancel_at
             if chosen_end is not None:
                 period_end = _current_period_end(subscription)
                 if period_end is None or chosen_end <= period_end:
-                    continue  # It already ends within its paid period, as the customer chose.
+                    continue  # It already ends within its paid period, as the customer or an earlier deletion chose.
             marker = _NO_EARLIER_END if chosen_end is None else str(chosen_end)
             stripe.Subscription.modify(
                 subscription.id, cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: marker}
@@ -507,7 +526,7 @@ def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
 
 
 async def _resume(
-    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], summary: LifecycleSummary
+    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
@@ -517,33 +536,41 @@ async def _resume(
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
-        try:
-            # Several backend replicas may resume a torn-down instance at once; only the one that claims it while it
-            # is still deprovisioned deploys it and mints its key.
-            await _reprovision(
-                sb,
-                instance_id,
-                subscription,
-                resume_lifecycle_hold=True,
-                expected_status="deprovisioned" if torn_down else None,
-            )
-        except InstanceClaimLostError:
-            # The request that claimed it owns the deploy, so this run neither enables a key nor clears the hold.
-            logger.info("Instance %s is already being reprovisioned; skipping this resume", instance_id)
-            return
+        await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
-    # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
-    current = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
+    if await _hold_for_pending_deletion(sb, instance_id, subscription, now, summary):
+        return
+    # Reprovisioning may have minted a new key, so re-read the instance before enabling it.
+    current = get_instance(sb, instance_id, columns=LIFECYCLE_INSTANCE_COLUMNS) or {}
     try:
         await set_instance_openrouter_key_disabled(current, disabled=False)
     except OpenRouterKeyNotFoundError:
-        # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one.
-        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
-        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=True)
+        # The key is gone on OpenRouter; forget it so reprovisioning mints and mounts a new one, unless another run
+        # recorded a replacement meanwhile.
+        update_instance(
+            sb,
+            instance_id,
+            CLEARED_OPENROUTER_KEY_METADATA,
+            expected_openrouter_key_hash=current["openrouter_key_hash"],
+        )
+        await _reprovision(sb, current, subscription, resume_lifecycle_hold=True)
+        if await _hold_for_pending_deletion(sb, instance_id, subscription, now, summary):
+            return
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
+
+
+async def _hold_for_pending_deletion(
+    sb: Client, instance_id: Any, subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
+) -> bool:
+    """Hold a resuming instance again, returning True, when a deletion request on another backend replica marked its
+    account while the instance was being started or redeployed."""
+    if not account_pending_deletion(sb, subscription["account_id"]):
+        return False
+    await _hold(sb, get_instance(sb, instance_id, columns=LIFECYCLE_INSTANCE_COLUMNS) or {}, subscription, now, summary)
+    return True
 
 
 def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
@@ -581,7 +608,7 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
     alignment = _plan_alignment(instance, subscription["tier"])
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
-        await _reprovision(sb, instance_id, subscription, resume_lifecycle_hold=False)
+        await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
         try:
             await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
@@ -593,18 +620,14 @@ async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[s
 
 
 async def _reprovision(
-    sb: Client,
-    instance_id: Any,
-    subscription: dict[str, Any],
-    *,
-    resume_lifecycle_hold: bool,
-    expected_status: str | None = None,
+    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], *, resume_lifecycle_hold: bool
 ) -> None:
     """Redeploy an instance for its subscription's tier.
 
-    Only resuming a hold passes `resume_lifecycle_hold`; any other redeploy stays stopped when a hold, or an account
-    deletion, lands while it runs.
-    With `expected_status`, the redeploy claims the instance only while it still has that status.
+    Every redeploy stays stopped when an account deletion lands while it runs, and one that does not resume a hold
+    (`resume_lifecycle_hold`) also when a hold does.
+    The redeploy claims the instance only while it still has the status this run read, so instead of overlapping a
+    provision that claimed it since, such as a redeploy by another backend replica, it gets `InstanceClaimLostError`.
     """
     await provision_instance(
         sb,
@@ -612,11 +635,11 @@ async def _reprovision(
             "subscription_id": subscription["id"],
             "account_id": subscription["account_id"],
             "tier": subscription["tier"],
-            "instance_id": instance_id,
+            "instance_id": instance["instance_id"],
         },
         background_tasks=None,
         resume_lifecycle_hold=resume_lifecycle_hold,
-        expected_status=expected_status,
+        expected_status=instance["status"],
     )
 
 

@@ -29,14 +29,14 @@ _STAGING_PREFIX = "mindroom-moviepy-"
 _MAX_STAGED_VIDEO_BYTES = 1 << 30
 _MAX_STAGED_CAPTION_BYTES = 1 << 20
 # FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
-_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,ogg,wav,mp3,flac,aac"
+_PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,flv,asf,gif,ogg,wav,mp3,flac,aac"
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
 # them; create_caption_clips has no explicit font-size parameter.
 # Upstream issue: Tracking gap; no matching issue identified for caption style forwarding.
 # Upstream PR: None identified. The two copied methods retain the pinned SDK's
-# parsing, media settings, and temporary output publication.
+# parsing and media settings; outputs render in private staging and publish through write_agent_file.
 # Remove when: The pinned SDK applies all four embed_captions style arguments to
 # normal and highlighted clips, preserving layout and safe output publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_embed_captions_applies_styles_to_text_clips.
@@ -116,7 +116,7 @@ def _require_plain_media(staged: str) -> None:
         check=False,
     )
     if probe.returncode != 0:
-        msg = "Video input must be a plain media file; playlists, manifests, and unrecognized formats are refused."
+        msg = "Video input must be a supported plain media file; playlists and manifests are refused."
         raise ValueError(msg)
 
 
@@ -176,7 +176,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         return staged
 
     def _publish(self, raw_path: str, payload: bytes | BinaryIO) -> None:
-        """Atomically write one output where the agent's file_access allows, without following links below the workspace."""
+        """Write one output where the agent's file_access allows; below the workspace by atomic no-follow replacement."""
         write_agent_file(raw_path, payload, workspace_root=self._workspace_root, file_access=self._file_access)
 
     @override

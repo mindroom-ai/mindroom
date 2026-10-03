@@ -46,24 +46,21 @@ def append_denied_tool_result(
 
 
 # AGNO_COMPAT: Continuation runs every confirmed call in the stored run, not only the supplied requirements.
-# Reason: Agent and Team continuation keep stored tool entries that the supplied requirements do not replace,
-# and run each one that is confirmed without a result or that requires user input; Team continuation first
-# confirms entries whose approval_type is "required" from the approvals table in the same storage. A run
-# continued by ID is re-read from session storage first, so storage that worker code can write could add
-# calls nobody approved.
+# Reason: Agent continuation keeps stored tool entries that the supplied requirements do not replace, and runs
+# each one that is confirmed without a result or that requires user input. A run continued by ID is re-read
+# from session storage first, so agent session storage that worker code can write could add calls nobody
+# approved; team runs are stored where no worker writes.
 # Upstream issue: No matching issue identified; tracking gap for continuing exactly the supplied requirements.
 # Upstream PR: None identified.
-# Remove when: Agent and Team continuation run only the caller's supplied requirements, or expose a public
-# callback over the exact calls they are about to run; MindRoom's argument digest check must remain.
+# Remove when: Agent continuation runs only the caller's supplied requirements, or exposes a public callback
+# over the exact calls it is about to run; MindRoom's argument digest check must remain.
 # Coverage: tests/test_response_runner_focused.py::test_agent_continuation_runs_only_approved_calls;
 # tests/test_delegation_execution.py::test_fresh_delegation_continuation_never_runs_planted_stored_calls;
-# tests/test_delegation_approval_ownership.py::test_saved_child_approval_preserves_executable_ownership;
-# tests/test_team_approval_dynamic_tools.py::test_real_team_member_pause_reopens_with_exact_toolkit_owner.
+# tests/test_delegation_approval_ownership.py::test_saved_child_approval_preserves_executable_ownership.
 def continuation_executes(tool: ToolExecution) -> bool:
     """Return whether Agno's continuation would run this tool entry."""
-    confirmable = tool.confirmed is True or tool.approval_type == "required"
     return (
-        tool.requires_confirmation is True and confirmable and tool.result is None
+        tool.requires_confirmation is True and tool.confirmed is True and tool.result is None
     ) or tool.requires_user_input is True
 
 

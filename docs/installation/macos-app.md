@@ -174,7 +174,7 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
 
 While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
 The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and each line kept left to right.
-If any of them contains a non-ASCII character, the card warns that it can look like ASCII and repeats the command with every non-ASCII character escaped.
+If any of them contains a non-ASCII character, the card warns that it can look like ASCII and repeats each such field, labeled, with every non-ASCII character escaped.
 **Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.
 Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
 Without a waiting request, **Allow Without Asking…** offers the same durations.

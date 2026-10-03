@@ -339,3 +339,220 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
         finally:
             if storage is not scope.storage:
                 storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_kind", ["agent", "team"])
+@pytest.mark.parametrize("delegation_pause", ["gate", "child"])
+async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_approved(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_kind: str,
+    delegation_pause: str,
+) -> None:
+    """The delegation's card comes first, so the parent's own card is approved in the continuation that runs it."""
+    child_pauses = delegation_pause == "child"
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", tools=["calculator"], delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child", tools=["calculator"] if child_pauses else []),
+        },
+        teams={"squad": {"display_name": "Squad", "role": "Coordinate", "agents": ["leader"]}},
+        defaults=DefaultsConfig(tools=[], learning=False),
+        memory={"backend": "none"},
+        tool_approval={
+            "rules": [
+                {"match": "add", "action": "require_approval"},
+                *([] if child_pauses else [{"match": "run_subagent", "action": "require_approval"}]),
+            ],
+        },
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    child_model = DelegationModel(
+        id="test-child",
+        responses=[
+            *([ModelResponse(tool_calls=[_call("add", "child-add", a=5, b=6)])] if child_pauses else []),
+            ModelResponse(content="Child finished."),
+        ],
+    )
+    parent_model = DelegationModel(
+        id="test-parent",
+        responses=[
+            ModelResponse(
+                tool_calls=[
+                    _call("add", "parent-add", a=1, b=2),
+                    _call("run_subagent", "delegate", agent_name="child", task="Add 5 and 6"),
+                ],
+            ),
+            ModelResponse(content="Parent finished."),
+        ],
+    )
+    team_model = DelegationModel(
+        id="test-team",
+        responses=[
+            ModelResponse(tool_calls=[_call("delegate_task_to_member", "member", member_id="leader", task="Add")]),
+            ModelResponse(content="Team finished."),
+        ],
+    )
+    monkeypatch.setattr(
+        "mindroom.agents._load_agent_model_instance",
+        lambda _config, _paths, _name, owner: parent_model if owner.session_id == identity.session_id else child_model,
+    )
+    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: team_model)
+    executed = []
+    original_add = CalculatorTools.add
+
+    def add(self: CalculatorTools, a: float, b: float) -> str:
+        executed.append((a, b))
+        return original_add(self, a, b)
+
+    monkeypatch.setattr(CalculatorTools, "add", add)
+    delegate = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+    for function in delegate.get_async_functions().values():
+        function.owning_toolkit = "delegate"
+    apply_tool_approval_capability(
+        delegate,
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="delegate",
+    )
+    calculator = CalculatorTools()
+    for function in (*calculator.functions.values(), *calculator.async_functions.values()):
+        function.owning_toolkit = "calculator"
+    apply_tool_approval_capability(
+        calculator,
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="calculator",
+    )
+    context = _delegate_runtime_context(config, paths, execution_identity=identity)
+    history_scope = HistoryScope(kind="team", scope_id="squad")
+    with open_resolved_scope_session_context(
+        agent_name="leader",
+        scope=history_scope,
+        session_id=identity.session_id,
+        config=config,
+        runtime_paths=paths,
+        execution_identity=identity,
+        create_session_if_missing=True,
+    ) as scope:
+        assert scope is not None
+        storage = scope.storage if parent_kind == "team" else create_session_storage("leader", config, paths, identity)
+        try:
+            member = Agent(id="leader", name="Leader", model=parent_model, tools=[calculator, delegate], db=storage)
+            parent = (
+                Team(id="squad", name="Squad", members=[member], model=team_model, db=storage)
+                if parent_kind == "team"
+                else member
+            )
+            with tool_runtime_context(context):
+                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+                response = await drive_delegations(
+                    parent,
+                    response,
+                    run_child=run_delegated_child_response,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=identity,
+                    member_config_names={"leader": "leader"},
+                )
+            result = paused_attempt_from_response(
+                response,
+                fallback_session_id=identity.session_id,
+                fallback_run_id=response.run_id,
+                toolkit_owners=toolkit_owners_for_agents([member]),
+            )
+            assert result is not None
+            if parent_kind == "team":
+                result = _attach_team_pause_presentation(
+                    result,
+                    response=response,
+                    config_names=["leader"],
+                    display_names=["Leader"],
+                    show_tool_calls=True,
+                )
+        finally:
+            if storage is not scope.storage:
+                storage.close()
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    monkeypatch.setattr(
+        execution.knowledge_access,
+        "resolve_for_agent_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+    )
+    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
+    cards = []
+    for _ in range(3):
+        if not isinstance(result, PausedAttempt):
+            break
+        calls = tuple(
+            ApprovalCall(
+                tool_call_id=str(tool.tool_call_id),
+                tool_name=str(tool.tool_name),
+                invoking_agent=result.approval_agent_name or "leader",
+                toolkit_name="delegate" if tool.tool_name == "run_subagent" else "calculator",
+                expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool.tool_args),
+            )
+            for tool in result.tools
+        )
+        cards.append([(call.invoking_agent, call.tool_name) for call in calls])
+        decisions = {call.tool_call_id: True for call in calls}
+        reasons = {call.tool_call_id: None for call in calls}
+        with tool_runtime_context(context):
+            if parent_kind == "team":
+                result = await continue_paused_team_run(
+                    member_names=("leader",),
+                    mode=TeamMode.COORDINATE,
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=replace(identity, agent_name="squad"),
+                    session_id=identity.session_id,
+                    run_id=result.run_id,
+                    user_id=identity.requester_id,
+                    configured_team_name="squad",
+                    model_name="default",
+                    decisions=decisions,
+                    denial_reasons=reasons,
+                    refresh_scheduler=None,
+                    approval_calls=calls,
+                    history_scope=history_scope,
+                    prior_presentation_state=result.response_presentation_state,
+                    prior_response_text=result.response_text,
+                    prior_tool_trace=result.tool_trace,
+                    progress=None,
+                )
+            else:
+                continuation = ApprovalContinuation(
+                    approval_id=f"card-{len(cards)}",
+                    run_id=result.run_id,
+                    session_id=identity.session_id,
+                    entity_kind="agent",
+                    entity_name="leader",
+                    room_id=identity.room_id,
+                    thread_id=identity.thread_id,
+                    requester_id=identity.requester_id,
+                    response_event_id="$waiting",
+                    sources=ResponseSources(("$source",), ("$source",)),
+                    state="claimed",
+                    calls=calls,
+                )
+                result = await execution.continue_run(
+                    continuation,
+                    execution_identity=identity,
+                    tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=context),
+                    decisions=decisions,
+                    denial_reasons=reasons,
+                    tool_trace_collector=[],
+                    typing_log_context={},
+                    progress=None,
+                )
+
+    assert isinstance(result, CompletedApprovalRun)
+    first_card = [("child", "add")] if child_pauses else [("leader", "run_subagent")]
+    assert cards == [first_card, [("leader", "add")]]
+    assert executed == ([(5, 6), (1, 2)] if child_pauses else [(1, 2)])
