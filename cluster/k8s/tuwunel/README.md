@@ -192,8 +192,7 @@ Lower it on other platforms that cap the grace period, or set it to `null` to us
 
 For large databases, raise `probes.startup.failureThreshold` so the startup probe budget covers the longest expected migration, because a failing startup probe restarts the container.
 The `Recreate` strategy starts the replacement pod only after the old pod stops, and the old pod can take up to `terminationGracePeriodSeconds` to stop.
-Kubernetes' default progress deadline of 600 seconds is shorter than the 1800-second grace period, so a slow shutdown alone can make Kubernetes report the rollout as stalled.
-Set `progressDeadlineSeconds` above the old pod's shutdown time plus the startup probe budget so Kubernetes does not report the rollout as stalled while the old pod stops and the migration runs.
+Kubernetes' default progress deadline of 600 seconds is shorter than the 1800-second grace period, so set `progressDeadlineSeconds` above the old pod's shutdown time plus the startup probe budget, or Kubernetes can report the rollout as stalled while the old pod stops and the migration runs.
 The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds, and leaving it unset or `null` preserves the Kubernetes default.
 This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
 

@@ -17,9 +17,11 @@ from pydantic import BaseModel
 REDACTED = "***redacted***"
 REDACTION_FAILED = "[redaction failed]"
 __all__ = [
+    "MAX_CANONICAL_JSON_INTEGER",
     "REDACTED",
     "REDACTION_FAILED",
     "nests_beyond_redaction_depth",
+    "redact_config_text",
     "redact_log_event",
     "redact_sensitive_data",
     "redact_sensitive_text",
@@ -112,12 +114,15 @@ _REVIEW_TOKEN_PATTERN = re.compile(
 # names; a generated key has a long run mixing character classes, so those names stay visible.
 _KEBAB_PREFIXES = ("sk-", "pk-")
 _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
+# Config prose says "ask for the API key before calling", "bearer JWT", or "keep the API key server-side";
+# the word a log pattern takes for a token there is letters, possibly hyphen-joined and ending a sentence.
+_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _PLACEHOLDER_OPEN = "\u27e6"
 _PLACEHOLDER_CLOSE = "\u27e7"
 # Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
-_MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
+MAX_CANONICAL_JSON_INTEGER = 2**53 - 1
 _SECRET_KEYS: frozenset[str] = frozenset(
     {
         "access_token",
@@ -512,7 +517,16 @@ def _redact_url_match(match: re.Match[str]) -> str:
     return match.group("prefix") + _redact_url(url) + trailing_backslashes
 
 
-def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
+def _redact_prose_token(match: re.Match[str]) -> str:
+    """Keep an ordinary word or kebab-case name that authored prose holds where a log would hold a token."""
+    token = match.group("token")
+    ordinary = _ORDINARY_WORD_PATTERN.fullmatch(token) and not token.lower().startswith(_KEBAB_PREFIXES)
+    if ordinary or not _looks_generated(token):
+        return match.group(0)
+    return _redact_matched_token(match)
+
+
+def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = False) -> str:
     bounded_value = _bounded_redaction_input(value, max_length=max_length)
     has_assignment = "=" in bounded_value or ":" in bounded_value
     has_url = "://" in bounded_value
@@ -523,20 +537,21 @@ def _redact_sensitive_text(value: str, *, max_length: int | None) -> str:
     if not any((has_assignment, has_url, has_bearer, has_api_key_message, has_token)):
         return _truncate_text(bounded_value, max_length)
     redacted = _URL_PATTERN.sub(_redact_url_match, bounded_value) if has_url else bounded_value
+    redact_token = _redact_prose_token if prose else _redact_matched_token
     if has_bearer:
-        redacted = _BEARER_TOKEN_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _BEARER_TOKEN_PATTERN.sub(redact_token, redacted)
     if has_api_key_message:
-        redacted = _API_KEY_MESSAGE_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _API_KEY_MESSAGE_PATTERN.sub(redact_token, redacted)
     if has_token:
-        redacted = _TOKEN_LIKE_PATTERN.sub(_redact_matched_token, redacted)
+        redacted = _TOKEN_LIKE_PATTERN.sub(redact_token, redacted)
     if has_assignment:
         redacted = _redact_secret_assignments(redacted)
     return _truncate_text(redacted, max_length)
 
 
-def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None) -> str:
+def _redact_sensitive_text_fail_closed(value: str, *, max_length: int | None, prose: bool = False) -> str:
     try:
-        return _redact_sensitive_text(value, max_length=max_length)
+        return _redact_sensitive_text(value, max_length=max_length, prose=prose)
     except Exception:
         return _truncate_text(REDACTION_FAILED, max_length)
 
@@ -546,6 +561,17 @@ def redact_sensitive_text(value: str, *, max_length: int | None = None) -> str:
     if len(_bounded_redaction_input(value, max_length=max_length)) > _MAX_TEXT_INPUT_LENGTH:
         return _truncate_text(REDACTION_FAILED, max_length)
     return _redact_sensitive_text_fail_closed(value, max_length=max_length)
+
+
+def redact_config_text(value: str) -> str:
+    """Redact credential patterns in authored config text, showing the prose words log patterns would mask.
+
+    An ordinary word after "API key" or "bearer" and a kebab-case name such as ``sk-learn`` stay
+    visible; URL credentials, secret assignments, and generated tokens are masked as in logs.
+    """
+    if len(value) > _MAX_TEXT_INPUT_LENGTH:
+        return REDACTION_FAILED
+    return _redact_sensitive_text_fail_closed(value, max_length=None, prose=True)
 
 
 def _character_classes(run: str) -> int:
@@ -762,7 +788,7 @@ def _review_scalar_value(value: object, *, max_length: int | None, placeholders:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
-        return str(value) if abs(value) > _MAX_CANONICAL_JSON_INTEGER else value
+        return str(value) if abs(value) > MAX_CANONICAL_JSON_INTEGER else value
     return _redact_review_tokens(_safe_repr(value), max_length=max_length, placeholders=placeholders)
 
 

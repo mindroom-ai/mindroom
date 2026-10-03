@@ -5210,10 +5210,7 @@ agents:
           output_dir: charts
 ```
 
-In this example, `file_generation` saves into `exports` inside the agent workspace.
-`visualization` defaults to the primary runtime, and `charts` is relative to that process’s working directory.
-It is not automatically rebased into the agent workspace or made visible to worker-routed `file` and `shell` calls.
-Choose a destination shared with the tools that need the files, or generate worker-local artifacts through workspace-backed `shell` or `python`.
+In this example, `file_generation` saves into `exports` and `visualization` saves into `charts`, both inside the agent workspace.
 
 ## [`file`]
 
@@ -5639,20 +5636,23 @@ generate_text_file("Plain text export", filename="notes.txt")
 
 ## [`visualization`]
 
-`visualization` creates chart images with matplotlib and writes them to an output directory.
+`visualization` creates chart images with matplotlib and saves them in an output directory inside the agent workspace.
 
 ### What It Does
 
 `visualization` exposes `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
-The upstream toolkit switches matplotlib to the non-interactive `Agg` backend and auto-creates `output_dir` if it does not exist.
+The upstream toolkit switches matplotlib to the non-interactive `Agg` backend.
 Each chart function accepts dict-like data, list-based data, or JSON strings, normalizes the data, saves a PNG image, and returns a JSON payload with the file path and status.
+A chart's `filename` must be a plain file name; when it is omitted, the chart is named after its type and numbered from the count of files already in `output_dir`, such as `bar_chart_3.png`.
+Charts replace an existing file of the same name without following links, and `output_dir` is created inside the workspace when it is missing.
+Agents without a workspace cannot save charts.
 `visualization` defaults to primary execution.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `no` | `"charts"` | Directory where generated chart images are saved. |
+| `output_dir` | `text` | `no` | `"charts"` | Directory inside the agent workspace where charts are saved; absolute paths and `..` are rejected. |
 | `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `create_bar_chart()`. |
 | `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `create_line_chart()`. |
 | `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `create_pie_chart()`. |
@@ -5684,9 +5684,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### Notes
 
-- The toolkit saves PNG files to disk immediately; relative `output_dir` paths resolve from the executing process’s working directory.
-- Later tools can read or send those files only if their runtime can access that destination; primary and worker filesystems can differ.
-- If you explicitly route `visualization` through workers, the chart files will be created in the worker-visible filesystem instead of the primary process filesystem.
+- Charts land in the agent workspace, so `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 - `matplotlib` must be importable in the runtime that executes the tool.
 
 ## [`sleep`]
@@ -7188,7 +7186,7 @@ extract_metadata_only("https://matrix.org/blog/")
 - `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
 - Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
-- For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
+- For news-article specific extraction with titles, authors, and publish dates, `newspaper` can be a better fit.
 
 ### [`newspaper`]
 
@@ -7197,7 +7195,7 @@ extract_metadata_only("https://matrix.org/blog/")
 #### What It Does
 
 `newspaper` exposes `read_article(url)`.
-It returns JSON with whichever article fields were extracted successfully, including title, authors, text, publish date, and optional summary.
+It returns JSON with whichever article fields were extracted successfully, including title, authors, text, and publish date.
 `article_length` truncates article text after extraction.
 The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`.
 That means old references to `newspaper4k` are stale for current MindRoom config.
@@ -7206,7 +7204,6 @@ That means old references to `newspaper4k` are stale for current MindRoom config
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `include_summary` | `boolean` | `no` | `false` | Include article summary when available. |
 | `article_length` | `number` | `no` | `null` | Truncate article text to this many characters. |
 | `enable_read_article` | `boolean` | `no` | `true` | Enable `read_article()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -7218,7 +7215,6 @@ agents:
   newsdesk:
     tools:
       - newspaper:
-          include_summary: true
           article_length: 6000
 ```
 
@@ -9029,7 +9025,7 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 ### Notes
 
 - `moviepy` is the declared Python dependency, and the upstream toolkit also expects FFmpeg support for real audio and video processing.
-- `embed_captions()` defaults the output filename to `<video>_captioned.mp4` when `output_path` is omitted.
+- `embed_captions()` writes `<video>_captioned.mp4` next to the input video when `output_path` is omitted, where `<video>` is the input file name without its extension.
 - Use this tool for simple local media transforms, not remote video discovery or hosting.
 
 ## [`giphy`]
@@ -13330,6 +13326,7 @@ revoke_public_report("pub_...")
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
 Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
 Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
 A patch value, or a `display_name`, `role`, or `instructions` value given to `manage_agent()`, that contains the `***redacted***` marker or a URL password masked as `user:***@host` is refused, so copying redacted output back never replaces a hidden real value.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
@@ -13930,8 +13927,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
-Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, and `processors`.
+Daytona's `sandbox_env_vars` and `sandbox_labels`, and `custom_api` `headers`, instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -14077,6 +14074,7 @@ The toolkit creates one E2B sandbox at initialization time and reuses it for sub
 It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
 The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads.
 `upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` confines local paths to the agent workspace, and `unrestricted` allows any regular file MindRoom can read.
+`upload_file()` refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 Local paths for `download_file_from_sandbox()`, `download_png_result()`, and `download_chart_data()` are always relative to the agent workspace.
 Absolute download paths, `..`, and symlinks that leave the workspace are rejected, and agents without a workspace cannot download local files.
 `timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
@@ -14261,7 +14259,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
+| `headers` | `password` | `no` | `null` | Default headers as a JSON object of string header names and values, such as `{"X-Api-Key": "value"}`, stored through the dashboard or credential store because headers can carry credentials. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
@@ -14289,7 +14287,6 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 - If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
-- `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs
 
@@ -19361,6 +19358,7 @@ Changes are validated against the Pydantic config schema before applying.
 Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
 Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
 Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 
 **Modify configuration:**
 
@@ -19389,9 +19387,9 @@ When you use `!config set`, MindRoom:
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
 Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
-It stores the new value only when redaction leaves that value unchanged.
+It stores the new value only when redaction leaves that value unchanged and room state can carry it, which rules out decimal numbers and integers beyond 2^53 - 1.
+Any other new value is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 `!config set` refuses a value containing the `***redacted***` marker or a URL password masked as `user:***@host`, which only appear in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
-A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
@@ -19658,6 +19656,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
+A running `run_shell_command` stops with it, including one that runs in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 An explicit user stop finalizes the streamed message with:
 
 ```
@@ -22299,7 +22298,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Async model tool execution leaves generator consumers and synchronous threads alive after cancellation. | Own cancellation and cleanup for both execution paths. Reproduced against installed Agno 3.0.9; no issue or PR identified. | `agno_compat_prepared_tools.py`; public FunctionCall overrides fence late starts and settle consumers without replacing normal execution/hooks. |
 | Tool preparation does not expose the per-run Function copy the provider calls. | Expose the bound per-run Function from public preparation; no issue or PR identified. | `agno_compat_prepared_tools.py`; BashPresentationFunction reports its prepared copy so the CLI checkpoint can match provider calls exactly. |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
-| MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
+| MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, leaves temporary audio after encoding failures, names the default output from the last dot anywhere in the video path, and rasterizes every caption line before encoding starts. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, clean owned audio files on every exit, name the default output after the video's file name, and render caption lines on demand; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | MoviePyVideoTools hands model-chosen video, caption, and output paths to `open()`, `os.replace`, and FFmpeg by name, and FFmpeg follows the paths and URLs listed in HLS playlists and DASH manifests. | Tracking gap: accept caller-supplied input readers and output writers; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; `tests/test_moviepy_video_tools.py::test_media_paths_follow_file_access`, `tests/test_moviepy_video_tools.py::test_oversized_inputs_fail_before_staging_past_the_limit`, `tests/test_moviepy_video_tools.py::test_video_inputs_refuse_playlists_and_manifests`, `tests/test_moviepy_video_tools.py::test_outputs_publish_without_buffering_the_rendered_file`, and the probes in `tests/test_file_access_contract.py`. |
 | OpenAITools and GroqTools open model-chosen audio paths by name, and GroqTools reads any existing path before treating a source as a URL. | Tracking gap: accept a caller-supplied file opener for local audio; upstream tracking remains unverified. | `tools/agno_compat_openai.py` and `tools/agno_compat_groq.py`; the probes in `tests/test_file_access_contract.py`. |
 | AirflowTools defaults its DAG directory to the process working directory and reads and writes DAG files by path. | Tracking gap: accept a caller-supplied base directory descriptor or file reader and writer; upstream tracking remains unverified. | `tools/agno_compat_airflow.py`; `tests/test_airflow_tools.py` and the probes in `tests/test_file_access_contract.py`. |
@@ -22351,6 +22350,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | TrafilaturaTools extraction and crawling download through fixed module-level fetchers, and Trafilatura's spider has no fetch hook. | Tracking gap: accept a caller-supplied fetcher for extraction, batch extraction, and every crawler download; no matching issue or PR identified. | `tools/agno_compat_trafilatura.py`; loopback, metadata, redirect, DNS-rebind, and crawl coverage in `tests/test_trafilatura_tool.py`. |
 | Newspaper4kTools downloads through newspaper4k's article helper, which opens `file://` paths, follows redirects anywhere, and downloads every image URL a page lists. | Tracking gap: accept caller-supplied HTML or a fetcher and allow skipping image downloads; no matching issue or PR identified. | `tools/agno_compat_newspaper4k.py`; loopback, metadata, private-address, `file://`, redirect, and page-image coverage in `tests/test_newspaper_tool.py`. |
 | FileGenerationTools saves model-named files by path into its output directory, or the process working directory, and follows links there. | Tracking gap: accept a caller-supplied writer or directory descriptor for saved files; no matching issue or PR identified. | `tools/agno_compat_file_generation.py`; working-directory and planted-link coverage in `tests/test_file_generation_tool.py`. |
+| VisualizationTools saves model-named charts by path below an output directory in the process working directory and follows links there. | Accept a caller-supplied writer or directory descriptor for charts; [PR #9470](https://github.com/agno-agi/agno/pull/9470), open on October 3, 2026, keeps chart file names inside the output directory but still saves by path below the working directory. | `tools/agno_compat_visualization.py`; working-directory, file-name, and planted-link coverage in `tests/test_visualization_tool.py`. |
 | GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
 | ReplicateTools checks its API key but calls an independent SDK default client. | Bind SDK requests to the toolkit key and expose client lifetime ownership while preserving media results. | `custom_tools/agno_compat_replicate.py`. |
 | AgentQLTools stores its resolved key without handing it to AgentQL queries. | Tracking gap: pass the resolved key through a per-request or per-page SDK credential API; no matching issue or PR identified. | `custom_tools/agno_compat_agentql.py`; concurrent stored-key requests and an unrelated SDK call in `tests/test_agentql_tools.py`. |
@@ -22369,7 +22369,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
 | `tools/agno_compat_modelslabs.py` | Generation orchestration polls provider job identities, accepts numeric ETAs, retains completed outputs, and distinguishes retryable status failures from terminal rejection while reusing SDK payload and media helpers. | `tools/modelslabs.py` retains tool registration, optional imports, and authored file-type normalization; nonwaiting generation stays upstream. |
-| `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, owned temporary audio cleanup, and media paths resolved under `file_access`, with inputs copied through no-follow descriptors into a private staging directory up to a per-input cap, video inputs refused unless FFmpeg opens them as plain media rather than playlists or manifests, and outputs inside the workspace streamed into place by atomic no-follow replacement; SDK parsing remains shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings are preserved, and `file_access.py` and `tools/path_safety.py` own path authorization. |
+| `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, owned temporary audio cleanup, default outputs beside the input video, one caption line rendered at a time, and media paths resolved under `file_access`, with inputs copied through no-follow descriptors into a private staging directory up to a per-input cap, video inputs refused unless FFmpeg opens them as plain media rather than playlists or manifests, and outputs inside the workspace streamed into place by atomic no-follow replacement; SDK parsing remains shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings are preserved, and `file_access.py` and `tools/path_safety.py` own path authorization. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, private run-table access, monotonic run insertion inside owner transactions with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy; `history/archive.py` shares the deletion and insertion transactions to move runs into and out of the compaction archive. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
@@ -22392,6 +22392,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tools/agno_compat_trafilatura.py` | Replaces the Agno and Trafilatura spider download bindings with fetchers that request uncompressed bodies and validate every URL, redirect hop, and dialed address within Trafilatura's timeout, redirect, and size limits. | `tools/trafilatura.py` installs the guard before returning the toolkit; upstream extraction, crawling, and result formats are unchanged. |
 | `tools/agno_compat_newspaper4k.py` | Replaces newspaper4k's article helper with one that downloads an uncompressed, size-limited body after validating every URL, redirect hop, and dialed address, then parses it without image extraction. | `tools/newspaper4k.py` installs the guard before returning the toolkit; upstream text extraction and result format are unchanged. |
 | `tools/agno_compat_file_generation.py` | Replaces the saved-file writer with an atomic, no-follow write into a workspace-relative output directory and keeps saves off without a workspace. | `tools/file_generation.py` returns the adapter; upstream generation, sanitized file names, and result artifacts are unchanged. |
+| `tools/agno_compat_visualization.py` | Draws each chart into a private directory and publishes it by atomic, no-follow write into a workspace-relative output directory, refusing model file names with directories and charts without a workspace. | `tools/visualization.py` returns the adapter; upstream chart drawing, default chart names, and result fields are unchanged. |
 | `tools/agno_compat_openai.py` | Copied transcription call that opens the audio file under `file_access` through a no-follow, non-blocking descriptor. | `tools/openai.py` returns the adapter; image and speech generation stay upstream, and `file_access.py` owns path authorization. |
 | `tools/agno_compat_groq.py` | Copied transcription and translation calls that send only `http` and `https` sources as URLs and open other sources under `file_access` through no-follow, non-blocking descriptors. | `tools/groq.py` returns the adapter; speech generation stays upstream, and `file_access.py` owns path authorization. |
 | `tools/agno_compat_airflow.py` | Replaces DAG reads and writes with resolution from a workspace-relative DAG directory under `file_access`, capped no-follow reads, and atomic no-follow writes. | `tools/airflow.py` returns the adapter; `file_access.py` and `tools/path_safety.py` own path authorization. |
@@ -22502,6 +22503,7 @@ Reads through those descriptors are capped per surface.
 | Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, its directory cannot be opened, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
 | Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; 1 MiB of workspace template files read, from at most 1,024 entries of the template directory, per `list_templates` call; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file and stops listing workspace templates with a warning at the template that would exceed its read cap |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
+| `e2b` uploads | 64 MiB | The upload is refused with a tool error |
 | Thread-export files | 64 MiB per file for the room index; the unchanged-content comparison reads at most the new export's size | A larger file is indexed from its header before its messages, and an existing file larger than the new export counts as changed and is replaced |
 | Thread-export files one room index rebuild reads | 256 MiB in total, newest file first, each file counted before it is parsed | Older thread files are listed under `unindexed_files` in that room's `index.json` instead of indexed, with a warning, and stay on disk |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
@@ -22518,7 +22520,7 @@ The thread exporter decides whether a file changed by comparing its text rather 
 While it reads a thread, the exporter keeps only the message content it writes and stops once that passes 128 MiB as compact JSON, twice the read cap so every thread whose file fits that cap still exports; it then reports the thread as failed and leaves its previous file in place.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
 `file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.
 No-follow applies to the workspace's final path component only, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout today, because no primary-only directory there contains an entry named `workspace` for such a link to reach; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
@@ -22554,13 +22556,13 @@ Every tool declares how its own file access relates to this setting.
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, deletes, and every file a `file` content search reads walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and the other searches check the resolved path and then walk it by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `visualization`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`, `visualization`).
+A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -22569,7 +22571,7 @@ The model sees the effective file access and the unconfined tools in its tool ex
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `visualization`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
   This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a `coding` content search.
   They run in a worker by default, where they see only what the worker already mounts.
@@ -22590,7 +22592,7 @@ Do not report or "fix" these; they are deliberate.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
-- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review forks the request the reviewed agent's model just processed and resends it unredacted to the same provider.
   A digest replay, used for another review model or a request that cannot be forked, redacts the conversation on a best-effort basis.
@@ -24975,6 +24977,13 @@ Handles are owned by a small worker-local shell supervisor process that the runn
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
+Stopping a response stops its async worker calls too, such as `run_shell_command`.
+Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
+The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
+A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
+Synchronous worker calls, such as the `python` and `file` tools, still run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`.
+Persistent browser actions also finish on their own: they are short, and interrupting one would close the worker's shared browser and its tabs.
+
 ## Workspace home contract
 
 For worker-routed shell or python requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running the tool.
@@ -25088,6 +25097,7 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 |--------|----------|-------------|
 | POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
 | POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| POST | `/api/sandbox-runner/execute/cancel` | Stop the execute request with the given `request_id` |
 | GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
 | POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
 
@@ -25264,10 +25274,7 @@ These runtime-derived entries are not written back to `config.yaml` by dashboard
 Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
-The proxy reads the static allowlist only at startup.
-The chart hashes inline `approvedEgress.allowlist.domains` into the proxy pod template, so changing them rolls the proxy.
-With `approvedEgress.allowlist.existingConfigMap`, the chart cannot see the content, so restart the proxy Deployment after editing that ConfigMap, or put a content hash in `approvedEgress.podAnnotations`.
-MindRoom's own copy of the allowlist refreshes only when its pod restarts, so after removing a domain also restart the MindRoom Deployment; until then `request_network_access` reports that domain as already allowed and creates no grant, while the proxy blocks it.
+The proxy and MindRoom read the static allowlist only at startup; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) describes which allowlist changes roll the proxy and when to restart it or MindRoom.
 
 ## Agent Vault Chaining
 
@@ -26142,20 +26149,11 @@ The other events on this page are `warning` records.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables the event-loop stall detector and with it the scheduler-lag summary.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
-## Suggested alerts
-
-These thresholds are starting points; tune them against your own baseline.
-The queries are generic pseudo-queries, so translate them into your log platform's metric and alert syntax.
-
-| Event | Condition | Starting threshold |
-|-------|-----------|--------------------|
-| `event_loop_scheduler_lag_summary` | Median of `p50_ms` stays high | Above 20 ms for 30 minutes |
-| `matrix_sync_stall_diagnostics` | Repeated reports for one `agent` | 5 or more for one `agent` within 15 minutes |
-| `tool_call_limit_reached` | Any occurrence | Every record, with notifications rate-limited to about one per hour |
-
 ## Events
 
 Each section lists the event's fields, a pseudo-query for its suggested alert, and where to look when the alert fires.
+The alert thresholds are starting points; tune them against your own baseline.
+The queries are generic pseudo-queries, so translate them into your log platform's metric and alert syntax.
 
 ### `event_loop_scheduler_lag_summary`
 

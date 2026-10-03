@@ -5,14 +5,17 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import contextlib
 import contextvars
 import functools
 import hashlib
 import json
 import os
+import signal
 import stat
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -98,6 +101,7 @@ from tests.conftest import (
     make_relation_lookup,
     requires_linux,
 )
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -559,6 +563,64 @@ def test_worker_proxy_client_records_worker_success() -> None:
     assert captured["timeout"] == 7.0
     assert manager.touched == ["agent:test"]
     assert manager.failures == []
+
+
+def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
+    """A dedicated worker's call is stopped at that worker, with the worker's own token."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    stopped = threading.Event()
+
+    def responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/cancel"):
+            stopped.set()
+            return {"cancelled": True}
+        cancellation.cancel()
+        assert stopped.wait(10)
+        return {"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key="agent:test",
+        endpoint="http://worker/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+    cancellation = sandbox_proxy_module.WorkerCallCancellation()
+    manager = _TrackingWorkerManager()
+    last_post: dict[str, Any] = {}
+    client_class = _recording_client_class(captured=last_post, captured_calls=calls, responder=responder)
+
+    with pytest.raises(RuntimeError, match="cancelled"):
+        execute_worker_proxy_request(
+            config=WorkerProxyClientConfig(
+                proxy_url=None,
+                proxy_token=None,
+                proxy_timeout_seconds=7.0,
+                credential_lease_ttl_seconds=60,
+                credential_policy={},
+                lease_tool_credentials=False,
+            ),
+            payload={"tool_name": "shell", "function_name": "run_shell_command"},
+            credentials_manager=None,
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_target=None,
+            worker_handle=handle,
+            worker_manager=manager,
+            client_factory=client_class,
+            cancellation=cancellation,
+        )
+
+    (_, execute), (cancel_url, cancel) = calls
+    assert cancel_url == "http://worker/api/sandbox-runner/execute/cancel"
+    assert cancel == {"request_id": execute["request_id"]}
+    assert last_post["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
+    # A stopped call is a tool outcome, never a worker failure.
+    assert manager.failures == []
+    assert manager.touched == ["agent:test"]
 
 
 def _run_worker_proxy_request_with_exception(
@@ -5566,6 +5628,8 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
 def _forward_proxy_to_seeded_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    runner_execution_mode: str = "inprocess",
 ) -> tuple[RuntimePaths, Path, list[dict[str, Any]]]:
     """Forward the primary's proxy calls to a real runner app whose seed config lacks the live `mind` agent."""
     storage_root = tmp_path / "storage"
@@ -5575,7 +5639,10 @@ def _forward_proxy_to_seeded_runner(
     runner_paths = resolve_runtime_paths(
         config_path=seed_config_path,
         storage_path=storage_root,
-        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": runner_execution_mode,
+        },
     )
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TEST_AUTH_TOKEN)
     runner = TestClient(sandbox_runner_app)
@@ -5682,6 +5749,143 @@ async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
     assert isinstance(ordinary, str)
     assert ordinary.endswith("||")
     assert "response-grant" not in json.dumps(sent_payloads[-1])
+
+
+@requires_linux()
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner_execution_mode", ["inprocess", "subprocess", "forkserver"])
+async def test_cancelling_a_worker_shell_call_stops_its_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner_execution_mode: str,
+) -> None:
+    """Stopping a response stops the command its worker shell call started, not only the primary's wait."""
+    primary_paths, workspace, _sent_payloads = _forward_proxy_to_seeded_runner(
+        monkeypatch,
+        tmp_path,
+        runner_execution_mode=runner_execution_mode,
+    )
+    live_config = _live_primary_config(primary_paths)
+    workspace.mkdir(parents=True)
+    tool = get_tool_by_name(
+        "shell",
+        primary_paths,
+        runtime_config=live_config,
+        tool_init_overrides={"base_dir": str(workspace)},
+        worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    pid_file = tmp_path / "command.pid"
+
+    with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
+        call = asyncio.create_task(entrypoint(["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"], timeout=60))
+        async with asyncio.timeout(30):
+            while not pid_file.exists() or not pid_file.read_text().strip():  # noqa: ASYNC110 - the worker command signals only through its pid file
+                await asyncio.sleep(0.05)
+        pid = int(pid_file.read_text())
+        call.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await call
+
+    try:
+        await assert_linux_pid_not_running(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _proxied_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Callable[[str, dict[str, Any]], object],
+) -> tuple[Callable[..., Any], list[tuple[str, dict[str, Any]]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=calls, responder=responder),
+    )
+    entrypoint = (
+        get_tool_by_name("shell", runtime_paths, worker_target=None).async_functions["run_shell_command"].entrypoint
+    )
+    assert entrypoint is not None
+    return entrypoint, calls
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
+    dispatched = threading.Event()
+    stopped = threading.Event()
+    runner_answers = threading.Event()
+
+    def responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/cancel"):
+            stopped.set()
+            # The caller must not wait for the runner to answer its stop request.
+            assert runner_answers.wait(10)
+            return {"cancelled": True}
+        dispatched.set()
+        assert stopped.wait(10)
+        return {"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+
+    entrypoint, calls = _proxied_shell(monkeypatch, responder)
+    call = asyncio.create_task(entrypoint("sleep 30"))
+    assert await asyncio.to_thread(dispatched.wait, 10)
+    call.cancel()
+    cancelled_at = time.monotonic()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        # A stop request sent on the event loop would block it until the runner answered.
+        assert time.monotonic() - cancelled_at < 2
+    finally:
+        runner_answers.set()
+
+    assert await asyncio.to_thread(stopped.wait, 10)
+    (_, execute), (cancel_url, cancel) = [(url, payload) for url, payload in calls if "/execute" in url]
+    assert cancel_url == "http://sandbox-runner:8765/api/sandbox-runner/execute/cancel"
+    assert cancel == {"request_id": execute["request_id"]}
+
+
+@pytest.mark.asyncio
+async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call cancelled while its worker is still being prepared never reaches the worker."""
+    entrypoint, calls = _proxied_shell(monkeypatch, lambda _url, _payload: {"ok": True, "result": "ran"})
+    preparing = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    build_routing = sandbox_proxy_module._build_worker_routing_payload
+    execute = sandbox_proxy_module.execute_worker_proxy_request
+
+    def slow_routing(**kwargs: object) -> object:
+        preparing.set()
+        assert release.wait(10)
+        return build_routing(**kwargs)
+
+    def tracked_execute(**kwargs: object) -> object:
+        try:
+            return execute(**kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", slow_routing)
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", tracked_execute)
+    call = asyncio.create_task(entrypoint("echo never"))
+    assert await asyncio.to_thread(preparing.wait, 10)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    release.set()
+
+    assert await asyncio.to_thread(finished.wait, 10)
+    assert not [url for url, _payload in calls if url.endswith("/execute")]
 
 
 def test_static_runner_saves_attachment_for_agent_added_after_seeding(

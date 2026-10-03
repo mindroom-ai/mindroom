@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import textwrap
 import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.test_helm_instance_worker_isolation import _render_chart, _resource, _run_helm_template
+from tests.test_helm_instance_worker_isolation import _render_chart, _resource, _run_helm_template, _values_files
 
 TUWUNEL_CHART = Path("cluster/k8s/tuwunel")
 
@@ -47,22 +46,9 @@ tuwunel:
 """
 
 
-def _values_file(tmp_path: Path, name: str, content: str) -> Path:
-    path = tmp_path / name
-    path.write_text(textwrap.dedent(content), encoding="utf-8")
-    return path
-
-
 def _tuwunel_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
     config_map = _resource(docs, "ConfigMap", "matrix-mindroom-tuwunel-config")
     return tomllib.loads(config_map["data"]["tuwunel.toml"])["global"]
-
-
-def _render_layered(tmp_path: Path, *contents: str) -> list[dict[str, Any]]:
-    values_files = tuple(
-        _values_file(tmp_path, f"values-{index}.yaml", content) for index, content in enumerate(contents)
-    )
-    return _render_chart(TUWUNEL_CHART, release_name="matrix", values_files=values_files)
 
 
 def test_config_without_settings_renders_only_chart_options() -> None:
@@ -82,7 +68,8 @@ def test_config_without_settings_renders_only_chart_options() -> None:
 
 def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> None:
     """An environment file changes single options while shared options, tables, and raw TOML still render."""
-    config = _tuwunel_config(_render_layered(tmp_path, SHARED_VALUES, ENVIRONMENT_VALUES))
+    values_files = _values_files(tmp_path, SHARED_VALUES, ENVIRONMENT_VALUES)
+    config = _tuwunel_config(_render_chart(TUWUNEL_CHART, release_name="matrix", values_files=values_files))
 
     assert config["server_name"] == "staging.example.com"
     assert config["login_with_password"] is True
@@ -138,11 +125,7 @@ def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> N
 )
 def test_settings_reject_options_that_cannot_render_cleanly(tmp_path: Path, values: str, error: str) -> None:
     """Duplicate chart options and arrays of tables fail at render time instead of at homeserver startup."""
-    completed = _run_helm_template(
-        TUWUNEL_CHART,
-        release_name="matrix",
-        values_files=(_values_file(tmp_path, "values.yaml", values),),
-    )
+    completed = _run_helm_template(TUWUNEL_CHART, release_name="matrix", values_files=_values_files(tmp_path, values))
 
     assert completed.returncode != 0
     assert error in completed.stderr

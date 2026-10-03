@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template
+from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template, _values_files
 
 CLIENT_CHART = Path("cluster/k8s/client")
 
@@ -45,21 +44,12 @@ config:
 """
 
 
-def _values_file(tmp_path: Path, name: str, content: str) -> Path:
-    path = tmp_path / name
-    path.write_text(textwrap.dedent(content), encoding="utf-8")
-    return path
-
-
 def _client_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return json.loads(next(doc["data"]["config.json"] for doc in docs if "config.json" in doc.get("data", {})))
 
 
 def _render_layered(tmp_path: Path, *contents: str) -> list[dict[str, Any]]:
-    values_files = tuple(
-        _values_file(tmp_path, f"values-{index}.yaml", content) for index, content in enumerate(contents)
-    )
-    return _render_chart(CLIENT_CHART, release_name="mindroom-client", values_files=values_files)
+    return _render_chart(CLIENT_CHART, release_name="mindroom-client", values_files=_values_files(tmp_path, *contents))
 
 
 def test_default_client_config_is_unchanged_without_structured_values() -> None:
@@ -167,7 +157,7 @@ def test_structured_values_reject_inputs_they_cannot_apply(tmp_path: Path, value
     completed = _run_helm_template(
         CLIENT_CHART,
         release_name="mindroom-client",
-        values_files=(_values_file(tmp_path, "values.yaml", values),),
+        values_files=_values_files(tmp_path, values),
     )
 
     assert completed.returncode != 0

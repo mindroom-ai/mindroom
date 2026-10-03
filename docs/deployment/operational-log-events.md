@@ -24,20 +24,11 @@ The other events on this page are `warning` records.
 Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables the event-loop stall detector and with it the scheduler-lag summary.
 See [Environment Variables](../configuration/index.md#environment-variables) for the logging controls.
 
-## Suggested alerts
-
-These thresholds are starting points; tune them against your own baseline.
-The queries are generic pseudo-queries, so translate them into your log platform's metric and alert syntax.
-
-| Event | Condition | Starting threshold |
-|-------|-----------|--------------------|
-| `event_loop_scheduler_lag_summary` | Median of `p50_ms` stays high | Above 20 ms for 30 minutes |
-| `matrix_sync_stall_diagnostics` | Repeated reports for one `agent` | 5 or more for one `agent` within 15 minutes |
-| `tool_call_limit_reached` | Any occurrence | Every record, with notifications rate-limited to about one per hour |
-
 ## Events
 
 Each section lists the event's fields, a pseudo-query for its suggested alert, and where to look when the alert fires.
+The alert thresholds are starting points; tune them against your own baseline.
+The queries are generic pseudo-queries, so translate them into your log platform's metric and alert syntax.
 
 ### `event_loop_scheduler_lag_summary`
 

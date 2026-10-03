@@ -1844,6 +1844,11 @@ path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.sandbox_request_cancellation"
+depends_on = []
+visibility = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
 path = "mindroom.api.worker_responses"
 depends_on = []
 
@@ -1877,6 +1882,7 @@ depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
     "mindroom.api.sandbox_protocol",
+    "mindroom.api.sandbox_request_cancellation",
     "mindroom.api.sandbox_worker_prep",
     "mindroom.api.worker_responses",
     "mindroom.config.main",
@@ -7302,6 +7308,19 @@ visibility = ["mindroom.tools.file_generation"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_file_generation"]
 expose = ["WorkspaceFileGenerationTools"]
+
+[[modules]]
+path = "mindroom.tools.visualization"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_visualization"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_visualization"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+visibility = ["mindroom.tools.visualization"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_visualization"]
+expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.newspaper4k"

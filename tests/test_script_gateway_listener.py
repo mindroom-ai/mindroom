@@ -19,6 +19,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
 _GATEWAY_PREFIX = "/api/script-gateway"
@@ -43,12 +44,6 @@ class _ReceiptBroker:
         )
 
 
-def _free_port() -> int:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 def _assert_port_released(port: int) -> None:
     """Binding the port again succeeds only when no listener still holds it."""
     socket.create_server(("127.0.0.1", port)).close()
@@ -65,6 +60,15 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str]) -> RuntimePaths:
     )
 
 
+def _listener(tmp_path: Path, broker: _ReceiptBroker | None = None) -> tuple[int, AbstractAsyncContextManager[None]]:
+    """Return a free port and the gateway listener context configured to serve it."""
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    return port, serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=broker, log_level="INFO")
+
+
 def _primary_api_requests() -> list[tuple[str, str]]:
     """Return one concrete request for every primary API route outside the gateway."""
     requests = []
@@ -79,15 +83,11 @@ def _primary_api_requests() -> list[tuple[str, str]]:
 @pytest.mark.asyncio
 async def test_listener_serves_only_script_gateway_routes(tmp_path: Path) -> None:
     """The listener answers gateway calls with the bound broker and nothing from the primary API."""
-    port = _free_port()
-    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    port, listener = _listener(tmp_path, _ReceiptBroker())
     primary_requests = _primary_api_requests()
     assert ("GET", "/api/health") in primary_requests
 
-    async with (
-        serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=_ReceiptBroker(), log_level="INFO"),
-        httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client,
-    ):
+    async with listener, httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
         receipt = await client.get(
             f"{_GATEWAY_PREFIX}/runs/run-1/calls/call-1",
             headers={"Authorization": "Bearer capability"},
@@ -113,15 +113,11 @@ async def test_listener_serves_only_script_gateway_routes(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_listener_closes_when_its_owner_is_cancelled_while_serving(tmp_path: Path) -> None:
     """Cancelling the owning task closes the listener and its open connections before cancellation propagates."""
-    port = _free_port()
-    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    port, listener = _listener(tmp_path)
     serving = asyncio.Event()
 
     async def own_listener() -> None:
-        async with (
-            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client,
-            serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=_ReceiptBroker(), log_level="INFO"),
-        ):
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client, listener:
             assert (await client.get("/api/health")).status_code == 404
             serving.set()
             await asyncio.Event().wait()
@@ -138,17 +134,11 @@ async def test_listener_closes_when_its_owner_is_cancelled_while_serving(tmp_pat
 @pytest.mark.asyncio
 async def test_listener_finishes_closing_when_its_owner_is_cancelled_during_shutdown(tmp_path: Path) -> None:
     """A cancellation that arrives while the listener shuts down cannot leave it serving."""
-    port = _free_port()
-    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    port, listener = _listener(tmp_path)
     leaving = asyncio.Event()
 
     async def own_listener() -> None:
-        async with serve_script_gateway_listener(
-            runtime_paths,
-            host="127.0.0.1",
-            broker=_ReceiptBroker(),
-            log_level="INFO",
-        ):
+        async with listener:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
                 assert (await client.get("/api/health")).status_code == 404
             # The owner leaves the body without awaiting, so the cancellation below lands in listener shutdown.
@@ -166,12 +156,11 @@ async def test_listener_finishes_closing_when_its_owner_is_cancelled_during_shut
 @pytest.mark.asyncio
 async def test_listener_shutdown_is_bounded_while_a_request_hangs(tmp_path: Path) -> None:
     """A client that sends part of a request and goes silent delays owner cancellation by at most the grace period."""
-    port = _free_port()
-    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    port, listener = _listener(tmp_path)
     serving = asyncio.Event()
 
     async def own_listener() -> None:
-        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
+        async with listener:
             serving.set()
             await asyncio.Event().wait()
 
@@ -199,16 +188,10 @@ async def test_listener_shutdown_is_bounded_while_a_request_hangs(tmp_path: Path
 @pytest.mark.asyncio
 async def test_listener_closes_when_the_context_body_raises(tmp_path: Path) -> None:
     """A failure in the owner's body closes the listener and propagates unchanged."""
-    port = _free_port()
-    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    port, listener = _listener(tmp_path)
 
     async def fail_inside_listener() -> None:
-        async with serve_script_gateway_listener(
-            runtime_paths,
-            host="127.0.0.1",
-            broker=_ReceiptBroker(),
-            log_level="INFO",
-        ):
+        async with listener:
             msg = "primary API failed"
             raise RuntimeError(msg)
 
@@ -221,13 +204,9 @@ async def test_listener_closes_when_the_context_body_raises(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_listener_is_absent_without_a_configured_port(tmp_path: Path) -> None:
     """Deployments that do not opt in keep a single primary API listener."""
+    runtime_paths = _runtime_paths(tmp_path, {})
     with patch("mindroom.api.script_gateway.socket.create_server") as create_server:
-        async with serve_script_gateway_listener(
-            _runtime_paths(tmp_path, {}),
-            host="127.0.0.1",
-            broker=_ReceiptBroker(),
-            log_level="INFO",
-        ):
+        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
             pass
 
     create_server.assert_not_called()
@@ -240,12 +219,7 @@ async def test_listener_rejects_invalid_port(tmp_path: Path, raw_port: str) -> N
     runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": raw_port})
 
     with pytest.raises(ValueError, match="MINDROOM_SCRIPT_GATEWAY_PORT"):
-        async with serve_script_gateway_listener(
-            runtime_paths,
-            host="127.0.0.1",
-            broker=_ReceiptBroker(),
-            log_level="INFO",
-        ):
+        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
             pass
 
 
