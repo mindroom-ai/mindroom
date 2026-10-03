@@ -448,7 +448,7 @@ def _private_targets(
         if instance.requester_id is None:
             # Instances from before owner records moved below tracking/ wait here for their requester's next turn.
             logger.info(
-                "Clearing exports of private instance until its requester's next turn records its owner",
+                "Clearing exports of private instance until the primary records its owner",
                 agent_name=agent_name,
                 instance_root=str(instance.state_root),
             )
