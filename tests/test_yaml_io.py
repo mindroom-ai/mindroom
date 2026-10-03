@@ -58,6 +58,11 @@ def test_safe_load_accepts_bytes_and_binary_streams() -> None:
         pytest.param("!!set {" + "".join(f"{k}, " for k in range(1025)) + "}", id="int-set"),
         pytest.param("x: 0000-01-01", id="year-0-date"),
         pytest.param("x: !!bool maybe", id="mistagged-bool"),
+        pytest.param("".join(f"%TAG !t{k}! x\n" for k in range(17)) + "--- a\n", id="tag-directives"),
+        pytest.param(
+            "".join(f"%TAG !t{k}! x" + "\r\x85\u2028\u2029"[k % 4] for k in range(17)) + "--- a\n",
+            id="tag-directives-after-other-line-breaks",
+        ),
     ],
 )
 def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document: str) -> None:
@@ -67,9 +72,10 @@ def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document
 
 
 def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
-    """Short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
+    """A few directives, short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
     numeric_keys = "".join(f"{k}: 0, " for k in range(1024))
-    document = "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
+    directives = "".join(f"%TAG !t{k}! x\n" for k in range(16)) + "---\n"
+    document = directives + "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
     assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
 
 

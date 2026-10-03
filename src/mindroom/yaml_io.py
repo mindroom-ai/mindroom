@@ -30,11 +30,14 @@ else:
     _SAFE_DUMPER = CSafeDumper
 
 _MAX_UNTRUSTED_DEPTH = 64
+_MAX_UNTRUSTED_DIRECTIVES = 16
 _MAX_UNTRUSTED_NODES = 250_000
 _MAX_UNTRUSTED_MERGE_KEYS = 64
 _MAX_UNTRUSTED_NUMERIC_KEYS = 1024
 _MAX_UNTRUSTED_BASE_60_LENGTH = 64
 _NUMERIC_TAGS = frozenset({"tag:yaml.org,2002:int", "tag:yaml.org,2002:float"})
+# Every line break libyaml recognizes; only a ``%`` at the start of a line can begin a directive.
+_YAML_LINE_BREAKS = "\n\r\x85\u2028\u2029"
 
 
 class _DumpOptions(TypedDict, total=False):
@@ -90,10 +93,15 @@ _UntrustedLoader.add_constructor("tag:yaml.org,2002:int", _UntrustedLoader.const
 def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
     """Parse like ``safe_load`` but refuse documents whose composed tree could exhaust memory or the C stack.
 
+    Directives are counted before parsing, because libyaml compares each ``%TAG`` directive with every earlier one.
     Events are checked before any node is composed: aliases let a short document describe a larger tree,
     the libyaml composer recurses in C once per nesting level, and each composed node costs a few hundred bytes.
     Construction refuses values whose cost grows faster than their length and reports every failure as ``yaml.YAMLError``.
     """
+    directives = stream.startswith("%") + sum(stream.count(f"{line_break}%") for line_break in _YAML_LINE_BREAKS)
+    if directives > _MAX_UNTRUSTED_DIRECTIVES:
+        msg = f"YAML may hold {_MAX_UNTRUSTED_DIRECTIVES} directives at most"
+        raise yaml.YAMLError(msg)
     depth = 0
     nodes = 0
     for event in yaml.parse(stream, Loader=SafeLoader):
