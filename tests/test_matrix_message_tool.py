@@ -18,6 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -261,10 +262,10 @@ async def test_matrix_message_active_mentions_do_not_promote_managed_requester()
 
 
 @pytest.mark.parametrize(
-    ("requester_id", "bot_accounts", "mindroom_user"),
+    ("requester_id", "bot_accounts", "mindroom_user", "acting_requester"),
     [
-        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None),
-        ("@mindroom_user:localhost", [], MindRoomUserConfig()),
+        ("@bridge_bot:localhost", ["@bridge_bot:localhost"], None, "@bridge_bot:localhost"),
+        ("@mindroom_user:localhost", [], MindRoomUserConfig(), None),
     ],
 )
 @pytest.mark.asyncio
@@ -272,8 +273,9 @@ async def test_matrix_message_active_mentions_do_not_promote_non_human_requester
     requester_id: str,
     bot_accounts: list[str],
     mindroom_user: MindRoomUserConfig | None,
+    acting_requester: str | None,
 ) -> None:
-    """Trusted relay provenance should require a human requester."""
+    """Trusted relay provenance requires a human; the recipient still acts for a configured bot account."""
     tool = MatrixMessageTools()
     ctx = _make_context(
         thread_id=None,
@@ -306,6 +308,7 @@ async def test_matrix_message_active_mentions_do_not_promote_non_human_requester
     assert SKIP_MENTIONS_KEY not in sent_content
     assert ORIGINAL_SENDER_KEY not in sent_content
     assert SOURCE_KIND_KEY not in sent_content
+    assert sent_content.get(ACTING_REQUESTER_KEY) == acting_requester
 
 
 @pytest.mark.asyncio
