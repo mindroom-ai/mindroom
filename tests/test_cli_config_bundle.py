@@ -16,6 +16,7 @@ from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.config_bundle import initialize_runtime_bundle
 from mindroom.cli.main import app
 from mindroom.config.main import load_config
+from mindroom.config_bundle import install_config_bundle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -457,7 +458,11 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
         if case == "previous_changed":
             if call == 1:
                 return {"status": "applied", "fingerprint": previous_fingerprint}
-            (tmp_path / "active.previous/config.yaml").write_text("agents: {}\n# edited\n")
+            # A legitimate install rotates a tree this apply never moved aside into TARGET.previous.
+            (source / "config.yaml").write_text("agents: {}\n# other\n")
+            install_config_bundle(source, target, process_env={})
+            (source / "config.yaml").write_text("agents: {}\n# candidate\n")
+            install_config_bundle(source, target, process_env={})
         return {"status": "failed", "fingerprint": candidate}
 
     _serve_runtime(monkeypatch, respond)
