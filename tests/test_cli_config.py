@@ -78,6 +78,7 @@ runner = CliRunner()
 def _clear_runtime_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_API_KEY", raising=False)
 
 
 def _runtime_path_env(config_path: Path, *, storage_path: Path | None = None) -> dict[str, str]:
@@ -1315,6 +1316,26 @@ class TestConfigInit:
 
         assert result.exit_code == 0, result.output
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
+        assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+
+    def test_init_keeping_existing_env_leaves_exported_dashboard_key_alone(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An exported MINDROOM_API_KEY wins over `.env`, so setup writes no second key that a restart would ignore."""
+        monkeypatch.setenv("MINDROOM_API_KEY", "exported-key")
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\n"
         assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
     @pytest.mark.parametrize(

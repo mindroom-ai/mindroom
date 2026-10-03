@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -13,20 +12,17 @@ from tests.conftest import make_matrix_client_mock
 from tests.cpu_budget_helpers import cpu_budget
 
 
-def test_hide_unfinished_interactive_handles_long_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Long lines finish promptly without entering a backtracking fence matcher."""
-    original_fullmatch = re.fullmatch
-
-    def guarded_fullmatch(pattern: str, string: str, flags: int = 0) -> re.Match[str] | None:
-        assert len(string) < 20_000, "Long fence lines must use the linear parser"
-        return original_fullmatch(pattern, string, flags)
-
-    monkeypatch.setattr(interactive.re, "fullmatch", guarded_fullmatch)
-    for line in (" " * 20_000, "```" + " " * 20_000):
+def test_hide_unfinished_interactive_handles_long_whitespace() -> None:
+    """Long whitespace runs finish promptly, including the stray-backtick fence line a backtracking matcher stalls on."""
+    for line, shown_before in (
+        (" " * 20_000, "Before."),
+        # Not a fence, because its info string holds a backtick; matching that by backtracking takes cubic time.
+        ("```" + " " * 2_000 + "`", "Before.\n```" + " " * 2_000 + "`"),
+    ):
         text = f"Before.\n{line}\n```interactive\n{{"
         with cpu_budget(0.5):
             shown = interactive.hide_unfinished_interactive(text)
-        assert shown == ("Before." if not line.startswith("`") else text)
+        assert shown == shown_before
 
 
 def test_parse_and_format_interactive_handles_many_unclosed_openers() -> None:

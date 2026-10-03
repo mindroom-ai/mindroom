@@ -17,6 +17,7 @@ import pytest
 import stripe
 from backend.routes.gdpr import export_user_data
 from fastapi.testclient import TestClient
+from httpx import Response
 from main import app
 
 from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
@@ -216,6 +217,13 @@ def db() -> Iterator[_SchemaCheckedSupabase]:
 
 
 def _deliver(event_type: str, stripe_object: dict[str, Any], event_id: str = "evt_1") -> dict[str, Any]:
+    """Deliver the event and return the webhook's answer, which must accept it."""
+    response = _post(event_type, stripe_object, event_id)
+    assert response.status_code == 200
+    return response.json()
+
+
+def _post(event_type: str, stripe_object: dict[str, Any], event_id: str = "evt_1") -> Response:
     """Sign and post the event the way Stripe does, so the handler sees a real ``stripe.StripeObject``."""
     body = json.dumps(
         {
@@ -233,11 +241,9 @@ def _deliver(event_type: str, stripe_object: dict[str, Any], event_id: str = "ev
     timestamp = int(time.time())
     signature = hmac.new(WEBHOOK_SECRET.encode(), f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
     with patch("backend.routes.webhooks.stripe.Subscription.retrieve", return_value=stripe_object):
-        response = TestClient(app).post(
+        return TestClient(app).post(
             "/webhooks/stripe", content=body, headers={"Stripe-Signature": f"t={timestamp},v1={signature}"}
         )
-    assert response.status_code == 200
-    return response.json()
 
 
 def test_stripe_library_pins_a_basil_api_version() -> None:
@@ -311,6 +317,19 @@ def test_redelivered_payment_succeeded_keeps_one_payment(db: _SchemaCheckedSupab
     assert _deliver("invoice.payment_succeeded", _invoice(), event_id="evt_2") == {"received": True, "error": None}
 
     assert len(db.tables["payments"]) == 1
+
+
+def test_transient_failure_recording_a_payment_is_redelivered(db: _SchemaCheckedSupabase) -> None:
+    # A lost payment row would cost the customer the past_due grace period on the next failed renewal.
+    with patch("backend.routes.webhooks.upsert_payment", side_effect=RuntimeError("connection reset")):
+        assert _post("invoice.payment_succeeded", _invoice()).status_code == 500
+    assert db.tables["webhook_events"] == []
+
+    assert _deliver("invoice.payment_succeeded", _invoice()) == {"received": True, "error": None}
+    _deliver("invoice.payment_failed", _invoice(status="open", amount_paid=0), event_id="evt_failed")
+
+    assert len(db.tables["payments"]) == 1
+    assert db.row("subscriptions", id=SUBSCRIPTION_ROW_ID)["status"] == "past_due"
 
 
 def test_payment_failed_marks_active_subscription_past_due(db: _SchemaCheckedSupabase) -> None:

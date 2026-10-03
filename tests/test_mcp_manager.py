@@ -4292,6 +4292,57 @@ async def test_mcp_manager_spaces_refreshes_for_repeated_tools_list_changed_noti
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_spaces_the_next_refresh_from_a_delayed_refresh_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refresh that waited past its slot for a running call is not followed by an immediate reconnect."""
+    _patch_manager(monkeypatch)
+    monkeypatch.setattr(mcp_manager_module, "_STALE_REFRESH_MIN_INTERVAL_SECONDS", 0.2)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    discovered_at: list[float] = []
+    original_connect = manager._connect_and_discover
+
+    async def observed_connect(
+        discovered: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        discovered_at.append(time.monotonic())
+        return await original_connect(discovered, auth_headers=auth_headers)
+
+    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
+
+    async def send_tools_changed() -> None:
+        message_handler = _FakeClientSession.sessions[-1].message_handler
+        assert message_handler is not None
+        await message_handler(
+            mcp_types.ServerNotification(
+                ToolListChangedNotification(method="notifications/tools/list_changed"),
+            ),
+        )
+
+    async with state.call_lock.read():
+        await send_tools_changed()
+        async with asyncio.timeout(5):
+            while state.stale:  # noqa: ASYNC110
+                await asyncio.sleep(0)
+        # The first refresh now waits for this call; a second notification arrives meanwhile.
+        await send_tools_changed()
+        await asyncio.sleep(0.3)
+    async with asyncio.timeout(5):
+        while (refresh_task := state.refresh_task) is not None:
+            await refresh_task
+
+    assert len(discovered_at) == 2
+    assert discovered_at[1] - discovered_at[0] >= 0.2
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_notifies_deferred_change_already_published_by_a_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

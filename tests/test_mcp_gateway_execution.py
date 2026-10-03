@@ -15,6 +15,8 @@ from starlette.routing import Route
 from structlog.testing import capture_logs
 
 from mindroom import agents
+from mindroom.custom_tools import google_scholar
+from mindroom.custom_tools.google_scholar import GoogleScholarTools
 from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
@@ -56,12 +58,14 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
     phase: str,
     interruption: str,
 ) -> None:
-    """A cancelled call keeps its slot, identity, and close owner until native work exits."""
+    """A cancelled call keeps its slot, identity, and close owner until native work exits on the gateway pool."""
     started, release = threading.Event(), threading.Event()
     close_started, close_release, closed = threading.Event(), threading.Event(), threading.Event()
     bodies: list[str] = []
+    on_gateway_pool: dict[str, bool] = {}
 
     def block(stage: str) -> None:
+        on_gateway_pool[stage] = threading.current_thread().name.startswith("mindroom-mcp-gateway-tool")
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
         worker = get_worker_runtime_context()
@@ -127,6 +131,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             # The original typed request ID becomes reusable only after its owner exits.
             response = await client.post("/mcp", json=_call(12))
             assert response.json()["result"]["structuredContent"] == {"result": "done"}
+            assert on_gateway_pool == dict.fromkeys(("body", "build", "close", "connect"), True)
         finally:
             release.set()
             close_release.set()
@@ -288,6 +293,47 @@ async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thre
                 while _code(response := await client.post("/mcp", json=_call(1))) == "duplicate_request":  # noqa: ASYNC110
                     await asyncio.sleep(0)
             assert response.json()["result"]["structuredContent"] == {"result": "done"}
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_returns(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking Google Scholar scrape runs on the gateway pool and keeps its slot after the call is cancelled."""
+    started, release = threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def search(_query: str, _limit: int) -> list[dict[str, object]]:
+        threads.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(5)
+        return []
+
+    monkeypatch.setattr(google_scholar, "_search_publications", search)
+    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: GoogleScholarTools())
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(
+            context,
+            toolkit="calculator",
+            function="search_google_scholar",
+            arguments={"query": "attention"},
+        )
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
         finally:
             release.set()
             await asyncio.gather(first, return_exceptions=True)

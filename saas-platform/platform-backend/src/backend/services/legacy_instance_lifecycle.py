@@ -19,9 +19,9 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Instances a soft delete marked deprovisioned while their deployment kept running.
 # Legacy format: an `instances` row with status `deprovisioned`, no `lifecycle_stopped_at`, and a live deployment,
 #   written by `soft_delete_account` for every running instance of an account whose deletion was requested.
-# Last legacy release: v2026.9.363, the newest tag when this was written, and any later release without migration
-#   005; replacement: the first release with migration 005, whose soft delete changes only the account while the
-#   subscription lifecycle holds the instances.
+# Last legacy release: v2026.9.373; replacement: v2026.9.374, whose migration 005 makes the soft delete change only
+#   the account while the subscription lifecycle holds the instances; a database without migration 005 keeps the old
+#   soft delete whatever the backend release.
 # Handling: the nightly run, and any run for an account pending deletion, marks such a row running again, since
 #   its deployment still runs; the lifecycle then holds it, or keeps it running for an entitled subscription.
 #   A deprovisioned row without a deployment is already torn down and is left alone.

@@ -126,14 +126,18 @@ extension DesktopShellRequest {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
     /// Look-alike letters and punctuation, such as Cyrillic U+0430 or U+2024, read as an ASCII host or path.
-    var hasNonASCIICharacters: Bool {
-        [command, cwd, requesterID, agentName].contains { !$0.unicodeScalars.allSatisfy(\.isASCII) }
+    var hasNonASCIICharacters: Bool { !asciiEscapedFields.isEmpty }
+    /// One labeled line per field that contains non-ASCII characters, with every one of them escaped.
+    var asciiEscapedFields: String {
+        [("Command", command), ("Working folder", cwd), ("Agent", agentName), ("Requester", requesterID)]
+            .filter { !$0.1.unicodeScalars.allSatisfy(\.isASCII) }
+            .map { "\($0.0): \(desktopSafePreview($0.1, escapingNonASCII: true))" }
+            .joined(separator: "\n")
     }
-    var asciiEscapedCommand: String { desktopSafePreview(command, escapingNonASCII: true) }
     var escapeWarning: String? {
         let clauses = [
             hasEscapedCharacters ? "control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}" : nil,
-            hasNonASCIICharacters ? "non-ASCII characters that can look like ASCII; the command with them escaped follows" : nil,
+            hasNonASCIICharacters ? "non-ASCII characters that can look like ASCII; the fields with them escaped follow" : nil,
         ].compactMap { $0 }
         return clauses.isEmpty ? nil : "This request contains \(clauses.joined(separator: ", and "))."
     }

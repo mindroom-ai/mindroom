@@ -15,12 +15,13 @@ from mindroom.commands.handler import handle_command
 from mindroom.commands.model_commands import handle_model_command
 from mindroom.commands.parsing import command_parser
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
+from mindroom.teams import TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
 
 
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
-    return resolve_thread_model_override(paths, "$root", configured_models=config.models).active.get("helper")
+    return resolve_thread_model_override(paths, "$root", config=config).active.get("helper")
 
 
 @pytest.mark.parametrize(
@@ -66,6 +67,7 @@ async def test_explicit_model_operation(
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": operation}
     if model is not None:
@@ -123,6 +125,7 @@ async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path:
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
     executor = harness.controller.deps.command_executor
@@ -171,6 +174,7 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": "reset"}
     if failure == "malformed":
@@ -296,6 +300,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     await executor.execute(client.rooms[ROOM], event, USER, command, target=target, handled_turn=pending)
     assert _helper_override(paths, config) == "later"
@@ -468,6 +473,39 @@ def test_thread_overrides_keep_the_selection_of_entities_the_next_setter_cannot_
     ):
         _run_model_command(config, args_text, requester_user_id)
         assert resolved_thread_models(config, paths) == expected, (args_text, requester_user_id)
+
+
+def test_team_thread_override_governs_members_a_team_only_requester_reaches(tmp_path: Path) -> None:
+    """A requester whom only the team admits switches the model of the team's members during its turns too."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", access=ResponderAccessConfig(users=[OTHER]))},
+            teams={
+                "squad": TeamConfig(
+                    display_name="Squad",
+                    role="Ship code",
+                    agents=["code"],
+                    access=ResponderAccessConfig(users=[USER]),
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="test-model"),
+                "expensive": ModelConfig(provider="openai", id="expensive-model"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    _run_model_command(config, "expensive", USER)
+
+    assert resolve_team_turn_models(
+        "squad",
+        ["code"],
+        ROOM,
+        config,
+        runtime_paths_for(config),
+        thread_id="$root",
+    ) == TeamTurnModelSelection(team_model_name="expensive", member_model_names={"code": "expensive"})
 
 
 @pytest.mark.asyncio

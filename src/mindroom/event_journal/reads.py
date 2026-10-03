@@ -35,7 +35,7 @@ _PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) A
 # How much stored content one page loads, newest message first. A resolved
 # long-text sidecar can be megabytes, and anyone who can post can make every
 # message in a thread name one, so a row limit alone does not bound a read.
-_PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
+PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 
 # What the loaded rows of one page may decode to, estimated before decoding.
 # Prose decodes to about its stored size, but every JSON value becomes a Python
@@ -215,7 +215,7 @@ def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
     total = 0
     for index, row in enumerate(rows):
         total += int(row["content_bytes"] or 0)
-        if total > _PAGE_CONTENT_BUDGET_BYTES:
+        if total > PAGE_CONTENT_BUDGET_BYTES:
             return max(index, 1)
     return len(rows)
 

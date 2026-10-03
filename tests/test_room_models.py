@@ -334,6 +334,7 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         room_id=ROOM_ID,
         set_by="@user:localhost",
         entity_names=("assistant",),
+        config=config,
     )
     assert (
         config.resolve_runtime_model(
@@ -431,6 +432,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         room_id=ROOM_ID,
         set_by="@user:localhost",
         entity_names=("assistant",),
+        config=context.config,
     )
     thread_members = materialize_exact_team_members(
         ["assistant"],

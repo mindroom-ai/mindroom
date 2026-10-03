@@ -1998,11 +1998,7 @@ class Config(BaseModel):
             if runtime_paths is None:
                 msg = "runtime_paths are required to resolve a thread-specific runtime model"
                 raise ValueError(msg)
-            thread_overrides = resolve_thread_model_override(
-                runtime_paths,
-                thread_id,
-                configured_models=self.models,
-            ).active
+            thread_overrides = resolve_thread_model_override(runtime_paths, thread_id, config=self).active
             if entity_name is not None:
                 resolved_model_name = thread_overrides.get(entity_name)
         if resolved_model_name is None:

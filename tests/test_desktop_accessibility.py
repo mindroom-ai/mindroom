@@ -697,7 +697,8 @@ def test_mac_semantic_target_survives_unrelated_insertion(operation: str, during
         backend.set_value(state.app_id, state.state_id, 1, "published")
         assert services.attributes["button"]["value"] == "published"
     else:
-        assert backend.element_for_action(state.app_id, state.state_id, 1).name == "Save"
+        element, process_id = backend.element_for_action(state.app_id, state.state_id, 1)
+        assert (element.name, process_id) == ("Save", 42)
 
 
 @pytest.mark.parametrize("change", ["title", "value", "geometry", "parent"])

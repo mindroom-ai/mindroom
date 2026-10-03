@@ -84,10 +84,14 @@ async def test_startup_moves_valid_records_once(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_planted_entries_stay_behind_without_stopping_startup(tmp_path: Path) -> None:
-    """Junk, links, FIFOs, and misbound records are left where workers put them and never adopted."""
+    """Junk, links, FIFOs, misbound records, and records their reader cannot decode stay where workers put them."""
     paths = _runtime(tmp_path)
     agent = paths.storage_root / "agents" / "helper"
     _write(agent / "invited_rooms.json", "{}")
+    # The invited-room reader decodes strictly as UTF-8, so it would reject a BOM that json.loads on bytes accepts.
+    bom_ledger = paths.storage_root / "agents" / "planner" / "invited_rooms.json"
+    bom_ledger.parent.mkdir(parents=True)
+    bom_ledger.write_bytes(b'\xef\xbb\xbf["!a:example.org"]')
     os.mkfifo(agent / "pending_room_invites.json")
     _write(tmp_path / "outside.json", _mode_choices())
     (agent / "agent_modes.json").symlink_to(tmp_path / "outside.json")
@@ -98,8 +102,10 @@ async def test_planted_entries_stay_behind_without_stopping_startup(tmp_path: Pa
     with capture_logs() as logs:
         await migrate_state_root_records(paths)
 
-    assert len([log for log in logs if log["log_level"] == "warning"]) == 5
+    assert len([log for log in logs if log["log_level"] == "warning"]) == 6
     assert load_invited_rooms(invited_rooms_path(paths, "helper")) == set()
+    assert load_invited_rooms(invited_rooms_path(paths, "planner")) == set()
+    assert bom_ledger.exists()
     assert load_pending_room_invites(pending_room_invites_path(paths, "helper")) == {}
     assert resolve_agent_mode(paths, agent, "helper", "session") == "standard"
     assert read_personal_room(personal_room_record_path(paths, "helper", _ALICE)) is None
