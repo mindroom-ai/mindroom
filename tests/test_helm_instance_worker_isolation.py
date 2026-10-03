@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import textwrap
@@ -2649,6 +2650,102 @@ def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token
         rule for rule in bootstrap_role["rules"] if "secrets" in rule.get("resources", []) and "resourceNames" in rule
     )
     assert "agent-vault-grants-admin" in secret_rule["resourceNames"]
+
+
+def _render_agent_vault_jobs(
+    tmp_path: Path,
+    *,
+    job_naming: str,
+    grant_email: str = "maintainer@example.test",
+    kubectl_image: str = "registry.example.test/kubectl:1",
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    values_path = tmp_path / f"values-{job_naming}-{grant_email}-{kubectl_image.replace('/', '_')}.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "workerCaConfigMapName": "agent-vault-ca",
+                            "jobNaming": job_naming,
+                            "bootstrap": {"enabled": True, "kubectlImage": kubectl_image},
+                            "accessGrants": {
+                                "enabled": True,
+                                "grants": [{"email": grant_email, "workerScope": "shared", "agent": "example-agent"}],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
+    jobs = {doc["metadata"]["labels"]["app.kubernetes.io/component"]: doc for doc in docs if doc["kind"] == "Job"}
+    return docs, jobs["agent-vault-access-grants"], jobs["agent-vault-bootstrap"]
+
+
+def test_runtime_chart_agent_vault_content_hash_jobs_skip_helm_hooks(tmp_path: Path) -> None:
+    """Hashed Job names let plain `kubectl apply` replace the Jobs without Helm hooks."""
+    docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash")
+
+    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", grants_job["metadata"]["name"])
+    assert re.fullmatch(r"agent-vault-bootstrap-[0-9a-f]{10}", bootstrap_job["metadata"]["name"])
+    for job, base_name in ((grants_job, "agent-vault-access-grants"), (bootstrap_job, "agent-vault-bootstrap")):
+        assert "annotations" not in job["metadata"]
+        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+        assert job["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] == base_name
+    grants_pod = grants_job["spec"]["template"]["spec"]
+    assert grants_pod["automountServiceAccountToken"] is False
+    assert grants_pod["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
+    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    assert bootstrap_job["spec"]["template"]["spec"]["serviceAccountName"] == "agent-vault-bootstrap"
+
+
+def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path: Path) -> None:
+    """Only the Job whose rendered inputs changed gets a new name."""
+
+    def names(**overrides: str) -> tuple[str, str]:
+        _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
+        return grants_job["metadata"]["name"], bootstrap_job["metadata"]["name"]
+
+    grants_name, bootstrap_name = names()
+    assert names() == (grants_name, bootstrap_name)
+    changed_grants_name, same_bootstrap_name = names(grant_email="second@example.test")
+    assert changed_grants_name != grants_name
+    assert same_bootstrap_name == bootstrap_name
+    same_grants_name, changed_bootstrap_name = names(kubectl_image="registry.example.test/kubectl:2")
+    assert same_grants_name == grants_name
+    assert changed_bootstrap_name != bootstrap_name
+
+
+def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path: Path) -> None:
+    """The default keeps stable Job names and the Helm hook on the grants Job."""
+    _, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
+
+    assert grants_job["metadata"]["name"] == "agent-vault-access-grants"
+    assert grants_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    assert bootstrap_job["metadata"]["name"] == "agent-vault-bootstrap"
+    assert "annotations" not in bootstrap_job["metadata"]
+
+
+def test_runtime_chart_rejects_unknown_agent_vault_job_naming() -> None:
+    """Job naming accepts only the two documented modes."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "workers.kubernetes.agentVault.jobNaming=hooks",
+    )
+    assert result.returncode != 0
+    assert "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" in result.stderr
 
 
 def test_runtime_chart_rejects_agent_vault_access_token_same_secret_different_keys(tmp_path: Path) -> None:

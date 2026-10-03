@@ -487,6 +487,15 @@ workers:
             drop:
               - ALL
         resources: {}
+      # How the bootstrap and accessGrants Jobs are named and re-run.
+      # fixed keeps stable Job names and runs accessGrants as a Helm
+      # post-install/post-upgrade hook, so only `helm install`/`helm upgrade`
+      # re-run grants and a changed bootstrap pod template needs the old Job
+      # deleted first. contentHash drops the hook and appends a hash of each
+      # Job's rendered pod spec (and grants config) to its name, so applying
+      # rendered manifests with plain `kubectl apply` creates a fresh Job when
+      # those inputs change and leaves the existing Job alone otherwise.
+      jobNaming: fixed
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the
       # root CA into workerCaConfigMapName so worker pods trust the vault's TLS

@@ -301,6 +301,9 @@
 {{- end -}}
 {{- end -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
+{{- if not (has $agentVault.jobNaming (list "fixed" "contentHash")) -}}
+{{- fail "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" -}}
+{{- end -}}
 {{- if $agentVault.server.enabled -}}
 {{- $managedVaultEnv := list "AGENT_VAULT_MASTER_PASSWORD" -}}
 {{- if $agentVault.server.smtp.enabled -}}

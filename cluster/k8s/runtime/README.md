@@ -488,9 +488,9 @@ workers:
 ```
 
 The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a post-install/post-upgrade Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
+When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
 The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
-The Job is idempotent and safe to rerun on each deploy.
+The helper is idempotent, so running it again with the same grants changes nothing.
 If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
 
 For `workerScope: shared`, `agent` is required and `requester` must be omitted.
@@ -501,6 +501,17 @@ If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker
 When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
 If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
 When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
+
+`workers.kubernetes.agentVault.jobNaming` controls how the access-grant and bootstrap Jobs run again.
+With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
+The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
+Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
+With `fixed`, those workflows do not rerun an existing access-grant Job for a changed grant list, and they fail to apply a changed pod template until the old Job is deleted.
+Set `jobNaming: contentHash` for those workflows.
+The chart then drops the hook and appends a hash of each Job's rendered pod spec, plus the grant config for the access-grant Job, to the Job name.
+Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
+Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
+To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
