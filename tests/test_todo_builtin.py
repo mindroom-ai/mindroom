@@ -410,6 +410,27 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert any(item["depends_on"] for item in items)
 
 
+def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) -> None:
+    """Quotes, backslashes, and emoji in free-text params should reach the todo titles as typed."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    issue_ref = 'Fix "quoted" C:\\temp 🐛'
+    branch = 'fix/"quoted"'
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(
+            agent=_agent(),
+            name="mindroom-dev",
+            params={"ISSUE_REF": issue_ref, "BRANCH": branch, "REPO": "mindroom"},
+        )
+
+    titles = [item["title"] for item in _read_todos(config)["items"]]
+    assert titles[0] == f"Create living report for {issue_ref} in the repo notes or task file"
+    assert titles[1] == f"Create implementation plan for {issue_ref} on {branch}"
+    assert titles[3] == f"Run focused automated tests for {issue_ref}"
+    assert titles[-1] == f"Push {branch} and open PR if IS_PR is true"
+
+
 def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
     """The review-loop template should not force a rerun after first-round approval."""
     config = _config(tmp_path)
@@ -472,6 +493,29 @@ todos:
         tool.apply_template(agent=_agent(), name="bad-dependency-index", params={})
 
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path: Path) -> None:
+    """Jinja in priority and depends_on values should be validated after rendering, like every other value."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "templated-fields",
+        _template_text(
+            "templated-fields",
+            '  - title: One\n  - title: Two\n    priority: "{{ PRIORITY }}"\n    depends_on: ["{{ DEP }}"]\n',
+        ),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "high", "DEP": 1})
+        with pytest.raises(ValueError, match=r"document validation failed: todos\.1\.priority"):
+            tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "urgent", "DEP": 1})
+
+    first, second = _read_todos(config)["items"]
+    assert second["priority"] == "high"
+    assert second["depends_on"] == [first["id"]]
 
 
 def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:

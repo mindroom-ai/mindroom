@@ -7027,7 +7027,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
+          "description": "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, user-read-currently-playing, playlist-read-private, playlist-modify-public, playlist-modify-private, user-modify-playback-state)",
           "label": "Access Token",
           "name": "access_token",
           "options": null,

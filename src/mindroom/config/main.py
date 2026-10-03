@@ -121,7 +121,8 @@ if TYPE_CHECKING:
 
 # Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
+# "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
+_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
 )

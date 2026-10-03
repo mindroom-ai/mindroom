@@ -322,7 +322,7 @@ def _prepare_matrix_config(
         _write_private_file(config_path, content)
         _protect_synapse_config(config_path)
 
-    # Copy other files (like signing.key, log.config, etc.)
+    # Copy other files (like log.config)
     for file in template_dir.glob("*"):
         if not file.is_file() or file.suffix == ".j2":
             continue
@@ -331,27 +331,14 @@ def _prepare_matrix_config(
             # Skip - already handled by template
             continue
 
-        if file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
-            # Generate a unique signing key for Synapse
-            key_bytes = secrets.token_bytes(32)
-            key_b64 = base64.b64encode(key_bytes).decode("ascii")
-            key_id = f"{instance.name}_{secrets.token_hex(3)}"
-            signing_key_content = f"ed25519 {key_id} {key_b64}\n"
-
-            fd = os.open(target_dir / file.name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
-            with os.fdopen(fd, "w") as f:
-                f.write(signing_key_content)
-            console.print("  [dim]Generated unique signing key for instance[/dim]")
-
-        else:
-            fd = os.open(
-                target_dir / file.name,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o666,
-            )
-            with os.fdopen(fd, "wb") as target, file.open("rb") as source:
-                shutil.copyfileobj(source, target)
-                os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
+        fd = os.open(
+            target_dir / file.name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o666,
+        )
+        with os.fdopen(fd, "wb") as target, file.open("rb") as source:
+            shutil.copyfileobj(source, target)
+            os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
 
 
 def _ensure_env_dir() -> None:

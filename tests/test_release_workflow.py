@@ -140,7 +140,18 @@ def test_release_publishers_restore_no_actions_cache(release_workflow: str) -> N
     assert setup_uv
     assert all(step.get("with", {}).get("enable-cache") is False for step in setup_uv)
     assert not any(str(step.get("uses", "")).startswith("actions/cache") for step in steps)
-    assert image_build["with"]["cache-from"] == "${{ github.event_name == 'pull_request' && 'type=gha' || '' }}"
+    assert image_build["with"]["cache-from"] == (
+        "${{ github.event_name == 'pull_request' && format('type=gha,scope={0}', matrix.service.name) || '' }}"
+    )
+
+
+def test_platform_images_keep_separate_build_caches() -> None:
+    """Exports to one shared gha scope replace each other, so each platform image reads and writes its own scope."""
+    platform_job = yaml.safe_load(BUILD_PLATFORM_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["build-and-push"]
+    image_build = next(step for step in platform_job["steps"] if "cache-to" in step.get("with", {}))
+
+    assert "format('type=gha,scope={0}', matrix.service.name)" in image_build["with"]["cache-from"]
+    assert image_build["with"]["cache-to"] == "type=gha,mode=max,scope=${{ matrix.service.name }}"
 
 
 @pytest.mark.parametrize("include_matching_pr", [False, True])

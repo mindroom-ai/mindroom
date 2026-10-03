@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import threading
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -340,9 +338,8 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
     }
 
     assert write_functions <= enabled_tool.functions.keys()
-    assert write_functions <= enabled_tool.async_functions.keys()
+    assert not enabled_tool.async_functions
     assert write_functions.isdisjoint(disabled_tool.functions)
-    assert write_functions.isdisjoint(disabled_tool.async_functions)
     assert "google_drive_delete_file" not in enabled_tool.functions
 
 
@@ -379,8 +376,6 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
 
     assert "google_drive_download_file" in tool.functions
     assert "download_file" not in tool.functions
-    assert "google_drive_download_file" in tool.async_functions
-    assert "download_file" not in tool.async_functions
     assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
@@ -397,7 +392,6 @@ def test_google_drive_download_disabled_without_workspace(tmp_path: Path) -> Non
     )
 
     assert "google_drive_download_file" not in tool.functions
-    assert "google_drive_download_file" not in tool.async_functions
     assert "google_drive_list_files" in tool.functions
 
 
@@ -578,7 +572,7 @@ def test_google_drive_readonly_grant_keeps_reads_and_requires_reconnect_for_writ
     assert service.files_resource.create_kwargs is None
 
 
-def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path: Path) -> None:
+def test_google_drive_readonly_grant_blocks_direct_write_methods(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(
         tmp_path,
         {"MINDROOM_PUBLIC_URL": "https://mindroom.example.test"},
@@ -604,45 +598,16 @@ def test_google_drive_readonly_grant_blocks_direct_async_write_methods(tmp_path:
     tool.service = service
 
     results = (
-        asyncio.run(tool._aupload_file("plan.txt")),
-        asyncio.run(tool.aupdate_file("file-id", "plan.txt")),
-        asyncio.run(tool.acreate_folder("Plans")),
-        asyncio.run(tool.amove_file("file-id", "parent-id")),
-        asyncio.run(tool.atrash_file("file-id")),
+        tool.upload_file("plan.txt"),
+        tool.update_file("file-id", "plan.txt"),
+        tool.create_folder("Plans"),
+        tool.move_file("file-id", "parent-id"),
+        tool.trash_file("file-id"),
     )
 
     assert all(json.loads(result)["reason"] == "missing_write_scope" for result in results)
     assert service.files_resource.create_kwargs is None
     assert service.files_resource.update_kwargs is None
-
-
-def test_google_drive_async_write_scope_check_runs_off_event_loop(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
-    tool = GoogleDriveTools(
-        runtime_paths=runtime_paths,
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        worker_target=None,
-    )
-    event_loop_thread = threading.get_ident()
-    scope_check_threads: list[int] = []
-    expected_result = json.dumps({"reason": "missing_write_scope"})
-
-    def scope_upgrade_result() -> str:
-        scope_check_threads.append(threading.get_ident())
-        return expected_result
-
-    monkeypatch.setattr(tool, "_write_scope_upgrade_result", scope_upgrade_result)
-    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
-    assert entrypoint is not None
-
-    result = asyncio.run(entrypoint("unused"))
-
-    assert result == expected_result
-    assert scope_check_threads
-    assert event_loop_thread not in scope_check_threads
 
 
 def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp_path: Path) -> None:

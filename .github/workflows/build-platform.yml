@@ -90,7 +90,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Any job on main can write the Actions cache, so release images import none.
-          cache-from: ${{ github.event_name == 'pull_request' && 'type=gha' || '' }}
-          cache-to: type=gha,mode=max
+          # Each image keeps its own scope; a shared scope keeps only the last export.
+          cache-from: ${{ github.event_name == 'pull_request' && format('type=gha,scope={0}', matrix.service.name) || '' }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
           build-args: |
             BUILDKIT_INLINE_CACHE=1

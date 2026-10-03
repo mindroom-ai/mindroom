@@ -50,6 +50,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
     from pathlib import Path
 
+    from nio.api import RelationshipType
+
     from mindroom.event_journal import EventJournalStore, PrincipalStore, RefreshRequest
 
 pytestmark = pytest.mark.asyncio
@@ -245,14 +247,32 @@ class FakeClient:
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield stored relations in server order, enforcing depth the way nio does."""
+        """Yield stored relations in server order, enforcing depth the way nio does.
+
+        A relation type asks for the event's direct relations of that type only.
+        """
         del room_id, recurse
         self.relation_calls += 1
-        sources = self._ordered_relations(event_id, direction)
+        if rel_type is None:
+            sources = self._ordered_relations(event_id, direction)
+        else:
+            direct = {"rel_type": rel_type.value, "event_id": event_id}
+            sources = iter(
+                sorted(
+                    (
+                        source
+                        for source in self.relations.get(event_id, [])
+                        if source["content"].get("m.relates_to") == direct
+                    ),
+                    key=lambda source: (source["origin_server_ts"], source["event_id"]),
+                    reverse=direction is not nio.MessageDirection.front,
+                ),
+            )
         first = next(sources, None)
         # Mirrors nio: an empty page has no depth to report and nothing that
         # could have been truncated, so it is never rejected.
@@ -424,6 +444,7 @@ class HeldFirstWalk(FakeClient):
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
@@ -435,6 +456,7 @@ class HeldFirstWalk(FakeClient):
         async for event in super().room_get_event_relations(
             room_id=room_id,
             event_id=event_id,
+            rel_type=rel_type,
             direction=direction,
             recurse=recurse,
             minimum_recursion_depth=minimum_recursion_depth,
@@ -845,6 +867,66 @@ class TestThreadHydrationBounds:
         assert await bodies(alice, "$root") == ["root", "answer 2 v2", "answer 3 v2"]
         assert await revisions(alice, "$root") == ["$root", "$answer2-edit2", "$answer3-edit2"]
 
+    @pytest.mark.parametrize(
+        ("bounds", "edit_ts", "relation_calls"),
+        [
+            ({"prompt_window_messages": 2}, 600, 2),
+            ({"max_fetched_events": 3}, 600, 2),
+            ({"prompt_window_messages": 2}, 5_000, 1),
+        ],
+    )
+    async def test_the_root_keeps_its_newest_edit_when_the_walk_stops_short(
+        self,
+        alice: PrincipalStore,
+        bounds: dict[str, int],
+        edit_ts: int,
+        relation_calls: int,
+    ) -> None:
+        """The root is kept outside the window, and so is its edit.
+
+        An edit made early in a long thread sorts behind every newer reply, so
+        a walk that stops at a bound never reached it, and the root was shown
+        at its original text as if it had never been edited. An edit the walk
+        already read costs no further request.
+        """
+        client = edited_thread(answers=4, edits=1)
+        client.relations["$root"].append(raw("$root-edit", "root edited", ts=edit_ts, replaces="$root"))
+
+        await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert (await bodies(alice, "$root"))[0] == "root edited"
+        assert (await revisions(alice, "$root"))[0] == "$root-edit"
+        assert client.relation_calls == relation_calls
+
+    @pytest.mark.parametrize(
+        ("ceiling", "expected"),
+        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        ids=["edits_past_ceiling", "edit_before_ceiling"],
+    )
+    async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
+        self,
+        alice: PrincipalStore,
+        ceiling: int,
+        expected: str,
+    ) -> None:
+        """A root-edit fetch stopped before any of the sender's edits cannot vouch for the root.
+
+        Edits arrive newest first, so enough edits of the root by someone else
+        end the edits-only fetch before the sender's own. Installing the root
+        as though it had never been edited would let any room member roll it
+        back. An edit by the sender found before the ceiling needs no notice.
+        """
+        client = edited_thread(answers=4, edits=1)
+        client.relations["$root"].append(raw("$root-edit", "root edited", ts=600, replaces="$root"))
+        client.relations["$root"].extend(
+            raw(f"$forged{index}", "forged", sender=BOB, ts=700 + index, replaces="$root") for index in range(3)
+        )
+
+        await hydrator(alice, client, max_fetched_events=ceiling).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert (await bodies(alice, "$root"))[0] == expected
+        assert client.relation_calls == 2
+
     async def test_the_event_ceiling_stops_a_thread_the_window_never_would(
         self,
         alice: PrincipalStore,
@@ -1136,7 +1218,8 @@ class TestCompletenessRequirement:
 
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
 
-        assert client.relation_calls == 1
+        # The truncated walk, then the root's own edits it stopped short of.
+        assert client.relation_calls == 2
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
@@ -1145,7 +1228,7 @@ class TestCompletenessRequirement:
             thread_id="$root",
         )
 
-        assert client.relation_calls == 1
+        assert client.relation_calls == 2
         # Still refused, which is the other half: not re-walking must not
         # become quietly calling a truncated thread whole.
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")

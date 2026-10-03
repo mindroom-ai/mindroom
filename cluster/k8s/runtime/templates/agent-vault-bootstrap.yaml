@@ -1,14 +1,10 @@
 {{- if .Values.workers.kubernetes.agentVault.bootstrap.enabled }}
 {{- $av := .Values.workers.kubernetes.agentVault -}}
-{{- $bs := $av.bootstrap -}}
 {{- $accessTool := $av.accessTool -}}
 {{- $accessGrants := $av.accessGrants -}}
 {{- $accessGrantsHasGrants := and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
 {{- $accessAdminTokenEnabled := or $accessTool.enabled $accessGrantsHasGrants -}}
 {{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
-{{- /* Target the same vault API the workers use, so bootstrap also works
-     against an externally managed Agent Vault (server.enabled=false). */ -}}
-{{- $addr := required "workers.kubernetes.agentVault.apiUrl is required when bootstrap is enabled" $av.apiUrl -}}
 {{- if not $av.workerCaConfigMapName -}}
 {{- fail "workers.kubernetes.agentVault.workerCaConfigMapName is required when bootstrap is enabled (the Job publishes the root CA into it)" -}}
 {{- end -}}
@@ -83,16 +79,32 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
 ---
+{{- $jobSpec := include "mindroom-runtime.agentVaultBootstrapJobSpec" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $name }}
+  name: {{ include "mindroom-runtime.agentVaultJobName" (list . $name $jobSpec) }}
   labels:
     {{- include "mindroom-runtime.agentVaultBootstrapLabels" . | nindent 4 }}
+{{ $jobSpec }}
+{{- end }}
+
+{{- define "mindroom-runtime.agentVaultBootstrapJobSpec" -}}
+{{- $av := .Values.workers.kubernetes.agentVault -}}
+{{- $bs := $av.bootstrap -}}
+{{- $accessTool := $av.accessTool -}}
+{{- $accessGrants := $av.accessGrants -}}
+{{- $accessGrantsHasGrants := and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
+{{- $accessAdminTokenEnabled := or $accessTool.enabled $accessGrantsHasGrants -}}
+{{- $name := include "mindroom-runtime.agentVaultBootstrapName" . -}}
+{{- /* Target the same vault API the workers use, so bootstrap also works
+     against an externally managed Agent Vault (server.enabled=false). */ -}}
+{{- $addr := required "workers.kubernetes.agentVault.apiUrl is required when bootstrap is enabled" $av.apiUrl -}}
 spec:
-  # The finished Job is garbage-collected after 24h; the RBAC objects above are
-  # Helm-managed and stay. To force a re-run (the script is idempotent), delete
-  # the Job and `helm upgrade`, which re-applies it.
+  # The finished Job is garbage-collected after 24h; the RBAC objects above stay.
+  # The script is idempotent. With jobNaming=fixed, delete the Job before
+  # `helm upgrade` or `kubectl apply` to re-run it or change its pod template.
+  # With jobNaming=contentHash, a changed pod template gets a new Job name.
   ttlSecondsAfterFinished: 86400
   template:
     metadata:

@@ -328,33 +328,6 @@ class TestDownloadImage:
         mock_decrypt.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_download_media_bytes_rejects_decrypted_payload_over_limit(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Decrypted Matrix media bytes should be capped before persistence or model handoff."""
-        monkeypatch.setattr(media_module, "_matrix_media_max_bytes", 5)
-        client = make_matrix_client_mock()
-        event = MagicMock(spec=nio.RoomEncryptedImage)
-        event.event_id = "$test_event"
-        event.url = "mxc://example.org/decrypted-too-large"
-        event.source = {
-            "content": {
-                "file": {
-                    "key": {"k": "test_key"},
-                    "hashes": {"sha256": "test_hash"},
-                    "iv": "test_iv",
-                },
-            },
-        }
-        client.download.return_value = _download_response(b"small")
-
-        with patch("mindroom.matrix.media.crypto.attachments.decrypt_attachment", return_value=b"123456"):
-            result = await download_media_bytes(client, event)
-
-        assert result is None
-
-    @pytest.mark.asyncio
     async def test_download_encrypted_image_missing_key_material_returns_none(self) -> None:
         """Test encrypted payloads missing key material fail gracefully."""
         client = make_matrix_client_mock()

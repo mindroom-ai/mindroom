@@ -289,8 +289,9 @@ OPENAI_API_KEY=your_openai_key
 # OPENROUTER_API_KEY=your_openrouter_key
 # ANTHROPIC_API_KEY=your_anthropic_key
 
-# Optional: protect the dashboard API (recommended for non-localhost)
-# MINDROOM_API_KEY=your-secret-key
+# Dashboard API key; generate one with `openssl rand -hex 32`.
+# Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
+MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 
 #### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)

@@ -264,8 +264,9 @@ Environment variables go in `.env` next to the selected config file (`~/.mindroo
 ```bash
 MATRIX_HOMESERVER=https://your-matrix.server
 ANTHROPIC_API_KEY=your-key-here
-# Optional: protect dashboard API endpoints (recommended for non-localhost)
-# MINDROOM_API_KEY=your-secret-key
+# Dashboard API key; generate one with `openssl rand -hex 32`.
+# Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
+MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 
 Select another config with `mindroom run --config /path/to/config.yaml` or `export MINDROOM_CONFIG_PATH=/path/to/config.yaml` before running the CLI.

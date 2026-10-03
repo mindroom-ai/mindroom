@@ -8,13 +8,14 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses five Helm charts:
+MindRoom uses six Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 - **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
 - **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
 - **Client Chart** (`cluster/k8s/client/`) - Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS
+- **MatrixRTC Chart** (`cluster/k8s/matrixrtc/`) - Optional LiveKit SFU and MatrixRTC authorization service for voice calls, paired with the client chart's MatrixRTC proxy
 
 ## Prerequisites
 

@@ -754,8 +754,9 @@ OPENAI_API_KEY=your_openai_key
 # OPENROUTER_API_KEY=your_openrouter_key
 # ANTHROPIC_API_KEY=your_anthropic_key
 
-# Optional: protect the dashboard API (recommended for non-localhost)
-# MINDROOM_API_KEY=your-secret-key
+# Dashboard API key; generate one with `openssl rand -hex 32`.
+# Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
+MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 
 #### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
@@ -1351,6 +1352,7 @@ Successful sync completion refreshes both liveness clocks and clears the ingesti
 After 90 seconds without sync or durable ingestion progress, `matrix_sync_stall_diagnostics` logs bounded await chains for that agent's sync, ingestion runner, ingestion pump, and delivery recovery tasks, including during first-sync and restarted-sync startup grace.
 Reports repeat at most every 90 seconds and include sync age, time without progress, and ingestion generation without changing watchdog or readiness behavior.
 Snapshots contain at most four tasks and 32 code locations per task, with strings capped at 240 characters; they exclude locals, message content, and source text, and stop at opaque Future or Task await boundaries.
+[Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/) lists this report's stable fields and a suggested alert condition.
 Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ### Tools & Matrix
@@ -1876,6 +1878,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
+| `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second primary listener that serves only `/api/script-gateway`, so Kubernetes script workers can be given a network path to the gateway without the general API; binds the `--api-host` address and is off when unset | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining exact CPU and memory requests and limits for the fixed `small`, `standard`, and `large` background-script profiles | Built-in bounded profiles |
@@ -3208,13 +3211,13 @@ All runtimes for the same non-private agent read and write the same storage dire
 If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
 Agents that use `private` are different.
 They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`.
-Workers mount those canonical private-instance roots.
-They do not own them.
+Dedicated Docker and Kubernetes workers mount only the private root (`private.root`) inside that state root, never the state root itself, and own neither.
+The Kubernetes `static_runner` sidecar mounts the whole `private_instances` directory.
 
 The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
 The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
 GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
-Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth, local-only, and model-provider placement unchanged.
+Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth and local-only placement unchanged.
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described below.
@@ -3290,7 +3293,7 @@ mind_template/
 In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage.
 That private root is not created next to `config.yaml`.
 It is not stored under `workers/<worker>/`.
-Workers mount the same canonical private-instance root when they execute that requester scope.
+Dedicated workers mount that `mind_data/` private root, not the state root around it, when they execute that requester scope.
 For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
 
 ### Private Fields
@@ -3365,7 +3368,9 @@ Exports land at `<storage_root>/agents/<agent>/workspace/thread_exports/<urlenco
 Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread_exports/`.
 Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
 Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
@@ -3512,6 +3517,7 @@ agents:
 
 Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
 Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
+The names `router`, `user`, and `_shared` are reserved for MindRoom's own accounts and storage.
 
 ## Defaults
 
@@ -9212,8 +9218,8 @@ search_by_brand("OpenAI")
 `spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
 The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
-By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`.
-The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
+The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
+Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
 `get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
 Spotify's [endpoint access notice](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) restricts new and affected Development Mode apps while preserving access for qualifying existing Extended Quota Mode apps.
 
@@ -9638,7 +9644,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
-An `m.room.message` that `send_event` sends for a human requester names that requester, so the agents and teams it mentions act for that human, as they do for the agent's ordinary replies.
+An `m.room.message` that `send_event` sends for a human or configured bot-account requester names that requester, so the agents and teams it mentions act for that requester, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
@@ -10532,6 +10538,7 @@ An open app refreshes externally saved settings while stopped and preserves unsa
 Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
 Repeating setup for the same controller preserves existing browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 Setup for a different controller starts without saved folders or shell access.
+Setup also replaces a malformed local configuration, or one readable by group or other users, with fresh private settings; choose apps, folders, shell, and browser access again afterward.
 If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
@@ -13790,7 +13797,9 @@ Existing Kubernetes script workers can keep their launch image across primary up
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
-Enforce that boundary with a separate listener or path-filtering proxy and network policy; the environment flag does not create network isolation by itself.
+Set `MINDROOM_SCRIPT_GATEWAY_PORT` to have the primary serve that listener itself on a second port that answers only `/api/script-gateway` routes and returns 404 for every other primary API route.
+The main API port is unchanged, so network policy must still keep workers off it; the environment flag does not create network isolation by itself.
+The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in `cluster/k8s/runtime/README.md`.
 When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
 Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
 Direct network clients started by the script process do not receive Agent Vault credential injection.
@@ -13808,11 +13817,12 @@ export MINDROOM_SANDBOX_PROXY_TOKEN=replace-with-a-long-random-token
 export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gateway
 ```
 
-For Kubernetes, configure the dedicated backend and isolated gateway attestation instead:
+For Kubernetes, configure the dedicated backend, the gateway-only listener, and the isolated gateway attestation instead:
 
 ```bash
 export MINDROOM_WORKER_BACKEND=kubernetes
-export MINDROOM_SCRIPT_GATEWAY_URL=https://script-gateway.example.org/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_PORT=8767
+export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
@@ -17244,7 +17254,7 @@ Only agents with no private, per-agent, or inherited scope use the global creden
 Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
-Scoped tool settings are read from primary stores, never worker credential stores, with OAuth token, existing local-only, and model-provider service rules unchanged.
+Scoped tool settings are read from primary stores, never worker credential stores, with OAuth token and existing local-only service rules unchanged.
 The primary builds every tool and leases a worker-routed tool's settings to the worker per call; settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, while explicit shared grants and shared mirrors still apply.
 Storage, API routing, OAuth provider loading, and worker identity derivation stay in their existing modules.
 Tools should declare `auth_provider` and, when credentials are missing, return a concise connect instruction that points at the generic `authorize` route for the provider and agent.
@@ -18735,6 +18745,8 @@ Your Matrix deployment needs the standard Element Call backend:
 }
 ```
 
+On Kubernetes, the [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/matrixrtc) deploys LiveKit and the authorization service, and the [client chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/client) publishes the `.well-known` announcement and proxies `/livekit/jwt` and `/livekit/sfu` to them.
+LiveKit media still needs a static public IP and open TCP and UDP media ports, which the chart README describes.
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
 
 MindRoom joins only calls whose oldest membership advertises the locally configured or discovered MatrixRTC focus.
@@ -18858,8 +18870,8 @@ Transient failures (HTTP 5xx and 429 status codes on the provider exception) als
 
 ## Limitations
 
-- **Incoming image size** -- the downloaded payload and, for encrypted images, the decrypted payload must each be at most 64 MiB (67,108,864 bytes).
-  These checks run after download returns; send a smaller image if rejected, and account for any stricter homeserver or provider limits.
+- **Incoming image size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted images decrypt to the same size.
+  MindRoom stops a download as soon as it passes that limit, so send a smaller image when it is rejected, and account for any stricter homeserver or provider limits.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.
@@ -18925,6 +18937,7 @@ Earlier attachments stay in chronological position through inline annotations, b
 ```
 
 Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
+When a message with a file, image, or video is edited, later turns register its current revision under a new attachment ID, so a replaced file is used instead of the old one.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -19004,9 +19017,8 @@ Downloaded Matrix media is stored once per content and file type, so events that
 
 ## Limitations
 
-- **Incoming media size** -- downloaded and decrypted payloads must each be at most 64 MiB (67,108,864 bytes).
-  MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
-  This is a post-download check, so use a smaller file when it is rejected.
+- **Incoming media size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted media decrypts to the same size.
+  MindRoom stops a download as soon as it passes that limit, so use a smaller file when it is rejected.
   Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
 - **Earlier media that fails** -- a file, image, or video earlier in the conversation that cannot be downloaded, decrypted, or stored is not tried again for an hour, so later turns do not fetch it each time.
 - **Earlier media per turn** -- one turn downloads at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
@@ -20461,11 +20473,11 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
-An agent's or team's reply, including a raw `m.room.message` an agent sends with `matrix_api`, does not carry that bypass to the entities it mentions when a human requested the reply.
-A mentioned agent or team then acts for that human: it applies its own `access` to the human and does not respond when that excludes them, and it runs with the human as requester for credentials, requester-private instances, memory, learning, and approvals.
-The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise run with that human as requester, so they reach only the entities the human may address.
-MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the human must send those personally.
-A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the human by scheduling it either.
+An agent's or team's reply, including a raw `m.room.message` an agent sends with `matrix_api`, does not carry that bypass to the entities it mentions when a human or a configured bot account requested the reply.
+A mentioned agent or team then acts for that requester: it applies its own `access` to the requester and does not respond when that excludes them, and it runs as that requester for credentials, requester-private instances, memory, learning, and approvals.
+The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise run as that requester, so they reach only the entities the requester may address.
+MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the requester must send those personally.
+A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the requester by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
@@ -21871,11 +21883,12 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`workers/backends/legacy_state_root_mounts.py`][legacy-state-root-mounts] | [State-root mount tests][legacy-state-root-mounts-tests] cover backend dispatch, Kubernetes configuration, API, and transport failures that fail retirement, and startup that fails before anything serves; [Docker worker tests][docker-worker-tests] remove only unlabeled containers, and [Kubernetes worker tests][kubernetes-worker-tests] stop real old-template and downgraded Deployments, wait for their live pods, and rebuild them from the current template. |
 | [SSO cookie routes][sso] | [SSO endpoint tests][sso-cookie-tests] assert host-only token cookies and exact legacy shared-domain expiry cookies on both endpoints, and emit no domain cookie for localhost, IP addresses, and single-label hosts. |
 | [Hosted instance lifecycle][instance-lifecycle] and [`legacy_instance_lifecycle.py`][legacy-instance-lifecycle] | [Lifecycle tests][instance-lifecycle-tests] mark an instance an older soft delete left `deprovisioned` while its deployment kept running as running again, then hold it or keep it running for an entitled subscription, leave one without a deployment alone, and look only during nightly runs and for accounts pending deletion. |
+| [Hosted instance provisioner][provisioner-service] | [Provisioner tests][provisioner-tests] keep a reprovisioned instance without a stored key keyless only while its storage volume exists, give it the derived key on new volumes, and let an existing keyless instance opt into encryption. |
 
 This index intentionally excludes current authoring shorthands, protocol adapters, recovery rules, and caches that tolerate unknown versions because those are active interfaces rather than evidence of a retired native writer.
 Sparse publication, job, and failure fields in [`knowledge/index_metadata.py`][knowledge-index] remain a current writer contract: the writer still omits optional values and the reader accepts those sparse in-progress and failed records.
 Dependency-owned schemas remain attributed to their dependency, and removed readers remain documented as removed rather than recreated only to obtain conversion coverage.
-The coverage delivered here is limited to Python owners, including the SSO route and the hosted instance lifecycle; inventoried SQL migrations, browser cleanup, and infrastructure setup below remain outside this implementation and carry no new annotation or test claim.
+The coverage delivered here is limited to Python owners, including the SSO route, the hosted instance lifecycle, and the hosted instance provisioner; inventoried SQL migrations, browser cleanup, and infrastructure setup below remain outside this implementation and carry no new annotation or test claim.
 
 The explicit response attempt schema replaces ownership inference used by the last verified native writer, v2026.9.137.
 SQLite holds its startup writer transaction and PostgreSQL its schema advisory lock while the migration runs.
@@ -22002,6 +22015,7 @@ These rows are checked manually because the original inventory used section head
 | D7 | Current behavior | [Provider][claude-compat], [Matrix protocol][event-info], dependency, and [cancellation][cancellation] adapters remain necessary after database reset. |
 | D8 | Current behavior | [`session_storage_preflight.py`][session-preflight] is the concrete owned-session archive boundary; reset remains an explicit owner policy, not a generic exception fallback. |
 | D9 | Current behavior | [Usage diagnostics][usage], [model overrides][thread-models], [invited rooms][invited-rooms], and [vocabulary cache][tag-vocabulary] deliberately use weak retention without an old conversion chain. |
+| D10 | Tiny retained default | [The hosted instance provisioner][provisioner-service] keeps an instance that has no stored credential encryption key keyless while its MindRoom storage volume, which may hold plaintext credential files from before v2026.5.140, still exists, unless the provision request opts into encryption. |
 
 ## Upgrade and reset limits
 
@@ -22156,6 +22170,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py
 [instance-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/services/instance_lifecycle.py
 [legacy-instance-lifecycle]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/services/legacy_instance_lifecycle.py
+[provisioner-service]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/services/provisioner_service.py
 [tag-vocabulary]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_tag_vocabulary.py
 [terraform-state]: https://github.com/mindroom-ai/mindroom/blob/main/cluster/scripts/setup-terraform-state.sh
 [thread-export]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/thread_export/storage.py
@@ -22211,6 +22226,7 @@ Plugin directories beside a file-sourced config are no longer visible to the sid
 [session-recovery-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_agent_session_storage_recovery.py
 [sso-cookie-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_sso_cookie_attrs.py
 [instance-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_instance_lifecycle.py
+[provisioner-tests]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/tests/test_provisioner.py
 [streaming-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_streaming_behavior.py
 [sync-continuity-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_sync_continuity_store.py
 [todo-builtin-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_todo_builtin.py
@@ -22487,8 +22503,10 @@ Reads through those descriptors are capped per surface.
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, its directory cannot be opened, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
 | Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; 1 MiB of workspace template files read, from at most 1,024 entries of the template directory, per `list_templates` call; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file and stops listing workspace templates with a warning at the template that would exceed its read cap |
-| Scheduled-run receipts, thread-export files, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
+| Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads | 64 MiB | The upload is refused with a tool error |
+| Thread-export files | 64 MiB per file for the room index; the unchanged-content comparison reads at most the new export's size | A larger file is indexed from its header before its messages, and an existing file larger than the new export counts as changed and is replaced |
+| Thread-export files one room index rebuild reads | 256 MiB in total, newest file first, each file counted before it is parsed | Older thread files are listed under `unindexed_files` in that room's `index.json` instead of indexed, with a warning, and stay on disk |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails with an error before staging more than the cap |
@@ -22499,7 +22517,8 @@ The same files are refused when one mapping holds more than 64 `<<` merge keys o
 Numeric keys are counted because they can be chosen to share one hash, and a `!!set` counts as a mapping.
 They are also refused when more than 16 lines start with `%`, as YAML directives do, because libyaml compares each `%TAG` directive with every earlier one before the event checks see any of them.
 A value PyYAML cannot build, such as a year-0 date, is handled like any other YAML error in that file.
-The thread exporter decides whether a file changed by comparing its text rather than parsing it, and indexes a thread file too large to parse whole from the thread header before its messages.
+The thread exporter decides whether a file changed by comparing its text rather than parsing it, reading no more of the existing file than the new export's size, and indexes a thread file too large to read or parse whole from the thread header before its messages.
+While it reads a thread, the exporter keeps only the message content it writes and stops once that passes 128 MiB as compact JSON, twice the read cap so every thread whose file fits that cap still exports; it then reports the thread as failed and leaves its previous file in place.
 Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
@@ -22511,7 +22530,7 @@ Git commands the primary runs in a workspace, for knowledge checkouts and the `c
 
 Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
 Access policy and requester authorization govern it, independently of the tool trust model.
-An agent or team that another entity's reply mentions acts for the human who requested that reply, so a human cannot reach an entity whose `access` excludes them by asking a different entity to mention it.
+An agent or team that another entity's reply mentions acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
 
 ## Hosted tenant isolation
 
@@ -22560,8 +22579,6 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   The `file` tool's `search_content` also walks by path, but resolves each file it finds like `read_file` and reads it through no-follow descriptors, so under `file_access: workspace` it returns only workspace content.
 - `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
-- Rebuilding a thread-export room index parses every thread file in that room's directory, each up to the 64 MiB read cap, with no budget for the whole rebuild, while it holds the primary's process-wide export lock.
-  Worker code that plants many large thread files there makes each such rebuild, and every other thread export waiting on that lock, take seconds longer per planted file.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 
 ## Intentional behaviors
@@ -24917,6 +24934,7 @@ Workers still need Agent Vault API access (`apiUrl`, usually port `14321`) so th
 When the chart also manages the Agent Vault server, the worker NetworkPolicy includes that API egress automatically.
 For an externally managed Agent Vault server, add an egress rule for the API endpoint only.
 Do not add worker egress directly to the Agent Vault MITM proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants; that bypasses the Squid-first policy path.
+The chart-managed Agent Vault server has its own NetworkPolicy that by default admits only in-chart vault clients and limits vault egress; see `workers.kubernetes.agentVault.server.networkPolicy` in `cluster/k8s/runtime/README.md`.
 
 For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 
@@ -25249,6 +25267,11 @@ These runtime-derived entries are not written back to `config.yaml` by dashboard
 Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
+The proxy reads the static allowlist only at startup.
+The chart hashes inline `approvedEgress.allowlist.domains` into the proxy pod template, so changing them rolls the proxy.
+With `approvedEgress.allowlist.existingConfigMap`, the chart cannot see the content, so restart the proxy Deployment after editing that ConfigMap, or put a content hash in `approvedEgress.podAnnotations`.
+MindRoom's own copy of the allowlist refreshes only when its pod restarts, so after removing a domain also restart the MindRoom Deployment; until then `request_network_access` reports that domain as already allowed and creates no grant, while the proxy blocks it.
+
 ## Agent Vault Chaining
 
 When approved egress and Agent Vault are used together, the correct chain is:
@@ -25391,13 +25414,14 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses five Helm charts:
+MindRoom uses six Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 - **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
 - **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
 - **Client Chart** (`cluster/k8s/client/`) - Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS
+- **MatrixRTC Chart** (`cluster/k8s/matrixrtc/`) - Optional LiveKit SFU and MatrixRTC authorization service for voice calls, paired with the client chart's MatrixRTC proxy
 
 ## Prerequisites
 
@@ -26021,6 +26045,122 @@ The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetz
 Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
 The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.
 
+# Operational Log Events
+
+MindRoom names every structured log record with an `event` string.
+Most event names are internal diagnostics and can change in any release.
+The events on this page are stable operator signals for log-based metrics and alerts.
+Their names and fields are pinned by `tests/test_operational_log_events.py`, which also checks the field tables on this page, so a rename or field change cannot land without updating this page in the same change.
+
+## Collecting the events
+
+Set `MINDROOM_LOG_FORMAT=json` so each record is written as one JSON object per line to stderr and to the runtime log file under `<storage>/logs/`.
+Every record carries `event`, `level`, `logger`, and `timestamp` next to the event fields below.
+Container log collectors that parse JSON lines can then filter on `event` and extract numeric fields.
+
+```json
+{"sample_count": 1200, "p50_ms": 0.412, "p95_ms": 1.87, "p99_ms": 4.02, "max_ms": 11.3, "gc_collections_total": [5120, 466, 31], "max_lag_scheduled_at": "2026-01-01T12:00:41.250+00:00", "max_lag_observed_at": "2026-01-01T12:00:41.261+00:00", "event": "event_loop_scheduler_lag_summary", "logger": "mindroom.event_loop_stall", "level": "info", "timestamp": "2026-01-01T12:01:00.012345Z"}
+```
+
+`event_loop_scheduler_lag_summary` is an `info` record, so keep `LOG_LEVEL` at `INFO` or lower, or raise only that logger with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO`.
+The other events on this page are `warning` records.
+Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value disables the event-loop stall detector and with it the scheduler-lag summary.
+See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
+
+## Suggested alerts
+
+These thresholds are starting points; tune them against your own baseline.
+The queries are generic pseudo-queries, so translate them into your log platform's metric and alert syntax.
+
+| Event | Condition | Starting threshold |
+|-------|-----------|--------------------|
+| `event_loop_scheduler_lag_summary` | Median of `p50_ms` stays high | Above 20 ms for 30 minutes |
+| `matrix_sync_stall_diagnostics` | Repeated reports for one `agent` | 5 or more for one `agent` within 15 minutes |
+| `tool_call_limit_reached` | Any occurrence | Every record, with notifications rate-limited to about one per hour |
+
+## Events
+
+Each section lists the event's fields, a pseudo-query for its suggested alert, and where to look when the alert fires.
+
+### `event_loop_scheduler_lag_summary`
+
+The runtime runs every agent, team, and router bot on one asyncio event loop.
+The event-loop stall detector schedules a heartbeat callback every 50 ms and records how late each callback runs.
+A native watcher thread, not a task on the loop, logs one summary for every completed 60-second window that collected samples.
+
+| Field | Meaning |
+|-------|---------|
+| `sample_count` | Heartbeat samples in the window |
+| `p50_ms` | Median heartbeat lateness in milliseconds |
+| `p95_ms` | 95th percentile heartbeat lateness in milliseconds |
+| `p99_ms` | 99th percentile heartbeat lateness in milliseconds |
+| `max_ms` | Worst heartbeat lateness in milliseconds |
+| `max_lag_scheduled_at` | UTC time at which the worst heartbeat was due |
+| `max_lag_observed_at` | UTC time at which the worst heartbeat ran |
+| `gc_collections_total` | Cumulative garbage collections per generation since process start |
+
+An idle or lightly loaded loop reports a `p50_ms` of a few milliseconds or less.
+A sustained high median means the loop is saturated and replies slow down, which can happen while `/api/health` still reports healthy, because liveness tracks Matrix sync and durable ingestion progress rather than loop latency.
+
+```text
+metric  = distribution of p50_ms
+          from logs where event = "event_loop_scheduler_lag_summary"
+alert if  median(metric) over 10 minutes > 20
+          for 30 minutes
+```
+
+When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the loop thread's stack when one stall exceeds the stall threshold (5 seconds by default) unless `stack_capture_suppressed` is true.
+Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
+Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
+
+### `matrix_sync_stall_diagnostics`
+
+Each agent, team, and router bot owns its own Matrix receive loop.
+When one of them goes 90 seconds without sync or durable ingestion progress, this record logs bounded await chains for that entity's tasks, and it repeats at most every 90 seconds while the stall lasts.
+It does not change watchdog, liveness, or readiness behavior, as described in [Health & Readiness](https://docs.mindroom.chat/dashboard/#health-readiness).
+
+| Field | Meaning |
+|-------|---------|
+| `agent` | Name of the entity whose receive loop made no progress |
+| `no_progress_seconds` | Seconds since the last sync or durable ingestion progress |
+| `sync_age` | Seconds since the last sync activity, or `null` before the first sync result |
+| `generation` | Durable ingestion progress generation, or `null` when none is reported |
+| `snapshots` | Up to four task snapshots for the entity's sync, ingestion runner, ingestion pump, and delivery recovery tasks, each with `task_name`, `await_chain`, `await_boundary`, and `truncated` |
+
+A homeserver interruption that lasts a little over 90 seconds without a receive-loop restart logs one report per entity.
+Each restart starts a fresh 90-second timer, so with `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` below 90, first syncs that keep timing out can restart the loop before it ever logs this report.
+Each report covers its own 90 seconds without sync or durable ingestion progress, so five reports for one entity within 15 minutes mean at least seven and a half minutes, not necessarily continuous, without that progress.
+
+```text
+metric  = count of logs where event = "matrix_sync_stall_diagnostics"
+          grouped by agent
+alert if  sum(metric) over 15 minutes >= 5 for any agent
+```
+
+Read the `await_chain` snapshots to see where each task is waiting.
+Reports for every entity at once usually point at the homeserver or at a saturated event loop, so check `event_loop_scheduler_lag_summary` as well.
+
+### `tool_call_limit_reached`
+
+Each agent or team run has a tool-call budget, normally the entity's `max_tool_calls_per_turn`.
+Calls past the budget return a tool error, and a run that keeps requesting tools ends after its budget plus two model requests.
+The refused model request never reaches the provider, the turn completes with the text produced so far, and this record is logged once for that run.
+
+| Field | Meaning |
+|-------|---------|
+| `entity` | Agent or team name; dynamic workflow participants appear as `dynamic_workflow_<participant id>` |
+| `budget` | The run's tool-call budget |
+| `model_requests` | Model requests the run made before the next one was refused |
+
+```text
+alert on  each log where event = "tool_call_limit_reached"
+notify    at most once per hour
+```
+
+Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
+Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
+For legitimate long work in an agent or team turn, raise that entity's `max_tool_calls_per_turn`, as described in [Agents](https://docs.mindroom.chat/configuration/agents/).
+
 # CLI Reference
 
 MindRoom provides a command-line interface for managing agents.
@@ -26061,7 +26201,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
@@ -26087,30 +26227,32 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
 ## check-active-responses
 
-Check the running process's admitted Matrix work and OpenAI-compatible requests.
+Check the running process for live work that a restart would interrupt: admitted Matrix work, OpenAI-compatible requests, voice calls, and background script runs.
 
 ```
 mindroom check-active-responses
 mindroom check-active-responses --json
 mindroom check-active-responses --details
 mindroom check-active-responses --details --json
+mindroom check-active-responses --wait 1800
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
-| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `0` | Runtime ready, admission open, and no admitted Matrix work, OpenAI requests, voice calls, or interruptible script runs. |
+| `1` | Admitted Matrix work, OpenAI-compatible requests, voice calls, or interruptible script runs are active. |
 | `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
 
 The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
-Rows contain `channel`, `responder`, and `requester_id`.
-The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point, plus one row per voice call.
+Rows contain `channel` (`matrix`, `openai`, or `call`), `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope, authenticated OpenAI requester context, or the caller the agent joined.
+Details also list `script_runs` with `run_id`, the owning agent as `responder`, the owner as `requester_id`, and `recoverable`.
 Unknown identities are `null` in JSON and labeled unknown in text.
-Identities are held only in memory; no database, history, or Matrix lookups are added.
+Response and call identities are held only in memory; script rows come from a read-only query of the durable script run store, and no history or Matrix lookups are added.
 
 Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
 The CLI reads that key from the selected runtime environment.
@@ -26121,14 +26263,28 @@ Aggregate output never includes identities.
 Nested admission slots count separately, so this is not a count of unique responses.
 Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
 `active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+`active_calls` counts [voice calls](https://docs.mindroom.chat/voice-calls/) that an agent has joined or is joining.
+A restart, or a configuration reload that restarts the call agent, drops the agent from its calls, and a rejoined call starts a new call session, so calls count as busy.
+
+`interruptible_script_runs` counts unfinished [background script runs](https://docs.mindroom.chat/tools/background-scripts/) that a restart would interrupt, including Docker, unsafe-local, cancelling, and runs whose recovery contract or owner authorization cannot be confirmed.
+`recoverable_script_runs` counts runs whose worker process restart startup would adopt under the current runtime environment.
+Recoverable runs do not make the runtime busy, because they are designed to survive restarts and may run for hours.
+They survive only while the replacement keeps their recovery contract, so treat them as busy before a change that [interrupts them](https://docs.mindroom.chat/tools/background-scripts/#lifecycle-and-failure-semantics).
+
 Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
 
 This is a point-in-time observation, not a drain or restart lock.
 New work can start immediately afterward.
 For multiple processes, check each process directly.
 
+`--wait SECONDS` polls every 5 seconds while the runtime is busy and exits as soon as it is idle.
+If work is still active at the deadline, the command exits `1` with the last busy snapshot.
+An unavailable result ends the wait immediately with exit `2`, because work could have been interrupted while the status was unknown.
+A poll still in flight at the deadline is not cut short, so the total runtime can exceed `--wait`.
+Only the final snapshot is printed.
+
 The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to set each request's HTTP connect, read, and write timeouts (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
 Redirects are disabled.
 
@@ -26760,7 +26916,9 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
@@ -26989,6 +27147,7 @@ If installation fails, MindRoom starts in the terminal instead.
 `mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
 Both `mindroom service install` and `mindroom run` save `MINDROOM_API_KEY` and the provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) to `.env` before installing, because the service does not see your shell's environment and would otherwise serve the dashboard on every interface without the key your terminal runs used.
 Keys are quoted where needed so `.env` reads them back unchanged, and installation stops with an error when an exported key contains `${`, which reading `.env` would expand, or when a key that needs quoting ends in a backslash.
+When the service will still start without a dashboard credential, installing it prints the same open-dashboard warning as a terminal run, since the service's own warning only reaches its logs.
 If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
 On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 
@@ -27213,19 +27372,21 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Migrate config.yaml to membership access settings.                    │
-│ fingerprint      Print the config source SHA-256, including all transitively included  │
-│                  files.                                                                │
-│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
-│                  runtime reload.                                                       │
-│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
-│                  failed/restart-required/unavailable.                                  │
+│ init              Create a starter config.yaml with a personal agent and model.        │
+│ show              Display the current config file with syntax highlighting.            │
+│ edit              Open config.yaml in your default editor.                             │
+│ validate          Validate config.yaml and check for common issues.                    │
+│ resolve           Print the fully merged config YAML with all !include tags resolved.  │
+│ path              Show the resolved config file path and search locations.             │
+│ migrate           Migrate config.yaml to membership access settings.                   │
+│ fingerprint       Print the config source SHA-256, including all transitively included │
+│                   files.                                                               │
+│ install-bundle    Validate and install a complete tree; use check-applied to confirm   │
+│                   runtime reload.                                                      │
+│ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
+│                   changes, 2 error.                                                    │
+│ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
+│                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -27382,6 +27543,8 @@ Changed managed trees replace the active tree only if its file names, modes, and
 This covers `.env` and files outside the YAML include graph too.
 An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
 `--force` cannot be combined with `--initialize-only`.
+`--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
+The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
 
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
@@ -27434,6 +27597,27 @@ The fingerprint identifies native YAML/include sources, so use the existing `che
 The installer advances the root config mtime on changed activation for the existing watcher.
 Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
 Preserve `TARGET.previous` until runtime confirmation succeeds.
+
+### config classify-change
+
+Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
+
+```bash
+mindroom config classify-change ./active ./candidate --json
+mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml --config staging/config.yaml
+```
+
+Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
+Directories that only appear or disappear around those files also count as sources.
+Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
+Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload).
+A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
+Each `--config` entrypoint (default `config.yaml`) must load in both trees.
+Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
+The command only reads both trees, and its results list paths, never file contents.
+
+JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
+Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
 
 ### config fingerprint and config check-applied
 

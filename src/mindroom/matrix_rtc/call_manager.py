@@ -297,6 +297,12 @@ class CallManager:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
+    @property
+    def active_call_requesters(self) -> tuple[str, ...]:
+        """Return the requester of each call this agent has joined or is joining."""
+        sessions = {room_id: starting.session for room_id, starting in self._starting_calls.items()} | self._sessions
+        return tuple(session.requester_id for session in sessions.values())
+
     def update_config(self, config: Config) -> None:
         """Replace the live config used by authorization-only hot reloads."""
         self._config = config

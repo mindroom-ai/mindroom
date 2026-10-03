@@ -142,10 +142,15 @@ export default function AccountsPage() {
                                 method: 'PUT',
                                 body: JSON.stringify({ status: next }),
                               })
-                              if (!res.ok) throw new Error('Failed to update status')
+                              if (!res.ok) {
+                                const body = await res.json().catch(() => null)
+                                alert(`Failed to update status: ${body?.detail ?? res.statusText}`)
+                                return
+                              }
                               setAccounts((prev) => prev.map(a => a.id === account.id ? { ...a, status: next } : a))
                             } catch (err) {
                               logger.error('Update status failed', err)
+                              alert('An error occurred while updating the status')
                             } finally {
                               setUpdatingId(null)
                             }

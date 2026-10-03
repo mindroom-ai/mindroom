@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import mimetypes
 from contextlib import contextmanager
@@ -216,6 +215,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             quota_project_id=quota_project_id,
         )
         super().__init__(creds=creds, **kwargs)
+        # Agno's async variants run Drive calls on the event loop's default executor, which the
+        # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
+        self.async_functions.clear()
         if write:
             self._register_write_tools()
         self._set_original_auth(AgnoGoogleDriveTools._resolve_creds)
@@ -240,25 +242,15 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         return build("drive", "v3", http=self._google_authorized_http(credentials))
 
     def _register_write_tools(self) -> None:
-        sync_tools = (
+        write_tools = (
             (self._upload_file, "upload_file"),
             (self.update_file, "update_file"),
             (self.create_folder, "create_folder"),
             (self.move_file, "move_file"),
             (self.trash_file, "trash_file"),
         )
-        async_tools = (
-            (self._aupload_file, "upload_file"),
-            (self.aupdate_file, "update_file"),
-            (self.acreate_folder, "create_folder"),
-            (self.amove_file, "move_file"),
-            (self.atrash_file, "trash_file"),
-        )
-        self.tools = (*self.tools, *(tool for tool, _name in sync_tools))
-        self._async_tools = (*self._async_tools, *async_tools)
-        for tool, name in sync_tools:
-            self.register(tool, name=name)
-        for tool, name in async_tools:
+        self.tools = (*self.tools, *(tool for tool, _name in write_tools))
+        for tool, name in write_tools:
             self.register(tool, name=name)
 
     def _stored_credentials_have_required_scopes(self, token_data: dict[str, Any]) -> bool:
@@ -364,22 +356,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not upload file '{authorized.display_path}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def _aupload_file(
-        self,
-        local_path: str,
-        folder_id: str | None = None,
-        name: str | None = None,
-        mime_type: str | None = None,
-    ) -> str:
-        """Upload one local file without blocking the async agent loop."""
-        return await asyncio.to_thread(
-            self.upload_file,
-            local_path,
-            folder_id=folder_id,
-            name=name,
-            mime_type=mime_type,
-        )
-
     @authenticate
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
         """Replace the contents of one binary Drive file from the agent workspace."""
@@ -420,10 +396,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not update Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def aupdate_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
-        """Replace one binary Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.update_file, file_id, local_path, mime_type=mime_type)
-
     @authenticate
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         """Create a Google Drive folder, optionally under one parent folder."""
@@ -441,10 +413,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except Exception as exc:
             log_error(f"Could not create Google Drive folder '{name}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    async def acreate_folder(self, name: str, parent_id: str | None = None) -> str:
-        """Create a Google Drive folder without blocking the async agent loop."""
-        return await asyncio.to_thread(self.create_folder, name, parent_id=parent_id)
 
     @authenticate
     def move_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
@@ -476,10 +444,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not move Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def amove_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
-        """Move one Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.move_file, file_id, new_parent_id, name=name)
-
     @authenticate
     def trash_file(self, file_id: str) -> str:
         """Move one Drive file to trash without permanently deleting it."""
@@ -501,10 +465,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except Exception as exc:
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    async def atrash_file(self, file_id: str) -> str:
-        """Trash one Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.trash_file, file_id)
 
     @authenticate
     def read_file(self, file_id: str) -> str:

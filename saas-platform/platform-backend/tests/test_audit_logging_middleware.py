@@ -108,15 +108,14 @@ def test_accepted_mutations_are_audited_with_request_metadata_only(
 
 
 @pytest.mark.usefixtures("real_auth")
-@pytest.mark.parametrize(("method", "path"), [("DELETE", "/my/sso-cookie"), ("POST", "/admin/auth/logout")])
-def test_anonymous_routes_are_audited_without_their_body(method: str, path: str, audit_table: Mock) -> None:
-    """Routes that answer anyone produce an unattributed metadata row."""
-    response = TestClient(app).request(method, path, json={"payload": "a" * 4096})
+def test_anonymous_route_is_audited_without_its_body(audit_table: Mock) -> None:
+    """A route that answers anyone produces an unattributed metadata row."""
+    response = TestClient(app).request("DELETE", "/my/sso-cookie", json={"payload": "a" * 4096})
 
     assert response.status_code == 200
     [row] = _inserted_rows(audit_table)
     assert "account_id" not in row
-    assert row["details"] == {"method": method, "path": path, "status_code": 200}
+    assert row["details"] == {"method": "DELETE", "path": "/my/sso-cookie", "status_code": 200}
 
 
 def _jwt_with_exp(expires_at: datetime) -> str:

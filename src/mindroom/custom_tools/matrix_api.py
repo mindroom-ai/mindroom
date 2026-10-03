@@ -22,7 +22,11 @@ from mindroom.matrix.thread_mutation_impact import (
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
-from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_access_checked_requester_id,
+    is_human_requester_id,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -834,8 +838,8 @@ class MatrixApiTools(Toolkit):
         event_type: str,
         content: dict[str, object],
     ) -> dict[str, object]:
-        """Name a human requester on a room message, so entities it mentions act for them as on ordinary replies."""
-        if event_type != "m.room.message" or not is_human_requester_id(
+        """Name a human or bot-account requester on a room message, so entities it mentions act for it as on replies."""
+        if event_type != "m.room.message" or not is_access_checked_requester_id(
             context.requester_id,
             context.config,
             context.runtime_paths,

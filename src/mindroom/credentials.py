@@ -481,6 +481,7 @@ class CredentialsManager:
     def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> CredentialsManager:
         """Return a primary-runtime-only scoped credentials manager."""
         requester_dir = _scoped_credentials_dir_part(requester_id)
+        # Config reserves "_shared" as an entity name, so no agent's store collides with the requester-wide one.
         agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
         scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
         return CredentialsManager(
