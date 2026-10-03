@@ -25,7 +25,7 @@ from mindroom.api.sandbox_forkserver import (
 from mindroom.constants import resolve_primary_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -127,6 +127,7 @@ def _stub_execute(
     request_cwd: str | None = None,
     envelope: str = "payload",
     timeout_seconds: float = 30.0,
+    bind_stop: Callable[[Callable[[], None]], None] = lambda _stop: None,
 ) -> subprocess.CompletedProcess[str]:
     return manager.execute(
         python_executable=None,
@@ -135,6 +136,7 @@ def _stub_execute(
         request_cwd=request_cwd,
         envelope=envelope,
         timeout_seconds=timeout_seconds,
+        bind_stop=bind_stop,
     )
 
 
@@ -166,6 +168,24 @@ def test_execute_round_trips_and_reuses_one_template(
     assert second.stdout.split("|")[2] == "marker-2"
     assert _template_pid(first) == _template_pid(second)
     assert len(spawned) == 1
+
+
+def test_stop_after_its_request_ended_never_signals_the_reaped_child(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The template reaps finished children, so a late stop must not signal a process that reuses the PID."""
+    manager, _spawned = stub_manager
+    stops: list[Callable[[], None]] = []
+
+    completed = _stub_execute(manager, bind_stop=stops.append)
+    signals: list[tuple[int, int]] = []
+    with monkeypatch.context() as patched:
+        patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+        stops[0]()
+
+    assert completed.returncode == 0
+    assert signals == []
 
 
 def test_template_recycled_when_env_fingerprint_changes(

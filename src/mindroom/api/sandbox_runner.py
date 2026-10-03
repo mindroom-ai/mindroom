@@ -91,7 +91,7 @@ from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
     from agno.tools.toolkit import Toolkit
 
@@ -1454,6 +1454,9 @@ def _execute_request_subprocess_sync(
         except shell_supervisor.ShellSupervisorStartupError as exc:
             return _subprocess_failure_response(request, str(exc), runtime_paths)
 
+    if sandbox_request_cancellation.request_cancelled():
+        # Cancelled while the worker was being prepared; never start the tool.
+        return _cancelled_response()
     if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
         forkserver_response = _execute_request_forkserver(
             request,
@@ -1464,7 +1467,24 @@ def _execute_request_subprocess_sync(
         )
         if forkserver_response is not None:
             return forkserver_response
+    return _execute_request_spawn(
+        request,
+        runtime_paths,
+        subprocess_context=subprocess_context,
+        envelope=envelope,
+        timeout_seconds=timeout_seconds,
+    )
 
+
+def _execute_request_spawn(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    *,
+    subprocess_context: _PreparedSandboxSubprocessContext,
+    envelope: str,
+    timeout_seconds: float,
+) -> SandboxRunnerExecuteResponse:
+    """Dispatch one prepared request to a freshly spawned child process."""
     try:
         completed = _run_request_subprocess(
             sandbox_exec.subprocess_worker_command(
@@ -1480,7 +1500,6 @@ def _execute_request_subprocess_sync(
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
     except OSError as exc:
         return _subprocess_failure_response(request, f"Failed to start sandbox subprocess: {exc}", runtime_paths)
-
     return _parse_subprocess_response(request, runtime_paths, completed)
 
 
@@ -1506,8 +1525,12 @@ def _run_request_subprocess(
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
         except subprocess.TimeoutExpired:
+            # Like subprocess.run: a grandchild may hold the pipes open, so wait for the child, not for EOF.
             process.kill()
-            process.communicate()
+            process.wait()
+            raise
+        except BaseException:
+            process.kill()
             raise
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
@@ -2063,13 +2086,15 @@ async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branch
             except AttributeError:
                 computer = None
         if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
-            return await _execute_worker_browser(
-                computer,
-                payload,
-                runtime_paths,
-                config,
-                prepared_worker,
-                runner_token,
+            return await _run_cancellable(
+                _execute_worker_browser(
+                    computer,
+                    payload,
+                    runtime_paths,
+                    config,
+                    prepared_worker,
+                    runner_token,
+                ),
             )
     if sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
@@ -2102,34 +2127,30 @@ async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branch
             config=config,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess_cancellable(
-        payload,
-        runtime_paths,
-        config,
-        prepared_worker,
-        runner_token=runner_token,
+    return await _run_cancellable(
+        _execute_request_inprocess(
+            payload,
+            runtime_paths,
+            config,
+            prepared_worker,
+            runner_token=runner_token,
+        ),
     )
 
 
-async def _execute_request_inprocess_cancellable(
-    request: SandboxRunnerExecuteRequest,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
-    *,
-    runner_token: str | None,
+async def _run_cancellable(
+    execution: Coroutine[object, object, SandboxRunnerExecuteResponse],
 ) -> SandboxRunnerExecuteResponse:
-    """Run one in-process request as a task the primary's cancel can stop."""
-    call = asyncio.create_task(
-        _execute_request_inprocess(request, runtime_paths, config, prepared_worker, runner_token=runner_token),
-    )
+    """Run one request inside this process as a task the primary's cancel can stop."""
+    call = asyncio.create_task(execution)
     loop = asyncio.get_running_loop()
     sandbox_request_cancellation.bind_request_stop(lambda: loop.call_soon_threadsafe(call.cancel))
     try:
         return await call
     except asyncio.CancelledError:
         current = asyncio.current_task()
-        if current is not None and current.cancelling():
+        assert current is not None
+        if current.cancelling() or not sandbox_request_cancellation.request_cancelled():
             call.cancel()
             raise
         return _cancelled_response()

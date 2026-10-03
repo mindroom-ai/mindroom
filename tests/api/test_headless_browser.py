@@ -146,6 +146,44 @@ async def test_concurrent_headless_calls_share_profile_and_keep_tabs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("headless_client", ["user_agent"], indirect=True)
+async def test_cancelled_browser_call_stops_its_running_operation(
+    headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
+    browser_processes: list[BrowserProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopping a response interrupts a persistent-browser operation instead of letting it finish."""
+    client, payload, _root, _config = headless_client
+    opened = await _call(client, payload, action="open", targetUrl="https://1.1.1.1/cancel")
+    entered = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def capture(**_kwargs: object) -> bytes:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exited.set()
+        return b"never"
+
+    monkeypatch.setattr(browser_processes[0].pages[-1], "screenshot", capture, raising=False)
+    request = {
+        **payload,
+        "request_id": "browser-call",
+        "kwargs": {"action": "screenshot", "targetId": opened["targetId"]},
+    }
+    running = asyncio.create_task(client.post("/api/sandbox-runner/execute", json=request))
+    async with asyncio.timeout(10):
+        await entered.wait()
+        cancel = await client.post("/api/sandbox-runner/execute/cancel", json={"request_id": "browser-call"})
+        response = await running
+        await exited.wait()
+
+    assert cancel.json() == {"cancelled": True}
+    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("save_only", [False, True])
 async def test_headless_screenshot_preserves_inline_media_and_save_only(
     headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],

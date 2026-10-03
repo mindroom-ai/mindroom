@@ -5,11 +5,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import contextlib
 import functools
 import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -2776,17 +2778,76 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
         while not pid_file.exists() or not pid_file.read_text().strip():
             assert time.monotonic() < deadline
             time.sleep(0.05)
-        cancel = runner_client.post(
-            "/api/sandbox-runner/execute/cancel",
-            headers=SANDBOX_HEADERS,
-            json={"request_id": "running"},
-        )
-        response = running.result(timeout=30)
+        pid = int(pid_file.read_text())
+        try:
+            cancel = runner_client.post(
+                "/api/sandbox-runner/execute/cancel",
+                headers=SANDBOX_HEADERS,
+                json={"request_id": "running"},
+            )
+            response = running.result(timeout=30)
+            asyncio.run(assert_linux_pid_not_running(pid))
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
     assert cancel.json() == {"cancelled": True}
     assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
     assert not failures
-    asyncio.run(assert_linux_pid_not_running(int(pid_file.read_text())))
+
+
+def test_request_cancelled_while_its_worker_is_prepared_never_starts(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel that arrives during worker preparation stops the request before its child process exists."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    _refresh_runner_app_from_env()
+    prepare = sandbox_runner_module._prepare_execute_request
+    spawned: list[object] = []
+
+    def prepare_then_cancel(*args: object, **kwargs: object) -> object:
+        prepared = prepare(*args, **kwargs)
+        sandbox_runner_module.sandbox_request_cancellation.cancel_request("preparing")
+        return prepared
+
+    monkeypatch.setattr(sandbox_runner_module, "_prepare_execute_request", prepare_then_cancel)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", lambda *args, **_kwargs: spawned.append(args))
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+            "request_id": "preparing",
+        },
+    )
+
+    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert spawned == []
+
+
+@requires_linux()
+def test_request_subprocess_timeout_does_not_wait_for_a_grandchild_holding_its_pipes(tmp_path: Path) -> None:
+    """Like subprocess.run, a timed-out request returns at its timeout even while a grandchild keeps the pipes open."""
+    pid_file = tmp_path / "grandchild.pid"
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            sandbox_runner_module._run_request_subprocess(
+                ["bash", "-c", f"sleep 30 & echo $! > {pid_file}; sleep 30"],
+                input="",
+                timeout=0.5,
+                env=None,
+                cwd=None,
+            )
+        assert time.monotonic() - started < 10
+    finally:
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(

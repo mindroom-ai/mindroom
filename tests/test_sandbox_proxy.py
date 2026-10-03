@@ -5667,24 +5667,88 @@ async def test_cancelling_a_worker_shell_call_stops_its_command(
             os.kill(pid, signal.SIGKILL)
 
 
-def test_worker_call_abandoned_before_dispatch_is_never_sent() -> None:
-    """A call cancelled while its worker is still being prepared never reaches the worker."""
-    cancellation = sandbox_proxy_module._WorkerCallCancellation()
-    cancellation.cancel()
+def _proxied_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Callable[[str, dict[str, Any]], object],
+) -> tuple[Callable[..., Any], list[tuple[str, dict[str, Any]]]]:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=calls, responder=responder),
+    )
+    entrypoint = (
+        get_tool_by_name("shell", runtime_paths, worker_target=None).async_functions["run_shell_command"].entrypoint
+    )
+    assert entrypoint is not None
+    return entrypoint, calls
 
-    with pytest.raises(asyncio.CancelledError):
-        cancellation.arm(lambda: None)
 
-
-def test_worker_call_abandoned_after_dispatch_asks_the_runner_to_stop() -> None:
-    """Cancelling a dispatched call sends its stop request without making the caller wait for it."""
+@pytest.mark.asyncio
+async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
+    dispatched = threading.Event()
     stopped = threading.Event()
-    cancellation = sandbox_proxy_module._WorkerCallCancellation()
-    cancellation.arm(stopped.set)
 
-    cancellation.cancel()
+    def responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/cancel"):
+            stopped.set()
+            return {"cancelled": True}
+        dispatched.set()
+        assert stopped.wait(10)
+        return {"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}
 
-    assert stopped.wait(5)
+    entrypoint, calls = _proxied_shell(monkeypatch, responder)
+    call = asyncio.create_task(entrypoint("sleep 30"))
+    assert await asyncio.to_thread(dispatched.wait, 10)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    assert await asyncio.to_thread(stopped.wait, 10)
+    (_, execute), (cancel_url, cancel) = [(url, payload) for url, payload in calls if "/execute" in url]
+    assert cancel_url == "http://sandbox-runner:8765/api/sandbox-runner/execute/cancel"
+    assert cancel == {"request_id": execute["request_id"]}
+
+
+@pytest.mark.asyncio
+async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call cancelled while its worker is still being prepared never reaches the worker."""
+    entrypoint, calls = _proxied_shell(monkeypatch, lambda _url, _payload: {"ok": True, "result": "ran"})
+    preparing = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    build_routing = sandbox_proxy_module._build_worker_routing_payload
+    execute = sandbox_proxy_module.execute_worker_proxy_request
+
+    def slow_routing(**kwargs: object) -> object:
+        preparing.set()
+        assert release.wait(10)
+        return build_routing(**kwargs)
+
+    def tracked_execute(**kwargs: object) -> object:
+        try:
+            return execute(**kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", slow_routing)
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", tracked_execute)
+    call = asyncio.create_task(entrypoint("echo never"))
+    assert await asyncio.to_thread(preparing.wait, 10)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    release.set()
+
+    assert await asyncio.to_thread(finished.wait, 10)
+    assert not [url for url, _payload in calls if url.endswith("/execute")]
 
 
 def test_static_runner_saves_attachment_for_agent_added_after_seeding(

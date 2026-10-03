@@ -119,6 +119,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
+A running `run_shell_command` stops with it, including one that runs in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 An explicit user stop finalizes the streamed message with:
 
 ```

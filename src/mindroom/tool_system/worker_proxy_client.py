@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
+import secrets
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -222,6 +225,31 @@ def post_worker_proxy_json(
         raise
 
 
+class WorkerCallCancellation:
+    """Stop a worker call its caller stopped waiting for, or keep it from being dispatched."""
+
+    def __init__(self) -> None:
+        self.request_id = secrets.token_hex(16)
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._stop: Callable[[], None] | None = None
+
+    def _arm(self, stop: Callable[[], None]) -> None:
+        """Keep the runner stop request until it is needed; refuse to dispatch an abandoned call."""
+        with self._lock:
+            if self._cancelled:
+                raise asyncio.CancelledError
+            self._stop = stop
+
+    def cancel(self) -> None:
+        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
+        with self._lock:
+            self._cancelled = True
+            stop = self._stop
+        if stop is not None:
+            threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
+
+
 def _post_execute_cancel(
     client_factory: _WorkerProxyClientFactory,
     url: str,
@@ -249,13 +277,12 @@ def execute_worker_proxy_request(
     worker_manager: WorkerBackend,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
     primary_built_service: Callable[[str], bool] | None = None,
-    arm_cancel: Callable[[Callable[[], None]], None] | None = None,
+    cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
     ``primary_built_service`` names leased services whose settings live in primary stores.
-    ``arm_cancel`` receives, just before dispatch, a function that asks the runner to stop
-    the payload's ``request_id``; it raises instead when the caller has already given up.
+    ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
     """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
@@ -287,19 +314,20 @@ def execute_worker_proxy_request(
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
-            if arm_cancel is not None:
+            if cancellation is not None:
+                payload["request_id"] = cancellation.request_id
                 cancel_url = (
                     worker_api_endpoint(worker_handle, "execute-cancel")
                     if worker_handle is not None
                     else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}/cancel"
                 )
-                arm_cancel(
+                cancellation._arm(
                     functools.partial(
                         _post_execute_cancel,
                         client_factory,
                         cancel_url,
                         headers,
-                        str(payload["request_id"]),
+                        cancellation.request_id,
                     ),
                 )
 

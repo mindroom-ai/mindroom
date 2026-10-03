@@ -11,7 +11,6 @@ import inspect
 import json
 import os
 import secrets
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -36,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
+    WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_json,
@@ -937,7 +937,7 @@ def _call_proxy_sync(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
-    cancellation: _WorkerCallCancellation | None = None,
+    cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
 
@@ -965,8 +965,6 @@ def _call_proxy_sync(
         "args": wire_args,
         "kwargs": wire_kwargs,
     }
-    if cancellation is not None:
-        payload["request_id"] = cancellation.request_id
     manager_context = _primary_worker_manager_context(runtime_paths)
     with lease_primary_worker_manager(
         runtime_paths,
@@ -1016,7 +1014,7 @@ def _call_proxy_sync(
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
-            arm_cancel=cancellation.arm if cancellation is not None else None,
+            cancellation=cancellation,
         )
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
         from mindroom.tool_system.media_transport import (  # noqa: PLC0415
@@ -1027,31 +1025,6 @@ def _call_proxy_sync(
         if tool_name == "browser_mcp" or is_media_result_envelope(result):
             return finalize_tool_media(decode_media_result(result))
         return result
-
-
-class _WorkerCallCancellation:
-    """Stop a worker call its async caller stopped waiting for, or keep it from being dispatched."""
-
-    def __init__(self) -> None:
-        self.request_id = secrets.token_hex(16)
-        self._lock = threading.Lock()
-        self._cancelled = False
-        self._stop: Callable[[], None] | None = None
-
-    def arm(self, stop: Callable[[], None]) -> None:
-        """Keep the runner stop request until it is needed; refuse to dispatch an abandoned call."""
-        with self._lock:
-            if self._cancelled:
-                raise asyncio.CancelledError
-            self._stop = stop
-
-    def cancel(self) -> None:
-        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
-        with self._lock:
-            self._cancelled = True
-            stop = self._stop
-        if stop is not None:
-            threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
 
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
@@ -1135,7 +1108,7 @@ def _wrap_async_function(
             inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
         ):
             return await entrypoint(*args, **kwargs)
-        cancellation = _WorkerCallCancellation()
+        cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
             function_entrypoint=entrypoint,
