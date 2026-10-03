@@ -5,6 +5,15 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# Optional rollout progress deadline for the Tuwunel Deployment, in seconds.
+# Leave null to use the Kubernetes default.
+# Set it above the startup probe budget when upgrades can run long database migrations.
+progressDeadlineSeconds: null
+# Seconds Kubernetes waits after SIGTERM before killing Tuwunel.
+# Tuwunel stops a database migration only at its next safe point, and a kill before then leaves the database half migrated.
+# Set null to use the Kubernetes default of 30 seconds, or lower it on platforms that cap the grace period.
+terminationGracePeriodSeconds: 1800
+
 image:
   repository: ghcr.io/mindroom-ai/mindroom-tuwunel
   # Pin a release tag or digest for reproducible production deployments.

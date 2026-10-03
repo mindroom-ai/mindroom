@@ -2191,10 +2191,19 @@ def test_runtime_chart_parent_bypass_domains_are_inactive_without_parent(tmp_pat
     assert not any(doc["kind"] == "ConfigMap" and doc["metadata"]["name"].endswith("-squid-config") for doc in docs)
 
 
+_PROGRESS_DEADLINE_CHARTS = pytest.mark.parametrize(
+    ("chart", "required_args"),
+    [("runtime", ()), ("tuwunel", ("tuwunel.serverName=example.com",))],
+)
+
+
+@_PROGRESS_DEADLINE_CHARTS
 @pytest.mark.parametrize("deadline", [None, 1, 1800, 2147483647])
 @pytest.mark.parametrize("from_values_file", [False, True])
-def test_runtime_chart_progress_deadline_is_optional(
+def test_chart_progress_deadline_is_optional(
     tmp_path: Path,
+    chart: str,
+    required_args: tuple[str, ...],
     deadline: int | None,
     from_values_file: bool,
 ) -> None:
@@ -2202,12 +2211,13 @@ def test_runtime_chart_progress_deadline_is_optional(
     values_path = tmp_path / "values.yaml"
     values_path.write_text(yaml.safe_dump({"progressDeadlineSeconds": deadline}))
     docs = _render_chart(
-        Path("cluster/k8s/runtime"),
+        Path(f"cluster/k8s/{chart}"),
+        *required_args,
         *((f"progressDeadlineSeconds={deadline}",) if deadline is not None and not from_values_file else ()),
         values_files=(values_path,) if from_values_file else (),
-        release_name="mindroom-runtime",
+        release_name=f"mindroom-{chart}",
     )
-    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    deployment = _resource(docs, "Deployment", f"mindroom-{chart}")
 
     if deadline is None:
         assert "progressDeadlineSeconds" not in deployment["spec"]
@@ -2216,10 +2226,13 @@ def test_runtime_chart_progress_deadline_is_optional(
         assert deployment["spec"]["progressDeadlineSeconds"] == deadline
 
 
+@_PROGRESS_DEADLINE_CHARTS
 @pytest.mark.parametrize("deadline", [0, -1, 1.5, "abc", True, "", 2147483648, 999999999999999999999999])
 @pytest.mark.parametrize("from_values_file", [False, True])
-def test_runtime_chart_rejects_invalid_progress_deadline(
+def test_chart_rejects_invalid_progress_deadline(
     tmp_path: Path,
+    chart: str,
+    required_args: tuple[str, ...],
     deadline: str | float,
     from_values_file: bool,
 ) -> None:
@@ -2227,13 +2240,58 @@ def test_runtime_chart_rejects_invalid_progress_deadline(
     values_path = tmp_path / "values.yaml"
     values_path.write_text(yaml.safe_dump({"progressDeadlineSeconds": deadline}))
     completed = _run_helm_template(
-        Path("cluster/k8s/runtime"),
+        Path(f"cluster/k8s/{chart}"),
+        *required_args,
         set_string_args=() if from_values_file else (f"progressDeadlineSeconds={deadline}",),
         values_files=(values_path,) if from_values_file else (),
     )
 
     assert completed.returncode != 0
     assert "progressDeadlineSeconds must be a positive integer no greater than 2147483647" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({}, 1800),
+        ({"terminationGracePeriodSeconds": None}, None),
+        ({"terminationGracePeriodSeconds": 0}, 0),
+        ({"terminationGracePeriodSeconds": 600}, 600),
+    ],
+)
+def test_tuwunel_chart_termination_grace_period_outlasts_a_migration_step(
+    tmp_path: Path,
+    values: dict[str, int | None],
+    expected: int | None,
+) -> None:
+    """Killing Tuwunel before a migration step finishes leaves the database half migrated, so the default waits."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump(values))
+    docs = _render_chart(
+        Path("cluster/k8s/tuwunel"),
+        "tuwunel.serverName=example.com",
+        values_files=(values_path,),
+        release_name="mindroom-tuwunel",
+    )
+    pod_spec = _resource(docs, "Deployment", "mindroom-tuwunel")["spec"]["template"]["spec"]
+
+    assert pod_spec.get("terminationGracePeriodSeconds") == expected
+    assert expected is None or isinstance(pod_spec["terminationGracePeriodSeconds"], int)
+
+
+@pytest.mark.parametrize("grace", [-1, 1.5, "abc", True, ""])
+def test_tuwunel_chart_rejects_invalid_termination_grace_period(tmp_path: Path, grace: str | float) -> None:
+    """Reject grace periods Kubernetes would refuse during rendering rather than installation."""
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(yaml.safe_dump({"terminationGracePeriodSeconds": grace}))
+    completed = _run_helm_template(
+        Path("cluster/k8s/tuwunel"),
+        "tuwunel.serverName=example.com",
+        values_files=(values_path,),
+    )
+
+    assert completed.returncode != 0
+    assert "terminationGracePeriodSeconds must be a non-negative integer" in completed.stderr
 
 
 @pytest.mark.parametrize("smtp_enabled", [False, True])

@@ -38,3 +38,12 @@
 {{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
 {{- fail "config.existingConfigMap or config.create=true is required" -}}
 {{- end -}}
+{{- if ne .Values.progressDeadlineSeconds nil -}}
+{{- $deadline := toJson .Values.progressDeadlineSeconds -}}
+{{- if or (not (regexMatch "^[1-9][0-9]*$" $deadline)) (lt (int64 $deadline) 1) (gt (int64 $deadline) 2147483647) -}}
+{{- fail "progressDeadlineSeconds must be a positive integer no greater than 2147483647" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (ne .Values.terminationGracePeriodSeconds nil) (not (regexMatch "^(0|[1-9][0-9]*)$" (toJson .Values.terminationGracePeriodSeconds))) -}}
+{{- fail "terminationGracePeriodSeconds must be a non-negative integer" -}}
+{{- end -}}

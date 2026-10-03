@@ -133,6 +133,27 @@ When the apex is not routed to Tuwunel, the operator must serve the delegation d
 
 The chart defaults `tuwunel.wellKnown.client` to the effective `clientBaseUrl` and `tuwunel.wellKnown.server` to `<serverName>:443`; override them when the public routing differs.
 
+## Upgrades and Database Migrations
+
+The first start after a Tuwunel upgrade can run a one-time database migration, and the listener does not open until it finishes.
+Tuwunel stops a migration only at its next safe point, and a kill before then leaves the database half migrated with no repair path.
+The chart therefore sets `terminationGracePeriodSeconds: 1800`, following [Tuwunel's Kubernetes guidance](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/deploying/kubernetes.md), instead of the Kubernetes default of 30 seconds.
+Lower it on platforms that cap the grace period, or set it to `null` to use the Kubernetes default.
+
+For large databases, raise `probes.startup.failureThreshold` so the startup probe budget covers the longest expected migration, because a failing startup probe restarts the container.
+Then set `progressDeadlineSeconds` above that budget so Kubernetes does not report the rollout as stalled while the migration runs.
+The chart rejects invalid values and values above Kubernetes' int32 limit of `2147483647` seconds, and leaving it unset or `null` preserves the Kubernetes default.
+This controls when Kubernetes reports a stalled rollout; it does not change probe settings or Helm's wait timeout.
+
+```yaml
+probes:
+  startup:
+    periodSeconds: 10
+    failureThreshold: 180 # 30 minutes
+progressDeadlineSeconds: 3600
+terminationGracePeriodSeconds: 1800
+```
+
 ## Notes
 
 - The Deployment is pinned to one replica with a `Recreate` strategy because Tuwunel does not support horizontal scaling against one database.
