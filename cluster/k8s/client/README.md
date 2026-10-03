@@ -68,6 +68,9 @@ basePath: /mindroom
 
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
+The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
+Files under `assets/` and `public/` are cached as immutable, except Element Call's stable files such as its `index.html`, which revalidate on every use.
+Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.
 
