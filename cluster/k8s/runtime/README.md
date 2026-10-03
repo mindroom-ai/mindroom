@@ -37,6 +37,7 @@ The chart can either create a small PostgreSQL StatefulSet for the journal or wi
 This database is not a cache.
 It is the single durable owner of admitted Matrix events, turn records, the response outbox, and history debt, so losing it loses the record of which messages have already been answered rather than merely costing a rebuild.
 Size and back it up accordingly.
+See [Backup and Restore](../../../docs/deployment/kubernetes.md#backup-and-restore) for the volumes and Secrets that must be restored together with it.
 
 The chart's values and resource names still say `eventCache`, and they keep that name so existing deployments do not have to be renamed.
 Wherever this document says event journal, the value to set is `eventCache`.
