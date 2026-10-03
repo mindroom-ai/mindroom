@@ -1266,11 +1266,15 @@ async def register_thread_history_media_attachments(
     thread_id: str | None,
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> list[str]:
-    """Register unannotated image/file/video events visible in thread history."""
+    """Register unannotated image/file/video events visible in thread history.
+
+    The turn's download budget goes to the newest media first, so older media
+    that keeps failing cannot hold back newer media turn after turn.
+    """
     attachment_ids: list[str] = []
     seen_attachment_ids: set[str] = set()
     downloads = 0
-    for message in thread_history:
+    for message in reversed(thread_history):
         if not _thread_history_message_in_scope(message, thread_id):
             continue
         event = _media_event_from_thread_history_message(room_id, message)
@@ -1289,7 +1293,7 @@ async def register_thread_history_media_attachments(
             continue
         seen_attachment_ids.add(attachment_record.attachment_id)
         attachment_ids.append(attachment_record.attachment_id)
-    return attachment_ids
+    return attachment_ids[::-1]
 
 
 async def resolve_thread_attachment_ids(
