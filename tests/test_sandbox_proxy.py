@@ -72,7 +72,12 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.runtime_context import tool_runtime_context, worker_progress_pump_scope
+from mindroom.tool_system.runtime_context import (
+    WorkerRuntimeContext,
+    tool_runtime_context,
+    worker_progress_pump_scope,
+    worker_runtime_context,
+)
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
@@ -3607,6 +3612,63 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
     execute_url, execute_payload = captured_calls[0]
     assert execute_url.endswith("/api/sandbox-runner/execute")
     assert "lease_id" not in execute_payload
+
+
+def test_proxy_worker_routed_lease_uses_worker_context_grants_without_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway calls carry config only in the worker context, and their leases still include granted shared settings."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    execution_identity = ToolExecutionIdentity(
+        channel="mcp",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    fake_credentials = FakeCredentialsManager({"openai": {"api_key": "shared-key", "_source": "ui"}})
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+        credential_policy={"calculator.add": ("openai",)},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        credentials_manager=fake_credentials,
+        worker_tools_override=["calculator"],
+        worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code", worker_scope="user")},
+        defaults={"worker_grantable_credentials": ["openai"]},
+        models={},
+    )
+
+    with tool_runtime_context(None), worker_runtime_context(WorkerRuntimeContext(runtime_paths, config)):
+        result = entrypoint(1, 2)
+
+    assert result == "proxied"
+    lease_url, lease_payload = captured_calls[0]
+    assert lease_url.endswith("/api/sandbox-runner/leases")
+    assert lease_payload["credential_overrides"] == {"api_key": "shared-key"}
 
 
 def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1808,7 +1808,6 @@ class TestSharedIntegrationCredentialTagging:
     def test_spotify_credentials_saved_from_dashboard_are_tagged_as_ui_source(
         self,
         temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Spotify OAuth saves should mark credentials as UI-managed so unscoped workers mirror them."""
         manager = CredentialsManager(temp_credentials_dir)
@@ -1824,15 +1823,7 @@ class TestSharedIntegrationCredentialTagging:
             execution_identity=None,
         )
 
-        def _resolve_target(*_args: object, **_kwargs: object) -> RequestCredentialsTarget:
-            return target
-
-        monkeypatch.setattr(
-            "mindroom.api.integrations.resolve_request_credentials_target",
-            _resolve_target,
-        )
-
-        _save_spotify_credentials({"access_token": "spotify-token"}, object())
+        _save_spotify_credentials({"access_token": "spotify-token"}, target)
 
         assert manager.load_credentials("spotify") == {
             "access_token": "spotify-token",

@@ -2620,6 +2620,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
+    "mindroom.response_activity",
     "mindroom.script_runs.broker",
     "mindroom.script_runs.manager",
     "mindroom.script_runs.models",
@@ -2679,6 +2680,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.todo_poke_runtime",
+    "mindroom.response_activity",
     "mindroom.response_admission",
     "mindroom.scheduling_executor",
     "mindroom.tool_system.plugins",
@@ -4771,7 +4773,6 @@ path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
     "mindroom.credentials",
     "mindroom.runtime_env_policy",
-    "mindroom.tool_system.runtime_context",
     "mindroom.workers.models",
 ]
 visibility = [

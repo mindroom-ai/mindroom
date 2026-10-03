@@ -20,7 +20,7 @@ import stat
 import subprocess
 import sys
 import time
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +52,7 @@ load_dotenv(SCRIPT_DIR / ".env.telegram")
 
 
 # Bridge types and their configurations
-class BridgeType(str, Enum):
+class BridgeType(StrEnum):
     """Supported bridge types."""
 
     TELEGRAM = "telegram"

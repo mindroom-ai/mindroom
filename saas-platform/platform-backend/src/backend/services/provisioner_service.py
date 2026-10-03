@@ -407,6 +407,16 @@ async def _provision_credentials_encryption_key(
         return existing_key
     if not existing_storage or data.get("enable_credentials_encryption") is True:
         return _instance_credentials_encryption_key(customer_id)
+    # LEGACY_COMPAT: Hosted instances whose storage volume still holds a plaintext credential store.
+    # Legacy format: an instance Secret without `credentials_encryption_key` while the `mindroom-storage-<id>` PVC,
+    #   which may hold plaintext credential files, still exists.
+    # Last legacy release: v2026.5.139, which provisioned every instance keyless; replacement: v2026.5.140 gives every
+    #   newly provisioned instance its derived key.
+    # Handling: the instance stays keyless, because the runtime rejects plaintext credential files once a key is set,
+    #   until `enable_credentials_encryption` opts it into the derived key as a one-way switch; a stored key is always
+    #   reused, and an instance without that PVC gets the derived key.
+    # Coverage: saas-platform/platform-backend/tests/test_provisioner.py::TestProvisionerEndpoints::test_reprovision_without_a_stored_key_keeps_plaintext_only_on_an_existing_volume,
+    #   saas-platform/platform-backend/tests/test_provisioner.py::TestProvisionerEndpoints::test_provision_re_provision_existing_can_opt_into_credentials_encryption
     return ""
 
 

@@ -32,7 +32,27 @@ matrix:
 ```
 
 When `defaultServerName` is set, the login form shows that server name instead of the URL, and the name must publish `/.well-known/matrix/client` pointing at `homeserverUrl`.
-Set `config.data` to a full JSON document when you need client options beyond the homeserver entry, or point `config.existingConfigMap` at a ConfigMap you manage yourself.
+Set `config.values` when you need client options beyond the homeserver entry, set `config.data` to a full JSON document, or point `config.existingConfigMap` at a ConfigMap you manage yourself.
+
+`config.values` sets client options as structured values instead of `config.data`.
+The chart deep-merges them over the default document above, so the homeserver entry still follows the `matrix` values unless `config.values` overrides it.
+Helm merges maps key by key across values files, so an environment overlay can override one nested option without restating the rest; lists replace the earlier list.
+String values are rendered with `tpl`, so shared values can derive environment-specific names from other values.
+A nested `null` renders as JSON `null`; set `config.values: null` in a later values file to drop all structured settings.
+
+```yaml
+matrix:
+  homeserverUrl: https://matrix.example.com
+config:
+  values:
+    auth:
+      allowRegistration: false
+    featuredCommunities:
+      rooms:
+        - '#lobby:{{ .Values.matrix.homeserverUrl | trimPrefix "https://" }}'
+```
+
+An overlay that sets only `matrix.homeserverUrl: https://staging.example.com` then renders `#lobby:staging.example.com` and the matching homeserver entry; the alias assumes the Matrix server name equals the homeserver host.
 
 ## MatrixRTC Calls
 
@@ -68,6 +88,9 @@ basePath: /mindroom
 
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
+The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
+Files under `assets/` and `public/` are cached as immutable, except Element Call's stable files such as its `index.html`, which revalidate on every use.
+Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.
 

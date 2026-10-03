@@ -18,7 +18,6 @@ import httpx
 from mindroom.credentials import load_scoped_credentials
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 if TYPE_CHECKING:
@@ -277,11 +276,13 @@ def execute_worker_proxy_request(
     worker_manager: WorkerBackend,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
     primary_built_service: Callable[[str], bool] | None = None,
+    worker_grantable_credentials: frozenset[str] | None = None,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
     ``primary_built_service`` names leased services whose settings live in primary stores.
+    ``worker_grantable_credentials`` names shared services a scoped call may lease.
     ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
     """
     if worker_handle is None and config.proxy_url is None:
@@ -328,6 +329,7 @@ def execute_worker_proxy_request(
                 function_name=function_name,
                 worker_target=worker_target,
                 primary_built_service=primary_built_service,
+                worker_grantable_credentials=worker_grantable_credentials,
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
@@ -382,7 +384,8 @@ def _create_credential_lease(
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
-    primary_built_service: Callable[[str], bool] | None = None,
+    primary_built_service: Callable[[str], bool] | None,
+    worker_grantable_credentials: frozenset[str] | None,
 ) -> str | None:
     credential_overrides = _collect_credential_overrides(
         tool_name,
@@ -391,6 +394,7 @@ def _create_credential_lease(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         primary_built_service=primary_built_service,
+        worker_grantable_credentials=worker_grantable_credentials,
     )
     if not credential_overrides:
         return None
@@ -419,7 +423,8 @@ def _collect_credential_overrides(
     config: WorkerProxyClientConfig,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
-    primary_built_service: Callable[[str], bool] | None = None,
+    primary_built_service: Callable[[str], bool] | None,
+    worker_grantable_credentials: frozenset[str] | None,
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
@@ -434,12 +439,6 @@ def _collect_credential_overrides(
     )
     if not services:
         return {}
-    allowed_shared_services: frozenset[str] | None = None
-    if worker_target is not None and worker_target.worker_scope is not None:
-        context = get_tool_runtime_context()
-        allowed_shared_services = (
-            context.config.get_worker_grantable_credentials() if context is not None else frozenset()
-        )
 
     merged_overrides: dict[str, object] = {}
     for service in services:
@@ -447,7 +446,7 @@ def _collect_credential_overrides(
             service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
+            allowed_shared_services=worker_grantable_credentials,
             primary_built_tool=primary_built_service is not None and primary_built_service(service),
         )
         if isinstance(credentials, Mapping):
