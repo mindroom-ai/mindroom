@@ -214,7 +214,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         config_path_str = args[0]
         try:
             value = _get_nested_value(redacted_config_dict, config_path_str)
-        except (KeyError, IndexError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
             return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{_format_value(value)}\n```", None
@@ -245,7 +245,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         # Get the current value for comparison
         try:
             old_value = _get_nested_value(redacted_config_dict, config_path_str)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, TypeError):
             old_value = None  # Path doesn't exist yet
 
         # Create a copy to test the change
@@ -254,11 +254,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         try:
             # Verify the path exists or can be created
             _set_nested_value(test_config_dict, config_path_str, value)
-
-            # Validate the modified config
-            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
-        except (KeyError, IndexError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
+
+        try:
+            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:

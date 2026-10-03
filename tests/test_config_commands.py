@@ -1526,6 +1526,39 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected_reply"),
+    [
+        ("get models.default.id.x", "❌ Configuration path not found: `models.default.id.x`"),
+        ("get agents.writer.tools.x", "❌ Configuration path not found: `agents.writer.tools.x`"),
+        ("set agents.writer.role.x 1", "❌ Configuration path error: `agents.writer.role.x`"),
+        ("set models.default.id.0 1", "❌ Configuration path error: `models.default.id.0`"),
+    ],
+)
+async def test_handle_config_command_reports_paths_through_scalars_and_lists(
+    tmp_path: Path,
+    command: str,
+    expected_reply: str,
+) -> None:
+    """A path that steps into a scalar or uses a name on a list gets the path error reply."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {"writer": {"display_name": "Writer", "role": "Writes", "tools": ["shell"]}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert response.startswith(expected_reply)
+    assert change_info is None
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
     """Show should keep working when runtime plugin loading degrades."""
     plugin_root = tmp_path / "plugins" / "bad-name"
