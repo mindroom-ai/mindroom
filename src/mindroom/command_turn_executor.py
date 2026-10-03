@@ -205,6 +205,7 @@ class CommandTurnExecutor:
             event=event,
             command=command,
             requester_user_id=requester_user_id,
+            acts_for_requester=event.acts_for_requester,
         )
 
     def _matrix_admin(self) -> HookMatrixAdmin | None:

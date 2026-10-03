@@ -52,6 +52,8 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.desktop.credentials import load_desktop_credentials, save_desktop_credentials
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
@@ -2041,6 +2043,47 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
     assert harness.turn_store.is_handled(event.event_id) is True
     overrides = resolve_thread_model_override(runtime_paths_for(config), thread_root, configured_models=config.models)
     assert set(overrides.active) == {"research", ROUTER_AGENT_NAME}
+
+
+@pytest.mark.asyncio
+async def test_desktop_command_an_agent_wrote_for_a_human_is_refused(tmp_path: Path) -> None:
+    """Only the human may change their Desktop target; an agent posting the command for them is refused."""
+    config = bind_runtime_paths(
+        Config(agents={"code": AgentConfig(display_name="Code", tools=["desktop"])}),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _room_with_members(config, ROUTER_AGENT_NAME, "code")
+    room.members_synced = True
+    credentials = get_runtime_credentials_manager(runtime_paths_for(config))
+    save_desktop_credentials(credentials, {"device_id": "DEVICE"}, requester_id=_SENDER, agent_name="code")
+
+    def disconnect_event(sender: str, event_id: str) -> nio.RoomMessageText:
+        return nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "!desktop disconnect confirm",
+                    "msgtype": "m.text",
+                    "m.mentions": {"user_ids": [_entity_user_id(config, ROUTER_AGENT_NAME)]},
+                    constants.ACTING_REQUESTER_KEY: _SENDER,
+                },
+                "event_id": event_id,
+                "sender": sender,
+                "origin_server_ts": 1_000_000,
+                "room_id": _ROOM_ID,
+                "type": "m.room.message",
+            },
+        )
+
+    await harness.deliver(room, disconnect_event(_entity_user_id(config, "code"), "$agent-command:localhost"))
+
+    assert harness.gateway.sent[-1].response_text == "❌ Agents cannot run this command for you. Send it yourself."
+    assert load_desktop_credentials(credentials, requester_id=_SENDER, agent_name="code") is not None
+
+    await harness.deliver(room, disconnect_event(_SENDER, "$human-command:localhost"))
+
+    assert harness.gateway.sent[-1].response_text == "✅ Desktop disconnected for you and agent `code`."
+    assert load_desktop_credentials(credentials, requester_id=_SENDER, agent_name="code") is None
 
 
 @pytest.mark.asyncio

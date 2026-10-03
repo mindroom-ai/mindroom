@@ -77,6 +77,18 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.ENCRYPT,
     },
 )
+# Commands an agent may post for a human; Desktop pairing, confirmations, and admin changes need the human in person.
+_COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
+    {
+        CommandType.HELP,
+        CommandType.MODE,
+        CommandType.MODEL,
+        CommandType.SCHEDULE,
+        CommandType.LIST_SCHEDULES,
+        CommandType.CANCEL_SCHEDULE,
+        CommandType.EDIT_SCHEDULE,
+    },
+)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -339,6 +351,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     event: _CommandEvent,
     command: Command,
     requester_user_id: str,
+    acts_for_requester: bool = False,
 ) -> None:
     """Dispatch chat commands using injected bot context."""
     context.logger.info("Handling command", command_type=command.type.value)
@@ -348,7 +361,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     response_text = ""
     result_extra_content = None
 
-    if command.type == CommandType.HELP:
+    if acts_for_requester and command.type not in _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN:
+        response_text = "❌ Agents cannot run this command for you. Send it yourself."
+
+    elif command.type == CommandType.HELP:
         topic = command.args.get("topic")
         response_text = get_command_help(topic)
 

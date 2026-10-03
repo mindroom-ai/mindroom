@@ -885,7 +885,8 @@ class TurnController:
         requester_user_id: str,
     ) -> None:
         """Dispatch one command as a control input without entering the coalescing gate."""
-        # A command an entity wrote for a human runs with that human's authority, as its conversation would.
+        # A command an entity wrote for a human runs with that human's authority, as its conversation would;
+        # handle_command refuses the commands only the human may send.
         acting_requester = self.deps.ingress.acting_requester_for_event(dispatch_event)
         pending_event = PendingEvent(
             event=replace(
