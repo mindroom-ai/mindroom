@@ -12,6 +12,7 @@ import math
 import resource
 import subprocess
 import sys
+import time
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 
 _MEMORY_LIMIT_BYTES = 128 * 1024 * 1024
 _MAX_ERROR_CHARS = 500
-# Children share the primary's CPU and memory quota, so one renders at a time.
+# Children share the primary's CPU and memory quota, so one renders at a time and other calls wait their turn.
 _render_slots = BoundedSemaphore(1)
 
 
@@ -42,18 +43,20 @@ def render_workspace_template(
         {"template": template_text, "params": dict(params), "max_chars": max_chars},
         default=str,
     ).encode("utf-8")
-    if not _render_slots.acquire(blocking=False):
-        msg = "todo template renderer is busy; try again shortly"
+    deadline = time.monotonic() + timeout_seconds
+    if not _render_slots.acquire(timeout=timeout_seconds):
+        msg = "rendering exceeded its time limit while waiting for another template to render"
         raise ValueError(msg)
     try:
+        remaining_seconds = deadline - time.monotonic()
         completed = subprocess.run(
             # Run this file isolated by path: no MindRoom import, no inherited environment or user site-packages.
-            [sys.executable, "-I", __file__, str(max(1, math.ceil(timeout_seconds)))],
+            [sys.executable, "-I", __file__, str(max(1, math.ceil(remaining_seconds)))],
             input=request,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={},
-            timeout=timeout_seconds,
+            timeout=remaining_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired:

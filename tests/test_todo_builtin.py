@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -672,6 +673,26 @@ def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> N
 
     assert "only substitute" in refused["error"]
     assert rendered == {"rendered": "Fix X-1"}
+
+
+def test_workspace_template_render_waits_for_another_render_within_its_deadline() -> None:
+    """A render that overlaps another waits for the single slot instead of failing, but never past its time limit."""
+    slots = todo_template_render_module._render_slots
+    render = todo_template_render_module.render_workspace_template
+    slots.acquire()
+    release = threading.Timer(0.2, slots.release)
+    release.start()
+    try:
+        assert render("Fix {{ X }}", {"X": 1}, max_chars=100, timeout_seconds=5) == "Fix 1"
+    finally:
+        release.join()
+
+    slots.acquire()
+    try:
+        with pytest.raises(ValueError, match="time limit"):
+            render("Fix {{ X }}", {"X": 2}, max_chars=100, timeout_seconds=0.1)
+    finally:
+        slots.release()
 
 
 @_NEEDS_MEMORY_CAP
