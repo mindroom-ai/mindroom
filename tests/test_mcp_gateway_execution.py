@@ -62,10 +62,10 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
     started, release = threading.Event(), threading.Event()
     close_started, close_release, closed = threading.Event(), threading.Event(), threading.Event()
     bodies: list[str] = []
-    threads: dict[str, str] = {}
+    on_gateway_pool: dict[str, bool] = {}
 
     def block(stage: str) -> None:
-        threads[stage] = threading.current_thread().name
+        on_gateway_pool[stage] = threading.current_thread().name.startswith("mindroom-mcp-gateway-tool")
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
         worker = get_worker_runtime_context()
@@ -131,8 +131,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             # The original typed request ID becomes reusable only after its owner exits.
             response = await client.post("/mcp", json=_call(12))
             assert response.json()["result"]["structuredContent"] == {"result": "done"}
-            assert sorted(threads) == ["body", "build", "close", "connect"]
-            assert all(name.startswith("mindroom-mcp-gateway-tool") for name in threads.values())
+            assert on_gateway_pool == dict.fromkeys(("body", "build", "close", "connect"), True)
         finally:
             release.set()
             close_release.set()
