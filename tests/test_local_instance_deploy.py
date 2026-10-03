@@ -1957,7 +1957,7 @@ def test_secret_file_already_owned_by_the_container_uid_is_not_chowned(
     assert console.export_text() == ""
 
 
-def test_unrestrictable_secret_file_asks_for_a_root_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unrestrictable_secret_file_asks_for_a_root_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how.
 
     It never prints a sudo command naming the path, because the container could swap that path for a link first.
@@ -1978,7 +1978,7 @@ def test_unrestrictable_secret_file_asks_for_a_root_rerun(tmp_path: Path, monkey
     deploy._protect_synapse_config(homeserver)
 
     output = normalize_console_output(console.export_text())
-    assert "Rerun this deploy.py command as root" in output
+    assert "Run deploy.py start for this instance as root" in output
     assert "sudo" not in output
     assert _mode(homeserver) == 0o600
 
@@ -1998,7 +1998,7 @@ def test_unreadable_container_secret_keeps_permission_guidance(tmp_path: Path, m
     deploy._protect_synapse_config(homeserver)
 
     output = normalize_console_output(console.export_text())
-    assert "Rerun this deploy.py command as root" in output
+    assert "Run deploy.py start for this instance as root" in output
     assert "sudo" not in output
     assert homeserver.read_text() == "unchanged"
     assert _mode(homeserver) == 0o600
