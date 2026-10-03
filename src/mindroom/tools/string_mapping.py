@@ -11,10 +11,13 @@ def parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str)
         return value
     if not value.strip():
         return None
-    parsed = json.loads(value)
+    msg = f"{field_name} must be a JSON object with string keys and values"
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        raise ValueError(msg) from None
     if not isinstance(parsed, dict) or not all(
         isinstance(key, str) and isinstance(item, str) for key, item in parsed.items()
     ):
-        msg = f"{field_name} must be a JSON object with string keys and values"
         raise ValueError(msg)
     return parsed

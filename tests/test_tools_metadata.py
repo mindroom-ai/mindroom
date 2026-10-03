@@ -383,7 +383,7 @@ def test_custom_api_tool_sends_dashboard_json_headers_to_the_base_url(monkeypatc
     assert sent[0].headers["X-Api-Key"] == "operator-secret"
 
 
-@pytest.mark.parametrize("headers", ['["X-Api-Key"]', '{"X-Retries": 3}'])
+@pytest.mark.parametrize("headers", ['["X-Api-Key"]', '{"X-Retries": 3}', "X-Api-Key: abc"])
 def test_custom_api_tool_rejects_headers_that_are_not_a_json_object_of_strings(headers: str) -> None:
     """A malformed headers value fails when the tool is built instead of on every request."""
     with pytest.raises(ValueError, match="headers must be a JSON object with string keys and values"):
