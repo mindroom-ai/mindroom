@@ -34,9 +34,12 @@ class _Provider(SyntheticModel):
     id: str = "test"
     steps: list[ModelResponse] = field(default_factory=list)
     requests: list[list[Message]] = field(default_factory=list)
+    failure: Exception | None = None
 
     async def ainvoke(self, messages: list[Message], **_kwargs: object) -> ModelResponse:
         self.requests.append([message.model_copy(deep=True) for message in messages])
+        if self.failure is not None:
+            raise self.failure
         response = self.steps.pop(0)
         response.response_usage = MessageMetrics(input_tokens=10, output_tokens=2, total_tokens=12)
         return response
@@ -161,7 +164,12 @@ async def test_empty_review_is_reported_without_inventing_learning(
 
 
 @pytest.mark.asyncio
-async def test_failed_trial_keeps_partial_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("provider_failure", [False, True])
+async def test_failed_trial_keeps_partial_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_failure: bool,
+) -> None:
     """A provider failure leaves completed evidence clearly marked as incomplete."""
     calls = 0
 
@@ -170,6 +178,8 @@ async def test_failed_trial_keeps_partial_report(tmp_path: Path, monkeypatch: py
         calls += 1
         if calls == 3:
             msg = "provider unavailable"
+            if provider_failure:
+                return _Provider(failure=RuntimeError(msg))
             raise RuntimeError(msg)
         return _Provider(steps=[ModelResponse(content="42")])
 

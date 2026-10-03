@@ -176,6 +176,24 @@ def _learner(
     return config, resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
+def test_explicit_empty_catalog_roots_do_not_reserve_installed_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Global skills reserve names by default, but an explicitly empty catalog is isolated."""
+    installed = tmp_path / "installed/deploy-checks/SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text(LEARNED)
+    monkeypatch.setattr("mindroom.tool_system.skills.get_user_skills_dir", lambda: installed.parent.parent)
+    config, paths = _learner(tmp_path)
+    root = tmp_path / "workspace/skills"
+    assert "deploy-checks" in load_skill_catalog(config, paths, "mind", root).reserved_names
+    empty = load_skill_catalog(config, paths, "mind", root, skill_roots=[])
+    assert empty.reserved_names == frozenset()
+    assert empty.skills is None
+    assert installed.read_text() == LEARNED
+
+
 def _run(run_id: str, *messages: Message) -> RunOutput:
     return RunOutput(run_id=run_id, agent_id="mind", session_id="session", messages=list(messages))
 

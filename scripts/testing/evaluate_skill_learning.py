@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
 from mindroom import model_loading
@@ -75,6 +76,16 @@ class Trial:
     tool_calls: list[str]
 
 
+@dataclass(frozen=True)
+class ArmSummary:
+    """Exact-output scores for one treatment's completed trials."""
+
+    passed: int
+    trials: int
+    transfer_passed: int
+    control_passed: int
+
+
 @dataclass
 class Report:
     """Evidence for one learned artifact, not a claim of general learning quality."""
@@ -92,19 +103,16 @@ class Report:
     def write(self, output_dir: Path) -> None:
         """Checkpoint completed trials so a failed provider call cannot erase earlier results."""
         payload = asdict(self)
-        payload["summary"] = {
-            arm: {
-                "passed": sum(trial.passed for trial in self.trials if trial.arm == arm),
-                "trials": sum(trial.arm == arm for trial in self.trials),
-                "transfer_passed": sum(
-                    trial.passed for trial in self.trials if trial.arm == arm and trial.case != "control"
-                ),
-                "control_passed": sum(
-                    trial.passed for trial in self.trials if trial.arm == arm and trial.case == "control"
-                ),
-            }
-            for arm in ARMS
-        }
+        summaries: dict[str, ArmSummary] = {}
+        for arm in ARMS:
+            trials = [trial for trial in self.trials if trial.arm == arm]
+            summaries[arm] = ArmSummary(
+                passed=sum(trial.passed for trial in trials),
+                trials=len(trials),
+                transfer_passed=sum(trial.passed for trial in trials if trial.case != "control"),
+                control_passed=sum(trial.passed for trial in trials if trial.case == "control"),
+            )
+        payload["summary"] = {arm: asdict(summary) for arm, summary in summaries.items()}
         (output_dir / "report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -159,6 +167,9 @@ async def _trial(
         response = await agent.arun(case.prompt)
     finally:
         await aclose_anthropic_async_client(model)
+    if response.status != RunStatus.completed:
+        msg = f"Trial {case.name}/{arm} did not complete ({response.status}): {response.content}"
+        raise RuntimeError(msg)
     output = response.content if isinstance(response.content, str) else str(response.content)
     return Trial(
         case=case.name,
@@ -217,7 +228,7 @@ async def evaluate(
                 skills_root=skills_root,
                 captured=None,
                 progress=progress,
-                skill_roots=[output_dir / "catalog"],
+                skill_roots=[],
             )
     finally:
         report.review_seconds = time.perf_counter() - started
