@@ -15,6 +15,7 @@ from agno.db.base import SessionType
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from nio.exceptions import EncryptionError, RemoteProtocolError
 
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
@@ -48,6 +49,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -139,7 +141,7 @@ from mindroom.teams import (
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
-    strip_team_header,
+    strip_team_display,
     team_response,
     team_response_stream,
 )
@@ -248,10 +250,10 @@ _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Write your complete reply from the start, reusing those results instead of repeating calls that may already "
     "have taken effect."
 )
-_UNREADABLE_ATTEMPT_INSTRUCTION = (
-    "A service restart stopped a previous attempt at replying to the current message, and what it did "
-    "could not be read back. Write your complete reply from the start, and check whether any tool call "
-    "with side effects already took effect before repeating it."
+_UNKNOWN_ATTEMPT_INSTRUCTION = (
+    "A service restart stopped a previous attempt at replying to the current message, and what that attempt did "
+    "is unknown. Write your complete reply from the start, and before repeating any tool call with side effects, "
+    "check whether it already took effect."
 )
 
 
@@ -3636,17 +3638,23 @@ class ResponseRunner:
         event_id = request.existing_event_id
         if event_id is None or not (request.existing_event_is_placeholder and request.existing_event_is_recovered):
             return request
-        message = await fetch_latest_visible_message(
-            self._client(),
-            room_id=resolved_target.room_id,
-            event_id=event_id,
-            trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
-        )
-        if message is None:
-            # Unreadable, so the stopped attempt's work is unknown rather than absent.
-            return _with_interrupted_attempt_instruction(request, _UNREADABLE_ATTEMPT_INSTRUCTION)
-        unfinished = unfinished_streamed_reply(message.body, message.content)
-        if unfinished is None:
+        try:
+            message = await fetch_latest_visible_message(
+                self._client(),
+                room_id=resolved_target.room_id,
+                event_id=event_id,
+                trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
+            )
+        except (EncryptionError, RemoteProtocolError):
+            # A reply this device cannot decrypt, or whose edits the server will
+            # not list, stays unreadable however often the turn is retried.
+            message = None
+        unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
+        if message is None or unfinished is None:
+            if message is None or message.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+                # Unreadable, or stopped before showing anything such as hidden or
+                # non-streamed tool calls: unknown work, not absent work.
+                return _with_interrupted_attempt_instruction(request, _UNKNOWN_ATTEMPT_INSTRUCTION)
             return request
         completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
         recorder = self._build_turn_recorder(
@@ -3658,7 +3666,7 @@ class ResponseRunner:
         )
         recorder.record_interrupted(
             run_metadata=recorder.run_metadata,
-            assistant_text=strip_team_header(unfinished.partial_text),
+            assistant_text=strip_team_display(unfinished.partial_text),
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
         )

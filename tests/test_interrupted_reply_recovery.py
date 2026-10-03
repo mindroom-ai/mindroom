@@ -32,6 +32,7 @@ from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_runner_focused import _admit_approval_source
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -171,7 +172,7 @@ async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
 async def _replay(
     bot: AgentBot,
     request: ResponseRequest,
-    visible: ResolvedVisibleMessage | None,
+    visible: ResolvedVisibleMessage | Exception | None,
 ) -> tuple[list[tuple[ResponseTurnContext, list[str]]], AsyncMock]:
     """Run the replayed turn, observing each model call's context and the history it could read."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -181,7 +182,7 @@ async def _replay(
         calls.append((cast("ResponseTurnContext", args[0]), _recorded_attempts(bot, request)))
         return "The complete report."
 
-    fetch = AsyncMock(return_value=visible)
+    fetch = AsyncMock(side_effect=visible) if isinstance(visible, Exception) else AsyncMock(return_value=visible)
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=fetch),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
@@ -240,21 +241,40 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "visible",
-    [
-        _streamed("Thinking...", status=STREAM_STATUS_PENDING, trace=()),
-        _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR),
-    ],
-    ids=["placeholder_only", "already_terminal"],
-)
-async def test_replay_without_unfinished_visible_work_answers_as_before(
-    tmp_path: Path,
-    visible: ResolvedVisibleMessage,
-) -> None:
-    """Without visible work to carry forward the replay is an ordinary answer."""
+async def test_a_streamed_replay_reads_the_record_and_instruction_too(tmp_path: Path) -> None:
+    """The streaming path receives the same context and still delivers through the adopted reply."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    calls: list[tuple[ResponseTurnContext, list[str]]] = []
+
+    async def fake_stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        calls.append((ctx, _recorded_attempts(bot, request)))
+        yield "The complete report."
+
+    with (
+        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
+    ):
+        await runner.generate_response(request)
+
+    ((context, history),) = calls
+    assert len(_attempt_context(context)) == 1
+    (attempt,) = history
+    assert "The `counter` tool finished" in attempt
+    final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert final is not None
+    assert final.edits_event_id == REPLY_ID
+    assert cast("dict[str, Any]", final.payload["m.new_content"])["body"] == "The complete report."
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
+    """A reply that already reached a terminal state hides no stopped work."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    visible = _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR)
 
     ((context, _history),), _fetch = await _replay(bot, request, visible)
 
@@ -264,16 +284,30 @@ async def test_replay_without_unfinished_visible_work_answers_as_before(
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_stopped_attempt_still_warns_the_new_attempt(tmp_path: Path) -> None:
-    """Unknown is not nothing: the new attempt is told side effects may already have happened."""
+@pytest.mark.parametrize(
+    "read",
+    [
+        None,
+        nio.EncryptionError("missing session key"),
+        nio.exceptions.RemoteProtocolError("relations page failed"),
+        _streamed("Thinking...", status=STREAM_STATUS_PENDING, trace=()),
+    ],
+    ids=["unreadable", "undecryptable", "unlisted_edits", "nothing_shown"],
+)
+async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
+    tmp_path: Path,
+    read: ResolvedVisibleMessage | Exception | None,
+) -> None:
+    """Unknown is not nothing: the turn is answered, warned that side effects may already have happened."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
 
-    ((context, _history),), _fetch = await _replay(bot, request, None)
+    ((context, _history),), _fetch = await _replay(bot, request, read)
 
     (instruction,) = _attempt_context(context)
-    assert "could not be read back" in instruction
+    assert "what that attempt did is unknown" in instruction
     assert _recorded_attempts(bot, request) == []
+    assert not await bot.journal_principal().is_pending("$source")
 
 
 @pytest.mark.asyncio
@@ -347,7 +381,7 @@ async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) -> None:
-    """A team's stopped attempt lands in the team scope its next attempt reads, without its display header."""
+    """A team's stopped attempt lands in the team scope its next attempt reads, without its display chrome."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -355,7 +389,9 @@ async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) ->
     identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
     scope = HistoryScope(kind="team", scope_id="team_general_helper")
 
-    visible = _streamed(f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}")
+    visible = _streamed(
+        f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}\n\n\n*No team consensus - showing individual responses only*",
+    )
     with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
         await runner._with_interrupted_attempt(
             request,
@@ -373,4 +409,5 @@ async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) ->
     (run,) = session.runs
     assert run.team_id == "team_general_helper"
     assert cast("str", run.content).startswith("Half of the report\n\n(turn stopped before completion")
+    assert "consensus" not in cast("str", run.content)
     assert "The `counter` tool finished" in cast("str", run.content)
