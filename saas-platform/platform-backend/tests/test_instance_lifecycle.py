@@ -409,6 +409,36 @@ async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_me
 
 
 @pytest.mark.asyncio
+async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_while_a_vanished_key_is_replaced(
+    platform: Platform,
+) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    platform.set_key_disabled.side_effect = [OpenRouterKeyNotFoundError("status 404"), None]
+    provision = platform.provision.side_effect
+
+    async def provision_while_the_account_deletion_lands(*args: Any, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        # A deletion request on another backend replica marks the account while this replica replaces the key.
+        _pending_deletion(platform, days_ago=0)
+        return await provision(*args, **kwargs)
+
+    platform.provision.side_effect = provision_while_the_account_deletion_lands
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.provision.assert_awaited_once()
+    assert summary.instances_resumed == 0
+    assert platform.scaled_down()
+    assert [key_call.kwargs for key_call in platform.set_key_disabled.await_args_list] == [
+        {"disabled": False},
+        {"disabled": True},
+    ]
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_resume_keeps_the_replacement_key_another_run_recorded_after_the_old_one_vanished(
     platform: Platform,
 ) -> None:

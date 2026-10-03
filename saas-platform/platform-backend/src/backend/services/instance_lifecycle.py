@@ -539,12 +539,10 @@ async def _resume(
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
+    if await _hold_for_pending_deletion(sb, instance_id, subscription, now, summary):
+        return
     # Reprovisioning may have minted a new key, so re-read the instance before enabling it.
     current = get_instance(sb, instance_id, columns=LIFECYCLE_INSTANCE_COLUMNS) or {}
-    if account_pending_deletion(sb, subscription["account_id"]):
-        # A deletion request on another backend replica landed while the instance started, so it stays held.
-        await _hold(sb, current, subscription, now, summary)
-        return
     try:
         await set_instance_openrouter_key_disabled(current, disabled=False)
     except OpenRouterKeyNotFoundError:
@@ -557,9 +555,22 @@ async def _resume(
             expected_openrouter_key_hash=current["openrouter_key_hash"],
         )
         await _reprovision(sb, current, subscription, resume_lifecycle_hold=True)
+        if await _hold_for_pending_deletion(sb, instance_id, subscription, now, summary):
+            return
     update_instance(sb, instance_id, {"lifecycle_stopped_at": None, "teardown_after": None, **_CLEARED_LIFECYCLE_ERROR})
     summary.instances_resumed += 1
     logger.info("Resumed instance %s for entitled subscription %s", instance_id, subscription["id"])
+
+
+async def _hold_for_pending_deletion(
+    sb: Client, instance_id: Any, subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
+) -> bool:
+    """Hold a resuming instance again, returning True, when a deletion request on another backend replica marked its
+    account while the instance was being started or redeployed."""
+    if not account_pending_deletion(sb, subscription["account_id"]):
+        return False
+    await _hold(sb, get_instance(sb, instance_id, columns=LIFECYCLE_INSTANCE_COLUMNS) or {}, subscription, now, summary)
+    return True
 
 
 def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
