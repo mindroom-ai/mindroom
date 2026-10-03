@@ -362,6 +362,14 @@ def _resolve_template_path(name: str, template_roots: Sequence[_TemplateRoot]) -
     raise ValueError(msg)
 
 
+def _builtin_applies(name: str, template_roots: Sequence[_TemplateRoot]) -> bool:
+    """Return whether apply_template would use the built-in template of this name."""
+    try:
+        return _resolve_template_path(name, template_roots)[1].source == "builtin"
+    except ValueError:
+        return False
+
+
 def _template_value_error(path: Path, message: str) -> ValueError:
     return ValueError(f"Invalid template '{path.name}': {message}")
 
@@ -1097,14 +1105,13 @@ class TodoTools(Toolkit):
     def list_templates(self, agent: Agent | Team) -> str:
         """List available todo templates."""
         templates: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
         remaining_workspace_bytes = _MAX_TEMPLATE_LISTING_BYTES
-        for template_root in _visible_template_roots(agent):
+        template_roots = _visible_template_roots(agent)
+        for template_root in template_roots:
             templates_root = template_root.path.resolve()
             if not templates_root.is_dir():
                 continue
-            paths = template_root.template_paths(templates_root)
-            for index, path in enumerate(paths):
+            for path in template_root.template_paths(templates_root):
                 try:
                     resolve_path_within_root(templates_root, path, symlinks="internal")
                 except ValueError:
@@ -1116,17 +1123,15 @@ class TodoTools(Toolkit):
                         remaining_workspace_bytes -= len(payload)
                         if remaining_workspace_bytes < 0:
                             logger.warning("Listing only the first workspace todo templates", template=path.name)
-                            # Unread workspace templates still shadow built-ins of the same name, as in apply_template.
-                            seen_names.update(unread.name.removesuffix(".yaml.j2") for unread in paths[index:])
                             break
                     metadata = _load_template_metadata(path, payload.decode("utf-8"))
                 except (OSError, ValueError):
                     if template_root.source == "workspace":
                         continue
                     raise
-                if metadata["name"] in seen_names:
+                # A workspace file of the same name, listed or not, is what apply_template uses instead.
+                if template_root.source == "builtin" and not _builtin_applies(metadata["name"], template_roots):
                     continue
-                seen_names.add(metadata["name"])
                 schema = _PARAMS_SCHEMAS.get(metadata["name"]) if template_root.source == "builtin" else None
                 templates.append(
                     {

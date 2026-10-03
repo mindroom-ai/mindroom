@@ -74,9 +74,17 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
 ) -> None:
     """Without workers, the response's Bash finds `mindroom-agent` and reaches the API with its grant."""
     runtime = _runtime_context(tmp_path)
+    # An older `mindroom-agent` on the agent's own PATH, like a `uv tool install`, must not shadow the response's CLI.
+    stale_bin = tmp_path / "stale-bin"
+    stale_bin.mkdir()
+    (stale_bin / "mindroom-agent").write_text("#!/bin/sh\necho stale-mindroom-agent\nexit 7\n")
+    (stale_bin / "mindroom-agent").chmod(0o755)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        tools=[{"shell": {"extra_env_passthrough": ["PASSTHROUGH_PROBE"]}}, "calculator"],
+        tools=[
+            {"shell": {"extra_env_passthrough": ["PASSTHROUGH_PROBE"], "shell_path_prepend": str(stale_bin)}},
+            "calculator",
+        ],
         memory_backend="file",
         learning=False,
     )

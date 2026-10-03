@@ -353,8 +353,8 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
     )
     if primary_built_tool:
         # LEGACY_COMPAT: Worker-store copies of settings the primary now owns.
-        # Legacy format: `<service>_credentials.json` in the agent's worker store, where the dashboard saved a scoped agent's settings of a tool the primary builds; the dashboard no longer lists or reads that copy.
-        # Last legacy release: v2026.9.404; replacement: v2026.9.405 saves them in the primary's agent- or requester-scoped stores.
+        # Legacy format: `<service>_credentials.json` in the agent's worker store, where the dashboard saved a scoped agent's tool settings; the dashboard no longer lists or reads that copy.
+        # Last legacy release: v2026.10.39 for `openai` and `groq`, v2026.9.414 for other tools routed to a worker, and v2026.9.404 for the rest; replacement: v2026.10.40, v2026.9.415, and v2026.9.405 respectively save them in the primary's agent- or requester-scoped stores.
         # Handling: deleting the settings also deletes that worker copy, so a deleted value stops reaching worker code.
         # Coverage: tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings.
         target.target_manager.delete_credentials(service)

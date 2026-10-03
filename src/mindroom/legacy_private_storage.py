@@ -8,8 +8,8 @@ Managed workers must be absent before inspecting or moving any scope contents.
 # Legacy format: requester-derived private directories used keys without the lossless `~` prefix.
 # Last legacy release: v2026.9.32; prefixed lossless encoding introduced in v2026.9.33.
 # Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
-# Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup; a separate session root keeps its fail-closed checks.
-# Once a start finishes every verified move, it writes a receipt in the primary-only tracking directory, and later starts never scan `private_instances` again.
+# Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, including an interrupted move whose session mirror is missing or whose configured roots changed; only unexpected entries in a separate session root and checks across all pending moves, such as a missing volume, still stop startup.
+# Once a start finishes every verified move, it writes a receipt in the primary-only tracking directory, and later starts never scan `private_instances` again, so an entry left untouched is retried only after an operator deletes the receipt.
 # Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents,
 # tests/test_private_storage_migration.py::test_first_start_leaves_planted_entries_and_writes_its_receipt,
 # tests/test_private_storage_migration.py::test_entries_planted_after_the_receipt_are_never_read.

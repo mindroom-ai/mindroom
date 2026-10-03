@@ -106,10 +106,8 @@ Set `config.source: file` when another init container or content bundle places `
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
-Dedicated Kubernetes workers and the `static_runner` sidecar also mount the storage subtree containing the config file read-only so content-bundle files under that subtree are visible without broad worker state access.
-That subtree is the first path component below `storage.mountPath`, and tool code can read all of it, so keep the config in its own directory away from credentials and Matrix state.
+Nothing is mounted at that path: neither dedicated Kubernetes workers nor the `static_runner` sidecar mount the config file or its directory, and each request carries the allowlisted config fields they resolve.
 With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
-A config directly in `storage.mountPath` is mounted into the sidecar as a single file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -170,6 +168,38 @@ stateStorage:
   size: 20Gi
 ```
 
+`stateStorage.extraSubPaths` overlays more state PVC subpaths, and the init container creates and chowns them with the built-in ones.
+Each entry needs a `name` and an absolute `mountPath`, and `subPath` defaults to `name`.
+For example, keep the tracking journal on the state PVC when `storage` is shared network storage:
+
+```yaml
+stateStorage:
+  enabled: true
+  existingClaim: mindroom-state
+  extraSubPaths:
+    - name: tracking
+      mountPath: /app/agent_data/tracking
+```
+
+## Session and Knowledge Storage
+
+`sessionStorage` gives agent and team session databases their own volume.
+The chart mounts it at `sessionStorage.mountPath` (default `/app/session_state`) and sets `MINDROOM_SESSION_STORAGE_PATH` to that path, so do not also set that variable in `env.extra`.
+`knowledgeStorage` gives shared knowledge-base indexes their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
+Each block creates a `<fullname>-sessions` or `<fullname>-knowledge` PVC from `size`, `storageClassName`, and `accessModes`, or mounts `existingClaim` instead.
+Both volumes must be writable by the runtime user; `podSecurityContext.fsGroup` covers volume types that support ownership management.
+
+```yaml
+sessionStorage:
+  enabled: true
+  existingClaim: mindroom-sessions
+
+knowledgeStorage:
+  enabled: true
+  size: 100Gi
+  storageClassName: fast-rwo
+```
+
 ## Content Bundles
 
 Hosted deployments can copy immutable private content into MindRoom storage before the runtime starts.
@@ -223,26 +253,36 @@ contentBundles:
 config:
   source: file
   path: /app/agent_data/active-config/config.yaml
-  bootstrapBundlePath: /app/agent_data/config-source
-  bootstrapBundleRevision: deploy-2
+  bootstrapContentBundle:
+    name: config-source
+    subPath: environments/prod
 
 workers:
   backend: kubernetes
 ```
 
-`config.bootstrapBundlePath` is optional and disabled by default.
-It adds `--bootstrap-config-bundle` to `mindroom run`.
-`config.bootstrapBundleRevision` is optional and requires `bootstrapBundlePath`.
-It adds `--bootstrap-config-bundle-revision` to the runtime command.
+`config.bootstrapContentBundle` is optional and disabled by default.
+It adds `--bootstrap-config-bundle` and `--bootstrap-config-bundle-revision` to `mindroom run`.
+The bootstrap source is the named bundle's `targetPath` joined with `subPath`, so the example installs from `/app/agent_data/config-source/environments/prod`.
+`subPath` is relative to the bundle root and defaults to the root itself.
+The revision is the sha256 of the bundle image digest and the selected image directory, `sourcePath` joined with `subPath`.
+Pin the digest once in `contentBundles`; a new image or a different `sourcePath` or `subPath` becomes a new revision.
+The chart rejects an unknown bundle name and an absolute or `..` subPath.
+It also rejects a selected bundle with `overwrite: false`, `seed`, or `volumeMounts`, because the source would no longer match the image digest.
+The derived form is for trees that only the selected image writes.
+Do not point another bundle, a seed script, raw `initContainers`, or `extraVolumeMounts` at the selected source, because the revision would not change with their content.
 A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks.
 A changed revision validates and installs the candidate under the native installer's non-force drift rules.
-The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
+
+When another mechanism, such as a seed script, raw `initContainers`, or `extraVolumeMounts`, provides or changes the source tree, set `config.bootstrapBundlePath` to its absolute directory instead and advance the revision yourself.
+`config.bootstrapBundleRevision` is optional, requires `bootstrapBundlePath`, and is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
+Neither explicit value can be combined with `config.bootstrapContentBundle`.
 Native installation and validation run in the main runtime container, with its image, mounts, and environment, before runtime startup.
 The target directory and filename come from `config.path`; the source must contain that filename at its root.
 The target must be its own directory below `storage.mountPath`, not the storage root or a ConfigMap mount.
-The chart rejects a normalized bootstrap source that equals, contains, or lies inside the target config directory.
+The chart rejects a normalized bootstrap source that equals, contains, or lies inside the target config directory, and a selected bundle `targetPath` that contains the target config directory, because transport removes that path on every start.
 
-Initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
+Without a revision, initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
 Bundle transport can refresh the separate source directory normally.
 To activate a changed revision explicitly, run `mindroom config install-bundle SOURCE --target TARGET --json` in the runtime container and confirm the returned fingerprint using `mindroom config check-applied`.
 Restore `TARGET.previous` using the same install command with its recorded `--expected-digest` if application fails.
@@ -251,6 +291,7 @@ Content images need no MindRoom binary.
 
 Bootstrap cannot be combined with `workers.backend: static_runner`: its sidecar starts concurrently and could capture the environment before installation.
 The chart rejects this combination until startup ordering is guaranteed.
+Bootstrap also requires `replicaCount` 0 or 1, because concurrent pods would install into the same config directory at once.
 
 Reference copied plugins from `config.yaml` with absolute paths:
 
@@ -434,6 +475,9 @@ This renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist Conf
 By default, chart-managed proxy resources use the release-derived `<fullname>-egress-proxy` name; set `approvedEgress.service.name` only when an explicit shared name is required.
 The control-plane pod receives `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS`.
 The control-plane pod also mounts the same allowlist file so the built-in `approved_egress` tool can avoid asking for domains that are already static-allowed.
+The proxy reads the allowlist only at startup, so the chart hashes inline `approvedEgress.allowlist.domains` into a `checksum/allowlist` pod annotation and any change rolls the proxy.
+The chart cannot read an `approvedEgress.allowlist.existingConfigMap`, so after editing that ConfigMap restart the proxy Deployment (`approvedEgress.service.name`, or `<fullname>-egress-proxy` when unset) with `kubectl rollout restart`, or have the tooling that renders it put a content hash in `approvedEgress.podAnnotations` (for example `checksum/allowlist`).
+The control-plane copy of the allowlist refreshes only when that pod restarts, so after removing a domain also restart the control-plane Deployment (`<fullname>`); until then `request_network_access` reports that domain as already allowed and creates no grant, while the proxy blocks it.
 The control-plane pod also receives `MINDROOM_APPROVED_EGRESS_ENABLED=true`, so MindRoom adds `approved_egress` and the required Matrix approval rule at runtime even when you use `config.data` or `config.existingConfigMap`.
 Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the authored config already assigns `approved_egress` deliberately, for example to specific agents instead of `defaults.tools`; the proxy and the other approved egress env vars are still wired.
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
@@ -563,9 +607,9 @@ workers:
 ```
 
 The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a post-install/post-upgrade Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
+When access grants are enabled and at least one grant is configured, the chart renders a ConfigMap plus a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
 The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
-The Job is idempotent and safe to rerun on each deploy.
+The helper is idempotent, so running it again with the same grants changes nothing.
 If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
 
 For `workerScope: shared`, `agent` is required and `requester` must be omitted.
@@ -576,6 +620,18 @@ If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker
 When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
 If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
 When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
+
+`workers.kubernetes.agentVault.jobNaming` controls how the access-grant and bootstrap Jobs run again.
+With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
+The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
+Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
+With `fixed`, those workflows do not rerun an existing access-grant Job for a changed grant list, and they fail to apply a changed pod template until the old Job is deleted.
+Set `jobNaming: contentHash` for those workflows.
+The chart then drops the hook and appends a hash of each Job's rendered pod spec, plus the grant config for the access-grant Job, to the Job name.
+The grants ConfigMap name gets a hash of its config too, so each access-grant Job reads the grants it was created for; `kubectl apply` leaves earlier grants ConfigMaps in place until you delete them or apply with `--prune`.
+Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
+Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
+To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
 
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
@@ -698,6 +754,10 @@ workers:
 
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
+- Containers that run the runtime image default to `securityContext.runAsNonRoot: true`, which the kubelet enforces against the image's numeric uid 1000.
+  The chart-managed Agent Vault server defaults to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
+  A custom image that runs as root, or an Agent Vault image with a different uid, needs matching `securityContext` overrides.
+  The state-storage init container still runs as root for `chown` and `chmod`, and content bundles and user-supplied containers keep their own security contexts.
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.

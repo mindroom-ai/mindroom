@@ -88,8 +88,9 @@ agents:
           output_dir: charts
 ```
 
-In this example, `file_generation` and `visualization` default to the primary runtime, and `exports`/`charts` are relative to that process’s working directory.
-They are not automatically rebased into the agent workspace or made visible to worker-routed `file` and `shell` calls.
+In this example, `file_generation` saves into `exports` inside the agent workspace.
+`visualization` defaults to the primary runtime, and `charts` is relative to that process’s working directory.
+It is not automatically rebased into the agent workspace or made visible to worker-routed `file` and `shell` calls.
 Choose a destination shared with the tools that need the files, or generate worker-local artifacts through workspace-backed `shell` or `python`.
 
 ## [`file`]

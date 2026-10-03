@@ -62,12 +62,17 @@ _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 # Reading a thread from source walks room history back to its root, and anyone
-# who can post in the room decides how old that root is.
-_MAX_THREAD_ROOM_SCAN_PAGES = 100
+# who can post in the room decides how old that root is. Every message event in
+# the room counts, including each streaming edit of every other reply, so the
+# bound leaves room for a busy room's ordinary long-running threads.
+_MAX_THREAD_ROOM_SCAN_PAGES = 1000
+# The walk keeps every non-edit message and one edit per original and sender until it ends,
+# so the kept count gets its own bound to cap the walk's memory.
+_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES = 10_000
 
 
 class _ThreadRoomScanBoundError(RuntimeError):
-    """Raised when a thread room scan reaches its page bound before seeing every requested root.
+    """Raised when a thread room scan reaches its page or kept-event bound before seeing every requested root.
 
     Unlike ``ThreadRoomScanRootNotFoundError`` this proves nothing about the
     root, so callers treat it as an unavailable read and fail closed.
@@ -564,13 +569,17 @@ async def bulk_scan_thread_event_sources(
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
-        if page_count >= _MAX_THREAD_ROOM_SCAN_PAGES:
+        if (
+            page_count >= _MAX_THREAD_ROOM_SCAN_PAGES
+            or len(scanned_message_sources) + len(edit_candidates) >= _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES
+        ):
             msg = (
-                f"thread room scan in {room_id} reached its {_MAX_THREAD_ROOM_SCAN_PAGES}-page bound "
-                "with history left, so the requested roots are unproven"
+                f"thread room scan in {room_id} reached its bound of {_MAX_THREAD_ROOM_SCAN_PAGES} pages "
+                f"or {_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES} kept events with history left, "
+                "so the requested roots are unproven"
             )
             logger.warning(
-                "Thread room scan reached its page bound before finding every root",
+                "Thread room scan reached its bound before finding every root",
                 room_id=room_id,
                 user_id=client.user_id,
                 missing_root_ids=sorted(remaining_root_ids),

@@ -265,7 +265,8 @@ class NativeDesktopHost:
             return {"status": self.status()}
         if action == "dashboard_configuration":
             _expect_keys(parameters, set())
-            return local_dashboard_configuration(self._runtime_paths)
+            # The port-owner check runs launchctl and lsof; the bridge tasks share this loop.
+            return await asyncio.to_thread(local_dashboard_configuration, self._runtime_paths)
         if action in {"configure", "set_allowed_apps", "set_browser_config", "set_local_access", "finish_setup"}:
             edited_keys = {
                 "configure": {"config"},

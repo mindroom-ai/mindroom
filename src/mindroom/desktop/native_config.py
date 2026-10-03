@@ -264,6 +264,15 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         ) from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
+    # LEGACY_COMPAT: Saved desktop setups that allow MindRoom's own app or desktop helper.
+    # Legacy format: `allowed_app_ids` naming `chat.mindroom.menubar` or `chat.mindroom.desktophelper`, which the macOS app offered and app edits and `mindroom desktop` commands saved.
+    # Last legacy release: v2026.9.378; replacement: v2026.9.379 refuses both IDs in every edit and run override.
+    # Handling: loading drops both IDs, so the rest of the setup stays usable and editable and the next save writes it without them; edits still refuse them.
+    # Coverage: tests/test_desktop_native_config.py::test_saved_config_that_allows_mindroom_itself_loads_and_saves_without_it.
+    if isinstance(payload, dict) and isinstance(app_ids := payload.get("allowed_app_ids"), list):
+        payload["allowed_app_ids"] = [
+            app_id for app_id in app_ids if not isinstance(app_id, str) or app_id not in MINDROOM_APP_IDS
+        ]
     # Persisted paths may disappear; they must not prevent unrelated settings from being loaded or edited.
     config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
     if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) & 0o077:

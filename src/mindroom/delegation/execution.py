@@ -1048,14 +1048,7 @@ async def drive_delegations(  # noqa: C901, PLR0912
             msg = "Paused run holds the same delegation call more than once; retry the request"
             raise RuntimeError(msg)
         ordinary = [requirement for requirement in response.requirements or () if requirement.needs_confirmation]
-        if ordinary:
-            state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
-            state.pending_tools = [
-                requirement.tool_execution.to_dict() for requirement in ordinary if requirement.tool_execution
-            ]
-            await persist_delegation_state(entity, response, state)
-            return response
-        if not external and any(not item.is_resolved() for item in response.requirements or ()):
+        if not external and not ordinary and any(not item.is_resolved() for item in response.requirements or ()):
             return response
         for requirement in external:
             if await advance_delegation_call(
@@ -1078,6 +1071,14 @@ async def drive_delegations(  # noqa: C901, PLR0912
                 on_event=on_event,
             ):
                 return response
+        # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them.
+        if ordinary:
+            state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
+            state.pending_tools = [
+                requirement.tool_execution.to_dict() for requirement in ordinary if requirement.tool_execution
+            ]
+            await persist_delegation_state(entity, response, state)
+            return response
         await persist_delegation_state(entity, response, state)
         if isinstance(response, RunOutput):
             continuation_stream = cast("Agent", entity).acontinue_run(

@@ -97,13 +97,10 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
     This wraps each mocked state content in that envelope with ``sender``, so the existing
     ``room_get_state_event`` mock stays the single source of room state and its call count
     still measures state-event requests.
-    ``room_get_event`` returns each served envelope by its event ID, as the scheduler's sender check reads it.
     The scheduler's check of the room's create event is answered as a homeserver honouring ``format=event``.
-    Other private sends and event reads fall through to the previous mocks.
+    Other private sends fall through to the previous mock.
     """
     fallback = client._send
-    get_event_fallback = client.room_get_event
-    served_events: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def send(response_class: type, method: str, path: str, *args: object, **kwargs: object) -> object:
         url = urlsplit(path)
@@ -123,15 +120,7 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
         if not isinstance(response, nio.RoomGetStateEventResponse):
             return response
         event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=sender)
-        served_events[room_id, event["event_id"]] = event
         return nio.RoomGetStateEventResponse(event, event_type, state_key, room_id)
 
-    async def get_event(room_id: str, event_id: str) -> object:
-        event = served_events.get((room_id, event_id))
-        if event is None:
-            return await get_event_fallback(room_id, event_id)
-        return nio.RoomGetEventResponse.from_dict(event)
-
     client._send = AsyncMock(side_effect=send)
-    client.room_get_event = AsyncMock(side_effect=get_event)
     return client._send
