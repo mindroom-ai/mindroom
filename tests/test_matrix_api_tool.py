@@ -441,15 +441,20 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("requester_id", "acting_requester"),
-    [("@user:localhost", "@user:localhost"), ("@mindroom_general:localhost", None)],
+    [
+        ("@user:localhost", "@user:localhost"),
+        ("@telegram:localhost", "@telegram:localhost"),
+        ("@mindroom_general:localhost", None),
+    ],
 )
 async def test_matrix_api_send_event_room_message_names_the_human_requester(
     requester_id: str,
     acting_requester: str | None,
 ) -> None:
-    """Agents a raw message mentions must act for the human the agent answers, not for the agent itself."""
+    """Agents a raw message mentions must act for the human or bot account the agent answers, not for the agent."""
     tool = MatrixApiTools()
     ctx = replace(_make_context(), requester_id=requester_id)
+    ctx.config.bot_accounts = ["@telegram:localhost"]
     content = {
         "msgtype": "m.text",
         "body": "@mindroom_research:localhost please do the task",

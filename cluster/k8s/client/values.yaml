@@ -65,7 +65,7 @@ matrix:
   allowCustomHomeservers: false
 
 # Optional MatrixRTC discovery and same-origin proxy routes for voice and video calls.
-# LiveKit and the MatrixRTC authorization service must already exist.
+# LiveKit and the MatrixRTC authorization service run separately, for example through the mindroom-matrixrtc chart in cluster/k8s/matrixrtc.
 matrixRTC:
   enabled: false
   # Public MatrixRTC authorization service URL advertised through

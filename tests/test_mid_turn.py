@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
 from pydantic import ValidationError
 
 from mindroom import model_loading
@@ -641,6 +642,66 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
     assert "Completed action" in checkpoints[0]
     assert ("WRAP UP NOW" in checkpoints[0]) is (not cancel)
     assert len(model.requests) == (1 if cancel else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("interrupt", [False, True])
+@pytest.mark.parametrize("media", [False, True])
+async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool, interrupt: bool, media: bool) -> None:
+    """A delegation paused beside other calls must not request a wrap-up the judge did not ask for."""
+    state = _QueuedMessageState()
+    judgments: list[JudgmentRequest] = []
+    messages = [Message(role="user", content="Do the task")]
+
+    def work() -> ToolResult:
+        state.add_waiting_human_message("$new", text="Thanks")
+        images = [Image(content=b"image", mime_type="image/png")] if media else None
+        return ToolResult(content="Completed action", images=images)
+
+    def delegate() -> str:
+        return "Child result"
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
+        return not interrupt
+
+    delegation = Function.from_callable(delegate)
+    delegation.external_execution = True
+    tools = [Function.from_callable(work), delegation]
+    model = ParticipationModel(
+        ModelResponse(
+            tool_calls=[
+                {"id": "work", "type": "function", "function": {"name": "work", "arguments": "{}"}},
+                {"id": "child", "type": "function", "function": {"name": "delegate", "arguments": "{}"}},
+            ],
+        ),
+    )
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+
+    async def respond() -> None:
+        if stream:
+            async for _ in model.aresponse_stream(messages, tools=tools):
+                pass
+        else:
+            await model.aresponse(messages, tools=tools)
+
+    with queued_message_signal_context(
+        state,
+        mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
+    ):
+        # Agno runs the ordinary call and pauses the delegation for its external driver.
+        await respond()
+        assert len(model.requests) == 1
+        assert judgments == []
+        assert not any(message.content == "WRAP UP NOW" for message in messages)
+        # Agno moves generated media into a user-role message after the ordinary call's result.
+        assert (messages[-1].role == "user") is media
+        # The driver resumes the run with the child's result, completing the batch for the judge.
+        messages.append(Message(role="tool", content="Child result", tool_call_id="child", tool_name="delegate"))
+        await respond()
+    assert len(judgments) == 1
+    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is interrupt
 
 
 @pytest.mark.asyncio

@@ -13,14 +13,18 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from itertools import chain
-from pathlib import Path
-from typing import Literal
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.main import load_config
+from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import exported_process_env, resolve_runtime_paths
 from mindroom.file_locks import advisory_file_lock
 
-__all__ = ["BundleInstallResult", "install_config_bundle"]
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+__all__ = ["BundleChange", "BundleInstallResult", "classify_bundle_change", "install_config_bundle"]
 
 _METADATA = ".mindroom-bundle.json"
 _MAX_REVISION_LENGTH = 128
@@ -77,9 +81,9 @@ class BundleInstallResult:
     recovery_pending: bool = False
 
 
-def _tree_digest(root: Path) -> str:
-    """Hash names, modes and bytes, rejecting links and special files."""
-    digest = hashlib.sha256()
+def _tree_entries(root: Path) -> dict[str, tuple[int, bytes | None]]:
+    """Map relative names to modes and content hashes in digest order, rejecting links and special files."""
+    entries: dict[str, tuple[int, bytes | None]] = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         mode = path.lstat().st_mode
@@ -88,10 +92,21 @@ def _tree_digest(root: Path) -> str:
             raise ValueError(msg)
         if relative == _METADATA:
             continue
-        digest.update(json.dumps([relative, mode]).encode())
+        content = None
         if stat.S_ISREG(mode):
             with path.open("rb") as stream:
-                digest.update(hashlib.file_digest(stream, "sha256").digest())
+                content = hashlib.file_digest(stream, "sha256").digest()
+        entries[relative] = (mode, content)
+    return entries
+
+
+def _tree_digest(root: Path) -> str:
+    """Hash names, modes and bytes, rejecting links and special files."""
+    digest = hashlib.sha256()
+    for relative, (mode, content) in _tree_entries(root).items():
+        digest.update(json.dumps([relative, mode]).encode())
+        if content is not None:
+            digest.update(content)
     return digest.hexdigest()
 
 
@@ -261,14 +276,18 @@ def _replace_metadata(target: Path, digest: str, revision: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _validate_target(target: Path, config: Path, *, initialize_only: bool, force: bool) -> Path:
-    """Reject unsafe paths and conflicting install modes before filesystem mutation."""
+def _validate_config(config: Path) -> None:
     if config == Path(_METADATA):
         msg = f"{_METADATA} is reserved for bundle metadata."
         raise ValueError(msg)
     if config.is_absolute() or ".." in config.parts or not config.name:
         msg = "--config must be a relative file path inside the bundle."
         raise ValueError(msg)
+
+
+def _validate_target(target: Path, config: Path, *, initialize_only: bool, force: bool) -> Path:
+    """Reject unsafe paths and conflicting install modes before filesystem mutation."""
+    _validate_config(config)
     if force and initialize_only:
         msg = "--force and --initialize-only cannot be combined."
         raise ValueError(msg)
@@ -291,6 +310,92 @@ def _validate_target(target: Path, config: Path, *, initialize_only: bool, force
     return target
 
 
+def _validate_source(source: Path, target: Path) -> Path:
+    source = source.expanduser().absolute()
+    if source.is_symlink() or not source.is_dir():
+        msg = "Bundle source must be a real directory, not a symlink."
+        raise ValueError(msg)
+    source = source.resolve()
+    if source.is_relative_to(target) or target.is_relative_to(source):
+        msg = "Bundle source and target must not overlap."
+        raise ValueError(msg)
+    _tree_digest(source)
+    return source
+
+
+@dataclass(frozen=True)
+class BundleChange:
+    """Changed tree paths, split by whether native YAML/include loading reads them."""
+
+    sources: tuple[str, ...]
+    other: tuple[str, ...]
+
+
+def _source_files(root: Path, configs: Sequence[Path]) -> set[str]:
+    """Return every file the native YAML loader reads from the entrypoints, relative to root."""
+    root = root.resolve()
+    files: set[str] = set()
+    for config in configs:
+        try:
+            read = load_yaml_config_source(root / config)[1]
+        except Exception as exc:
+            # Any loader failure makes the tree unclassifiable, including the
+            # KeyError/AttributeError/IndexError the safe constructor raises for
+            # tags such as `!!bool maybe` or `!!int ""`. Some messages echo YAML
+            # values, so name only the file and the error type.
+            msg = f"Cannot load the YAML/include sources of {root / config} ({type(exc).__name__})."
+            raise ValueError(msg) from exc
+        files.update(path.relative_to(root).as_posix() for path in read)
+    return files
+
+
+def classify_bundle_change(old: Path, new: Path, configs: Sequence[Path]) -> BundleChange:
+    """Split the differences between two trees into YAML/include sources and everything else.
+
+    Sources are the files that loading each entrypoint reads in either tree,
+    plus directories that only appear or disappear around them. Every
+    entrypoint must load in both trees. Installer metadata is ignored, and
+    links and special files are rejected as in installation.
+    """
+    for config in configs:
+        _validate_config(config)
+    old, new = old.expanduser(), new.expanduser()
+    for root in (old, new):
+        if root.is_symlink() or not root.is_dir():
+            msg = f"Bundle tree must be a real directory: {root}"
+            raise ValueError(msg)
+    before, after = _tree_entries(old), _tree_entries(new)
+    sources = _source_files(old, configs) | _source_files(new, configs)
+    source_dirs = {parent.as_posix() for name in sources for parent in PurePosixPath(name).parents[:-1]}
+    changed_sources: list[str] = []
+    other: list[str] = []
+    for name in sorted(before.keys() | after.keys()):
+        if before.get(name) == after.get(name):
+            continue
+        present = [tree[name][0] for tree in (before, after) if name in tree]
+        if (name in sources and all(stat.S_ISREG(mode) for mode in present)) or (
+            name in source_dirs and len(present) == 1 and stat.S_ISDIR(present[0])
+        ):
+            changed_sources.append(name)
+        else:
+            other.append(name)
+    return BundleChange(tuple(changed_sources), tuple(other))
+
+
+def _require_source_only(target: Path, stage: Path, config: Path) -> None:
+    if not target.exists():
+        msg = "--source-only requires an existing target; no replacement was made."
+        raise ValueError(msg)
+    other = classify_bundle_change(target, stage, (config,)).other
+    if other:
+        shown = ", ".join(other[:10]) + (", ..." if len(other) > 10 else "")
+        msg = (
+            f"Candidate changes {len(other)} path(s) outside the YAML/include sources of {config}: "
+            f"{shown}; no replacement was made."
+        )
+        raise ValueError(msg)
+
+
 def install_config_bundle(
     source: Path,
     target: Path,
@@ -298,6 +403,7 @@ def install_config_bundle(
     config: Path = Path("config.yaml"),
     initialize_only: bool = False,
     force: bool = False,
+    source_only: bool = False,
     expected_digest: str | None = None,
     revision: str | None = None,
     process_env: dict[str, str] | None = None,
@@ -309,6 +415,7 @@ def install_config_bundle(
     recovers interrupted renames; this is not a power-loss durability guarantee.
     Initialize-only preserves an existing directory when the revision is absent or matches.
     Force permits authored replacement, never invalid configuration.
+    Source-only refuses a change outside the active and candidate YAML/include sources.
     """
     _validate_revision(revision)
     target = _validate_target(target, config, initialize_only=initialize_only, force=force)
@@ -316,15 +423,7 @@ def install_config_bundle(
         _finish_rotation(target)
         if initialize_only and target.exists() and (revision is None or _active_revision(target) == revision):
             return BundleInstallResult("initialized", target / config)
-        source = source.expanduser().absolute()
-        if source.is_symlink() or not source.is_dir():
-            msg = "Bundle source must be a real directory, not a symlink."
-            raise ValueError(msg)
-        source = source.resolve()
-        if source.is_relative_to(target) or target.is_relative_to(source):
-            msg = "Bundle source and target must not overlap."
-            raise ValueError(msg)
-        _tree_digest(source)
+        source = _validate_source(source, target)
         stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent))
         try:
             shutil.copytree(source, stage, dirs_exist_ok=True, symlinks=True)
@@ -340,6 +439,8 @@ def install_config_bundle(
                 msg = "Candidate tree digest does not match --expected-digest; no replacement was made."
                 raise ValueError(msg)
             unchanged = _unchanged_or_replaceable(target, digest, force=force, require_managed=revision is not None)
+            if source_only and not unchanged:
+                _require_source_only(target, stage, config)
             if unchanged and revision is None:
                 return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
             active_revision = _active_revision(target) if target.exists() else None

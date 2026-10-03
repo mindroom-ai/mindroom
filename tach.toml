@@ -1668,7 +1668,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.bounded_bytes",
+    "mindroom.logging_config",
     "mindroom.script_runs.broker",
     "mindroom.script_runs.models",
     "mindroom.script_runs.store",
@@ -2653,6 +2655,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.event_journal_open",
     "mindroom.api.main",
+    "mindroom.api.script_gateway",
     "mindroom.approval_transport",
     "mindroom.bot",
     "mindroom.config.main",
@@ -3814,6 +3817,7 @@ depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
+    "mindroom.thread_export.projected_history",
     "mindroom.thread_export.service",
     "mindroom.thread_export.workspace_sync",
 ]
@@ -3848,6 +3852,8 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
+    "mindroom.path_confinement",
+    "mindroom.thread_export.storage",
 ]
 visibility = [
     "mindroom.thread_export.execution",
@@ -4309,6 +4315,9 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.service"
 depends_on = [
+    # Deferred import in the install-time dashboard warning.
+    "mindroom.api.auth",
+    "mindroom.cli.config",
     "mindroom.cli.env_file",
     "mindroom.constants",
     "mindroom.matrix.provisioning_env",
@@ -6476,7 +6485,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["bind_script_tool_broker", "router"]
+expose = ["bind_script_tool_broker", "router", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]
@@ -6753,7 +6762,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.config_bundle"
-depends_on = ["mindroom.config.main", "mindroom.constants", "mindroom.file_locks"]
+depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.constants", "mindroom.file_locks"]
 
 [[modules]]
 path = "mindroom.cli.config_bundle"
@@ -7296,6 +7305,19 @@ visibility = ["mindroom.tools.file_generation"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_file_generation"]
 expose = ["WorkspaceFileGenerationTools"]
+
+[[modules]]
+path = "mindroom.tools.visualization"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_visualization"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_visualization"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement"]
+visibility = ["mindroom.tools.visualization"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_visualization"]
+expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.newspaper4k"

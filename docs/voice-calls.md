@@ -277,6 +277,8 @@ Your Matrix deployment needs the standard Element Call backend:
 }
 ```
 
+On Kubernetes, the [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/matrixrtc) deploys LiveKit and the authorization service, and the [client chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/client) publishes the `.well-known` announcement and proxies `/livekit/jwt` and `/livekit/sfu` to them.
+LiveKit media still needs a static public IP and open TCP and UDP media ports, which the chart README describes.
 Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
 
 MindRoom joins only calls whose oldest membership advertises the locally configured or discovered MatrixRTC focus.

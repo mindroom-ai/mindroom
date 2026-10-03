@@ -164,9 +164,12 @@ def _attachment_ids_for_visible_message(message: ResolvedVisibleMessage) -> list
     attachment_ids = parse_attachment_ids_from_event_source({"content": message.content})
     if attachment_ids:
         return attachment_ids
-    if message.content.get("msgtype") in _MEDIA_MSGTYPES and message.event_id:
-        return [_attachment_id_for_event(message.event_id)]
-    return []
+    msgtype = message.content.get("msgtype")
+    if msgtype not in _MEDIA_MSGTYPES:
+        return []
+    # Voice handling registers audio under its original event; thread history registers other media per revision.
+    event_id = message.event_id if msgtype == "m.audio" else message.visible_event_id
+    return [_attachment_id_for_event(event_id)] if event_id else []
 
 
 def _attachment_record_in_message_scope(
@@ -1172,10 +1175,11 @@ def _media_event_from_thread_history_message(
     message: ResolvedVisibleMessage,
 ) -> FileOrVideoMessageEvent | ImageMessageEvent | None:
     content = {key: value for key, value in message.content.items() if isinstance(key, str)}
+    # An edit can replace the media, so each visible revision is its own attachment.
     return parse_matrix_media_dispatch_event_source(
         {
             "content": content,
-            "event_id": message.event_id,
+            "event_id": message.visible_event_id,
             "origin_server_ts": message.timestamp,
             "room_id": room_id,
             "sender": message.sender,
@@ -1296,19 +1300,22 @@ async def register_thread_history_media_attachments(
     return attachment_ids[::-1]
 
 
-async def resolve_thread_attachment_ids(
+async def resolve_thread_attachment_ids(  # noqa: PLR0911
     client: nio.AsyncClient,
     storage_path: Path,
     *,
     room_id: str,
     thread_id: str,
     thread_root_event: nio.Event | None = None,
+    thread_history: Sequence[ResolvedVisibleMessage] = (),
 ) -> list[str]:
     """Resolve attachment IDs from thread root event metadata or media payload.
 
     When *thread_root_event* is provided, the ``room_get_event`` round-trip
     is skipped, avoiding duplicate homeserver calls when the caller already
     fetched the root event for image/audio resolution.
+    A media root edited in *thread_history* is left to thread-history
+    registration, because the root event still holds the original revision.
     """
     started = time.monotonic()
     event_kind = "provided" if thread_root_event is not None else "fetched"
@@ -1324,6 +1331,14 @@ async def resolve_thread_attachment_ids(
             attachment_count=len(attachment_ids),
         )
         return attachment_ids
+
+    if any(
+        message.event_id == thread_id
+        and message.visible_event_id != thread_id
+        and _media_event_from_thread_history_message(room_id, message) is not None
+        for message in thread_history
+    ):
+        return finish([], "edited_media_root")
 
     event = thread_root_event
     if event is None:

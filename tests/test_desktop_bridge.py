@@ -1641,6 +1641,8 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
     assert response.ok
     assert response.result["action_outcome"] == "unknown"
     warning = str(response.result["warning"])
+    # The provider's reason comes first, ahead of the fixed recovery advice.
+    assert warning.startswith("extension disconnected ")
     assert "outcome is unknown" in warning
     assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
 

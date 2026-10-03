@@ -167,9 +167,10 @@ class _FakeMediaIoBaseDownload:
 
 
 class _FakeMediaIoBaseUpload:
-    def __init__(self, file: BinaryIO, *, mimetype: str) -> None:
+    def __init__(self, file: BinaryIO, *, mimetype: str, resumable: bool = False) -> None:
         self.content = file.read()
         self.mimetype = mimetype
+        self.resumable = resumable
 
 
 def _google_drive_download_tool(
@@ -840,6 +841,7 @@ def test_google_drive_upload_resolves_workspace_path_and_sets_metadata(
     assert isinstance(media, _FakeMediaIoBaseUpload)
     assert media.content == upload_path.read_bytes()
     assert media.mimetype == "text/custom"
+    assert media.resumable
     assert service.files_resource.create_kwargs == {
         "body": {"name": "Launch plan.txt", "parents": ["folder-id"]},
         "media_body": media,
@@ -889,6 +891,7 @@ def test_google_drive_update_replaces_binary_file_content(
     assert isinstance(media, _FakeMediaIoBaseUpload)
     assert media.content == replacement.read_bytes()
     assert media.mimetype == "text/markdown"
+    assert media.resumable
     assert service.files_resource.update_kwargs == {
         "fileId": "file-id",
         "media_body": media,

@@ -54,6 +54,7 @@ The chart can either create a small PostgreSQL StatefulSet for the journal or wi
 This database is not a cache.
 It is the single durable owner of admitted Matrix events, turn records, the response outbox, and history debt, so losing it loses the record of which messages have already been answered rather than merely costing a rebuild.
 Size and back it up accordingly.
+See [Backup and Restore](../../../docs/deployment/kubernetes.md#backup-and-restore) for the volumes and Secrets that must be restored together with it.
 
 The chart's values and resource names still say `eventCache`, and they keep that name so existing deployments do not have to be renamed.
 Wherever this document says event journal, the value to set is `eventCache`.
@@ -302,6 +303,7 @@ The chart rejects a normalized bootstrap source that equals, contains, or lies i
 Without a revision, initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
 Bundle transport can refresh the separate source directory normally.
 To activate a changed revision explicitly, run `mindroom config install-bundle SOURCE --target TARGET --json` in the runtime container and confirm the returned fingerprint using `mindroom config check-applied`.
+Add `--source-only` to refuse changes outside the YAML/include sources that a config reload rereads, such as `.env` or plugin files.
 Restore `TARGET.previous` using the same install command with its recorded `--expected-digest` if application fails.
 See the [CLI reference](../../../docs/cli.md#config-install-bundle) for drift protection, rollback, and filesystem limits.
 Content images need no MindRoom binary.
@@ -719,6 +721,38 @@ When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY
 When `approvedEgress.enabled` is true, the chart automatically points worker proxy settings and the worker egress policy at the chart-managed proxy.
 When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
 For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
+
+## Background Script Gateway
+
+Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
+MindRoom admits them only when workers reach that gateway through a listener that serves nothing else, because the general API port exposes more authority.
+Set `scriptGateway.enabled` to have the primary serve that listener on its own port:
+
+```yaml
+workers:
+  backend: kubernetes
+
+# Any worker egress setup from Worker Egress Proxy whose NetworkPolicy is enabled.
+approvedEgress:
+  enabled: true
+  image:
+    tag: v0.1.10
+
+scriptGateway:
+  enabled: true
+  port: 8767
+```
+
+The primary container then exposes a `script-gateway` port where MindRoom serves only `/api/script-gateway` routes and returns 404 for every other API route.
+The chart renders a `<fullname>-script-gateway` ClusterIP Service for that port and sets `MINDROOM_SCRIPT_GATEWAY_PORT`, `MINDROOM_SCRIPT_GATEWAY_URL`, and `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` on the primary.
+Worker pods receive the Service's cluster-local host name in `NO_PROXY` so gateway calls bypass the egress proxy.
+If `workers.kubernetes.extraEnv` replaces `NO_PROXY` or `no_proxy`, include that host name yourself.
+A `<fullname>-script-gateway-workers` NetworkPolicy in the worker namespace adds egress from workers to the gateway port on the control-plane pod.
+When `networkPolicy.create` is true, a `<fullname>-script-gateway` NetworkPolicy also admits workers to that port on the control-plane pod.
+
+The isolation attestation relies on the chart's worker egress NetworkPolicy, so `scriptGateway.enabled` requires `workers.backend=kubernetes`, `egressProxy.enabled` or `approvedEgress.enabled`, and `egressProxy.networkPolicy.create=true`.
+Keep `egressProxy.networkPolicy.extraEgress` and the egress proxy allowlist from opening the control-plane API port or the main runtime Service to workers.
+The Service is separate from the main runtime Service so `service.type` never exposes the gateway port outside the cluster.
 
 ## Matrix Managed Account Authentication
 

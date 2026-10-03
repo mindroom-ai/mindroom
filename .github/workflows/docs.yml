@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run.
+# Main runs queue instead: cancelling an in-progress build or Pages deployment marks its commit failed, and a newer queued run still replaces any older one that has not started.
 concurrency:
   group: "pages-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -28,6 +30,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Any job on main can write the Actions cache, so builds that publish the site restore none.
+          enable-cache: ${{ github.event_name == 'pull_request' }}
 
       - name: Set up Python
         run: uv python install 3.13

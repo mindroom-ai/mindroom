@@ -757,7 +757,9 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
-A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
@@ -986,6 +988,7 @@ If installation fails, MindRoom starts in the terminal instead.
 `mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
 Both `mindroom service install` and `mindroom run` save `MINDROOM_API_KEY` and the provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) to `.env` before installing, because the service does not see your shell's environment and would otherwise serve the dashboard on every interface without the key your terminal runs used.
 Keys are quoted where needed so `.env` reads them back unchanged, and installation stops with an error when an exported key contains `${`, which reading `.env` would expand, or when a key that needs quoting ends in a backslash.
+When the service will still start without a dashboard credential, installing it prints the same open-dashboard warning as a terminal run, since the service's own warning only reaches its logs.
 If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
 On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 
@@ -1210,19 +1213,21 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Migrate config.yaml to membership access settings.                    │
-│ fingerprint      Print the config source SHA-256, including all transitively included  │
-│                  files.                                                                │
-│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
-│                  runtime reload.                                                       │
-│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
-│                  failed/restart-required/unavailable.                                  │
+│ init              Create a starter config.yaml with a personal agent and model.        │
+│ show              Display the current config file with syntax highlighting.            │
+│ edit              Open config.yaml in your default editor.                             │
+│ validate          Validate config.yaml and check for common issues.                    │
+│ resolve           Print the fully merged config YAML with all !include tags resolved.  │
+│ path              Show the resolved config file path and search locations.             │
+│ migrate           Migrate config.yaml to membership access settings.                   │
+│ fingerprint       Print the config source SHA-256, including all transitively included │
+│                   files.                                                               │
+│ install-bundle    Validate and install a complete tree; use check-applied to confirm   │
+│                   runtime reload.                                                      │
+│ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
+│                   changes, 2 error.                                                    │
+│ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
+│                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1379,6 +1384,8 @@ Changed managed trees replace the active tree only if its file names, modes, and
 This covers `.env` and files outside the YAML include graph too.
 An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
 `--force` cannot be combined with `--initialize-only`.
+`--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
+The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
 
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
@@ -1431,6 +1438,27 @@ The fingerprint identifies native YAML/include sources, so use the existing `che
 The installer advances the root config mtime on changed activation for the existing watcher.
 Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
 Preserve `TARGET.previous` until runtime confirmation succeeds.
+
+### config classify-change
+
+Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
+
+```bash
+mindroom config classify-change ./active ./candidate --json
+mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml --config staging/config.yaml
+```
+
+Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
+Directories that only appear or disappear around those files also count as sources.
+Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
+Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](plugins.md#live-development-hot-reload).
+A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
+Each `--config` entrypoint (default `config.yaml`) must load in both trees.
+Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
+The command only reads both trees, and its results list paths, never file contents.
+
+JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
+Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
 
 ### config fingerprint and config check-applied
 

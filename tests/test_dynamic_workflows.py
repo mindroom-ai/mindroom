@@ -20,10 +20,12 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.tools  # noqa: F401
+from mindroom.api.credentials_target import RequestCredentialsTarget, save_credentials_for_target
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, execute_workflow_spec
@@ -2167,6 +2169,42 @@ def test_participant_run_config_pre_approves_allowed_tools(tmp_path: Path) -> No
     run_config = dynamic_workflow_module._participant_run_config(context, {"website": website, "shell": shell})
 
     assert run_config.tool_approval.default == "require_approval"
+    assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
+
+
+@pytest.mark.parametrize("agent_selected", [True, False])
+def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_scope_agent(
+    tmp_path: Path,
+    *,
+    agent_selected: bool,
+) -> None:
+    """Dashboard pre-approvals reach a shared-scope agent whether saved with that agent selected or globally."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", tools=["dynamic_workflow"], worker_scope="shared"),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+    target = RequestCredentialsTarget(
+        runtime_paths=context.runtime_paths,
+        base_manager=manager,
+        target_manager=manager,
+        worker_scope="shared" if agent_selected else None,
+        agent_name="general" if agent_selected else None,
+        execution_identity=None,
+    )
+    save_credentials_for_target("dynamic_workflow", {"allowed_tools": ["website"]}, target)
+    website = Toolkit(name="fake_website")
+    website.functions["read_url"] = SimpleNamespace(name="read_url")
+
+    run_config = dynamic_workflow_module._participant_run_config(context, {"website": website})
+
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
 
 

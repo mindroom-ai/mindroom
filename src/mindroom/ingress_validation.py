@@ -27,7 +27,11 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    is_access_checked_requester_id,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
@@ -127,11 +131,11 @@ class IngressValidator:
         )
 
     def acting_requester_for_event(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
-        """Return the human requester an agent's or team's own reply was written for, when trusted.
+        """Return the human or bot-account requester an agent's or team's own reply was written for, when trusted.
 
-        Entities that this reply mentions act for that human: they apply their
-        access policy to that human and run with that human as requester, while
-        the sender stays the message's author for every sender-based mechanic.
+        Entities that this reply mentions act for that requester: they apply their
+        access policy to it and run with it as requester, while the sender stays
+        the message's author for every sender-based mechanic.
         """
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -141,7 +145,7 @@ class IngressValidator:
             not isinstance(acting_requester, str)
             or self.managed_entity_name_for_sender(event.sender) in {None, ROUTER_AGENT_NAME}
             or source_kind_from_content(content) not in {None, MESSAGE_SOURCE_KIND}
-            or not is_human_requester_id(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
+            or not is_access_checked_requester_id(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
         ):
             return None
         return resolve_human_requester_alias(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)

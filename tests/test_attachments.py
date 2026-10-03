@@ -10,6 +10,7 @@ import os
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -42,6 +43,9 @@ from mindroom.attachments import (
 )
 from mindroom.logging_config import bound_log_context
 from tests.conftest import FakeMediaResponse, make_matrix_client_mock, make_visible_message
+
+if TYPE_CHECKING:
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def test_attachment_id_for_event_is_stable() -> None:
@@ -413,6 +417,60 @@ async def test_failing_older_thread_history_media_cannot_hold_back_newer_media(
         thread_history=history,
     )
     assert attachment_ids == [_attachment_id_for_event("$good-old"), _attachment_id_for_event("$good-new")]
+
+
+@pytest.mark.asyncio
+async def test_thread_history_media_replaced_by_an_edit_uses_the_new_file(tmp_path: Path) -> None:
+    """An edit that replaces a message's media yields the new file, while unedited media keeps its record."""
+    client = make_matrix_client_mock()
+    client.send = AsyncMock(
+        side_effect=lambda _method, path, *_args, **_kwargs: FakeMediaResponse(
+            b"NEW-BYTES" if "/media/download/localhost/new" in path else b"OLD-BYTES",
+        ),
+    )
+    edited = make_visible_message(
+        event_id="$media",
+        content={"msgtype": "m.file", "body": "report.txt", "url": "mxc://localhost/old"},
+    )
+    unedited = make_visible_message(
+        event_id="$other",
+        content={"msgtype": "m.file", "body": "other.txt", "url": "mxc://localhost/other"},
+    )
+
+    async def register(history: list[ResolvedVisibleMessage]) -> list[AttachmentRecord]:
+        attachment_ids = await attachments_module.register_thread_history_media_attachments(
+            client,
+            tmp_path,
+            room_id="!room:localhost",
+            thread_id=None,
+            thread_history=history,
+        )
+        return resolve_attachments(tmp_path, attachment_ids)
+
+    await register([edited, unedited])
+    edited.apply_edit(
+        body="report-v2.txt",
+        timestamp=1,
+        latest_event_id="$edit",
+        content={"msgtype": "m.file", "body": "report-v2.txt", "url": "mxc://localhost/new"},
+    )
+    records = await register([edited, unedited])
+
+    assert [record.attachment_id for record in records] == [
+        _attachment_id_for_event("$edit"),
+        _attachment_id_for_event("$other"),
+    ]
+    assert [(record.filename, record.local_path.read_bytes()) for record in records] == [
+        ("report-v2.txt", b"NEW-BYTES"),
+        ("other.txt", b"OLD-BYTES"),
+    ]
+    assert _attachment_ids_for_visible_message(edited) == [_attachment_id_for_event("$edit")]
+    assert client.send.await_count == 3
+
+    voice_content = {"msgtype": "m.audio", "body": "voice.ogg", "url": "mxc://localhost/voice"}
+    voice = make_visible_message(event_id="$voice", content=voice_content)
+    voice.apply_edit(body="voice.ogg", timestamp=1, latest_event_id="$voice-edit", content=voice_content)
+    assert _attachment_ids_for_visible_message(voice) == [_attachment_id_for_event("$voice")]
 
 
 @pytest.mark.asyncio

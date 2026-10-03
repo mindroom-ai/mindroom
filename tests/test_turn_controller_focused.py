@@ -1956,6 +1956,38 @@ async def test_mentioned_agent_ignores_an_agent_reply_for_a_human_its_access_exc
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_mentioned_agent_acts_for_the_bot_account_an_agent_reply_was_written_for(
+    tmp_path: Path,
+    *,
+    admitted: bool,
+) -> None:
+    """A configured bot account is held to the mentioned agent's access like a human, not run as the replying agent."""
+    bot_account = "@telegram:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[bot_account if admitted else _OWNER]),
+                ),
+                "research": AgentConfig(display_name="Research"),
+            },
+            bot_accounts=[bot_account],
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", "research")
+    event = _entity_reply_event(config, sender=_entity_user_id(config, "research"), acting_requester=bot_account)
+
+    await harness.deliver(room, event)
+
+    assert [request.user_id for request in harness.runner.requests] == ([bot_account] if admitted else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_acting_requester_written_by_a_human_is_ignored(tmp_path: Path) -> None:
     """Only a managed entity's own reply may name the requester it acts for."""
     config = _owner_only_general_config(tmp_path)
