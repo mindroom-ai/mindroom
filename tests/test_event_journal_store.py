@@ -1387,7 +1387,7 @@ class TestRedaction:
             content=text("first edit"),
         )
 
-        assert not installed
+        assert installed is None
         assert "first edit" not in await bodies(alice)
 
     async def test_a_newer_edit_beats_an_in_flight_refetch(self, alice: PrincipalStore) -> None:
@@ -1407,7 +1407,7 @@ class TestRedaction:
             content=text("first"),
         )
 
-        assert not installed
+        assert installed is None
         assert await bodies(alice) == ["newest"]
 
     async def test_a_stale_zero_token_cannot_drop_a_newer_outbox_projection(

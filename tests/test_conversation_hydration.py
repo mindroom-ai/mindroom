@@ -2087,8 +2087,11 @@ class TestPointRefetch:
         await self._redact_current_edit(alice)
         client = FakeClient(events={}, relations={})
 
-        assert not await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            is None
         )
         assert await bodies(alice) == []
         assert len(await refreshes(alice)) == 1
@@ -2383,8 +2386,11 @@ class TestEncryptedRelations:
         await TestPointRefetch._redact_current_edit(alice)
         client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
 
-        assert not await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            is None
         )
         assert len(await refreshes(alice)) == 1
 
