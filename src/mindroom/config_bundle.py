@@ -235,7 +235,7 @@ def _replaceable_digest(target: Path, candidate_digest: str, *, force: bool, req
         metadata = None
     baseline = metadata.get("digest") if isinstance(metadata, dict) else None
     if not force and active_digest != baseline:
-        msg = "Target contains authored edits or is unmanaged; use --force to replace it explicitly."
+        msg = "Target contains authored edits or is unmanaged; use install-bundle --force to replace it explicitly."
         raise ValueError(msg)
     return active_digest
 

@@ -240,10 +240,10 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
     status = _settled_status(runtime_paths, url, install.fingerprint, wait, timeout)
     if status in _SETTLED:
         return _ApplyReceipt(*_SETTLED[status], install, status)
-    # A reload of the same fingerprint that began before this install cannot confirm the new tree's result.
+    # A reload already pending or failed for this or a not-yet-known fingerprint cannot confirm the new tree.
     stale = (
         install.status == "installed"
-        and before.fingerprint == install.fingerprint
+        and before.fingerprint in {install.fingerprint, None}
         and before.status in {"pending", "failed"}
     )
     if status != "failed" or stale:
@@ -267,7 +267,7 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
     if rollback_status == "applied":
         detail = "The runtime rejected the candidate; the previous tree is restored and applied."
         return _ApplyReceipt("rolled_back", detail, install, status, rollback, rollback_status)
-    detail = "The runtime rejected the candidate; the previous tree is restored, but its runtime result is unconfirmed."
+    detail = "The runtime rejected the candidate; the previous tree is restored but not reported applied."
     return _ApplyReceipt("unconfirmed", detail, install, status, rollback, rollback_status)
 
 

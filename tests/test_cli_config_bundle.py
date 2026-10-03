@@ -372,6 +372,7 @@ def _apply(source: Path, target: Path, *args: str) -> tuple[int, dict[str, objec
         ("applies", ["--rollback-on-failure"], "applied", 0, "candidate"),
         ("rejects", ["--rollback-on-failure"], "rolled_back", 3, "previous"),
         ("rejects", [], "failed", 2, "candidate"),
+        ("rejects_both", ["--rollback-on-failure"], "unconfirmed", 4, "previous"),
         ("keeps_previous", ["--rollback-on-failure"], "pending", 1, "candidate"),
         ("needs_restart", ["--rollback-on-failure"], "restart_required", 5, "candidate"),
         ("disconnects", ["--rollback-on-failure"], "unconfirmed", 4, "candidate"),
@@ -397,7 +398,7 @@ def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
             return {"status": "applied", "fingerprint": previous_fingerprint}
         if runtime == "disconnects":
             return None
-        if runtime == "rejects" and current != previous_fingerprint:
+        if runtime == "rejects_both" or (runtime == "rejects" and current != previous_fingerprint):
             return {"status": "failed", "fingerprint": current}
         return {"status": "restart_required" if runtime == "needs_restart" else "applied", "fingerprint": current}
 
@@ -408,9 +409,9 @@ def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
     assert receipt["install"]["previous_digest"] == first["digest"]
     expected = "agents: {}\n# candidate\n" if active == "candidate" else "agents: {}\n"
     assert (target / "config.yaml").read_text() == expected
-    if status == "rolled_back":
+    if active == "previous":
         assert receipt["rollback"]["digest"] == first["digest"]
-        assert receipt["rollback_runtime_status"] == "applied"
+        assert receipt["rollback_runtime_status"] == ("applied" if status == "rolled_back" else "failed")
         assert (tmp_path / "active.previous/config.yaml").read_text() == "agents: {}\n# candidate\n"
     else:
         assert receipt["rollback"] is None
@@ -430,13 +431,14 @@ def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
     if problem == "missing_key":
         monkeypatch.delenv("MINDROOM_API_KEY")
     (source / "config.yaml").write_text("agents: {}\n# candidate\n")
-    (source / ".env").write_text("CHANGED=1\n")
+    if problem == "non_source":
+        (source / ".env").write_text("CHANGED=1\n")
     code, receipt = _apply(source, target, "--rollback-on-failure")
     assert (code, receipt["status"], receipt["install"]) == (2, "failed", None)
     assert (target / "config.yaml").read_text() == "agents: {}\n"
 
 
-@pytest.mark.parametrize("case", ["unchanged", "stale_failure", "stale_pending", "previous_changed"])
+@pytest.mark.parametrize("case", ["unchanged", "stale_failure", "stale_pending", "stale_unknown", "previous_changed"])
 def test_apply_bundle_never_rolls_back_an_unproven_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -450,8 +452,8 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
     candidate = hashlib.sha256((source / "config.yaml").read_bytes()).hexdigest()
 
     def respond(call: int) -> dict[str, object]:
-        if case == "stale_pending" and call == 1:
-            return {"status": "pending", "fingerprint": candidate}
+        if case in {"stale_pending", "stale_unknown"} and call == 1:
+            return {"status": "pending", "fingerprint": candidate if case == "stale_pending" else None}
         if case == "previous_changed":
             if call == 1:
                 return {"status": "applied", "fingerprint": previous_fingerprint}
@@ -460,7 +462,7 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
 
     _serve_runtime(monkeypatch, respond)
     code, receipt = _apply(source, target, "--rollback-on-failure")
-    expected = {"unchanged": (2, "failed"), "previous_changed": (4, "unconfirmed")}.get(case, (4, "unconfirmed"))
+    expected = (2, "failed") if case == "unchanged" else (4, "unconfirmed")
     assert (code, receipt["status"]) == expected, receipt
     assert receipt["rollback"] is None
     assert ("restoring the previous tree failed" in receipt["detail"]) == (case == "previous_changed")
