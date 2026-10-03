@@ -31,7 +31,11 @@ from mindroom.approval_response import (
     require_ordered_pause_presentation,
 )
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
-from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.background_tasks import (
+    create_background_task,
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+)
 from mindroom.cli_approval_waits import CliApprovalWaits
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -239,6 +243,22 @@ _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Write your complete reply from the start, reusing those results instead of repeating calls that may already "
     "have taken effect."
 )
+_UNREADABLE_ATTEMPT_INSTRUCTION = (
+    "A service restart stopped a previous attempt at replying to the current message, and what it did "
+    "could not be read back. Write your complete reply from the start, and check whether any tool call "
+    "with side effects already took effect before repeating it."
+)
+
+
+def _with_interrupted_attempt_instruction(request: ResponseRequest, text: str) -> ResponseRequest:
+    """Tell this turn's model that a stopped attempt came before it."""
+    return replace(
+        request,
+        transient_enrichment_items=(
+            *request.transient_enrichment_items,
+            EnrichmentItem(key="interrupted_attempt", text=text, persist=False, minimal_required=True),
+        ),
+    )
 
 
 async def _cancel_pending_responses(
@@ -3592,8 +3612,11 @@ class ResponseRunner:
             event_id=event_id,
             trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
         )
-        unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
-        if message is None or unfinished is None:
+        if message is None:
+            # Unreadable, so the stopped attempt's work is unknown rather than absent.
+            return _with_interrupted_attempt_instruction(request, _UNREADABLE_ATTEMPT_INSTRUCTION)
+        unfinished = unfinished_streamed_reply(message.body, message.content)
+        if unfinished is None:
             return request
         completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
         recorder = self._build_turn_recorder(
@@ -3610,37 +3633,29 @@ class ResponseRunner:
             interrupted_tools=interrupted_tools,
         )
         # A failed write raises and leaves the sources pending for retry, since
-        # answering without this record could repeat the finished tools.
-        await asyncio.to_thread(
-            self._persist_interrupted_turn,
-            recorder=recorder,
-            session_scope=history_scope,
-            session_id=resolved_target.session_id,
-            execution_identity=execution_identity,
-            # One record per stopped attempt: its last visible edit names it, so
-            # rereading that attempt rewrites its record while a later stopped
-            # attempt adds its own beside it.
-            run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
-            is_team=history_scope.kind == "team",
-            response_event_id=event_id,
+        # answering without this record could repeat the finished tools. The
+        # write finishes before cancellation releases the lifecycle lock.
+        await run_blocking_until_complete(
+            partial(
+                self._persist_interrupted_turn,
+                recorder=recorder,
+                session_scope=history_scope,
+                session_id=resolved_target.session_id,
+                execution_identity=execution_identity,
+                # One record per stopped attempt: its last visible edit names it, so
+                # rereading that attempt rewrites its record while a later stopped
+                # attempt adds its own beside it.
+                run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
+                is_team=history_scope.kind == "team",
+                response_event_id=event_id,
+            ),
         )
         self.deps.logger.info(
             "interrupted_attempt_recorded",
             response_event_id=event_id,
             completed_tool_count=len(completed_tools),
         )
-        return replace(
-            request,
-            transient_enrichment_items=(
-                *request.transient_enrichment_items,
-                EnrichmentItem(
-                    key="interrupted_attempt",
-                    text=_INTERRUPTED_ATTEMPT_INSTRUCTION,
-                    persist=False,
-                    minimal_required=True,
-                ),
-            ),
-        )
+        return _with_interrupted_attempt_instruction(request, _INTERRUPTED_ATTEMPT_INSTRUCTION)
 
     async def _prepare_locked_source(
         self,

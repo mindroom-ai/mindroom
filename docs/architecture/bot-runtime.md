@@ -86,6 +86,7 @@ A crash leaves the same pending state as orderly shutdown, and in both the inter
 When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and records them as an interrupted replay record in the turn's history before answering, with a transient instruction not to repeat calls that may already have taken effect.
 Only visible work is known this way: tool calls hidden by `show_tool_calls: false` leave no trace, and in a team only the leader reads the record and instruction.
 Each stopped attempt gets its own record, named by its last visible edit, so stopping again before the new attempt shows the earlier tools keeps both accounts; a reply showing only its placeholder carries nothing forward.
+A recovered reply that cannot be read back still gets an instruction warning that side effects may already have happened.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.

@@ -245,13 +245,12 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
     [
         _streamed("Thinking...", status=STREAM_STATUS_PENDING, trace=()),
         _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR),
-        None,
     ],
-    ids=["placeholder_only", "already_terminal", "unreadable"],
+    ids=["placeholder_only", "already_terminal"],
 )
 async def test_replay_without_unfinished_visible_work_answers_as_before(
     tmp_path: Path,
-    visible: ResolvedVisibleMessage | None,
+    visible: ResolvedVisibleMessage,
 ) -> None:
     """Without visible work to carry forward the replay is an ordinary answer."""
     bot = _bot(tmp_path)
@@ -262,6 +261,19 @@ async def test_replay_without_unfinished_visible_work_answers_as_before(
     assert _attempt_context(context) == []
     assert _recorded_attempts(bot, request) == []
     assert not await bot.journal_principal().is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stopped_attempt_still_warns_the_new_attempt(tmp_path: Path) -> None:
+    """Unknown is not nothing: the new attempt is told side effects may already have happened."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+
+    (context,), _fetch = await _replay(bot, request, None)
+
+    (instruction,) = _attempt_context(context)
+    assert "could not be read back" in instruction
+    assert _recorded_attempts(bot, request) == []
 
 
 @pytest.mark.asyncio
