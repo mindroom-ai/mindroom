@@ -29,13 +29,15 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
         "invoice.payment_failed",
     }
 )
-# Events whose handler writes the subscription binding or status. If one raises unexpectedly, the webhook answers
-# 500 without recording it so Stripe redelivers it; those handlers are safe to run again.
+# Events whose handler writes the subscription binding or status, or the payment records that decide whether a failed
+# renewal keeps the past_due grace period. If one raises unexpectedly, the webhook answers 500 without recording it so
+# Stripe redelivers it; those handlers are safe to run again.
 _REDELIVERED_EVENT_TYPES = frozenset(
     {
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
+        "invoice.payment_succeeded",
         "invoice.payment_failed",
     }
 )
