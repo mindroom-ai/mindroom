@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from agno.tools import Toolkit
@@ -2730,12 +2731,19 @@ def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
 ) -> None:
     """A cancel can reach the runner before its own request; that request then does not run, once."""
     _set_sandbox_token(monkeypatch)
-    request = {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "kwargs": {}, "request_id": "early"}
+    request_id = uuid4().hex
+    request = {
+        "tool_name": "calculator",
+        "function_name": "add",
+        "args": [1, 2],
+        "kwargs": {},
+        "request_id": request_id,
+    }
 
     cancel = runner_client.post(
         "/api/sandbox-runner/execute/cancel",
         headers=SANDBOX_HEADERS,
-        json={"request_id": "early"},
+        json={"request_id": request_id},
     )
     stopped = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
     retried = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
@@ -2763,13 +2771,14 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
         "record_worker_failure",
         lambda *args: failures.append(args),
     )
+    request_id = uuid4().hex
     pid_file = tmp_path / "command.pid"
     request = {
         "tool_name": "shell",
         "function_name": "run_shell_command",
         "args": [["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"]],
         "kwargs": {"timeout": 60},
-        "request_id": "running",
+        "request_id": request_id,
     }
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -2783,7 +2792,7 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
             cancel = runner_client.post(
                 "/api/sandbox-runner/execute/cancel",
                 headers=SANDBOX_HEADERS,
-                json={"request_id": "running"},
+                json={"request_id": request_id},
             )
             response = running.result(timeout=30)
             asyncio.run(assert_linux_pid_not_running(pid))
@@ -2805,11 +2814,12 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     _refresh_runner_app_from_env()
     prepare = sandbox_runner_module._prepare_execute_request
+    request_id = uuid4().hex
     spawned: list[object] = []
 
     def prepare_then_cancel(*args: object, **kwargs: object) -> object:
         prepared = prepare(*args, **kwargs)
-        sandbox_runner_module.sandbox_request_cancellation.cancel_request("preparing")
+        sandbox_runner_module.sandbox_request_cancellation.cancel_request(request_id)
         return prepared
 
     monkeypatch.setattr(sandbox_runner_module, "_prepare_execute_request", prepare_then_cancel)
@@ -2822,12 +2832,36 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
             "function_name": "add",
             "args": [1, 2],
             "kwargs": {},
-            "request_id": "preparing",
+            "request_id": request_id,
         },
     )
 
     assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
     assert spawned == []
+
+
+@pytest.mark.asyncio
+async def test_runner_shutdown_still_cancels_a_request_the_primary_cancelled() -> None:
+    """A request the primary cancelled still propagates the runner's own cancellation instead of answering."""
+    started = asyncio.Event()
+    request_id = uuid4().hex
+
+    async def execution() -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        started.set()
+        await asyncio.Event().wait()
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True)
+
+    async def handler() -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        with sandbox_runner_module.sandbox_request_cancellation.track_request(request_id):
+            return await sandbox_runner_module._run_cancellable(execution())
+
+    request = asyncio.create_task(handler())
+    await started.wait()
+    sandbox_runner_module.sandbox_request_cancellation.cancel_request(request_id)
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
 
 
 @requires_linux()

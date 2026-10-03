@@ -7,6 +7,7 @@ import base64
 import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -167,15 +168,16 @@ async def test_cancelled_browser_call_stops_its_running_operation(
         return b"never"
 
     monkeypatch.setattr(browser_processes[0].pages[-1], "screenshot", capture, raising=False)
+    request_id = uuid4().hex
     request = {
         **payload,
-        "request_id": "browser-call",
+        "request_id": request_id,
         "kwargs": {"action": "screenshot", "targetId": opened["targetId"]},
     }
     running = asyncio.create_task(client.post("/api/sandbox-runner/execute", json=request))
     async with asyncio.timeout(10):
         await entered.wait()
-        cancel = await client.post("/api/sandbox-runner/execute/cancel", json={"request_id": "browser-call"})
+        cancel = await client.post("/api/sandbox-runner/execute/cancel", json={"request_id": request_id})
         response = await running
         await exited.wait()
 

@@ -15,6 +15,7 @@ import signal
 import stat
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -5695,10 +5696,13 @@ async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkey
     """Cancelling a dispatched call returns at once and posts the call's request ID to the runner's cancel route."""
     dispatched = threading.Event()
     stopped = threading.Event()
+    runner_answers = threading.Event()
 
     def responder(url: str, _payload: dict[str, Any]) -> object:
         if url.endswith("/execute/cancel"):
             stopped.set()
+            # The caller must not wait for the runner to answer its stop request.
+            assert runner_answers.wait(10)
             return {"cancelled": True}
         dispatched.set()
         assert stopped.wait(10)
@@ -5708,8 +5712,14 @@ async def test_cancelled_worker_call_asks_the_runner_to_stop_that_request(monkey
     call = asyncio.create_task(entrypoint("sleep 30"))
     assert await asyncio.to_thread(dispatched.wait, 10)
     call.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await call
+    cancelled_at = time.monotonic()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        # A stop request sent on the event loop would block it until the runner answered.
+        assert time.monotonic() - cancelled_at < 2
+    finally:
+        runner_answers.set()
 
     assert await asyncio.to_thread(stopped.wait, 10)
     (_, execute), (cancel_url, cancel) = [(url, payload) for url, payload in calls if "/execute" in url]

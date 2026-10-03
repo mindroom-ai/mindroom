@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
@@ -186,6 +187,41 @@ def test_stop_after_its_request_ended_never_signals_the_reaped_child(
 
     assert completed.returncode == 0
     assert signals == []
+
+
+def test_stopping_a_request_ends_its_child_without_signalling_a_pid(
+    stub_manager: tuple[_SandboxForkserver, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Stopping hangs up on the running child, which exits; no PID is signalled, so none can be reused."""
+    manager, _spawned = stub_manager
+    pid_file = tmp_path / "child.pid"
+    stops: list[Callable[[], None]] = []
+    signals: list[tuple[int, int]] = []
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(_stub_execute, manager, envelope=f"sleep:{pid_file}", bind_stop=stops.append)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8"):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        with monkeypatch.context() as patched:
+            patched.setattr(sandbox_forkserver_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+            stops[0]()
+            with pytest.raises(ForkserverError):
+                running.result(timeout=10)
+
+    assert signals == []
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
 
 
 def test_template_recycled_when_env_fingerprint_changes(
