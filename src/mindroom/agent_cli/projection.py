@@ -36,13 +36,14 @@ def _shortened_without_workspace(result: object) -> object:
     """Keep oversized text within its receipt when there is no workspace to save the full output to."""
     if not isinstance(result, str) or _encoded_size(result) <= _INLINE_BUDGET:
         return result
-    shortened = result
-    while _encoded_size(shortened) > _INLINE_BUDGET:
-        shortened = shortened[: len(shortened) // 2]
-    return (
-        f"{shortened}\n[Output shortened for CLI; this agent has no workspace for the full output. "
+    notice = (
+        "\n[Output shortened for CLI; this agent has no workspace for the full output. "
         "Call the tool directly for all of it.]"
     )
+    shortened = result
+    while _encoded_size(shortened + notice) > _INLINE_BUDGET:
+        shortened = shortened[: len(shortened) // 2]
+    return shortened + notice
 
 
 def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool_name: str) -> object:

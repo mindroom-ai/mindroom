@@ -365,16 +365,24 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         await owner.close()
 
 
-def test_large_result_without_workspace_is_shortened_to_fit_its_receipt() -> None:
+@pytest.mark.parametrize(
+    "result",
+    [
+        # Quotes double when JSON-escaped, so this alone would overflow the 64 KiB receipt envelope.
+        '"' * 40_000,
+        # Halving stops just under the budget, so the notice must count toward it too.
+        "x" * 32_700,
+    ],
+    ids=["escaped", "notice-at-budget"],
+)
+def test_large_result_without_workspace_is_shortened_to_fit_its_receipt(result: str) -> None:
     """With nowhere to save the full output, an oversized result still reaches the caller, shortened."""
-    # Quotes double when JSON-escaped, so this alone would overflow the 64 KiB receipt envelope.
-    result = '"' * 40_000
-
     projected = project_cli_result(result, None, "run_shell_command")
 
     assert isinstance(projected, str)
-    assert projected.startswith('"' * 1000)
+    assert projected.startswith(result[:1000])
     assert projected.endswith("Call the tool directly for all of it.]")
+    assert len(json.dumps(projected, ensure_ascii=False).encode()) <= 16 * 1024
     receipt = ToolCallReceipt(
         call_id=uuid4(),
         toolkit="shell",
