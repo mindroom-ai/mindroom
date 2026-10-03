@@ -52,8 +52,6 @@ _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_SUMMARY_MAX_CHARS = 500
 _SNAPSHOT_SCHEMA_VERSION = 7
 _JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-# The internal source that delivers one job generation's outcome; parsing accepts exactly what the builder emits.
-_COMPLETION_EVENT_ID = re.compile(rf"tool-job:(?P<job_id>{_JOB_ID.pattern}):(?P<generation>0|[1-9][0-9]*)")
 _PAYLOAD_SUFFIX = ".result.json"
 # A reattaching call must name exactly the operation its job was admitted for.
 _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_event_id", "source_kind", "adapter")
@@ -145,21 +143,6 @@ class JobClaim:
 
     generation: int
     nonce: str
-
-
-def _completion_source(job_id: str, generation: int) -> str:
-    return f"tool-job:{job_id}:{generation}"
-
-
-def completion_event_id(job: BackgroundJob) -> str:
-    """Name the internal source that delivers one job generation's outcome, stable across worker and process retries."""
-    return _completion_source(job.job_id, job.generation)
-
-
-def parse_completion_event_id(event_id: str) -> tuple[str, int] | None:
-    """Return the job ID and generation an internal completion source names, or None for any other event."""
-    match = _COMPLETION_EVENT_ID.fullmatch(event_id)
-    return None if match is None else (match["job_id"], int(match["generation"]))
 
 
 def _updated(job: BackgroundJob, **changes: object) -> BackgroundJob:
@@ -379,10 +362,6 @@ class ToolJobRuntime:
     def awaits_approval(self, job_id: str) -> bool:
         """Whether an accepted job is paused for approval, read without acquiring the admission lock."""
         return (entry := self._entries.get(job_id)) is not None and entry.job.status == "awaiting_approval"
-
-    def source_event_id(self, job_id: str) -> str | None:
-        """Read accepted provenance for internal Stop ancestry without acquiring the admission lock."""
-        return entry.job.source_event_id if (entry := self._entries.get(job_id)) is not None else None
 
     def _add_entry(self, entry: _Entry) -> None:
         """Make an accepted job current and findable by its source and conversation, which never change."""
@@ -790,11 +769,6 @@ class ToolJobRuntime:
                 failures.append(error)
         return failures
 
-    async def is_user_stopped(self, job_id: str) -> bool:
-        """Whether an explicit Stop marked this job; consuming its outcome does not count."""
-        async with self._lock:
-            return (entry := self._entries.get(job_id)) is not None and entry.job.user_stop_receipt_order is not None
-
     async def is_source_user_stopped(self, source_event_id: str, transport_agent_name: str) -> bool:
         """Recognize a stopped original response, including foreground approval recovery."""
         async with self._lock:
@@ -920,18 +894,15 @@ class ToolJobRuntime:
             await run_coroutine_until_complete(self._admit(entry, job, operation))
             return await self._snapshot(entry)
 
-    def _unconsumed(self, entry: _Entry, source_event_id: str | None = None) -> bool:
-        """Whether no parent run consumed this generation, or only the reply of `source_event_id` did."""
+    def _unconsumed(self, entry: _Entry) -> bool:
+        """Whether no parent run consumed this generation, no Stop ended it, and no waiter claims it."""
         job = entry.job
         return (
-            (not job.consumed or (source_event_id is not None and job.consuming_source == source_event_id))
+            not job.consumed
             and job.user_stop_receipt_order is None
             and entry.live_claim is None
             and self._authorize(entry.job)
         )
-
-    def _pending(self, entry: _Entry, source_event_id: str | None = None) -> bool:
-        return entry.job.status in READY_STATUSES and self._unconsumed(entry, source_event_id)
 
     async def _find(
         self,
@@ -944,10 +915,6 @@ class ToolJobRuntime:
                 return []
             return [await self._snapshot(entry, include_approval_state=False) for entry in entries() if matches(entry)]
 
-    async def pending_outcomes(self) -> list[BackgroundJob]:
-        """Return authorized ready generations that no parent run consumed and no waiter claims."""
-        return await self._find(self._entries.values, self._pending)
-
     async def stoppable_jobs(self) -> list[BackgroundJob]:
         """Return jobs no Stop has marked whose execution or unconsumed outcome a saved Stop could still end."""
         return await self._find(
@@ -957,25 +924,6 @@ class ToolJobRuntime:
                 and (entry.job.status not in TERMINAL_STATUSES or not entry.job.consumed)
             ),
         )
-
-    async def outcome(
-        self,
-        job_id: str,
-        generation: int,
-        *,
-        source_event_id: str | None = None,
-    ) -> BackgroundJob | None:
-        """Revalidate an unread generation, or one the reply of `source_event_id` already consumed, at its boundary."""
-        async with self._lock:
-            entry = self._entries.get(job_id)
-            if (
-                self._closed
-                or entry is None
-                or entry.job.generation != generation
-                or not self._pending(entry, source_event_id)
-            ):
-                return None
-            return await self._snapshot(entry, include_approval_state=False)
 
     async def source_jobs(
         self,
@@ -1057,10 +1005,6 @@ class ToolJobRuntime:
             and entry.live_claim is None
             and entry.saved
             and datetime.fromisoformat(job.updated_at) < before
-            and not any(
-                (job.owner.recipient, _completion_source(job.job_id, generation)) in self._by_source.groups
-                for generation in range(job.generation + 1)
-            )
         )
 
     async def quiesce(self) -> None:

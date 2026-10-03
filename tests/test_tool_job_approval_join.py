@@ -54,7 +54,12 @@ from mindroom.tool_system.runtime_context import (
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    pending_outcomes,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -305,7 +310,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                 text = await asyncio.wait_for(pending, 30)
                 assert "Final result received." in text
                 assert text.count("Independent work done.") == 1
-                assert await runtime.pending_outcomes() == []
+                assert pending_outcomes(runtime) == []
             assert executions == 1
     finally:
         release.set()
@@ -641,7 +646,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             if streaming:
                 assert [entry.tool_name for entry in final_trace] == expected_tools
             assert calls == (2 if repeat_join else 1)
-            assert await runtime.pending_outcomes() == []
+            assert pending_outcomes(runtime) == []
     finally:
         for release in releases:
             release.set()

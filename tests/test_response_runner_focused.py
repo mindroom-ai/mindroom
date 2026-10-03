@@ -3446,20 +3446,18 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "toolkit_name", "completion_origin", "wait_argument", "feature_enabled", "job_child", "expected"),
+    ("tool_name", "toolkit_name", "wait_argument", "feature_enabled", "job_child", "expected"),
     [
-        ("job", "job", False, False, False, False, True),
-        ("job", "custom", False, False, False, False, False),
-        ("inspect", "test_toolkit", True, False, False, False, True),
-        ("inspect", "test_toolkit", False, False, False, False, False),
-        ("report", "reports", False, True, False, False, False),
-        ("report", "reports", False, True, True, False, True),
-        ("write_report", "file", False, False, True, True, True),
+        ("job", "job", False, False, False, True),
+        ("job", "custom", False, False, False, False),
+        ("inspect", "test_toolkit", False, False, False, False),
+        ("report", "reports", True, False, False, False),
+        ("report", "reports", True, True, False, True),
+        ("write_report", "file", False, True, True, True),
     ],
     ids=[
         "native-job-toolkit",
         "same-named-custom-tool",
-        "completion-or-recovery-source",
         "ordinary",
         "wait-argument-feature-disabled",
         "wait-argument-feature-enabled",
@@ -3471,7 +3469,6 @@ async def test_pause_writer_persists_background_tool_job_ownership(
     tmp_path: Path,
     tool_name: str,
     toolkit_name: str,
-    completion_origin: bool,
     wait_argument: bool,
     feature_enabled: bool,
     job_child: bool,
@@ -3482,9 +3479,6 @@ async def test_pause_writer_persists_background_tool_job_ownership(
     runner.deps.runtime.config.background_tool_jobs.enabled = feature_enabled
     await _admit_approval_source(runner.deps.approval_store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    if completion_origin:
-        origin = replace(request.response_envelope.origin, intent=TurnIntent.TOOL_JOB_COMPLETION)
-        request = replace(request, response_envelope=replace(request.response_envelope, origin=origin))
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",

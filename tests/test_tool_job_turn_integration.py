@@ -39,7 +39,12 @@ from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_response_turn import _AdapterLog, _continuation, _ctx, _streaming_adapter
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    pending_outcomes,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -115,7 +120,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         assert len(jobs) == len(topics)
         assert all(job.consumed for job in jobs)
         assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         storage.close()
         await runtime.shutdown()
@@ -277,7 +282,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         assert _provider_tool_content(model, "wait-call") == "durable report"
         assert executions == 1
         assert (await runtime.lookup(job_id, owner=owner, depth=0)).consumed
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         release.set()
         model.allow_wait.set()
@@ -425,7 +430,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             ready = await _wait_until_ready(runtime, job_id, owner=owner)
             assert ready.status == ("failed" if fails else "completed")
             assert not ready.consumed
-            assert len(await runtime.pending_outcomes()) == 1
+            assert len(pending_outcomes(runtime)) == 1
             assert not any(isinstance(chunk, BackgroundWaitChunk) for chunk in chunks)
 
             model.release_text.set()
@@ -434,7 +439,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
         assert executions == 1
         saved = await runtime.lookup(job_id, owner=owner, depth=0)
         assert saved.consumed
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         retrieval = next(
             response
             for response in responses

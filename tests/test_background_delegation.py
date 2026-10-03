@@ -691,14 +691,9 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert "Exact child result" in first
                 assert child.subagent_id in first
             saved = await runtime.lookup(child.delegation_id, owner=identity, depth=0)
-            assert (
-                await runtime.outcome(
-                    child.delegation_id,
-                    saved.generation,
-                    source_event_id="$native-reader",
-                )
-                is not None
-            )
+            # Only the reader's own reply consumed this generation, so that reply alone can still recover it.
+            assert saved.consuming_source in {None, "$native-reader"}
+            assert saved.user_stop_receipt_order is None
             if approval:
                 result = await finish_approval_sequence(result)
 

@@ -26,7 +26,6 @@ from mindroom.tool_system.events import (
     ToolTraceEntry,
     deserialize_tool_trace,
 )
-from mindroom.turn_origin import TurnIntent
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
@@ -133,9 +132,8 @@ async def test_recovered_job_source_reruns_into_its_reply_without_repeating_acce
     assert (note.persist, note.minimal_required) == (False, True)
     assert "do not repeat them" in note.text
     assert 'job_id="retained"' in note.text
-    # It is runtime work, not a new human message, even after deferred preparation rebuilds the envelope.
-    assert prepared.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
-    assert not prepared.response_envelope.origin.may_answer_interactive_prompt
+    # It answers the original human message, whose origin deferred preparation keeps.
+    assert prepared.response_envelope.origin == request.response_envelope.origin
 
 
 @pytest.mark.asyncio

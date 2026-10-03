@@ -30,7 +30,7 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_runner import _is_silent_schedule_response, _with_silent_schedule_delivery
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
+from mindroom.tool_jobs.completion import join_conversation_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
@@ -43,6 +43,8 @@ from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.tool_job_helpers import (
     assembled_function,
     completed_delegation_job,
+    pending_outcome,
+    pending_outcomes,
     start_delegation_job,
     start_job,
     tool_job_runtime,
@@ -170,7 +172,7 @@ async def _run_silent_turn(
                 tool_trace_collector=trace,
                 turn_recorder=recorder,
             )
-        return _SilentTurn(answer, trace, recorder, await runtime.pending_outcomes())
+        return _SilentTurn(answer, trace, recorder, pending_outcomes(runtime))
     finally:
         await runtime.shutdown()
         storage.close()
@@ -323,7 +325,7 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
         await runtime.release_wait("quiet", waited.claim)
         recovered = await runner._recover_tool_job_source(request)
         assert _is_silent_schedule_response(recovered)
-        assert recovered.response_envelope.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
+        assert recovered.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
         assert "NO_REPLY" in _with_silent_schedule_delivery((), recovered.response_envelope)[0].text
         outcome = await runner.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
@@ -399,8 +401,8 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True])
-async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp_path: Path, *, native: bool) -> None:
-    """SDK and native delegated calls carry quiet delivery into their restored completion envelope."""
+async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_path: Path, *, native: bool) -> None:
+    """SDK and native delegated calls stay with quiet replies after a restart, apart from visible ones."""
     bot = _bot(tmp_path)
     bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -450,12 +452,20 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
         await runtime.shutdown()
         runtime = tool_job_runtime(bot.runtime_paths.storage_root)
         await runtime.recover()
-        restored = await runtime.outcome(job_id, 0)
+        restored = pending_outcome(runtime, job_id, 0)
         assert restored is not None
-        completed = completion_envelope(restored, sender_id=bot.matrix_id.full_id)
-        assert completed.source_kind == SILENT_SCHEDULE_SOURCE_KIND
-        assert completed.origin.intent is TurnIntent.TOOL_JOB_COMPLETION
-        assert "NO_REPLY" in _with_silent_schedule_delivery((), completed)[0].text
+        assert restored.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        assert owner.room_id is not None
+        assert owner.requester_id is not None
+        conversation = {
+            "transport_agent_name": owner.recipient,
+            "room_id": owner.room_id,
+            "thread_id": owner.resolved_thread_id,
+            "requester_id": owner.requester_id,
+        }
+        quiet = await runtime.conversation_jobs(**conversation, source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+        assert [job.job_id for job in quiet] == [job_id]
+        assert await runtime.conversation_jobs(**conversation) == []
     finally:
         release.set()
         await runtime.shutdown()

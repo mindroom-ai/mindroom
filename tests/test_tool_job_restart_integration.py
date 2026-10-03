@@ -57,7 +57,12 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
 from tests.test_tool_job_turn_integration import _provider_tool_content, _wait_until_ready
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    pending_outcomes,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -229,7 +234,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
 
         before_restart = await runtime.lookup(job_id, owner=owner, depth=0)
         assert not before_restart.consumed
-        assert len(await runtime.pending_outcomes()) == 1
+        assert len(pending_outcomes(runtime)) == 1
         await runtime.shutdown()
 
         restored = tool_job_runtime(paths.storage_root)
@@ -275,7 +280,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         assert _provider_tool_content(final_model, "recovered-wait") == "retained after restart"
         assert executions == 1
         assert (await restored.lookup(job_id, owner=owner, depth=0)).consumed
-        assert await restored.pending_outcomes() == []
+        assert pending_outcomes(restored) == []
     finally:
         release.set()
         if original_task is not None and not original_task.done():

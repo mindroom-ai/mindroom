@@ -27,7 +27,13 @@ from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, completed_delegation_job, delivery_coordinator, managed_team_config
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    completed_delegation_job,
+    managed_team_config,
+    pending_outcome,
+    team_coordinator,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,7 +70,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
     config.defaults.tools = []
     entry = ToolConfigEntry(name=toolkit_name, defer=deferred, overrides={flag: True})
     config.agents["lead"].tools = [entry]
-    coordinator = delivery_coordinator(tmp_path, config)
+    coordinator = team_coordinator(tmp_path, config)
     paths = coordinator.runtime_paths
     owner = replace(completed_delegation_job().owner, transport_agent_name="lead")
     context = replace(
@@ -144,7 +150,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                 if revoked:
                     assert not (tmp_path / "nested.txt").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
-                    assert await runtime.outcome(job.job_id, job.generation) is None
+                    assert pending_outcome(runtime, job.job_id, job.generation) is None
                     with pytest.raises(JobAccessError):
                         await runtime.lookup(job.job_id, owner=owner, depth=0)
                     entry.overrides[flag] = True

@@ -22,7 +22,7 @@ from tests.delegation_helpers import _call, _delegate_runtime_context
 from tests.history_helpers import RecordingModel
 from tests.identity_helpers import entity_ids
 from tests.test_skills import _write_skill
-from tests.tool_job_helpers import completed_delegation_job, delivery_coordinator, managed_team_config
+from tests.tool_job_helpers import completed_delegation_job, managed_team_config, team_coordinator
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,7 +76,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
     lead.knowledge_bases = ["probe"]
     lead.learning = True
     lead.learning_mode = "agentic"
-    coordinator = delivery_coordinator(tmp_path, config)
+    coordinator = team_coordinator(tmp_path, config)
     paths, owner = coordinator.runtime_paths, completed_delegation_job().owner
     entity_ids(config, paths)
     workspace = resolve_agent_runtime("lead", config, paths, execution_identity=owner).workspace

@@ -58,7 +58,13 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime, wait_for_status
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    assembled_function,
+    pending_outcomes,
+    tool_job_runtime,
+    wait_for_status,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -677,7 +683,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         assert jobs[0].source_event_id == "$original-request"
         assert jobs[0].owner == owner
         assert jobs[0].consumed is not save_fails
-        assert len(await runtime.pending_outcomes()) == int(save_fails)
+        assert len(pending_outcomes(runtime)) == int(save_fails)
         await runtime.shutdown()
         restored = tool_job_runtime(tmp_path)
         try:
@@ -686,7 +692,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
             assert saved.source_event_id == "$original-request"
             assert saved.owner == owner
             assert saved.consumed is not save_fails
-            assert len(await restored.pending_outcomes()) == int(save_fails)
+            assert len(pending_outcomes(restored)) == int(save_fails)
             assert saved.adapter["arguments"] == encode_tool_result({"wait_timeout": None})
         finally:
             await restored.shutdown()
@@ -863,7 +869,7 @@ async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_pat
         assert json.loads(response.tools[0].result)["job_id"] == job.job_id
         saved = storage.get_run(response.run_id)
         assert saved.session_state["counter"] == 0
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         storage.close()
         await runtime.shutdown()
@@ -949,7 +955,7 @@ async def test_saved_result_reread_preserves_later_session_state(
         saved = storage.get_run(later.run_id)
         assert saved.session_state["counter"] == later_counter
         assert saved.tools[0].result == "original output"
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         storage.close()
         await runtime.shutdown()

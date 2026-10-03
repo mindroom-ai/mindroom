@@ -1,4 +1,4 @@
-"""An SDK read does not discharge its response's durable delivery obligation."""
+"""A reply that read a job outcome stays parked with that outcome while background jobs are disabled."""
 
 from __future__ import annotations
 
@@ -15,33 +15,29 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.state import DelegationChild
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import completion_event
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.disabled import event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_record import TurnRecord
-from tests.conftest import unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
 from tests.response_runner_helpers import _bot, _target
-from tests.tool_job_helpers import start_delegation_job, start_job, tool_job_runtime
+from tests.tool_job_helpers import start_job, tool_job_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
-    from mindroom.tool_jobs.runtime import ToolJobRuntime
+    from mindroom.delegation.state import DelegationChild
 
 
 def _reader(bot: AgentBot, owner: ToolExecutionIdentity, storage: BaseDb, answer: str) -> Agent:
@@ -97,48 +93,6 @@ async def _read_saved_job(bot: AgentBot, owner: ToolExecutionIdentity, source: s
         storage.close()
 
 
-async def _save_visible_response(bot: AgentBot, owner: ToolExecutionIdentity, source: str) -> None:
-    """Seed an acknowledged placeholder whose current Matrix edit already contains prose."""
-    store = bot.journal_principal()
-    await store.enqueue_matrix_delivery(
-        delivery_id=source,
-        stage=DeliveryStage.INITIAL,
-        room_id=owner.room_id,
-        thread_id=owner.resolved_thread_id,
-        payload={"msgtype": "m.notice", "body": "Thinking..."},
-    )
-    assert await store.claim_matrix_delivery(
-        delivery_id=source,
-        stage=DeliveryStage.INITIAL,
-        sending_device_id=bot.client.device_id,
-    )
-    await store.acknowledge_matrix_delivery(
-        delivery_id=source,
-        stage=DeliveryStage.INITIAL,
-        event_id="$placeholder",
-        delivered_projections=(),
-    )
-
-    def get_event(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
-        content = (
-            {"msgtype": "m.text", "body": "Already visible."}
-            if event_id == "$placeholder"
-            else bot.client.room_send.call_args.kwargs["content"]
-        )
-        return nio.RoomGetEventResponse.from_dict(
-            {
-                "event_id": event_id,
-                "type": "m.room.message",
-                "room_id": room_id,
-                "sender": bot.matrix_id.full_id,
-                "origin_server_ts": 1,
-                "content": content,
-            },
-        )
-
-    bot.client.room_get_event.side_effect = get_event
-
-
 def _completion_bot(tmp_path: Path) -> tuple[AgentBot, ToolExecutionIdentity]:
     """Prepare an ordinary non-streaming Matrix agent with real journal storage."""
     bot = _bot(tmp_path)
@@ -158,103 +112,6 @@ def _completion_bot(tmp_path: Path) -> tuple[AgentBot, ToolExecutionIdentity]:
         target.session_id,
     )
     return bot, owner
-
-
-async def _start(
-    runtime: ToolJobRuntime,
-    owner: ToolExecutionIdentity,
-    operation: Callable[[], Awaitable[BackgroundOutcome]],
-    *,
-    native: bool,
-) -> None:
-    """Accept generic work or a native child with its exact execution scope."""
-    if not native:
-        await start_job(runtime, "recover-me", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        return
-    child = DelegationChild(
-        delegation_id="recover-me",
-        parent_tool_call_id="launch",
-        caller_agent_name="general",
-        child_agent_name="general",
-        task="Produce the saved result.",
-        session_id="child-session",
-        run_id="child-run",
-        model_name="default",
-        depth=1,
-        execution_identity=serialize_tool_execution_identity(replace(owner, session_id="child-session")),
-        status="completed",
-    )
-    await start_delegation_job(runtime, child, owner=owner, operation=operation)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("native", [False, True])
-@pytest.mark.parametrize("visible", [False, True])
-@pytest.mark.parametrize("read_state", ["own", "reread", "other", "revoked", "settled", "stopped"])
-async def test_consumed_completion_recovers_only_its_unfinished_response(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    native: bool,
-    visible: bool,
-    read_state: str,
-) -> None:
-    """Restart finishes only the exact authorized, unfinished response without replaying work."""
-    bot, owner = _completion_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    runtime = tool_job_runtime(bot.runtime_paths.storage_root)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-    executions = []
-
-    async def operation() -> BackgroundOutcome:
-        executions.append("executed")
-        return BackgroundOutcome("completed", "saved output")
-
-    async def stopped_job(_job: object) -> bool:
-        return True
-
-    try:
-        await _start(runtime, owner, operation, native=native)
-        waited = await runtime.wait("recover-me", owner=owner, depth=0)
-        await runtime.release_wait("recover-me", waited.claim)
-        event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        store = runner.deps.approval_store
-        await store.admit(event)
-        if visible:
-            await _save_visible_response(bot, owner, event.event_id)
-        await _read_saved_job(bot, owner, "$human-followup" if read_state == "other" else event.event_id)
-        if read_state == "reread":
-            await _read_saved_job(bot, owner, "$human-followup")
-        if read_state == "settled":
-            await store.settle(event.event_id)
-        if read_state == "stopped":
-            await runtime.stop_jobs(receipt_order=2, matches=stopped_job)
-        assert not await runtime.pending_outcomes()
-        await runtime.shutdown()
-        runtime = tool_job_runtime(bot.runtime_paths.storage_root, authorize=lambda _job: read_state != "revoked")
-        await runtime.recover()
-        register_background_runtime(bot.runtime_paths, runtime)
-
-        monkeypatch.setattr(
-            "mindroom.ai.create_agent",
-            lambda *_args, **kwargs: _reader(bot, owner, kwargs["history_storage"], "Recovered answer."),
-        )
-        admitted = await store.load_event(event.event_id)
-        assert admitted is not None
-        await runner._resume_tool_job_completion(admitted, "recover-me", 0)
-        final = await store.load_matrix_delivery(delivery_id=event.event_id, stage=DeliveryStage.FINAL)
-        assert (final is not None) is (read_state in {"own", "reread"})
-        if final is not None:
-            assert final.acknowledged_event_id is not None
-            assert "Recovered answer." in final.payload["body"]
-            if visible:
-                # The re-run replaces the interrupted reply in place, like any recovered request.
-                assert final.edits_event_id == "$placeholder"
-                assert "Already visible." not in final.payload["body"]
-        assert not await store.is_pending(event.event_id)
-        assert executions == ["executed"]
-    finally:
-        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

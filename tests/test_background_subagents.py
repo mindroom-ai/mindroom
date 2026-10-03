@@ -45,6 +45,8 @@ from tests.tool_job_helpers import (
     job_child,
     job_owner,
     keep_child,
+    pending_outcome,
+    pending_outcomes,
     start_delegation_job,
     tool_job_runtime,
     wait_for_status,
@@ -214,7 +216,7 @@ async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path
         result = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         assert result.job.result == "answer"
         assert calls == 1
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         await runtime.acknowledge_wait(job.job_id, result.claim)
     finally:
         finish.set()
@@ -233,15 +235,15 @@ async def test_wait_claim_released_without_ack_keeps_outcome_pending(tmp_path: P
         job = await start_delegation_job(runtime, job_child(), owner=job_owner(), operation=operation)
         result = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         assert result.claim is not None
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         await runtime.release_wait(job.job_id, result.claim)
-        assert [item.job_id for item in await runtime.pending_outcomes()] == [job.job_id]
+        assert [item.job_id for item in pending_outcomes(runtime)] == [job.job_id]
         waiting = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         assert waiting.claim is not None
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         await runtime.acknowledge_wait(job.job_id, waiting.claim)
-        assert await runtime.pending_outcomes() == []
-        assert await runtime.outcome(job.job_id, result.job.generation) is None
+        assert pending_outcomes(runtime) == []
+        assert pending_outcome(runtime, job.job_id, result.job.generation) is None
     finally:
         await runtime.shutdown()
 
@@ -330,7 +332,7 @@ async def test_restart_retains_result_and_marks_live_work_interrupted(tmp_path: 
         await restored.recover()
         assert (await restored.lookup(first.job_id, owner=job_owner(), depth=0)).result == "durable"
         assert (await restored.lookup(second.job_id, owner=job_owner(), depth=0)).status == "interrupted"
-        assert len(await restored.pending_outcomes()) == 2
+        assert len(pending_outcomes(restored)) == 2
     finally:
         await restored.shutdown()
 
@@ -450,7 +452,7 @@ async def test_cancellation_waits_for_native_approval_cleanup(tmp_path: Path) ->
         cleaned.set()
         assert delegation_child(await cancelling).status == "cancelled"
         assert (await runtime.lookup(job.job_id, owner=job_owner(), depth=0)).status == "cancelled"
-        assert len(await runtime.pending_outcomes()) == 1
+        assert len(pending_outcomes(runtime)) == 1
     finally:
         cleaned.set()
         await runtime.shutdown()
@@ -944,9 +946,7 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
         }
         with pytest.raises(ValueError, match="closed"):
             await operations[operation_name]()
-        assert await runtime.outcome(job.job_id, waiting.job.generation) is None
-        assert await runtime.pending_outcomes() == []
-        assert len(await restored.pending_outcomes()) == 2
+        assert len(pending_outcomes(restored)) == 2
     finally:
         await restored.shutdown()
 

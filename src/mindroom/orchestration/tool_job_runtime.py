@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle and quiet serialized conversation wakeups."""
+"""Managed tool-job lifecycle: startup recovery, revocation, saved Stops, card expiry, and retention."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
 
 @dataclass
 class ToolJobRuntimeCoordinator:
-    """Own background jobs and wake their serialized conversation response owner."""
+    """Own the background job runtime; replies, not this coordinator, deliver job outcomes."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
@@ -73,12 +73,9 @@ class ToolJobRuntimeCoordinator:
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
-    # Journal admission of a completion is idempotent, but each one is a write transaction that locks its room's
-    # membership row and wakes the dispatcher, so every retry pass would repeat it until the job is consumed.
-    _admitted: set[tuple[str, int]] = field(default_factory=set, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
     # Recovered jobs a Stop saved while the runtime was away could still change, by recipient, until that recipient's
-    # bot exists to read its journal; no completion is delivered to a recipient still listed here.
+    # bot exists to read its journal.
     _unrestored_stops: dict[str, list[BackgroundJob]] = field(default_factory=dict, init=False)
     # Jobs whose approval cards still need expiring; a failed expiry retries next pass.
     _withdrawn_approvals: set[str] = field(default_factory=set, init=False)
@@ -257,7 +254,7 @@ class ToolJobRuntimeCoordinator:
             if self._task is not None and not self._task.cancelled():
                 error = self._task.exception()
                 if error is not None:
-                    logger.error("Tool job completion worker stopped; restarting", error=str(error))
+                    logger.error("Tool job worker stopped; restarting", error=str(error))
             await runtime.recover()
             self._unrestored_stops = {}
             if self._journal is not None:
@@ -265,7 +262,7 @@ class ToolJobRuntimeCoordinator:
                     self._unrestored_stops.setdefault(job.owner.recipient, []).append(job)
             await self._restore_user_stops()
             register_background_runtime(self.runtime_paths, runtime)
-            self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
+            self._task = asyncio.create_task(self._run(), name="tool_job_worker")
         else:
             await self._restore_user_stops()
         runtime.changed.set()
@@ -285,7 +282,7 @@ class ToolJobRuntimeCoordinator:
             self._unrestored_stops.pop(recipient, None)
 
     async def quiesce(self) -> None:
-        """Stop wakeups and execution while live response owners finish their receipts."""
+        """Stop the worker and execution while live response owners finish their receipts."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
@@ -306,7 +303,6 @@ class ToolJobRuntimeCoordinator:
                 release_background_tool_jobs(self.runtime_paths, self._instance)
             self._instance = self._runtime = self._journal = None
             self._initialized = False
-            self._admitted.clear()
             self._unrestored_stops.clear()
             self._withdrawn_approvals.clear()
 
@@ -315,27 +311,20 @@ class ToolJobRuntimeCoordinator:
         while True:
             self.runtime.changed.clear()
             try:
-                await self.deliver_pending()
+                await self._reconcile()
                 if asyncio.get_running_loop().time() >= next_retention:
                     await self._expire_consumed_results()
                     next_retention = asyncio.get_running_loop().time() + 3600
             except Exception:
-                logger.exception("Background tool job completion scan failed; retrying")
+                logger.exception("Background tool job reconciliation failed; retrying")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
-    async def deliver_pending(self) -> None:
-        """Retry pending outcomes until the durable journal owns each generation."""
+    async def _reconcile(self) -> None:
+        """Stop revoked work, apply saved Stops, and expire withdrawn approval cards; failures retry next pass."""
         await self.runtime.cancel_revoked(denied=self._denied)
         await self._restore_user_stops()
         await self._expire_withdrawn_approval_cards()
-        pending = await self.runtime.pending_outcomes()
-        self._admitted.intersection_update((job.job_id, job.generation) for job in pending)
-        for job in pending:
-            try:
-                await self._deliver(job)
-            except Exception:
-                logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
     async def _expire_withdrawn_approval_cards(self) -> None:
         """Expire the cards of job approval pauses that can never resume, so the replies waiting on them resume."""
@@ -380,23 +369,3 @@ class ToolJobRuntimeCoordinator:
             before=datetime.now(UTC) - CONSUMED_RESULT_RETENTION,
             source_finished=source_finished,
         )
-
-    async def _deliver(self, job: BackgroundJob) -> None:
-        generation = (job.job_id, job.generation)
-        if generation in self._admitted or job.owner.recipient in self._unrestored_stops:
-            return
-        bot = self.bot_provider(job.owner.recipient)
-        if (
-            bot is None
-            or not bot.running
-            or bot.client is None
-            or job.owner.room_id is None
-            # Synced membership: a bot outside the room costs no homeserver request on every retry pass.
-            or job.owner.room_id not in bot.client.rooms
-            or not self._authorized(job)
-        ):
-            return
-        current = await self.runtime.outcome(job.job_id, job.generation)
-        if current is not None:
-            await bot.wake_tool_job_completion(current)
-            self._admitted.add(generation)

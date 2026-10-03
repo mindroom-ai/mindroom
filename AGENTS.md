@@ -292,12 +292,12 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/control.py` | Human-follow-up wait signals and cancellation checkpoints |
 | `tool_jobs/wait_timeout.py` | Reserved wait metadata and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
-| `tool_jobs/completion.py` | Internal completion admission and transient waiting presentation |
+| `tool_jobs/completion.py` | The holding reply's join of its conversation's outstanding jobs and transient waiting presentation |
 | `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
-| `orchestration/tool_job_runtime.py` | Managed job lifecycle and retrying internal completion wakeups |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, saved Stops, card expiry, and retention |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |

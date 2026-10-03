@@ -1,4 +1,4 @@
-"""Internal completion sources admitted under the ordinary response lifecycle lock."""
+"""The holding reply's join of its conversation's background jobs and its transient waiting presentation."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from mindroom.constants import (
@@ -15,31 +14,19 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest
-from mindroom.event_journal import EventClass, EventKind, InboundEvent
-from mindroom.hooks import MessageEnvelope
-from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
-from mindroom.tool_jobs.runtime import (
-    READY_STATUSES,
-    JobAccessError,
-    completion_event_id,
-    get_background_runtime,
-    parse_completion_event_id,
-)
+from mindroom.tool_jobs.runtime import READY_STATUSES, JobAccessError, get_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
-    from mindroom.constants import RuntimePaths
+    from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamingPresentation
     from mindroom.tool_jobs.runtime import BackgroundJob, JobWait, ToolJobRuntime
 
 
-# The source kind of a completion whose job started outside any admitted turn.
-_UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
 # How many times one reply may continue with ready job results, counted apart from dynamic tool continuations.
 JOB_JOIN_LIMIT = 20
 
@@ -125,74 +112,6 @@ def recovered_jobs_note(jobs: Sequence[BackgroundJob]) -> str:
         "replayed: do not repeat them, and retrieve their stored outcomes once using the native job tool: "
         + _retrieval_calls(jobs)
     )
-
-
-def completion_event(job: BackgroundJob, *, sender_id: str) -> InboundEvent:
-    """Admit response ownership without manufacturing a Matrix timeline event."""
-    assert job.owner.room_id is not None
-    return InboundEvent(
-        event_id=completion_event_id(job),
-        room_id=job.owner.room_id,
-        thread_id=job.owner.resolved_thread_id,
-        kind=EventKind.TOOL_JOB_COMPLETION,
-        event_class=EventClass.ACTIONABLE,
-        sender=sender_id,
-        origin_server_ts=int(datetime.fromisoformat(job.created_at).timestamp() * 1000),
-        source={},
-    )
-
-
-def completion_origin(job: BackgroundJob, *, sender_id: str) -> TurnOrigin:
-    """Identify input as runtime-owned work while retaining its requester's authority."""
-    owner = job.owner
-    assert owner.requester_id is not None
-    return TurnOrigin(
-        transport_sender_id=sender_id,
-        requester_id=owner.requester_id,
-        sender_entity_name=owner.recipient,
-        requester_entity_name=None,
-        sender_kind=SenderKind.MANAGED_ENTITY,
-        requester_kind=SenderKind.USER,
-        intent=TurnIntent.TOOL_JOB_COMPLETION,
-        source_kind=job.source_kind or _UNSOURCED_COMPLETION_SOURCE_KIND,
-        trust=TurnTrust.TRUSTED_INTERNAL,
-    )
-
-
-def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelope:
-    """Address one job's completion to its exact owner conversation."""
-    owner = job.owner
-    assert owner.room_id is not None
-    assert owner.session_id is not None
-    return MessageEnvelope(
-        source_event_id=completion_event_id(job),
-        target=MessageTarget(owner.room_id, owner.resolved_thread_id, owner.resolved_thread_id, None, owner.session_id),
-        body=_completion_prompt([job]),
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name=owner.recipient,
-        origin=completion_origin(job, sender_id=sender_id),
-    )
-
-
-async def admit_job_completion(envelope: MessageEnvelope, runtime_paths: RuntimePaths) -> bool:
-    """Under the conversation lock, admit an internal completion only while the runtime still offers its generation.
-
-    A completion envelope is built from that same job's immutable owner, so its current outcome is the only recheck.
-    A turn without completion intent is admitted whatever its source event ID looks like, and so is a recovered turn
-    with completion intent whose source keeps its human event ID, because that ID names no completion.
-    """
-    if (
-        envelope.origin.intent is not TurnIntent.TOOL_JOB_COMPLETION
-        or (completion := parse_completion_event_id(envelope.source_event_id)) is None
-    ):
-        return True
-    runtime = get_background_runtime(runtime_paths)
-    if runtime is None:
-        msg = "Tool job runtime is not ready for completion admission"
-        raise RuntimeError(msg)
-    job_id, generation = completion
-    return await runtime.outcome(job_id, generation, source_event_id=envelope.source_event_id) is not None
 
 
 @dataclass(frozen=True)

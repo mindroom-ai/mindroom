@@ -1,11 +1,11 @@
-"""Quiet runtime outcomes use internal journal sources and existing response ordering."""
+"""A reply joins its conversation's outstanding jobs before it finishes, waiting visibly and interruptibly."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
@@ -23,6 +23,7 @@ from mindroom.response_turn import (
 from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
     JOB_JOIN_LIMIT,
+    _completion_prompt,
     _ReadyJobContinuation,
     background_wait_edit,
     background_wait_notice,
@@ -34,7 +35,6 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.turn_record import TurnRecord
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.response_runner_helpers import _plain_request, _target
@@ -49,15 +49,13 @@ if TYPE_CHECKING:
 
 import pytest
 
-from mindroom.event_journal import EventKind
-from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     completed_delegation_job,
-    delivery_coordinator,
-    finish_delegation_job,
     managed_team_config,
+    pending_outcome,
+    pending_outcomes,
     start_job,
     tool_job_runtime,
 )
@@ -141,54 +139,6 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 
 
 @pytest.mark.asyncio
-async def test_completion_source_is_internal_and_has_no_conversation_projection(tmp_path: Path) -> None:
-    """An outcome gains durable response ownership without adding a Matrix message."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    job = replace(
-        completed_delegation_job(),
-        owner=replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None),
-    )
-    event = completion_event(job, sender_id=bot.matrix_id.full_id)
-    envelope = completion_envelope(job, sender_id=bot.matrix_id.full_id)
-    store = bot._journal_store.principal(bot._journal_principal_id)
-    await store.admit(event)
-    admitted = await store.load_event(event.event_id)
-    assert admitted is not None
-    assert admitted.kind is EventKind.TOOL_JOB_COMPLETION
-    assert "content" not in admitted.source
-    assert envelope.requester_id == job.owner.requester_id
-    assert not envelope.origin.may_answer_interactive_prompt
-    assert envelope.source_event_id == event.event_id
-    assert envelope.target.resolved_thread_id == job.owner.resolved_thread_id
-    assert envelope.target.reply_to_event_id != event.event_id
-    assert await store.is_pending(event.event_id)
-
-
-@pytest.mark.asyncio
-async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path: Path) -> None:
-    """Journal replay sends internal work straight to its completion owner."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
-    job = replace(
-        completed_delegation_job(),
-        owner=replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None),
-    )
-    event = completion_event(job, sender_id=bot.matrix_id.full_id)
-    store = bot._journal_store.principal(bot._journal_principal_id)
-    await store.admit(event)
-    admitted = await store.load_event(event.event_id)
-    assert admitted is not None
-    callback = AsyncMock(return_value=False)
-    dispatcher.callbacks = replace(dispatcher.callbacks, on_tool_job_completion=callback)
-    dispatcher.release_turn_replay()
-    with patch("mindroom.journal_dispatch.parse_journal_event", side_effect=AssertionError("Matrix parser called")):
-        assert not await dispatcher._run_event(admitted)
-    callback.assert_awaited_once_with(admitted)
-
-
-@pytest.mark.asyncio
 async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> None:
     """Transient ready-result claims cannot hide an unsaved outcome after release."""
     runtime = tool_job_runtime(tmp_path)
@@ -200,92 +150,16 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
     try:
         await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        assert not await runtime.pending_outcomes()
+        assert not pending_outcomes(runtime)
         await runtime.release_wait("quiet", waited.claim)
-        assert (await runtime.outcome("quiet", 0)).result == "tool failed"
-        assert [job.job_id for job in await runtime.pending_outcomes()] == ["quiet"]
+        released = pending_outcome(runtime, "quiet", 0)
+        assert released is not None
+        assert released.result == "tool failed"
+        assert [job.job_id for job in pending_outcomes(runtime)] == ["quiet"]
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         await runtime.acknowledge_wait("quiet", waited.claim)
-        assert await runtime.outcome("quiet", 0) is None
-        assert not await runtime.pending_outcomes()
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("consumed", [False, True])
-async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consumed: bool) -> None:
-    """Completion never competes with a stream or an already queued human response."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread")
-    request = _plain_request(target)
-    owner = replace(
-        completed_delegation_job().owner,
-        agent_name="general",
-        transport_agent_name=None,
-        requester_id=request.user_id or "@user:localhost",
-    )
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-    order = []
-    started, release = asyncio.Event(), asyncio.Event()
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "answer")
-
-    async def stream(_target: object) -> None:
-        started.set()
-        await release.wait()
-        order.append("stream")
-
-    async def newer(_target: object) -> None:
-        order.append("human")
-
-    async def completed(_request: object, **_kwargs: object) -> None:
-        order.append("completion")
-        await runner.deps.approval_store.settle(event.event_id)
-
-    try:
-        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-        waited = await runtime.wait("quiet", owner=owner, depth=0)
-        if consumed:
-            await runtime.acknowledge_wait("quiet", waited.claim)
-        else:
-            await runtime.release_wait("quiet", waited.claim)
-        event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        await runner.deps.approval_store.admit(event)
-        admitted = await runner.deps.approval_store.load_event(event.event_id)
-        assert admitted is not None
-        first = asyncio.create_task(
-            runner._lifecycle_coordinator.run_locked_response(
-                target=target,
-                response_envelope=request.response_envelope,
-                pipeline_timing=None,
-                locked_operation=stream,
-            ),
-        )
-        await started.wait()
-        second = asyncio.create_task(
-            runner._lifecycle_coordinator.run_locked_response(
-                target=target,
-                response_envelope=replace(request.response_envelope, source_event_id="$newer"),
-                pipeline_timing=None,
-                locked_operation=newer,
-            ),
-        )
-        await asyncio.sleep(0)
-        with patch.object(runner, "_generate_response_locked", completed):
-            assert not await runner.handoff_tool_job_completion(admitted)
-            await asyncio.sleep(0)
-            assert not order
-            release.set()
-            await asyncio.gather(first, second)
-            await asyncio.gather(*tuple(runner._inbox_response_tasks))
-        assert order == (["stream", "human"] if consumed else ["stream", "human", "completion"])
-        assert not await runner.deps.approval_store.is_pending(event.event_id)
+        assert pending_outcome(runtime, "quiet", 0) is None
+        assert not pending_outcomes(runtime)
     finally:
         await runtime.shutdown()
 
@@ -327,7 +201,7 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             assert len(items) == 1
             assert 'job_id="quiet"' in items[0].prompt
             assert [item async for item in join_conversation_jobs(attempted)] == []
-            assert await runtime.outcome("quiet", 0) is not None
+            assert pending_outcome(runtime, "quiet", 0) is not None
     finally:
         await runtime.shutdown()
 
@@ -460,147 +334,9 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
                 )
         assert len(prompts) == 2
         assert 'job_id="quiet"' in prompts[1]
-        assert await runtime.outcome("quiet", 0) is not None
+        assert pending_outcome(runtime, "quiet", 0) is not None
     finally:
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Path) -> None:
-    """Ready work is published only to the internal response source owner."""
-    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
-    await coordinator.initialize()
-    try:
-        job = await finish_delegation_job(coordinator)
-        bot = coordinator.bot_provider("team")
-        assert bot is not None
-        await coordinator.deliver_pending()
-        bot.wake_tool_job_completion.assert_awaited_once_with(job)
-        bot.client.room_send.assert_not_called()
-    finally:
-        await coordinator.stop()
-
-
-@pytest.mark.asyncio
-async def test_successful_completion_admission_is_not_repeated_after_bot_replacement(tmp_path: Path) -> None:
-    """The durable journal owns an admitted generation, including after a bot is replaced."""
-    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
-    await coordinator.initialize()
-    bot = _bot(tmp_path)
-    bot.running = True
-    coordinator.bot_provider = lambda _name: bot
-    store = bot.journal_principal()
-    try:
-        job = await finish_delegation_job(coordinator)
-        event = completion_event(job, sender_id=bot.matrix_id.full_id)
-        with patch.object(type(store), "admit", autospec=True, side_effect=type(store).admit) as admit:
-            await coordinator.deliver_pending()
-            assert await store.is_pending(event.event_id)
-            await coordinator.deliver_pending()
-            admit.assert_awaited_once()
-            replacement = _bot(tmp_path)
-            replacement.running = True
-            coordinator.bot_provider = lambda _name: replacement
-            await coordinator.deliver_pending()
-            admit.assert_awaited_once()
-            assert await replacement.journal_principal().is_pending(event.event_id)
-            await coordinator.stop()
-            await coordinator.initialize()
-            await coordinator.runtime.recover()
-            # A restarted coordinator admits again, and the journal keeps its one pending event.
-            await coordinator.deliver_pending()
-            assert admit.await_count == 2
-            assert await store.is_pending(event.event_id)
-    finally:
-        await coordinator.stop()
-
-
-@pytest.mark.asyncio
-async def test_failed_completion_admission_retries_and_new_generation_is_admitted(tmp_path: Path) -> None:
-    """Only successful durable admission suppresses retries; approval outcomes keep distinct generations."""
-    coordinator = delivery_coordinator(tmp_path, managed_team_config(tmp_path))
-    await coordinator.initialize()
-    bot = _bot(tmp_path)
-    bot.running = True
-    coordinator.bot_provider = lambda _name: bot
-    fixture = completed_delegation_job()
-
-    async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    async def complete() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "approved result")
-
-    try:
-        await start_job(
-            coordinator.runtime,
-            fixture.job_id,
-            tool_name=fixture.tool_name,
-            depth=0,
-            kind=fixture.kind,
-            adapter=fixture.adapter,
-            owner=fixture.owner,
-            operation=approval,
-        )
-        waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
-        await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
-        store = bot.journal_principal()
-        first = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        with patch.object(type(store), "admit", side_effect=OSError("journal unavailable")):
-            await coordinator.deliver_pending()
-        assert not await store.is_pending(first.event_id)
-        with patch.object(type(store), "admit", autospec=True, side_effect=type(store).admit) as admit:
-            await coordinator.deliver_pending()
-            assert await store.is_pending(first.event_id)
-            await coordinator.deliver_pending()
-            admit.assert_awaited_once()
-            await coordinator.runtime.continue_job(
-                fixture.job_id,
-                owner=fixture.owner,
-                depth=0,
-                expected_generation=0,
-                operation=complete,
-                adapter=fixture.adapter,
-            )
-            waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
-            await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
-            second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-            assert second.event_id != first.event_id
-            await coordinator.deliver_pending()
-            assert await store.is_pending(second.event_id)
-            await coordinator.deliver_pending()
-            assert admit.await_count == 2
-    finally:
-        await coordinator.stop()
-
-
-@pytest.mark.asyncio
-async def test_internal_source_envelope_is_stable_after_runtime_recovery(tmp_path: Path) -> None:
-    """Recovery cannot conflict with an outcome source admitted before the crash."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    owner = replace(completed_delegation_job().owner, agent_name="general", transport_agent_name=None)
-    runtime = tool_job_runtime(tmp_path)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "retained")
-
-    await start_job(runtime, "recover", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
-    waited = await runtime.wait("recover", owner=owner, depth=0)
-    await runtime.release_wait("recover", waited.claim)
-    event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-    await bot._journal_store.principal(bot._journal_principal_id).admit(event)
-    await runtime.shutdown()
-    restored = tool_job_runtime(tmp_path)
-    try:
-        await restored.recover()
-        job = await restored.outcome("recover", 0)
-        assert job is not None
-        replay = completion_event(job, sender_id=bot.matrix_id.full_id)
-        assert replay == event
-        await bot._journal_store.principal(bot._journal_principal_id).admit(replay)
-    finally:
-        await restored.shutdown()
 
 
 @pytest.mark.asyncio
@@ -654,13 +390,12 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         if matching_source:
             note = recovered.system_enrichment_items[-1].text
             assert 'job_id="retained"' in note
-            assert not recovered.response_envelope.origin.may_answer_interactive_prompt
             assert recovered.response_envelope.source_event_id == request.response_envelope.source_event_id
             assert recovered.sources == request.sources
             assert recovered.prompt == request.prompt
             assert "Execution stopped; side effects may have happened." not in note
             if not authorized:
-                assert await runtime.outcome("retained", 0) is None
+                assert pending_outcome(runtime, "retained", 0) is None
         else:
             assert recovered is request
     finally:
@@ -718,135 +453,6 @@ def test_blocking_wait_preserves_formatted_mention_on_recovery(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("thread_root", [False, True])
-async def test_idle_completion_defers_to_still_pending_original_source(tmp_path: Path, thread_root: bool) -> None:
-    """The original durable source keeps exclusive recovery ownership of accepted work."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target(thread_id="$event" if thread_root else "$thread"))
-    owner = replace(
-        completed_delegation_job().owner,
-        agent_name="general",
-        transport_agent_name=None,
-        requester_id=request.response_envelope.requester_id,
-        session_id=request.response_envelope.target.session_id,
-        resolved_thread_id=request.thread_id,
-    )
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("interrupted", "Interrupted without replay.")
-
-    respond = AsyncMock(return_value="$completion-reply")
-
-    try:
-        await start_job(
-            runtime,
-            "recovered",
-            tool_name="tool",
-            depth=0,
-            source_event_id="$event",
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        waited = await runtime.wait("recovered", owner=owner, depth=0)
-        await runtime.release_wait("recovered", waited.claim)
-        event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        await runner.deps.approval_store.admit(
-            replace(
-                event,
-                event_id="$event",
-                kind=EventKind.MESSAGE,
-                thread_id=None if thread_root else event.thread_id,
-                source={"content": {"body": "Original instruction"}},
-            ),
-        )
-        await runner.deps.approval_store.admit(event)
-        admitted = await runner.deps.approval_store.load_event(event.event_id)
-        assert admitted is not None
-        with patch.object(runner, "generate_response", respond):
-            await runner._resume_tool_job_completion(admitted, "recovered", 0)
-        respond.assert_not_awaited()
-        assert await runner.deps.approval_store.is_pending("$event")
-        assert await runner.deps.approval_store.is_pending(event.event_id)
-        await runner.deps.approval_store.settle("$event")
-        with patch.object(runner, "generate_response", respond):
-            await runner._resume_tool_job_completion(admitted, "recovered", 0)
-        respond.assert_awaited_once()
-        assert respond.call_args.args[0].response_envelope.source_event_id == event.event_id
-        # The completion's reply is recorded as the responded turn of its internal source.
-        responded = bot._turn_store.turn_record_for_response_event_id("$completion-reply")
-        assert responded is not None
-        assert (responded.indexed_event_ids, responded.completed) == ((event.event_id,), True)
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_completion_without_an_outcome_completes_its_interrupted_turn(tmp_path: Path) -> None:
-    """A re-run completion whose outcome is gone settles, and completes the turn its interrupted attempt left."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target(thread_id="$thread"))
-    owner = replace(
-        completed_delegation_job().owner,
-        agent_name="general",
-        transport_agent_name=None,
-        requester_id=request.response_envelope.requester_id,
-        session_id=request.response_envelope.target.session_id,
-        resolved_thread_id=request.thread_id,
-    )
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "done")
-
-    try:
-        await start_job(
-            runtime,
-            "gone",
-            tool_name="tool",
-            depth=0,
-            source_event_id="$event",
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        waited = await runtime.wait("gone", owner=owner, depth=0)
-        event = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        await runner.deps.approval_store.admit(event)
-        # An interrupted attempt left its turn pending; another reader then consumed the outcome.
-        await bot._turn_store.record_pending_turn(
-            TurnRecord.create(
-                (event.event_id,),
-                conversation_target=request.response_envelope.target,
-                requester_id=owner.requester_id,
-                response_owner="general",
-                completed=False,
-            ),
-        )
-        await runtime.acknowledge_wait("gone", waited.claim, source_event_id="$other")
-        admitted = await runner.deps.approval_store.load_event(event.event_id)
-        assert admitted is not None
-        with patch.object(runner, "generate_response", AsyncMock()) as respond:
-            await runner._resume_tool_job_completion(admitted, "gone", 0)
-        respond.assert_not_awaited()
-        assert not await runner.deps.approval_store.is_pending(event.event_id)
-        turn = bot._turn_store.get_turn_record(event.event_id)
-        assert turn is not None
-        assert turn.completed
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(tmp_path: Path) -> None:
     """A pending approval reaches the existing native wait path without a join deadlock."""
     paths, owner = test_runtime_paths(tmp_path), completed_delegation_job().owner
@@ -887,7 +493,7 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
         assert not isinstance(items[0], str)
         assert 'job_id="approval"' in items[0].prompt
         assert 'job_id="running"' not in items[0].prompt
-        assert await runtime.outcome("approval", 0) is not None
+        assert pending_outcome(runtime, "approval", 0) is not None
     finally:
         release.set()
         await runtime.shutdown()
@@ -1017,3 +623,11 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
         assert len(continued) == JOB_JOIN_LIMIT
     finally:
         await runtime.shutdown()
+
+
+def test_join_prompt_lets_an_approved_retrieval_wait_for_the_approved_work() -> None:
+    """A ready result needs no wait; an approval pause's retrieval has no budget, so approving it waits for its work."""
+    done = completed_delegation_job()
+    paused = replace(done, status="awaiting_approval")
+    assert f'job(action="wait", job_id="{done.job_id}", wait_timeout=0)' in _completion_prompt([done])
+    assert f'job(action="wait", job_id="{paused.job_id}")' in _completion_prompt([paused])

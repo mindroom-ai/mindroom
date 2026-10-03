@@ -496,9 +496,6 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
         assert not await dispatcher._run_event(replace(event, event_id="$sibling"))
         assert not await dispatcher._run_event(event)
         assert dispatcher._deferral_is_live(event)
-        completion = replace(event, event_id="$completion", kind=EventKind.TOOL_JOB_COMPLETION)
-        assert not await dispatcher._run_event(completion)
-        assert dispatcher._deferral_is_live(completion)
         assert await dispatcher._run_event(replace(event, event_id="$new-human"))
         assert reached == ["$new-human"]
         assert path.read_bytes() == original

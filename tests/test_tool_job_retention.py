@@ -70,7 +70,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     await runtime.acknowledge_wait(
         "old",
         waited.claim,
-        source_event_id="$completion" if consumer_pending else "$original",
+        source_event_id="$followup" if consumer_pending else "$original",
     )
     entry = runtime._entries["old"]
     entry.job = replace(entry.job, updated_at=(datetime.now(UTC) - timedelta(days=31)).isoformat())
@@ -94,14 +94,14 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     if consumer_pending:
         await principal.admit(
             InboundEvent(
-                "$completion",
+                "$followup",
                 "!room:localhost",
                 "$thread",
-                EventKind.TOOL_JOB_COMPLETION,
+                EventKind.MESSAGE,
                 EventClass.ACTIONABLE,
-                bot.matrix_id.full_id,
+                "@human:localhost",
                 2,
-                {"job_id": "old", "generation": 0},
+                {"content": {"body": "what did it find?"}},
             ),
             None,
         )

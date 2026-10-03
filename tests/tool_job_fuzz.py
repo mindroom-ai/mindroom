@@ -28,7 +28,11 @@ from mindroom.tool_jobs.runtime import (
     read_job_snapshot,
     saved_job_paths,
 )
-from tests.tool_job_helpers import job_owner, tool_job_runtime
+from tests.tool_job_helpers import (
+    job_owner,
+    pending_outcomes,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -561,7 +565,7 @@ class JobFuzzRunner:
                 assert task.result().status in TERMINAL_STATUSES
             else:
                 assert self._faults > faults, task.exception()
-        pending = {job.job_id for job in await self.runtime.pending_outcomes()}
+        pending = {job.job_id for job in pending_outcomes(self.runtime)}
         assert pending == {job_id for job_id in self.jobs if self._pending(job_id)}
 
     def _pending(self, job_id: str) -> bool:

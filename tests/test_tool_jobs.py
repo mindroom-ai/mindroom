@@ -21,6 +21,8 @@ from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     backdate_job,
     job_owner,
+    pending_outcome,
+    pending_outcomes,
     start_job,
     tool_job_runtime,
     wait_for_status,
@@ -81,7 +83,7 @@ async def test_final_shutdown_waits_for_receipt_publication(tmp_path: Path, monk
     restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        assert await restored.pending_outcomes() == []
+        assert pending_outcomes(restored) == []
     finally:
         await restored.shutdown()
 
@@ -136,7 +138,7 @@ async def test_quiescence_fences_control_but_retains_receipts_and_storage(tmp_pa
     restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        assert await restored.pending_outcomes() == []
+        assert pending_outcomes(restored) == []
         assert (await restored.lookup(job.job_id, owner=job_owner(), depth=0)).status == "awaiting_approval"
     finally:
         await restored.shutdown()
@@ -273,10 +275,10 @@ async def test_waiter_that_missed_a_pause_claims_the_next_generation_once(
         assert waited.job.generation == 1
         assert waited.claim is not None
         assert waited.claim.generation == 1
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         await runtime.acknowledge_wait(job.job_id, waited.claim)
         assert (await runtime.lookup(job.job_id, owner=job_owner(), depth=0)).consumed
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         release_pause.set()
         await runtime.shutdown()
@@ -389,7 +391,7 @@ async def test_restart_reattaches_a_saved_result_without_rewrites_or_rerun(
     try:
         await restored.recover()
         assert {path.name: path.stat().st_mtime_ns for path in (tmp_path / "tool_jobs").glob("consumed.*")} == saved
-        assert bool(await restored.pending_outcomes()) is not acknowledged
+        assert bool(pending_outcomes(restored)) is not acknowledged
         _, claim = await restored.start(
             "consumed",
             tool_name="tool",
@@ -654,7 +656,7 @@ async def test_result_expiry_deletes_only_old_consumed_jobs_with_finished_source
             await runtime.lookup("expire", owner=job_owner(), depth=0)
         for name in kept:
             assert await runtime.read_payload(await runtime.lookup(name, owner=job_owner(), depth=0)) == payload
-        assert [job.job_id for job in await runtime.pending_outcomes()] == ["unread"]
+        assert [job.job_id for job in pending_outcomes(runtime)] == ["unread"]
     finally:
         if claimed is not None:
             await runtime.release_wait("claimed", claimed.claim)
@@ -902,18 +904,18 @@ async def test_stale_wait_receipt_cannot_consume_replacement_generation(tmp_path
             await wait_for_status(runtime, job.job_id, "completed")
         with pytest.raises(ValueError, match="no longer belongs"):
             await runtime.acknowledge_wait(job.job_id, waiting.claim)
-        pending = await runtime.pending_outcomes()
+        pending = pending_outcomes(runtime)
         assert len(pending) == 1
         assert pending[0].generation > waiting.job.generation
         assert not pending[0].consumed
-        assert await runtime.outcome(job.job_id, waiting.job.generation) is None
-        current = await runtime.outcome(job.job_id, pending[0].generation)
+        assert pending_outcome(runtime, job.job_id, waiting.job.generation) is None
+        current = pending_outcome(runtime, job.job_id, pending[0].generation)
         assert current is not None
         assert current.status == replacement
         claimed = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
-        assert await runtime.outcome(job.job_id, pending[0].generation) is None
+        assert pending_outcome(runtime, job.job_id, pending[0].generation) is None
         await runtime.acknowledge_wait(job.job_id, claimed.claim)
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         await runtime.shutdown()
 
@@ -1105,7 +1107,7 @@ async def test_cancel_requested_remains_owned_until_operation_finally_finishes(t
     cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=job_owner(), depth=0))
     await cleaning.wait()
     assert (await runtime.lookup(job.job_id, owner=job_owner(), depth=0)).status == "cancel_requested"
-    assert await runtime.pending_outcomes() == []
+    assert pending_outcomes(runtime) == []
     assert not cancelling.done()
     finished.set()
     settled = await cancelling
@@ -1370,7 +1372,7 @@ async def test_approval_cancellation_survives_a_crash_during_cleanup(tmp_path: P
     restored = tool_job_runtime(tmp_path)
     try:
         await restored.recover()
-        outcomes = await restored.pending_outcomes()
+        outcomes = pending_outcomes(restored)
         assert len(outcomes) == 1
         assert outcomes[0].status == "cancelled"
         assert outcomes[0].generation == 1
@@ -1479,7 +1481,7 @@ async def test_failed_approval_cancellation_admission_preserves_generation_trans
         assert settled.generation == 1
         assert not settled.consumed
         assert runtime._entries[job.job_id].live_claim is None
-        assert [pending.job_id for pending in await runtime.pending_outcomes()] == [job.job_id]
+        assert [pending.job_id for pending in pending_outcomes(runtime)] == [job.job_id]
         if prior_claim == "retained":
             with pytest.raises(ValueError, match="claim no longer belongs"):
                 await runtime.acknowledge_wait(job.job_id, claimed.claim)
@@ -1635,18 +1637,13 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
         snapshot = await runtime.lookup(job.job_id, owner=job_owner(), depth=0)
         snapshot.adapter["context"].append(2)
         (await runtime.read_payload(snapshot))["exact"].append(2)
-        pending = await runtime.pending_outcomes()
-        pending[0].adapter["context"].append(3)
-        outcome = await runtime.outcome(job.job_id, job.generation)
-        assert outcome is not None
-        outcome.adapter["context"].append(4)
         listed = await runtime.list_jobs(owner=job_owner(), depth=0)
         assert listed[0].adapter == {"context": [1]}
         monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
         waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         await runtime.acknowledge_wait(job.job_id, waited.claim)
-        assert await runtime.outcome(job.job_id, job.generation) is None
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcome(runtime, job.job_id, job.generation) is None
+        assert pending_outcomes(runtime) == []
         assert await runtime.read_payload(await runtime.lookup(job.job_id, owner=job_owner(), depth=0)) == {
             "exact": [1],
         }
@@ -1698,7 +1695,7 @@ async def test_terminal_operation_stays_pending_until_cancellation_cleanup_settl
         waiting = await runtime.wait(job.job_id, owner=job_owner(), depth=0, timeout=0)
         assert waiting.claim is None
         assert waiting.job.status == "cancel_requested"
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         assert not cancelling.done()
     finally:
         finish_cleanup.set()
@@ -2174,7 +2171,7 @@ async def test_repeated_waiter_cancellation_still_releases_its_claim(tmp_path: P
         finish.set()
         assert entry.task is not None
         await entry.task
-        assert await runtime.outcome("claimed", 0) is not None
+        assert pending_outcome(runtime, "claimed", 0) is not None
     finally:
         if lock.locked():
             lock.release()

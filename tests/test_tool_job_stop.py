@@ -3,32 +3,45 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.config.main import Config
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalCardReservation,
+    ApprovalContinuation,
+    ApprovalDecisionMetadata,
+    DeliveryStage,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.tool_jobs import runtime as runtime_module
-from mindroom.tool_jobs.completion import completion_event
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_jobs.user_stop import response_was_stopped, stop_conversation_jobs
+from mindroom.tool_jobs.user_stop import stop_conversation_jobs
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
-from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot
+from tests.conftest import unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_event_journal_store import ROOM, admit
 from tests.test_user_stop_convergence import _CountingGateway
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, backdate_job, job_owner, start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    job_owner,
+    pending_outcome,
+    pending_outcomes,
+    start_job,
+    tool_job_runtime,
+    user_stopped,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -137,93 +150,6 @@ async def test_stop_scopes_prior_work_to_clicked_reply_and_requester(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retention_pass", [False, True])
-async def test_stop_follows_ancestry_through_an_answered_completion(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-    *,
-    retention_pass: bool,
-) -> None:
-    """Work started by an already answered completion turn still belongs to the human turn behind that completion.
-
-    Retention keeps the delivered job, however old and consumed, while that work exists, so the ancestry stays intact.
-    """
-    store = journal_store.principal("agent@alice")
-    for source in ("$first", "$follow-up"):
-        await admit(store, source)
-    await _bind_reply(store, "$follow-up", "$reply")
-    target = MessageTarget.resolve(ROOM, "$thread", "$thread")
-    owner = replace(
-        job_owner(),
-        agent_name="agent",
-        room_id=ROOM,
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id=target.session_id,
-    )
-    stopped = TurnRecord.create(
-        ("$follow-up",),
-        response_event_id="$reply",
-        conversation_target=target,
-        requester_id=owner.requester_id,
-        response_owner="agent",
-        user_stop_receipt_order=100,
-    )
-    runtime = tool_job_runtime(tmp_path)
-
-    async def finished() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "prior result")
-
-    async def running() -> BackgroundOutcome:
-        await asyncio.Event().wait()
-        return BackgroundOutcome("completed", "unreachable")
-
-    try:
-        await start_job(
-            runtime,
-            "prior",
-            tool_name="tool",
-            depth=0,
-            source_event_id="$first",
-            adapter={},
-            owner=owner,
-            operation=finished,
-        )
-        ready = await runtime.wait("prior", owner=owner, depth=0)
-        completion = completion_event(ready.job, sender_id="@mindroom_agent:example.org")
-        await store.admit(completion)
-        await start_job(
-            runtime,
-            "descendant",
-            tool_name="tool",
-            depth=0,
-            source_event_id=completion.event_id,
-            adapter={},
-            owner=owner,
-            operation=running,
-        )
-        # Answering the completion turn settles its journal event, which releases the event's saved payload.
-        await store.settle(completion.event_id)
-        if retention_pass:
-            await runtime.acknowledge_wait("prior", ready.claim)
-            backdate_job(runtime, "prior", datetime.now(UTC) - timedelta(days=31))
-
-            async def source_finished(_job: BackgroundJob) -> bool:
-                return True
-
-            await runtime.expire_consumed(
-                before=datetime.now(UTC) - timedelta(days=30),
-                source_finished=source_finished,
-            )
-        else:
-            await runtime.release_wait("prior", ready.claim)
-        await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=100)
-        assert await runtime.is_user_stopped("descendant")
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tmp_path: Path) -> None:
     """Stop returns after cancellation admission while uncooperative cleanup still owns the job."""
     runtime = tool_job_runtime(tmp_path)
@@ -257,13 +183,13 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         assert saved.status == "cancel_requested"
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
         release.set()
         await runtime.release_wait("active", claim)
         waited = await runtime.wait("active", owner=job_owner(), depth=0)
         assert waited.job.status == "cancelled"
         await runtime.release_wait("active", waited.claim)
-        assert await runtime.pending_outcomes() == []
+        assert pending_outcomes(runtime) == []
     finally:
         release.set()
         await runtime.shutdown()
@@ -274,7 +200,7 @@ async def test_stop_includes_reserved_waits_and_preserves_honest_cancellation(tm
         saved = await restored.lookup("active", owner=job_owner(), depth=0)
         assert saved.user_stop_receipt_order == 7
         assert not saved.consumed
-        assert await restored.pending_outcomes() == []
+        assert pending_outcomes(restored) == []
     finally:
         await restored.shutdown()
 
@@ -331,8 +257,8 @@ async def test_replayed_stop_preserves_newer_edit_but_cancels_older_edit_work(
                 operation=operation,
             )
         await stop_conversation_jobs(runtime, store, stopped, stop_receipt_order=old.receipt_order)
-        assert await runtime.is_user_stopped("older-edit")
-        assert not await runtime.is_user_stopped("newer-edit")
+        assert user_stopped(runtime, "older-edit")
+        assert not user_stopped(runtime, "newer-edit")
         assert (await runtime.lookup("newer-edit", owner=owner, depth=0)).status == "running"
     finally:
         await runtime.shutdown()
@@ -416,10 +342,10 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         else:
             reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, _CountingGateway()))
             assert await reconciler.finalize("$reply", 100, AsyncMock())
-        assert await runtime.is_user_stopped("ready") is enabled
+        assert user_stopped(runtime, "ready") is enabled
         if enabled:
-            assert await runtime.pending_outcomes() == []
-            assert await runtime.outcome("ready", 0) is None
+            assert pending_outcomes(runtime) == []
+            assert pending_outcome(runtime, "ready", 0) is None
     finally:
         if coordinator is not None:
             await coordinator.stop()
@@ -726,43 +652,240 @@ async def test_saved_stop_reaches_jobs_of_a_bot_that_appears_after_startup(tmp_p
     try:
         await coordinator.initialize(bot._journal_store)
         await coordinator.sync()
-        assert not await coordinator.runtime.is_user_stopped("ready")
+        assert not user_stopped(coordinator.runtime, "ready")
         bots["general"] = bot
         if trigger == "sync":
             await coordinator.sync()
         else:
-            await coordinator.deliver_pending()
-        assert await coordinator.runtime.is_user_stopped("ready")
-        assert await coordinator.runtime.outcome("ready", 0) is None
+            await coordinator._reconcile()
+        assert user_stopped(coordinator.runtime, "ready")
+        assert pending_outcome(coordinator.runtime, "ready", 0) is None
     finally:
         await coordinator.stop()
 
 
+async def _persist_waiting_continuation(
+    store: PrincipalStore,
+    *,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> None:
+    """Persist one waiting continuation and its exact approval card."""
+    assert await store.create_approval_continuation(continuation) == continuation
+    assert await store.reserve_approval_card_deliveries(
+        continuation_principal_id=principal_id,
+        continuation_id=continuation.approval_id,
+        expected_generation=0,
+        cards=(
+            ApprovalCardReservation(
+                delivery_id="approval-card",
+                tool_call_id="call-1",
+                event_type="io.mindroom.tool_approval",
+                payload={
+                    "approval_id": "approval-card",
+                    "continuation_id": continuation.approval_id,
+                    "continuation_generation": 0,
+                    "tool_call_id": "call-1",
+                    "status": "pending",
+                    "tool_name": "dangerous",
+                },
+            ),
+        ),
+    )
+    assert await store.claim_matrix_delivery(delivery_id="approval-card", stage=DeliveryStage.INITIAL) is not None
+    await store.acknowledge_matrix_delivery(
+        delivery_id="approval-card",
+        stage=DeliveryStage.INITIAL,
+        event_id="$approval-card",
+        delivered_projections=(),
+    )
+
+
 @pytest.mark.asyncio
-async def test_stopped_job_fences_its_settled_completion(tmp_path: Path, journal_store: EventJournalStore) -> None:
-    """A settled completion event keeps only its identity, which still fences the response delivering a Stopped job."""
-    paths = test_runtime_paths(tmp_path)
-    store = journal_store.principal("parent@alice")
-    runtime = tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(Config(), paths)
+async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path) -> None:
+    """Retiring an empty placeholder cannot erase the Stop intent for its jobs."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.background_tool_jobs.enabled = True
+    paths = runner.deps.runtime_paths
+    store = runner.deps.approval_store
+    await bot._turn_store.warm()
+    await admit(store, "$source")
+    await _bind_reply(store, "$source", "$reply", entity_name="general")
+    target = MessageTarget.resolve(ROOM, "$thread", "$thread")
+    owner = replace(
+        job_owner(),
+        agent_name="general",
+        room_id=ROOM,
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=target.session_id,
+    )
+    await bot._turn_store.record_turn(
+        TurnRecord.create(
+            ("$source",),
+            redacted_source_event_ids=("$source",),
+            response_event_id=None,
+            conversation_target=target,
+            requester_id=owner.requester_id,
+            response_owner="general",
+            completed=False,
+        ),
+    )
+    runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
+
+    class RetiredGateway(_CountingGateway):
+        """Prove retirement of the original empty placeholder."""
+
+        @asynccontextmanager
+        async def user_stop_scope(self, response_event_id: str) -> AsyncIterator[str]:
+            """Return the source whose initial delivery was retired."""
+            del response_event_id
+            yield "$source"
+
+    async def active() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        return BackgroundOutcome("completed", "unreachable")
+
     try:
         await start_job(
             runtime,
-            "ready",
+            "active",
             tool_name="tool",
             depth=0,
+            source_event_id="$source",
             adapter={},
-            owner=job_owner(),
-            operation=_completed,
+            owner=owner,
+            operation=active,
         )
-        waited = await runtime.wait("ready", owner=job_owner(), depth=0)
-        await runtime.release_wait("ready", waited.claim)
-        completion = completion_event(waited.job, sender_id="@mindroom_parent:test")
-        await store.admit(completion)
-        await store.settle(completion.event_id)
-        assert not await response_was_stopped(completion.event_id, paths, "parent")
-        await runtime.stop_jobs(receipt_order=100, matches=_every_job)
-        assert await response_was_stopped(completion.event_id, paths, "parent")
+        reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, RetiredGateway()))
+        assert await reconciler.finalize("$reply", 100, AsyncMock())
+        job = await runtime.lookup("active", owner=owner, depth=0)
+        turn = bot._turn_store.get_turn_record("$source")
+        assert turn.user_stop_receipt_order == 100
+        assert turn.response_event_id is None
+        assert job.user_stop_receipt_order == 100
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned_approval", [False, True])
+async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Path, *, owned_approval: bool) -> None:
+    """Stopping a later reply also fences recovery and approvals of earlier managed work."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.background_tool_jobs.enabled = True
+    runner.deps.runtime.config.agents["general"].access.users = ["@user:localhost"]
+    paths = runner.deps.runtime_paths
+    store = runner.deps.approval_store
+    await bot._turn_store.warm()
+    await admit(store, "$first")
+    await admit(store, "$follow-up")
+    await _bind_reply(store, "$follow-up", "$reply", entity_name="general")
+    target = MessageTarget.resolve(ROOM, "$thread", "$thread")
+    owner = replace(
+        job_owner(),
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id=ROOM,
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=target.session_id,
+    )
+    await bot._turn_store.record_turn(
+        TurnRecord.create(
+            ("$follow-up",),
+            response_event_id="$reply",
+            conversation_target=target,
+            requester_id=owner.requester_id,
+            response_owner="general",
+            completed=False,
+        ),
+    )
+    runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
+    register_background_runtime(paths, runtime)
+
+    async def awaiting() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    try:
+        await start_job(
+            runtime,
+            "older-approval-job",
+            tool_name="delegate",
+            depth=0,
+            source_event_id="$first",
+            adapter={},
+            owner=owner,
+            operation=awaiting,
+        )
+        waiting = await runtime.wait("older-approval-job", owner=owner, depth=0)
+        await runtime.release_wait("older-approval-job", waiting.claim)
+        original_request = _plain_request(target, source_event_id="$first")
+        if owned_approval:
+            continuation = ApprovalContinuation(
+                approval_id="older-human-source-approval",
+                run_id="run-paused",
+                session_id=target.session_id,
+                entity_kind="agent",
+                entity_name="general",
+                room_id=ROOM,
+                thread_id=target.resolved_thread_id,
+                requester_id=owner.requester_id,
+                response_event_id="$older-waiting",
+                sources=ResponseSources(("$first",), ("$first",)),
+                calls=(
+                    ApprovalCall(
+                        tool_call_id="call-1",
+                        tool_name="dangerous",
+                        invoking_agent="general",
+                        expires_at_ns=2**62,
+                    ),
+                ),
+                state="waiting",
+                runtime_generation=runner.deps.approval_runtime_generation,
+                origin=original_request.response_envelope.origin,
+                hook_source="message",
+                requires_background_tool_jobs=True,
+            )
+            await _persist_waiting_continuation(
+                store,
+                principal_id=bot._journal_principal_id,
+                continuation=continuation,
+            )
+            decision = await store.resolve_continuation_approval_card(
+                card_event_id="$approval-card",
+                requested_status="approved",
+                reason=None,
+                metadata=ApprovalDecisionMetadata(resolved_by=owner.requester_id),
+            )
+            assert decision.continuation_ready
+        reconciler = UserStopReconciler(UserStopReconcilerDeps(bot._turn_store, runner, _CountingGateway()))
+        assert await reconciler.finalize("$reply", 100, AsyncMock())
+        assert user_stopped(runtime, "older-approval-job")
+        execute = AsyncMock()
+        resume = AsyncMock(return_value="$older-waiting")
+        settled = AsyncMock(return_value=True)
+        with (
+            patch.object(runner, "_run_owned_approval_continuation", new=resume),
+            patch.object(
+                runner,
+                "_settle_user_stopped_approval",
+                new=settled,
+            ),
+        ):
+            await runner._run_locked_response_lifecycle(
+                original_request,
+                response_kind="test",
+                locked_operation=execute,
+                signal_queued_message=False,
+            )
+        resume.assert_not_awaited()
+        assert settled.await_count == int(owned_approval)
+        execute.assert_not_awaited()
     finally:
         await runtime.shutdown()

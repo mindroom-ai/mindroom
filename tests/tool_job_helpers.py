@@ -6,7 +6,6 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-import nio
 from agno.tools.function import Function
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -19,7 +18,7 @@ from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime
+from mindroom.tool_jobs.runtime import READY_STATUSES, BackgroundJob, BackgroundOutcome, ToolJobRuntime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -54,6 +53,28 @@ def tool_job_runtime(
 ) -> ToolJobRuntime:
     """Build a runtime whose current grants allow every job and call and whose adapters need no extra cleanup."""
     return ToolJobRuntime(storage_root, authorize=authorize, authorize_execution=authorize_execution, cancel=cancel)
+
+
+def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
+    """Ready outcomes a holding reply would still deliver: unconsumed, not stopped, unclaimed, and authorized."""
+    return [
+        entry.job
+        for entry in runtime._entries.values()
+        if entry.job.status in READY_STATUSES and runtime._unconsumed(entry)
+    ]
+
+
+def pending_outcome(runtime: ToolJobRuntime, job_id: str, generation: int) -> BackgroundJob | None:
+    """The pending outcome of one exact job generation, if a holding reply would still deliver it."""
+    return next(
+        (job for job in pending_outcomes(runtime) if (job.job_id, job.generation) == (job_id, generation)),
+        None,
+    )
+
+
+def user_stopped(runtime: ToolJobRuntime, job_id: str) -> bool:
+    """Whether an explicit Stop marked this job; consuming its outcome does not count."""
+    return runtime._entries[job_id].job.user_stop_receipt_order is not None
 
 
 def assembled_function(entrypoint: Callable[..., object]) -> Function:
@@ -177,12 +198,9 @@ def completed_delegation_job() -> BackgroundJob:
     )
 
 
-def delivery_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
-    """A coordinator whose only running bot is the `team` transport in `!room:localhost`."""
+def team_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
+    """A coordinator whose only bot is the `team` transport."""
     bot = MagicMock(spec=AgentBot)
-    bot.running = True
-    bot.client = MagicMock(spec=nio.AsyncClient)
-    bot.client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_team:localhost")}
     bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
     return ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),

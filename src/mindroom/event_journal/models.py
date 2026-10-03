@@ -57,7 +57,6 @@ class EventKind(StrEnum):
     MESSAGE = "message"
     MEDIA = "media"
     SCHEDULE_TRIGGER = "schedule_trigger"
-    TOOL_JOB_COMPLETION = "tool_job_completion"
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
@@ -75,9 +74,7 @@ class EventKind(StrEnum):
 # pending alone does not mean that. Thread membership is derived from content
 # for every readable kind alike, so a pending reaction or approval can sit
 # in a thread and be mistaken for an unanswered turn.
-TURN_BACKED_KINDS = frozenset(
-    {EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER, EventKind.TOOL_JOB_COMPLETION},
-)
+TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
 
 
 class SemanticConsumer(StrEnum):

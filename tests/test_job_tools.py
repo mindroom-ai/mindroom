@@ -29,7 +29,11 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_ru
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import start_job, tool_job_runtime
+from tests.tool_job_helpers import (
+    pending_outcomes,
+    start_job,
+    tool_job_runtime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -543,7 +547,7 @@ async def test_generic_wait_keeps_a_paused_child_approval(tmp_path: Path) -> Non
         job = await runtime.lookup("paused", owner=owner, depth=0)
         assert job.status == "awaiting_approval"
         assert not job.consumed
-        assert await runtime.pending_outcomes() != []
+        assert pending_outcomes(runtime) != []
     finally:
         await runtime.shutdown()
 

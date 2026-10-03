@@ -322,20 +322,20 @@ A tool's own argument named `wait_timeout` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
 With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
-Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and cannot be controlled with `job`.
+Shell handles do not appear in `job(action="list")` or keep a reply waiting, and cannot be controlled with `job`.
 
 | `wait_timeout` | Behavior |
 | --- | --- |
-| Omitted or `null` | Wait until completion or a human follow-up. |
+| Omitted or `null` | Wait until completion or until the agent starts answering a newer message. |
 | `0` | Return a job handle immediately while execution continues. |
 | Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
 
 Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
-A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
+When the agent starts answering a newer message, the foreground wait is released without pausing or cancelling the accepted work.
 The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
 
 Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
-It also stops automatic replies and further managed work originating from those jobs; a restart does not resume them.
+Their outcomes are no longer offered to later replies, and a restart does not resume them.
 Jobs belonging to other requesters, conversations, agents, or newer human turns remain unaffected.
 An operation that cannot stop immediately stays `cancel_requested` until its execution and cleanup settle.
 Saved results remain available for explicit retrieval.
@@ -359,7 +359,7 @@ For delegation, `job_id` identifies one turn and `subagent_id` identifies the re
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
 Non-MCP constructor settings are part of the accepted tool identity, stored as a digest: changing those authored settings cancels the tool's still-running jobs and blocks access to saved results until the settings match again.
 Include/exclude filters remain checked per function.
-Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and completion delivery.
+Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and result delivery.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
@@ -379,21 +379,22 @@ Their schemas omit the shared waiting option, and supplying a non-null nested wa
 Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
 Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
-After the agent finishes independent work, the runtime waits for outstanding jobs without repeated model polling.
-Streaming and non-streaming responses show waiting progress, and a human message can release the wait immediately.
+While background work is outstanding in a conversation, the agent's latest reply stays open and holds it: after its own work, the reply waits for every outstanding job of this agent and requester in the conversation, including jobs that earlier replies started, without repeated model polling.
+Streaming and non-streaming replies show waiting progress, and pressing **Stop** on the waiting reply cancels the work it holds.
+When the agent starts answering a newer message in the conversation, the newer reply takes over the outstanding work and the older reply finishes; a message that another agent answers leaves the waiting reply as it is.
 Resuming an approved tool follows the same waiting behavior.
-Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
+Ready outcomes or approval boundaries cause one continuation of the holding reply using the native result-retrieval tool, up to 20 continuations per reply.
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
 Result continuations retain previously delivered prose and tool traces in the final response.
-Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
-Runtime updates retain requester authorization but are identified separately from human input.
-Silent scheduled work retains its quiet delivery policy and run receipts across later completions and restarts.
+No job completion starts a new reply by itself.
+After a restart, interrupted work is reported to the next reply in its conversation, such as the automatic resume of the interrupted reply.
+A reply holds only work it may retrieve: jobs of its requester, and of its own agent or its team's members, so another requester's or an absent member's results wait for a later reply that can retrieve them.
+Silent scheduled work retains its quiet delivery policy and run receipts across later replies and restarts.
 Automatic joins keep quiet and ordinary results separate.
 As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
 
 A result is consumed only after exact persisted parent tool-result evidence is verified.
-Listing jobs or scheduling internal completion work does not consume it.
-Consumed results, errors, and acknowledged cancellation do not cause another completion response.
+Listing jobs does not consume it.
 If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
 Reading an already consumed result returns its original output without reapplying session-state changes.
