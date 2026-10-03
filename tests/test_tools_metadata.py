@@ -374,6 +374,22 @@ def test_custom_api_tool_strips_configured_credentials_from_hops_off_the_base_ur
     assert followed.headers["X-Request-Id"] == "req-1"
 
 
+def test_custom_api_tool_sends_dashboard_json_headers_to_the_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headers saved in the dashboard arrive as JSON text and are sent as default headers to base_url."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={"ok": True}))
+    tool = custom_api_tools()(base_url="https://api.example.com", headers='{"X-Api-Key": "operator-secret"}')
+
+    assert json.loads(tool.make_request("data"))["data"] == {"ok": True}
+    assert sent[0].headers["X-Api-Key"] == "operator-secret"
+
+
+@pytest.mark.parametrize("headers", ['["X-Api-Key"]', '{"X-Retries": 3}'])
+def test_custom_api_tool_rejects_headers_that_are_not_a_json_object_of_strings(headers: str) -> None:
+    """A malformed headers value fails when the tool is built instead of on every request."""
+    with pytest.raises(ValueError, match="headers must be a JSON object with string keys and values"):
+        custom_api_tools()(base_url="https://api.example.com", headers=headers)
+
+
 def test_custom_api_tool_strips_basic_auth_from_hops_off_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Basic auth pair reaches the base_url origin but not a presigned download on another host."""
 

@@ -12,6 +12,7 @@ from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.string_mapping import parse_string_mapping
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -130,6 +131,8 @@ def _read_final_response(client: httpx.Client, response: httpx.Response) -> str:
             type="password",
             required=False,
             default=None,
+            placeholder='{"X-Api-Key": "value"}',
+            description="Default headers sent only to the Base URL (JSON format)",
         ),
         ConfigField(
             name="verify_ssl",
@@ -170,6 +173,33 @@ def custom_api_tools() -> type[CustomApiTools]:
 
     class MindRoomCustomApiTools(CustomApiTools):
         """Custom API toolkit with MindRoom server-fetch URL validation."""
+
+        def __init__(
+            self,
+            base_url: str | None = None,
+            username: str | None = None,
+            password: str | None = None,
+            api_key: str | None = None,
+            headers: dict[str, str] | str | None = None,
+            verify_ssl: bool = True,
+            timeout: int = 30,
+            enable_make_request: bool = True,
+            all: bool = False,  # noqa: A002
+            **kwargs: object,
+        ) -> None:
+            super().__init__(
+                base_url=base_url,
+                username=username,
+                password=password,
+                api_key=api_key,
+                # The dashboard stores headers as JSON text, while Agno expects a mapping.
+                headers=parse_string_mapping(headers, field_name="headers"),
+                verify_ssl=verify_ssl,
+                timeout=timeout,
+                enable_make_request=enable_make_request,
+                all=all,
+                **kwargs,
+            )
 
         def make_request(
             self,

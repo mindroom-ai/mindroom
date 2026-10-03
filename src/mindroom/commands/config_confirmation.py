@@ -77,6 +77,7 @@ class _PendingConfigChange:
     requester: str  # User who requested the change
     # Room state is readable by every member and never end-to-end encrypted, so a new value
     # that display redaction would mask is withheld from it and kept only in this process.
+    # So is a value room state cannot carry, since Matrix canonical JSON rejects floats.
     new_value_withheld: bool = False
     # A withheld change restored from room state after a restart, whose new value is gone.
     new_value_lost: bool = False

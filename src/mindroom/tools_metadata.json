@@ -2456,11 +2456,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Default headers sent only to the Base URL (JSON format)",
           "label": "Headers",
           "name": "headers",
           "options": null,
-          "placeholder": null,
+          "placeholder": "{\"X-Api-Key\": \"value\"}",
           "required": false,
           "type": "password",
           "validation": null
@@ -11956,18 +11956,6 @@
       "auth_provider": null,
       "category": "research",
       "config_fields": [
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Include Summary",
-          "name": "include_summary",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
         {
           "authored_override": true,
           "default": null,

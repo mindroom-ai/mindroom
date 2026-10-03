@@ -29,8 +29,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
-Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, and `processors`.
+Daytona's `sandbox_env_vars` and `sandbox_labels`, and `custom_api` `headers`, instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -360,7 +360,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
+| `headers` | `password` | `no` | `null` | Default headers as a JSON object of string header names and values, such as `{"X-Api-Key": "value"}`, stored through the dashboard or credential store because headers can carry credentials. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
@@ -388,7 +388,6 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 - If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
-- `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs
 

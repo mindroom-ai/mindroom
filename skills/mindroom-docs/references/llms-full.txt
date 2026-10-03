@@ -7184,7 +7184,7 @@ extract_metadata_only("https://matrix.org/blog/")
 - `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
 - Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
-- For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
+- For news-article specific extraction with titles, authors, and publish dates, `newspaper` can be a better fit.
 
 ### [`newspaper`]
 
@@ -7193,7 +7193,7 @@ extract_metadata_only("https://matrix.org/blog/")
 #### What It Does
 
 `newspaper` exposes `read_article(url)`.
-It returns JSON with whichever article fields were extracted successfully, including title, authors, text, publish date, and optional summary.
+It returns JSON with whichever article fields were extracted successfully, including title, authors, text, and publish date.
 `article_length` truncates article text after extraction.
 The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`.
 That means old references to `newspaper4k` are stale for current MindRoom config.
@@ -7202,7 +7202,6 @@ That means old references to `newspaper4k` are stale for current MindRoom config
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `include_summary` | `boolean` | `no` | `false` | Include article summary when available. |
 | `article_length` | `number` | `no` | `null` | Truncate article text to this many characters. |
 | `enable_read_article` | `boolean` | `no` | `true` | Enable `read_article()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -7214,7 +7213,6 @@ agents:
   newsdesk:
     tools:
       - newspaper:
-          include_summary: true
           article_length: 6000
 ```
 
@@ -13325,6 +13323,7 @@ revoke_public_report("pub_...")
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
 Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
 Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
 A patch value, or a `display_name`, `role`, or `instructions` value given to `manage_agent()`, that contains the `***redacted***` marker or a URL password masked as `user:***@host` is refused, so copying redacted output back never replaces a hidden real value.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
@@ -13922,8 +13921,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
-Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, and `processors`.
+Daytona's `sandbox_env_vars` and `sandbox_labels`, and `custom_api` `headers`, instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -14253,7 +14252,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
+| `headers` | `password` | `no` | `null` | Default headers as a JSON object of string header names and values, such as `{"X-Api-Key": "value"}`, stored through the dashboard or credential store because headers can carry credentials. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
@@ -14281,7 +14280,6 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 - If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
-- `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs
 
@@ -19351,6 +19349,7 @@ Changes are validated against the Pydantic config schema before applying.
 Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
 Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
 Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 
 **Modify configuration:**
 
@@ -19379,9 +19378,9 @@ When you use `!config set`, MindRoom:
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
 Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
-It stores the new value only when redaction leaves that value unchanged.
+It stores the new value only when redaction leaves that value unchanged and room state can carry it, which rules out decimal numbers and integers beyond 2^53 - 1.
+Any other new value is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 `!config set` refuses a value containing the `***redacted***` marker or a URL password masked as `user:***@host`, which only appear in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
-A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
