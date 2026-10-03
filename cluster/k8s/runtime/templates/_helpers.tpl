@@ -466,7 +466,7 @@ Returns a JSON array for fromJsonArray.
 {{- else if kindIs "invalid" $item -}}
 {{- /* A null entry removes an entry set by an earlier values file. */ -}}
 {{- else if $.scalarKey -}}
-{{- fail (printf "%s.%s must be a string, a map, or null; quote numbers and booleans" $.path $key) -}}
+{{- fail (printf "%s.%s must be a string, a map, or null; quote numbers and booleans (or use --set-string)" $.path $key) -}}
 {{- else -}}
 {{- fail (printf "%s.%s must be a map or null" $.path $key) -}}
 {{- end -}}

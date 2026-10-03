@@ -290,7 +290,7 @@ providerCredentials: []
 #     key: anthropic-api-key
 
 # The env lists, Agent Vault server env lists, extraVolumes, and extraVolumeMounts accept
-# either a list or a map keyed by entry name; see "Layering Values Files" in the README.
+# either a list or a map keyed by entry; see "Layering Values Files" in the README.
 # They default to null so Helm accepts either form without table/non-table warnings.
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.

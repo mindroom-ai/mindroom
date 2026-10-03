@@ -355,7 +355,7 @@ Helm replaces lists wholesale when it merges several values files, so an environ
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
 
-String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv`, and `egressProxy.noProxy` entries, are rendered with `tpl`.
+String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv` are rendered with `tpl`, as are `egressProxy.noProxy` entries.
 Shared values can therefore reference the release namespace or other values instead of repeating environment-specific names.
 Write `{{ "{{" }}` for a literal `{{`.
 A `null` in `workers.kubernetes.extraEnv` removes an inherited or chart-injected worker variable.
@@ -380,17 +380,17 @@ env:
       secretRef:
         name: mindroom-secrets
 extraVolumes:
-  session-state:
-    persistentVolumeClaim:
-      claimName: mindroom-session-state
-  knowledge-db:
-    persistentVolumeClaim:
-      claimName: mindroom-knowledge-db
+  ca-bundle:
+    secret:
+      secretName: custom-ca-bundle
+  scratch:
+    emptyDir: {}
 extraVolumeMounts:
-  session-state:
-    mountPath: /app/session_state
-  knowledge-db:
-    mountPath: /app/agent_data/knowledge_db
+  ca-bundle:
+    mountPath: /etc/ssl/custom
+    readOnly: true
+  scratch:
+    mountPath: /scratch
 ```
 
 ```yaml
@@ -414,9 +414,9 @@ env:
       secretRef:
         name: staging-secrets
 extraVolumes:
-  knowledge-db: null
+  scratch: null
 extraVolumeMounts:
-  knowledge-db: null
+  scratch: null
 ```
 
 ## Control-Plane NetworkPolicy
