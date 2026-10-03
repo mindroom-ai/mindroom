@@ -861,7 +861,8 @@ async def test_current_runtime_export_and_mounts_find_migrated_contents(tmp_path
         resolved_thread_id=None,
         session_id=None,
     )
-    runtime = resolve_agent_runtime("writer", config, paths, identity)
+    # The requester's first turn after the move records the scope the thread exporter trusts.
+    runtime = resolve_agent_runtime("writer", config, paths, identity, create=True)
     assert (runtime.state_root / "workspace/notes.txt").read_bytes() == b"private workspace\x00retained"
     assert (runtime.session_state_root / "sessions/credentials.bin").read_bytes() == b"opaque credentials"
     targets = _private_targets(config, paths, "writer", "@writer:example.org", AgentThreadExportConfig())

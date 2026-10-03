@@ -630,7 +630,7 @@ async def test_unreadable_private_identity_clears_that_instance_and_keeps_the_pa
 
     with (
         patch(
-            "mindroom.private_instance_identity_store.load_private_instance_identity",
+            "mindroom.private_instance_identity_store.load_private_instance_record_payload",
             side_effect=PermissionError("record unreadable"),
         ),
         patch(EXPORT_PATH, new=export),

@@ -45,11 +45,11 @@ class PrivateInstanceIdentityError(ValueError):
 
 @dataclass(frozen=True)
 class PrivateInstance:
-    """One materialized private-instance root and the requester its scope record names.
+    """One private-instance root on disk and the requester the primary recorded when it materialized the scope.
 
-    ``requester_id`` is ``None`` when the record is missing, unreadable, invalid, or
-    belongs to a different worker scope than the agent runs under today; nothing can
-    execute as such an instance.
+    ``requester_id`` is ``None`` when the primary's copy of the scope record is missing,
+    unreadable, invalid, or belongs to a different worker scope than the agent runs under
+    today; sandbox runner code can write a record into the scope itself, but not that copy.
     """
 
     state_root: Path
@@ -78,9 +78,9 @@ def private_instances_for_agent(
 
 
 def _instance_requester(trusted_base_path: Path, scope_root: Path, worker_scope: WorkerScope) -> str | None:
-    """Return the requester one scope record names, when it is valid for ``worker_scope``."""
+    """Return the requester the primary's copy of one scope record names, when it is valid for ``worker_scope``."""
     try:
-        identity = load_private_instance_identity(trusted_base_path, scope_root)
+        identity = _load_identity(trusted_base_path, scope_root, _primary_record_path(trusted_base_path, scope_root))
     except (PrivateInstanceIdentityError, OSError):
         return None
     if identity is None or _worker_key_scope(identity.worker_key) != worker_scope:
@@ -97,12 +97,31 @@ def load_private_instance_identity(base_storage_path: Path, scope_root: Path) ->
     """Load and validate the identity record for one private scope, if it exists."""
     trusted_base_path = shared_storage_root(base_storage_path)
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=False)
-    payload = load_private_instance_record_payload(trusted_scope_root / _RECORD_FILENAME)
+    return _load_identity(trusted_base_path, trusted_scope_root, trusted_scope_root / _RECORD_FILENAME)
+
+
+def _load_identity(trusted_base_path: Path, scope_root: Path, record_path: Path) -> PrivateInstanceIdentity | None:
+    payload = load_private_instance_record_payload(record_path)
     if payload is None:
         return None
     identity = parse_private_instance_identity_payload(payload)
-    _validate_identity(identity, trusted_base_path, trusted_scope_root)
+    _validate_identity(identity, trusted_base_path, scope_root)
     return identity
+
+
+def _primary_record_path(trusted_base_path: Path, scope_root: Path) -> Path:
+    """Return the primary's copy of one scope record, below the tracking directory that no worker mounts."""
+    return trusted_base_path / "tracking" / scope_root.relative_to(trusted_base_path) / _RECORD_FILENAME
+
+
+def _write_primary_record(trusted_base_path: Path, scope_root: Path, identity: PrivateInstanceIdentity) -> None:
+    write_json_file_durable(
+        _primary_record_path(trusted_base_path, scope_root),
+        _identity_payload(identity),
+        indent=2,
+        sort_keys=True,
+        trailing_newline=True,
+    )
 
 
 def ensure_private_instance_identity(
@@ -120,7 +139,15 @@ def ensure_private_instance_identity(
     _validate_identity(requested_identity, trusted_base_path, scope_root)
     existing_identity = load_private_instance_identity(trusted_base_path, scope_root)
     if existing_identity is not None:
-        return _matching_identity(existing_identity, requested_identity)
+        identity = _matching_identity(existing_identity, requested_identity)
+        # LEGACY_COMPAT: Private scope records without the primary's copy below `tracking/`.
+        # Legacy format: only `private_instances/<scope>/.mindroom-private-instance.json`, which the static-runner sidecar can write.
+        # Last legacy release: v2026.10.47; replacement: the next release also keeps a copy at `tracking/private_instances/<scope>/.mindroom-private-instance.json`.
+        # Handling: the requester's next turn copies its matching record; until then the thread exporter gives that instance no target and clears its export tree.
+        # Coverage: tests/test_private_instance_identity.py::test_private_instances_for_agent_ignores_a_record_the_primary_never_wrote.
+        if not _primary_record_path(trusted_base_path, scope_root).exists():
+            _write_primary_record(trusted_base_path, scope_root, identity)
+        return identity
 
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=True)
     # Sandbox runners can write private scopes and could hold a lock there forever, so it lives in the storage root.
@@ -130,6 +157,8 @@ def ensure_private_instance_identity(
             return _matching_identity(existing_identity, requested_identity)
         if _scope_has_preexisting_data(trusted_scope_root):
             return None
+        # The copy comes first, so a scope record the primary wrote always has one.
+        _write_primary_record(trusted_base_path, trusted_scope_root, requested_identity)
         write_json_file_durable(
             trusted_scope_root / _RECORD_FILENAME,
             _identity_payload(requested_identity),

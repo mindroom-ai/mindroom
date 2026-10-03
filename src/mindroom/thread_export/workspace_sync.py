@@ -428,10 +428,10 @@ def _private_targets(
     agent_user_id: str,
     options: AgentThreadExportConfig,
 ) -> list[ThreadExportTarget]:
-    """Return one owner-scoped target per private instance whose core identity checks out.
+    """Return one owner-scoped target per private instance whose primary-recorded owner checks out.
 
-    An instance without a valid owner gets its export tree cleared instead: nothing can
-    run as that instance, so nothing should keep reading conversations there.
+    An instance without one gets its export tree cleared instead: until the primary
+    materializes it for its requester, nothing should keep reading conversations there.
     """
     private = config.agents[agent_name].private
     assert private is not None
