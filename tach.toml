@@ -6846,6 +6846,7 @@ depends_on = [
 path = "mindroom.delegation.records"
 depends_on = [
     "mindroom.atomic_file",
+    "mindroom.constants",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
