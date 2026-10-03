@@ -49,7 +49,7 @@ from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, 
 from mindroom.helper_usage import helper_usage_context
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
-from mindroom.tool_jobs.completion import join_conversation_jobs, report_background_wait
+from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, join_conversation_jobs, report_background_wait
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -348,6 +348,8 @@ class TurnRunState:
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
     attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
+    # Continuations with ready job results, which do not spend the dynamic tool continuation budget.
+    job_joins: int = 0
     prior_response_text: str = ""
     prior_response_tools: tuple[ToolTraceEntry, ...] = ()
 
@@ -688,6 +690,15 @@ class StreamingTurnAdapter[ChunkT]:
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
 
 
+def _continuation_count_after(run: TurnRunState, joins: int, continuation_count: int) -> int:
+    """Spend one dynamic continuation unless the attempt joined ready job results, failing once all are spent."""
+    if run.job_joins != joins:
+        return continuation_count
+    if continuation_count >= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        _raise_continuation_budget_exhausted()
+    return continuation_count + 1
+
+
 def _raise_continuation_budget_exhausted() -> NoReturn:
     # The continuation loop always settles on its final iteration: at the limit
     # the decision carries a limit_message and never asks to continue.
@@ -906,6 +917,7 @@ def _advance_job_continuation(
     prompt: str,
 ) -> DynamicContinuationRunState:
     """Retain model selection and substantive prose while retrieving ready job results."""
+    run.job_joins += 1
     if ctx.allow_no_report_response and is_silent_schedule_no_report_response(resolution.replayable_text):
         resolution = replace(resolution, replayable_text="", response_text=tool_marker_text(resolution.response_text))
     return _advance_turn_continuation(
@@ -983,8 +995,10 @@ async def run_blocking_response_turn(
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            continuation_count = 0
+            while True:
                 cli_lifetime.continuation_count = continuation_count
+                joins = run.job_joins
                 try:
                     with helper_usage_context(scope_context):
                         resolution = await adapter.run_attempt(run, continuation)
@@ -1006,7 +1020,7 @@ async def run_blocking_response_turn(
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
-            _raise_continuation_budget_exhausted()
+                continuation_count = _continuation_count_after(run, joins, continuation_count)
     except asyncio.CancelledError:
         # The blocking envelope re-records from the recorder's canonical state so
         # an in-attempt cancellation (recorded above with attempt-local partials)
@@ -1172,7 +1186,7 @@ async def _settle_joined_blocking_attempt(
         interrupted_tools=(),
     )
     joined_continuation = None
-    if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+    if run.job_joins < JOB_JOIN_LIMIT:
         async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
             if isinstance(joined, BackgroundWaitChunk):
                 await report_background_wait(StreamingPresentation(response_text=response_text), joined.content)
@@ -1382,13 +1396,16 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            initial_count = (
+            continuation_count = (
                 resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
             )
-            for continuation_count in range(initial_count, DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            if continuation_count > DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                _raise_continuation_budget_exhausted()
+            while True:
                 cli_lifetime.continuation_count = continuation_count
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
+                joins = run.job_joins
                 try:
                     if resumed_attempt is not None:
                         resolution = resumed_attempt.attempt
@@ -1470,7 +1487,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         resolution = replace(resolution, response_text="")
                     elif settle.response_text and join_document is None:
                         yield adapter.make_text_chunk(settle.response_text)
-                    if not keep_going and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                    if not keep_going and run.job_joins < JOB_JOIN_LIMIT:
                         async for joined in join_conversation_jobs(
                             run.attempted_job_outcomes,
                             agent_names=ctx.tool_job_agent_names,
@@ -1512,7 +1529,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     await finalize_consumption()
                 if not keep_going:
                     return
-            _raise_continuation_budget_exhausted()
+                continuation_count = _continuation_count_after(run, joins, continuation_count)
     except asyncio.CancelledError:
         _record_turn_excluded_fallback(
             ctx,

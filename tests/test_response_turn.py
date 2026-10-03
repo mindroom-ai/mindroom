@@ -19,6 +19,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -42,7 +43,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.tool_jobs.completion import _ReadyJobContinuation
+from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, _ReadyJobContinuation
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -2229,3 +2230,82 @@ async def test_team_join_document_replaces_the_terminal_rendering_only_in_a_join
     )
     published = [chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk for chunk in chunks]
     assert published == (["Document 1", "Document 2"] if joins else ["notice:Terminal 1"])
+
+
+@pytest.mark.asyncio
+async def test_job_join_follows_spent_dynamic_continuations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reply that used every dynamic continuation still joins the jobs it holds."""
+    log = _AdapterLog()
+    attempts = 0
+
+    async def attempt(_run: TurnRunState, _continuation_state: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= DYNAMIC_TOOL_CONTINUATION_LIMIT:
+            return CompletedAttempt(attempt_run_id=f"run-{attempts}", tool_executions=(_dynamic_tool_execution(),))
+        text = "final" if attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1 else "after join"
+        return CompletedAttempt(response_text=text, replayable_text=text, has_visible_content=True)
+
+    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        if not attempted:
+            attempted.add(("job", 0))
+            yield _ReadyJobContinuation("Retrieve the result")
+
+    monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
+    result = await run_blocking_response_turn(
+        _ctx(),
+        _blocking_adapter(log, attempt),
+        TurnSinks(),
+        continuation=_continuation(),
+    )
+    assert attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 2
+    assert result.endswith("after join")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch, streaming: bool) -> None:
+    """Endless ready results end the reply after `JOB_JOIN_LIMIT` joins, without exhausting dynamic continuations."""
+    log = _AdapterLog()
+    attempts = 0
+
+    def completed() -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(
+            response_text=f"Reply {attempts}",
+            replayable_text=f"Reply {attempts}",
+            has_visible_content=True,
+        )
+
+    async def blocking_attempt(_run: TurnRunState, _state: DynamicContinuationRunState) -> CompletedAttempt:
+        return completed()
+
+    async def streaming_attempt(
+        _run: TurnRunState,
+        _state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(completed())
+
+    async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+        attempted.add(("job", len(attempted)))
+        yield _ReadyJobContinuation("Retrieve the result")
+
+    monkeypatch.setattr(response_turn_module, "join_conversation_jobs", join)
+    if streaming:
+        await _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, streaming_attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        )
+    else:
+        await run_blocking_response_turn(
+            _ctx(),
+            _blocking_adapter(log, blocking_attempt),
+            TurnSinks(),
+            continuation=_continuation(),
+        )
+    assert attempts == JOB_JOIN_LIMIT + 1

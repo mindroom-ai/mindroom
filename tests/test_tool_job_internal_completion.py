@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.visible_body import visible_body_from_content
@@ -23,6 +22,7 @@ from mindroom.response_turn import (
 )
 from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
+    JOB_JOIN_LIMIT,
     _ReadyJobContinuation,
     background_wait_edit,
     background_wait_notice,
@@ -976,9 +976,8 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("used", [0, DYNAMIC_TOOL_CONTINUATION_LIMIT - 1, DYNAMIC_TOOL_CONTINUATION_LIMIT])
-async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_path: Path, used: int) -> None:
-    """A resumed approval joins ready results only within the continuations its turn has left."""
+async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
+    """A resumed approval joins ready results at most `JOB_JOIN_LIMIT` times."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
     runtime = tool_job_runtime(tmp_path)
@@ -1009,13 +1008,12 @@ async def test_approval_join_spends_only_the_remaining_continuation_budget(tmp_p
     try:
         await leave_ready_result()
         with tool_runtime_context(context):
-            _, joins = await join_approval_jobs(
+            await join_approval_jobs(
                 "completed run",
                 is_complete=lambda _response: True,
                 continue_response=continue_response,
                 presentation=lambda: StreamingPresentation(response_text=""),
-                continuation_count=used,
             )
-        assert joins == len(continued) == DYNAMIC_TOOL_CONTINUATION_LIMIT - used
+        assert len(continued) == JOB_JOIN_LIMIT
     finally:
         await runtime.shutdown()

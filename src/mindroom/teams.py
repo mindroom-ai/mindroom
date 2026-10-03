@@ -2890,10 +2890,9 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                 progress=progress,
             )
 
-            continued, joins = await join_approval_jobs(
+            continued = await join_approval_jobs(
                 continued,
                 agent_names=member_names,
-                continuation_count=continuation_count,
                 is_complete=lambda result: result.status == RunStatus.completed,
                 continue_response=partial(
                     _retrieve_team_job_results,
@@ -2921,8 +2920,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             toolkit_owners=toolkit_owners_for_agents(members.agents),
         )
         if paused is not None:
-            # A later pause resumes with only the budget these joins left.
-            return _continued_team_pause(presentation, replace(paused, continuation_count=continuation_count + joins))
+            return _continued_team_pause(presentation, replace(paused, continuation_count=continuation_count))
         if continued.status != RunStatus.completed:
             raise RuntimeError(str(continued.content or "Team continuation did not complete"))
         if tool_trace_collector is not None and show_tool_calls:

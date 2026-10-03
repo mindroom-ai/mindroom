@@ -15,7 +15,6 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
@@ -41,6 +40,8 @@ if TYPE_CHECKING:
 
 # The source kind of a completion whose job started outside any admitted turn.
 _UNSOURCED_COMPLETION_SOURCE_KIND = "tool_job_completion"
+# How many times one reply may continue with ready job results, counted apart from dynamic tool continuations.
+JOB_JOIN_LIMIT = 20
 
 
 @dataclass
@@ -304,16 +305,11 @@ async def join_approval_jobs[RunT](
     is_complete: Callable[[RunT], bool],
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
     presentation: Callable[[], StreamingPresentation],
-    continuation_count: int,
     agent_names: Sequence[str] | None = None,
-) -> tuple[RunT, int]:
-    """Join ready jobs after a reconstructed approval, within the continuation budget its turn has left.
-
-    Returns the final response and how many continuations the joins spent.
-    """
+) -> RunT:
+    """Join ready jobs after a reconstructed approval, at most `JOB_JOIN_LIMIT` times."""
     attempted: set[tuple[str, int]] = set()
-    joins = 0
-    for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT - continuation_count):
+    for _ in range(JOB_JOIN_LIMIT):
         if not is_complete(response):
             break
         prompt = None
@@ -325,5 +321,4 @@ async def join_approval_jobs[RunT](
         if prompt is None:
             break
         response = await continue_response(response, prompt)
-        joins += 1
-    return response, joins
+    return response
