@@ -331,13 +331,13 @@ def _end_customer_billing_at_period_end(customer_id: str) -> list[ScheduledBilli
     scheduled: list[ScheduledBillingEnd] = []
     try:
         for subscription in _customer_subscriptions(customer_id):
-            if subscription.status in _UNBILLED_STRIPE_STATUSES or subscription.metadata.get(DELETION_BILLING_MARKER):
+            if subscription.status in _UNBILLED_STRIPE_STATUSES:
                 continue
             chosen_end = subscription.cancel_at
             if chosen_end is not None:
                 period_end = _current_period_end(subscription)
                 if period_end is None or chosen_end <= period_end:
-                    continue  # It already ends within its paid period, as the customer chose.
+                    continue  # It already ends within its paid period, as the customer or an earlier deletion chose.
             marker = _NO_EARLIER_END if chosen_end is None else str(chosen_end)
             stripe.Subscription.modify(
                 subscription.id, cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: marker}

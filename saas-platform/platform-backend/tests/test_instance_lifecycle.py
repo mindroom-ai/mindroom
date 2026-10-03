@@ -2209,6 +2209,20 @@ def test_deletion_moves_a_later_end_date_to_the_period_end_and_cancelling_it_res
     )
 
 
+@pytest.mark.parametrize("ends", [False, True], ids=["renewed-in-the-portal", "still-ending"])
+def test_deletion_ends_a_marked_subscription_only_while_it_renews(platform: Platform, *, ends: bool) -> None:
+    # A failed resume after a cancelled deletion leaves the marker behind when the customer renews in the portal.
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    _stripe_lists(platform, _stripe_sub("sub_stripe_1", "active", ends=ends, marked=True))
+
+    assert _request_deletion(platform).status_code == 200
+
+    expected = (
+        [] if ends else [call("sub_stripe_1", cancel_at_period_end=True, metadata={DELETION_BILLING_MARKER: "none"})]
+    )
+    assert platform.stripe.Subscription.modify.call_args_list == expected
+
+
 def test_unpaid_subscriptions_are_cancelled_only_once_the_deletion_is_recorded(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("incomplete"))
     _stripe_lists(platform, _stripe_sub("sub_unpaid", "incomplete"))
