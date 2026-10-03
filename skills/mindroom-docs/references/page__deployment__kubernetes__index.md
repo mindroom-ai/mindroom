@@ -347,7 +347,7 @@ Several volumes and Secrets only work together, so plan backups as restore units
 | Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
 Data that `stateStorage`, `sessionStorage`, or `knowledgeStorage` mount lives on those volumes instead of the storage claim.
-The sessions volume, like a session store relocated with `MINDROOM_SESSION_STORAGE_PATH` onto another volume, belongs with the storage claim.
+Back up and restore the sessions volume, like a session store relocated with `MINDROOM_SESSION_STORAGE_PATH`, together with the storage claim.
 [Docker Data Persistence](https://docs.mindroom.chat/deployment/docker/#data-persistence) describes the storage root's directories in more detail.
 
 ### Restore units
@@ -398,8 +398,8 @@ Everything else on the storage, sessions, state, and journal volumes is not rebu
 ### Restoring
 
 1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
-   A PersistentVolumeClaim restored under the StatefulSet's claim name, `<volumeName>-<fullname>-event-cache-postgres-0`, is adopted by the chart-managed PostgreSQL; with an external database, restore the database and keep its URL Secret.
-   To restore a `pg_dump` instead, install with a new journal volume and load the dump into it; until then the runtime refuses the empty database as never used.
+   A PersistentVolumeClaim restored under the StatefulSet's claim name, `<volumeName>-<fullname>-event-cache-postgres-0`, is adopted by the chart-managed PostgreSQL, so set its original password as described in [Restore units](#restore-units); with an external database, restore the database and keep its URL Secret.
+   To restore a `pg_dump` instead, install with a new journal volume and `replicaCount: 0`, load the dump into it, then set `replicaCount` back to 1, so the runtime never opens a partly loaded journal.
 2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
 3. Start Tuwunel first, then the runtime.
    `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError` in the runtime log means the device stores do not match the journal, and an event journal binding error means the binding file and journal database do not match; restore the matching backups rather than deleting state, because automatic device replacement is unsupported.
