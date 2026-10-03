@@ -14,12 +14,10 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Signaling and the server API: the public proxy and the authorization service.
+    # Signaling and the server API through the public proxy.
+    # The authorization service calls the server API through the public auth.livekitUrl, so its requests also arrive from the proxy.
     - from:
         {{- $clientPeers | trim | nindent 8 }}
-        - podSelector:
-            matchLabels:
-              {{- include "mindroom-matrixrtc.selectorLabels" (dict "root" $ "component" "auth") | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ .Values.livekit.port }}

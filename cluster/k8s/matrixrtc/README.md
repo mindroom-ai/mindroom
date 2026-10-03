@@ -97,7 +97,8 @@ networkPolicy:
 
 Pods matching `clientPodSelector` in the release namespace may reach the signaling and authorization ports.
 `networkPolicy.extraFrom` adds raw `NetworkPolicyPeer` entries, for example an ingress controller namespace that routes the public paths directly to these Services.
-The authorization service may always reach LiveKit's signaling port, and the media ports stay open to every source because clients connect to them directly.
+The authorization service calls LiveKit's server API through the public `auth.livekitUrl`, so those requests also arrive through the proxy.
+The media ports stay open to every source because clients connect to them directly.
 The policies select only ingress; egress stays unrestricted because the authorization service must reach the users' homeservers and the public LiveKit URL.
 
 ## Customization

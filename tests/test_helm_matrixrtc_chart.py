@@ -115,8 +115,7 @@ def test_network_policy_admits_selected_proxies_and_open_media() -> None:
         {"namespaceSelector": {"matchLabels": {"team": "ingress"}}},
     ]
 
-    assert livekit_rules[0]["from"][:2] == proxy_peers
-    assert livekit_rules[0]["from"][2]["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "auth"
+    assert livekit_rules[0]["from"] == proxy_peers
     assert livekit_rules[0]["ports"] == [{"protocol": "TCP", "port": 7880}]
     assert livekit_rules[1] == {"ports": [{"protocol": "TCP", "port": 7881}, {"protocol": "UDP", "port": 7882}]}
     assert auth_rules == [{"from": proxy_peers, "ports": [{"protocol": "TCP", "port": 8080}]}]
