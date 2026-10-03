@@ -241,11 +241,13 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 
-async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thread_exits(
+@pytest.mark.parametrize("async_body", [True, False], ids=["async-body", "sync-body"])
+async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exits(
     context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    async_body: bool,
 ) -> None:
-    """An async worker-routed body keeps its slot on the gateway pool until its proxy request returns."""
+    """A worker-routed body, async or sync, keeps its slot on the gateway pool until its proxy request returns."""
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     threads: list[str] = []
 
@@ -258,11 +260,18 @@ async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thre
         finally:
             finished.set()
 
-    async def work() -> str:
+    async def async_work() -> str:
         return "local"
+
+    def sync_work() -> str:
+        return "local"
+
+    work = async_work if async_body else sync_work
+    work.__name__ = "work"
 
     def build(*_args: object, **_kwargs: object) -> Toolkit:
         toolkit = Toolkit(name="calculator", tools=[work])
+        # Like maybe_wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
         toolkit.async_functions = {
             name: sandbox_proxy._wrap_async_proxy(
                 function,
@@ -271,7 +280,7 @@ async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thre
                 runtime_paths=context.runtime_paths,
                 credentials_manager=None,
             )
-            for name, function in toolkit.async_functions.items()
+            for name, function in {**toolkit.functions, **toolkit.async_functions}.items()
         }
         return toolkit
 

@@ -24978,7 +24978,7 @@ Shell requests run in per-request subprocesses like every other execution tool; 
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
 Stopping a response stops its worker calls too, such as `run_shell_command` and `run_python_code`.
-Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
+Each worker call from an async run carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
 The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
 A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
 Synchronous tool functions get the same asynchronous proxy, so a stop reaches them as well.

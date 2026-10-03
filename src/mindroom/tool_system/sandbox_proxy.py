@@ -1109,8 +1109,9 @@ def _wrap_async_proxy(
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
     assert entrypoint is not None
+    entrypoint_is_async = inspect.iscoroutinefunction(entrypoint)
     # A sync function keeps the completion ownership its sync entrypoint had; an async one keeps prompt cancellation.
-    run_blocking = _run_in_worker_proxy_executor if inspect.iscoroutinefunction(entrypoint) else _run_sync_tool_call
+    run_blocking = _run_in_worker_proxy_executor if entrypoint_is_async else _run_sync_tool_call
 
     @functools.wraps(entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
@@ -1118,9 +1119,9 @@ def _wrap_async_proxy(
             function_name,
             inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
         ):
-            if inspect.iscoroutinefunction(entrypoint):
+            if entrypoint_is_async:
                 return await entrypoint(*args, **kwargs)
-            return await run_blocking(functools.partial(entrypoint, *args, **kwargs))
+            return await _run_sync_tool_call(functools.partial(entrypoint, *args, **kwargs))
         cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
