@@ -180,8 +180,8 @@ class CliOperationOwner(Protocol):
         """Fence authority before response-owned teardown."""
         ...
 
-    async def operation(self, operation: AgentCliOperation) -> dict[str, object]:
-        """Read metadata or enqueue one owned operation."""
+    async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
+        """Read metadata, or enqueue one owned operation from the shell command that opened ``window``."""
         ...
 
     async def get_call(self, call_id: str) -> dict[str, object]:

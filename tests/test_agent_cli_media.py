@@ -34,6 +34,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation, deserialize
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 
 
@@ -55,7 +56,13 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         receipts.append(
             await asyncio.create_task(
                 owner.operation(
-                    ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
+                    window=cli_window(),
+                    operation=ToolCallOperation(
+                        operation="tools.call",
+                        call_id=uuid4(),
+                        toolkit="media",
+                        function="produce",
+                    ),
                 ),
                 context=Context(),
             ),
@@ -275,14 +282,18 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
     try:
         async with owner._window("outer"):
             response = await owner.operation(
-                ToolDescribeOperation(operation="tools.describe", toolkit="big", function="huge"),
+                window="outer",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="big", function="huge"),
             )
         assert len(json.dumps(response).encode()) < 32768
         name = response["context"]["name"]
         parts = []
         offset = 0
         while offset is not None:
-            page = await owner.operation(ContextReadOperation(operation="context.read", name=name, offset=offset))
+            page = await owner.operation(
+                window=cli_window(),
+                operation=ContextReadOperation(operation="context.read", name=name, offset=offset),
+            )
             parts.append(page["text"])
             offset = page["next_offset"]
         descriptor = json.loads("".join(parts))
@@ -335,10 +346,11 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         authorize=authorize,
     )
 
-    async def submit():
+    async def submit(window: str):
         return await asyncio.create_task(
             owner.operation(
-                ToolCallOperation(
+                window=window,
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="state",
@@ -356,7 +368,7 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
             token = tag.set(label)
             try:
                 async with owner._window(label):
-                    admitted = await submit()
+                    admitted = await submit(label)
             finally:
                 tag.reset(token)
             assert (await owner.get_call(admitted["call_id"]))["outcome"] == label

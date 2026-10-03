@@ -14,6 +14,9 @@ _ShellOperationName = Literal["run_shell_command", "check_shell_command", "kill_
 SHELL_OPERATION_NAMES: tuple[_ShellOperationName, ...] = get_args(_ShellOperationName)
 AGENT_CLI_URL_ENV = "MINDROOM_AGENT_CLI_URL"
 AGENT_CLI_TOKEN_ENV = "MINDROOM_AGENT_CLI_TOKEN"  # noqa: S105 - environment variable name
+AGENT_CLI_WINDOW_ENV = "MINDROOM_AGENT_CLI_WINDOW"
+# `mindroom-agent` sends its command's window back with each request.
+AGENT_CLI_WINDOW_HEADER = "X-MindRoom-Agent-CLI-Window"
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,10 +31,15 @@ class AgentCliShellEnv:
     token: str = field(repr=False)
     # Prepended to PATH where `mindroom-agent` is not already installed on it.
     bin_dir: str | None = None
+    # The shell command this environment is exported to, so its CLI calls belong to it.
+    window: str | None = None
 
     def env(self) -> dict[str, str]:
         """Return the variables `mindroom-agent` reads."""
-        return {AGENT_CLI_URL_ENV: self.api_url, AGENT_CLI_TOKEN_ENV: self.token}
+        env = {AGENT_CLI_URL_ENV: self.api_url, AGENT_CLI_TOKEN_ENV: self.token}
+        if self.window is not None:
+            env[AGENT_CLI_WINDOW_ENV] = self.window
+        return env
 
 
 _CURRENT: ContextVar[AgentCliShellEnv | None] = ContextVar("agent_cli_shell_env", default=None)

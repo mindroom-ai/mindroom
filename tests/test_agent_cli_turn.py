@@ -46,6 +46,7 @@ from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
@@ -65,10 +66,12 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     hooks = []
 
     async def run_shell_command(args: str) -> str:
-        assert current_agent_cli_shell_env() is owner.shell_env
+        # The nested command runs inside the outer command's window.
+        assert current_agent_cli_shell_env() == replace(owner.shell_env, window="outer-1")
         if args == "outer":
             queued = await owner.operation(
-                ToolCallOperation(
+                window=cli_window(),
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="shell",
@@ -78,7 +81,13 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
             )
         else:
             queued = await owner.operation(
-                ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
+                window=cli_window(),
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="state",
+                    function="mutate",
+                ),
             )
         assert queued["status"] == "queued"
         settled = await wait(queued["call_id"])
@@ -139,9 +148,12 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     assert catalog.run_context.session_state["count"] == 1
     late = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate")
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
-        await owner.operation(late)
+        await owner.operation(window=cli_window(), operation=late)
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
-        await owner.operation(ToolDescribeOperation(operation="tools.describe", toolkit="state", function="mutate"))
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolDescribeOperation(operation="tools.describe", toolkit="state", function="mutate"),
+        )
     with pytest.raises(CliAuthenticationError):
         await owner.get_call(str(late.call_id))
     await owner.close()
@@ -171,9 +183,11 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     owner.shell_env = _SHELL_ENV
 
     async def command() -> str:
-        assert current_agent_cli_shell_env() is _SHELL_ENV
+        assert cli_window() is not None
+        assert current_agent_cli_shell_env() == replace(_SHELL_ENV, window=cli_window())
         queued = await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
         while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
             await asyncio.sleep(0.001)
@@ -186,7 +200,8 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     assert current_agent_cli_shell_env() is None
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
     await owner.close()
 
@@ -217,7 +232,8 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
 
     async def command() -> str:
         queued = await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
         )
         while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
             await asyncio.sleep(0.001)
@@ -251,7 +267,8 @@ async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools
 
 async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
     queued = await owner.operation(
-        ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
+        window=cli_window(),
+        operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
     )
     while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
         await asyncio.sleep(0.001)
@@ -325,6 +342,51 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
 
     assert first_result == "first output"
     assert isinstance(second_result, ExceptionGroup)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path: Path) -> None:
+    """A call from the earlier of two running commands belongs to that command, media included."""
+
+    async def produce() -> ToolResult:
+        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [produce], authorize)
+    first_open = asyncio.Event()
+    second_open = asyncio.Event()
+    first_called = asyncio.Event()
+    windows = {}
+
+    async def first() -> str:
+        windows["first"] = cli_window()
+        first_open.set()
+        # The second command starts later, so it is the newest window when this one calls.
+        await second_open.wait()
+        receipt = await _settled_receipt(owner, "produce")
+        windows["first call"] = receipt["parent_bash_call_id"]
+        first_called.set()
+        return "first output"
+
+    async def second() -> str:
+        windows["second"] = cli_window()
+        second_open.set()
+        await first_called.wait()
+        return "second output"
+
+    async with asyncio.timeout(3):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        await first_open.wait()
+        second_result = await owner.run_native_shell(second)
+        first_result = await first_task
+
+    assert windows["first call"] == windows["first"] != windows["second"]
+    assert isinstance(first_result, ToolResult)
+    assert [image.content for image in first_result.images or []] == [b"png"]
+    assert second_result == "second output"
     await owner.close()
 
 
@@ -441,7 +503,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
 
     async def run_shell_command(args: str) -> str:
         shell_env = current_agent_cli_shell_env()
-        assert shell_env is owner.shell_env
+        assert shell_env == replace(owner.shell_env, window="bash-http")
         env = os.environ | shell_env.env()
         receipt = await asyncio.to_thread(_cli_call_until_settled, env, separate_wait=separate_wait)
         assert receipt["outcome"] == "completed-via-http"
@@ -621,9 +683,11 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     receipts = []
 
     async def run_shell_command(args: str) -> str:
-        assert current_agent_cli_shell_env() is _SHELL_ENV
+        assert cli_window() is not None
+        assert current_agent_cli_shell_env() == replace(_SHELL_ENV, window=cli_window())
         receipt = await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
         )
         receipts.append(receipt)
         while (await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
@@ -646,10 +710,11 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     owner.shell_env = _SHELL_ENV
     await owner.retire_binding()
     with pytest.raises(CliOperationError, match="being rebuilt"):
-        await owner.operation(ToolListOperation(operation="tools.list"))
+        await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
         )
     new = await _catalog(
         tmp_path,
@@ -693,7 +758,8 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
 
     async def run_shell_command(args: str) -> str:
         await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="wait"),
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="wait"),
         )
         await asyncio.Event().wait()
         return "unreachable"
@@ -783,7 +849,8 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     window = asyncio.create_task(first_window())
     await asyncio.sleep(0)
     old = await owner.operation(
-        ToolCallOperation(
+        window="old-bash",
+        operation=ToolCallOperation(
             operation="tools.call",
             call_id=uuid4(),
             toolkit="state",
@@ -795,7 +862,8 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     leave.set()
     await asyncio.sleep(0)
     late = await owner.operation(
-        ToolCallOperation(
+        window="old-bash",
+        operation=ToolCallOperation(
             operation="tools.call",
             call_id=uuid4(),
             toolkit="state",
@@ -811,7 +879,8 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     assert (await owner.get_call(old["call_id"]))["parent_bash_call_id"] == "old-bash"
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            ToolCallOperation(
+            window="old-bash",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="state",
@@ -858,7 +927,10 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     names = []
     cursor = None
     while True:
-        page = await owner.operation(ToolListOperation(operation="tools.list", cursor=cursor, limit=4))
+        page = await owner.operation(
+            window=cli_window(),
+            operation=ToolListOperation(operation="tools.list", cursor=cursor, limit=4),
+        )
         names.extend(item["toolkit"] for item in page["items"])
         assert all("input_schema" not in item for item in page["items"])
         cursor = page["next_cursor"]
@@ -867,25 +939,31 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert names == [f"tool{index}" for index in range(15)]
     assert loaded == []
     search = await owner.operation(
-        ToolSearchOperation(operation="tools.search", query="Metadata", toolkit="tool12", limit=1),
+        window=cli_window(),
+        operation=ToolSearchOperation(operation="tools.search", query="Metadata", toolkit="tool12", limit=1),
     )
     assert [item["toolkit"] for item in search["items"]] == ["tool12"]
     operation = ToolDescribeOperation(operation="tools.describe", toolkit="tool12", function="selected")
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
-        await owner.operation(operation)
+        await owner.operation(window=cli_window(), operation=operation)
     assert loaded == []
     async with owner._window("describe-bash"):
-        descriptor = await owner.operation(operation)
+        descriptor = await owner.operation(window="describe-bash", operation=operation)
         assert descriptor["input_schema"]["properties"] == {}
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
-                ToolDescribeOperation(operation="tools.describe", toolkit="unassigned", function="selected"),
+                window="describe-bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="unassigned", function="selected"),
             )
         unknown = "Toolkit 'tool3' has no function 'send'; its functions: selected"
         with pytest.raises(CliOperationError, match=f"^{unknown}$"):
-            await owner.operation(ToolDescribeOperation(operation="tools.describe", toolkit="tool3", function="send"))
+            await owner.operation(
+                window="describe-bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="tool3", function="send"),
+            )
         receipt = await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="tool3", function="send"),
+            window="describe-bash",
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="tool3", function="send"),
         )
         while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
             await asyncio.sleep(0.001)
@@ -915,7 +993,8 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
     async with owner._window("bash"):
         with pytest.raises(CliOperationError, match="Tool is unavailable"):
             await owner.operation(
-                ToolDescribeOperation(operation="tools.describe", toolkit="state", function="selected"),
+                window="bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="state", function="selected"),
             )
     await owner.close()
 
@@ -948,15 +1027,15 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
         return ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="slow")
 
     async with owner._window("bash"):
-        first = await owner.operation(call())
+        first = await owner.operation(window="bash", operation=call())
         with pytest.raises(CliOperationError, match="at once"):
-            await owner.operation(call())
+            await owner.operation(window="bash", operation=call())
         release.set()
         while (await owner.get_call(first["call_id"]))["status"] != "completed":
             await asyncio.sleep(0.001)
-        await owner.operation(call())
+        await owner.operation(window="bash", operation=call())
         with pytest.raises(CliOperationError, match="already holds 2"):
-            await owner.operation(call())
+            await owner.operation(window="bash", operation=call())
     await owner.close()
 
 
@@ -1000,11 +1079,20 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
         authorize=authorize,
         context={"instructions": context},
     )
-    first = await owner.operation(ContextReadOperation(operation="context.read", name="instructions", limit=65536))
+    first = await owner.operation(
+        window=cli_window(),
+        operation=ContextReadOperation(operation="context.read", name="instructions", limit=65536),
+    )
     assert len(canonical_json(first).encode()) <= 65536
     assert first["next_offset"] is not None
     second = await owner.operation(
-        ContextReadOperation(operation="context.read", name="instructions", offset=first["next_offset"], limit=65536),
+        window=cli_window(),
+        operation=ContextReadOperation(
+            operation="context.read",
+            name="instructions",
+            offset=first["next_offset"],
+            limit=65536,
+        ),
     )
     assert first["text"] + second["text"] == context
     assert second["next_offset"] is None
@@ -1043,9 +1131,9 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     )
     original = operation.model_copy(deep=True)
     async with owner._window("bash"):
-        await owner.operation(operation)
+        await owner.operation(window="bash", operation=operation)
         operation.arguments["value"] = "mutated"
-    receipt = await owner.operation(original)
+    receipt = await owner.operation(window=cli_window(), operation=original)
     assert called == ["original"]
     assert receipt["status"] == "completed"
     outcome = ToolCallReceipt.model_validate(receipt).outcome
@@ -1069,7 +1157,8 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(tmp_path: Pa
     async def run_shell_command(args: str) -> str:
         if args == "outer":
             await owner.operation(
-                ToolCallOperation(
+                window=cli_window(),
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="shell",
@@ -1083,7 +1172,8 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(tmp_path: Pa
         nested_entered.set()
         await outer_returning.wait()
         child = await owner.operation(
-            ToolCallOperation(
+            window=cli_window(),
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="state",
@@ -1181,7 +1271,8 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
         async with owner._window("bash"):
             describe = asyncio.create_task(
                 owner.operation(
-                    ToolDescribeOperation(
+                    window="bash",
+                    operation=ToolDescribeOperation(
                         operation="tools.describe",
                         toolkit="deferred",
                         function="selected",
@@ -1218,7 +1309,8 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     async def run_shell_command(args: str) -> str:
         catalog.run_context.session_state["before_pause"] = True
         receipt = await owner.operation(
-            ToolCallOperation(
+            window=cli_window(),
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="actions",
