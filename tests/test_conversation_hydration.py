@@ -898,6 +898,35 @@ class TestThreadHydrationBounds:
         assert (await revisions(alice, "$root"))[0] == "$root-edit"
         assert client.relation_calls == relation_calls
 
+    @pytest.mark.parametrize(
+        ("ceiling", "expected"),
+        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        ids=["edits_past_ceiling", "edit_before_ceiling"],
+    )
+    async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
+        self,
+        alice: PrincipalStore,
+        ceiling: int,
+        expected: str,
+    ) -> None:
+        """A root-edit fetch stopped before any of the sender's edits cannot vouch for the root.
+
+        Edits arrive newest first, so enough edits of the root by someone else
+        end the edits-only fetch before the sender's own. Installing the root
+        as though it had never been edited would let any room member roll it
+        back. An edit by the sender found before the ceiling needs no notice.
+        """
+        client = edited_thread(answers=4, edits=1)
+        client.relations["$root"].append(raw("$root-edit", "root edited", ts=600, replaces="$root"))
+        client.relations["$root"].extend(
+            raw(f"$forged{index}", "forged", sender=BOB, ts=700 + index, replaces="$root") for index in range(3)
+        )
+
+        await hydrator(alice, client, max_fetched_events=ceiling).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert (await bodies(alice, "$root"))[0] == expected
+        assert client.relation_calls == 2
+
     async def test_the_event_ceiling_stops_a_thread_the_window_never_would(
         self,
         alice: PrincipalStore,

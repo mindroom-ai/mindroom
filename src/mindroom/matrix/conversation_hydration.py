@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import nio
@@ -485,6 +485,13 @@ def _reduce_current_revision(
     return winner
 
 
+def _edited_by_sender(original: ProjectedEvent, relations: Sequence[ProjectedEvent]) -> bool:
+    """Return whether the relations hold an edit of one message by its own sender."""
+    return any(
+        relation.replaces_event_id == original.event_id and relation.sender == original.sender for relation in relations
+    )
+
+
 @dataclass
 class ConversationHydrator:
     """One-time conversation hydration and point refetch against Matrix."""
@@ -892,8 +899,9 @@ class ConversationHydrator:
 
         The request ceiling has no counterpart. nio paginates inside each
         ``room_get_event_relations`` call and yields events, not pages, so
-        there is nothing here to count. The walk is one such call, and a walk
-        that stops early may add one edits-only call for the root.
+        there is nothing here to count. The walk is one such call. A walk that
+        is not complete, because it stopped at a bound or met an unreadable
+        relation, may add one edits-only call for the root.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -927,10 +935,7 @@ class ConversationHydrator:
         if (
             root_projected is not None
             and not relations.complete
-            and not any(
-                event.replaces_event_id == thread_id and event.sender == root_projected.sender
-                for event in relations.events
-            )
+            and not _edited_by_sender(root_projected, relations.events)
         ):
             # The root sits outside the window, but an early edit of it sorts
             # behind every newer reply, so a walk that stopped short may never
@@ -944,6 +949,15 @@ class ConversationHydrator:
                 edits_only=True,
             )
             events.extend(root_edits.events)
+            if root_edits.ceiling_reached and not _edited_by_sender(root_projected, root_edits.events):
+                # Edits arrive newest first, so anyone in the room can push the
+                # sender's own past the ceiling with edits of theirs. The root,
+                # first in the walk, gets the notice a refetch gives rather than
+                # passing as unedited.
+                events[0] = replace(
+                    root_projected,
+                    content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
+                )
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
