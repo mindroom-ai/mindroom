@@ -50,8 +50,12 @@ def test_visualization_saves_only_inside_the_workspace(tmp_path: Path, monkeypat
     assert (working_directory / "config.yaml").read_text(encoding="utf-8") == "agents: {}\n"
 
 
-def test_visualization_refuses_an_output_directory_replaced_by_a_link(tmp_path: Path) -> None:
+def test_visualization_refuses_an_output_directory_replaced_by_a_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A workspace output directory swapped for a link to another directory is refused instead of followed."""
+    monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside"
@@ -66,8 +70,16 @@ def test_visualization_refuses_an_output_directory_replaced_by_a_link(tmp_path: 
 
 
 @pytest.mark.parametrize("output_dir", ["/etc", "../outside"])
-def test_visualization_refuses_output_dir_outside_the_workspace(tmp_path: Path, output_dir: str) -> None:
+def test_visualization_refuses_output_dir_outside_the_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_dir: str,
+) -> None:
     """An authored output directory must stay inside the workspace."""
+    # A nested working directory keeps even "../outside" under tmp_path if the refusal regresses.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
     with pytest.raises(ValueError, match="inside the agent workspace"):
         visualization_tools()(tool_output_workspace_root=tmp_path, output_dir=output_dir)
 
