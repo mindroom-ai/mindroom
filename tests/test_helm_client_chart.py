@@ -30,12 +30,14 @@ def test_client_chart_lets_only_its_own_origin_frame_the_app_shell(base_path: st
     assert 'add_header X-Frame-Options "SAMEORIGIN" always;' in app_shell
 
 
-def test_client_chart_serves_nested_build_files_from_their_own_path() -> None:
-    """Nested build trees resolve to their own files, and only content-hashed files are cached as immutable.
+@pytest.mark.parametrize("base_path", ["/", "/chat", "/assets", "/public"])
+def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: str) -> None:
+    """Element Call resolves to its own files, other build files resolve as before, and 404s are not immutable.
 
     The bundled Element Call ships its own assets/ directory under public/element-call/.
     Resolving its hashed files against the app's top-level assets/ returned 404, and the immutable header on that 404
     pinned the broken call in the browser.
+    Base paths and route segments named assets or public must still resolve to the top-level build files.
     """
     docker = shutil.which("docker")
     if docker is None:
@@ -48,14 +50,21 @@ def test_client_chart_serves_nested_build_files_from_their_own_path() -> None:
         "public/element-call/index.html": "call page",
         "public/element-call/assets/call-3c4d.js": "call bundle",
     }
+    prefix = base_path.rstrip("/")
     expected = {
-        "/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
-        "/rooms/abc/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
-        "/public/locales/en.json": ("200", "no-cache", "translations"),
-        "/public/element-call/index.html": ("200", "no-cache", "call page"),
-        "/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
-        "/rooms/abc/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
-        "/public/element-call/assets/missing-5e6f.js": ("404", "", None),
+        f"{prefix}{path}": response
+        for path, response in {
+            "/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
+            "/rooms/abc/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
+            "/rooms/public/assets/app-1a2b.js": ("200", _IMMUTABLE, "app bundle"),
+            "/rooms/assets/public/locales/en.json": ("200", _IMMUTABLE, "translations"),
+            "/public/locales/en.json": ("200", _IMMUTABLE, "translations"),
+            "/public/element-call/index.html": ("200", "no-cache", "call page"),
+            "/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
+            "/rooms/abc/public/element-call/assets/call-3c4d.js": ("200", _IMMUTABLE, "call bundle"),
+            "/public/element-call/assets/missing-5e6f.js": ("404", "", None),
+            "/assets/missing-5e6f.js": ("404", "", None),
+        }.items()
     }
     html = PurePosixPath("/usr/share/nginx/html")
     script = "\n".join(
@@ -78,7 +87,7 @@ def test_client_chart_serves_nested_build_files_from_their_own_path() -> None:
 
     completed = subprocess.run(
         [docker, "run", "--rm", "-i", _NGINX_IMAGE, "sh", "-c", script],
-        input=_client_nginx_conf("nginx.ipv6=false"),
+        input=_client_nginx_conf(f"basePath={base_path}", "nginx.ipv6=false"),
         check=False,
         capture_output=True,
         text=True,
