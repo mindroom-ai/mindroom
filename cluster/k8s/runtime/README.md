@@ -29,6 +29,23 @@ This controls when Kubernetes reports a stalled rollout; it does not change prob
 progressDeadlineSeconds: 1800
 ```
 
+## Restart Safety
+
+The Deployment uses the `Recreate` strategy, so an upgrade, restart, or pod-template change stops the running MindRoom process before its replacement starts.
+Immediately before such a change, check live work inside the running container:
+
+```bash
+kubectl --namespace mindroom exec deploy/mindroom-runtime -c mindroom -- \
+  mindroom check-active-responses --details --wait 1800 --url http://127.0.0.1:8765
+```
+
+The command exits `0` once no admitted Matrix work, OpenAI-compatible request, voice call, or interruptible background script run is active, `1` if work is still active at the deadline, and `2` if status is unavailable.
+Treat every nonzero result, including `kubectl` and authentication failures, as a blocked restart.
+The command uses the container's `MINDROOM_API_KEY`, so the key stays in the pod, and the loopback URL bypasses any ingress.
+Background script runs that restart startup would adopt, such as runs on dedicated `kubernetes` workers with an isolated script gateway, are listed as recoverable and do not block.
+Wait for them as well when the change alters their recovery contract.
+The result is a point-in-time observation, not a drain or restart lock; see the [CLI reference](../../../docs/cli.md#check-active-responses) for its exact scope.
+
 ## Event Journal
 
 The runtime chart defaults to PostgreSQL for MindRoom's Matrix event journal, because Kubernetes deployments need a durable database for it.

@@ -42,7 +42,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
@@ -68,30 +68,32 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
 ## check-active-responses
 
-Check the running process's admitted Matrix work and OpenAI-compatible requests.
+Check the running process for live work that a restart would interrupt: admitted Matrix work, OpenAI-compatible requests, voice calls, and background script runs.
 
 ```
 mindroom check-active-responses
 mindroom check-active-responses --json
 mindroom check-active-responses --details
 mindroom check-active-responses --details --json
+mindroom check-active-responses --wait 1800
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
-| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `0` | Runtime ready, admission open, and no admitted Matrix work, OpenAI requests, voice calls, or interruptible script runs. |
+| `1` | Admitted Matrix work, OpenAI-compatible requests, voice calls, or interruptible script runs are active. |
 | `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
 
 The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
-Rows contain `channel`, `responder`, and `requester_id`.
-The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point, plus one row per voice call.
+Rows contain `channel` (`matrix`, `openai`, or `call`), `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope, authenticated OpenAI requester context, or the caller the agent joined.
+Details also list `script_runs` with `run_id`, the owning agent as `responder`, the owner as `requester_id`, and `recoverable`.
 Unknown identities are `null` in JSON and labeled unknown in text.
-Identities are held only in memory; no database, history, or Matrix lookups are added.
+Response and call identities are held only in memory; script rows come from a read-only query of the durable script run store, and no history or Matrix lookups are added.
 
 Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
 The CLI reads that key from the selected runtime environment.
@@ -102,14 +104,28 @@ Aggregate output never includes identities.
 Nested admission slots count separately, so this is not a count of unique responses.
 Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
 `active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+`active_calls` counts [voice calls](voice-calls.md) that an agent has joined or is joining.
+A restart, or a configuration reload that restarts the call agent, drops the agent from its calls, and a rejoined call starts a new call session, so calls count as busy.
+
+`interruptible_script_runs` counts unfinished [background script runs](tools/background-scripts.md) that a restart would interrupt, including Docker, unsafe-local, cancelling, and older runs without a recovery contract.
+`recoverable_script_runs` counts runs whose worker process restart startup would adopt under the current runtime environment.
+Recoverable runs do not make the runtime busy, because they are designed to survive restarts and may run for hours.
+They survive only while the replacement keeps their recovery contract, so treat them as busy before a change that [interrupts them](tools/background-scripts.md#lifecycle-and-failure-semantics).
+
 Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
 
 This is a point-in-time observation, not a drain or restart lock.
 New work can start immediately afterward.
 For multiple processes, check each process directly.
 
+`--wait SECONDS` polls every 5 seconds while the runtime is busy and exits as soon as it is idle.
+If work is still active at the deadline, the command exits `1` with the last busy snapshot.
+An unavailable result ends the wait immediately with exit `2`, because work could have been interrupted while the status was unknown.
+Each poll is bounded by `--timeout`, so the total runtime can exceed `--wait` by at most one request timeout.
+Only the final snapshot is printed.
+
 The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound each request (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
 Redirects are disabled.
 

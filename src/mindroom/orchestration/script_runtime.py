@@ -19,6 +19,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.response_activity import ActiveScriptRunInfo
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
 from mindroom.script_runs.manager import (
     ScriptRunManager,
@@ -1075,6 +1076,19 @@ class ScriptRuntimeLifecycle:
         if self.api_enabled and self._api_ready.is_set():
             self.broker.open_call_admission()
         self._startup_cleanup_pending = False
+
+    async def active_runs(self) -> list[ActiveScriptRunInfo]:
+        """Read unfinished runs and whether this runtime's restart startup would adopt each process."""
+        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        return [
+            ActiveScriptRunInfo(
+                run_id=run.run_id,
+                responder=run.agent_name,
+                requester_id=run.owner_user_id,
+                recoverable=self._preserves_process(run),
+            )
+            for run in runs
+        ]
 
     def _preserves_process(self, run: ScriptRunRecord) -> bool:
         """Retain new Kubernetes process ownership while its primary is detached."""

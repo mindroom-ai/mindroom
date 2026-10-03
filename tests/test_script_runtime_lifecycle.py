@@ -1008,6 +1008,35 @@ async def test_incomplete_kubernetes_recovery_backend_cannot_mint_or_adopt_autho
         await runtime.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_active_runs_classify_unfinished_runs_with_the_startup_adoption_rule(tmp_path: Path) -> None:
+    """Activity lists every unfinished run read-only and marks only runs restart startup would adopt."""
+    runtime, adoptable, _backend, client = _recovery_scenario(tmp_path)
+    paths = runtime.runtime_paths
+    legacy = _stored_run_pinned_to_worker(runtime.store, paths, run_id=f"script-{'b' * 32}")
+    cancelling = _stored_run_pinned_to_worker(
+        runtime.store,
+        paths,
+        run_id=f"script-{'c' * 32}",
+        recovery_signature=adoptable.recovery_signature,
+    )
+    runtime.store.request_cancel(cancelling.run_id, reason="Cancelled by owner.")
+    finished = _stored_run_pinned_to_worker(runtime.store, paths, run_id=f"script-{'d' * 32}")
+    runtime.store.transition_run(finished.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    before = {run.run_id: run for run in runtime.store.list_runs()}
+
+    active = await runtime.active_runs()
+
+    assert {run.run_id: run.recoverable for run in active} == {
+        adoptable.run_id: True,
+        legacy.run_id: False,
+        cancelling.run_id: False,
+    }
+    assert {(run.responder, run.requester_id) for run in active} == {("watcher", "@alice:example.test")}
+    assert {run.run_id: run for run in runtime.store.list_runs()} == before
+    assert client.exited is False
+
+
 def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:
     """An unavailable historical digest cannot match a missing durable authority record."""
     runtime, run, backend, _client = _recovery_scenario(tmp_path)

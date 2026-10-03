@@ -1608,24 +1608,26 @@ async def test_positive_call_reconciliation_waits_for_admission_and_rechecks_pol
     assert not manager._sessions
 
 
+class _BlockingConnectBridge(FakeBridge):
+    """Hold the SFU connect step until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connect_started = asyncio.Event()
+        self.release_connect = asyncio.Event()
+
+    async def connect(self, grant: SfuGrant) -> None:
+        self.connect_started.set()
+        await self.release_connect.wait()
+        await super().connect(grant)
+
+
 @pytest.mark.asyncio
 async def test_call_start_holds_response_admission_through_session_handoff(tmp_path: Path) -> None:
     """A replacement cannot commit while an authorized call start is in flight."""
-
-    class BlockingBridge(FakeBridge):
-        def __init__(self) -> None:
-            super().__init__()
-            self.connect_started = asyncio.Event()
-            self.release_connect = asyncio.Event()
-
-        async def connect(self, grant: SfuGrant) -> None:
-            self.connect_started.set()
-            await self.release_connect.wait()
-            await super().connect(grant)
-
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
-    bridge = BlockingBridge()
+    bridge = _BlockingConnectBridge()
     gate = ResponseAdmissionGate()
     manager = _manager(
         client,
@@ -1642,6 +1644,36 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
 
     assert gate.close_if_idle()
     gate.reopen()
+
+
+@pytest.mark.asyncio
+async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: Path) -> None:
+    """Activity reporting sees a call from its first SFU step until the agent leaves it."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    manager = _manager(client, bridge, tmp_path)
+    assert manager.active_call_requesters == ()
+
+    reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+    assert manager.active_call_requesters == ("@alice:example.org",)
+    bridge.release_connect.set()
+    await reconcile
+    assert manager.active_call_requesters == ("@alice:example.org",)
+
+    client.room_get_state.return_value = _state_response(
+        {
+            "type": CALL_MEMBER_EVENT_TYPE,
+            "state_key": membership_state_key("@alice:example.org", "ALICEDEV"),
+            "sender": "@alice:example.org",
+            "origin_server_ts": 2_000,
+            "content": {},
+        },
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    assert manager.active_call_requesters == ()
 
 
 @pytest.mark.asyncio
