@@ -141,7 +141,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, earlier_tool_trace_content, serialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -287,12 +287,14 @@ async def _cancel_pending_responses(
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: Sequence[str] | None,
+    earlier_tool_trace: Sequence[ToolTraceEntry] = (),
 ) -> dict[str, Any] | None:
-    """Merge optional attachment IDs into response metadata."""
+    """Merge optional attachment IDs and carried tool calls into response metadata."""
     merged_extra_content = extra_content if extra_content is not None else {}
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
-    return merged_extra_content if extra_content is not None or attachment_ids else None
+    merged_extra_content.update(earlier_tool_trace_content(earlier_tool_trace))
+    return merged_extra_content if extra_content is not None or attachment_ids or earlier_tool_trace else None
 
 
 def _paused_with_committed_presentation(
@@ -526,6 +528,8 @@ class ResponseRequest:
     existing_event_is_placeholder: bool = False
     # Set when replay adopts the reply an earlier attempt at this turn left behind.
     existing_event_is_recovered: bool = False
+    # Tool calls the stopped attempts had shown, carried on this attempt's streamed reply.
+    earlier_tool_trace: tuple[ToolTraceEntry, ...] = ()
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3636,6 +3640,7 @@ class ResponseRunner:
                 *request.transient_enrichment_items,
                 EnrichmentItem(key="interrupted_attempt", text=instruction, persist=False, minimal_required=True),
             ),
+            earlier_tool_trace=() if unfinished is None else unfinished.tool_trace,
         )
 
     async def _prepare_locked_source(
@@ -4541,6 +4546,7 @@ class ResponseRunner:
                                 extra_content=_merge_response_extra_content(
                                     team_run_metadata_content,
                                     request.attachment_ids,
+                                    request.earlier_tool_trace,
                                 ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
@@ -5063,6 +5069,7 @@ class ResponseRunner:
                 response_extra_content = _merge_response_extra_content(
                     run_metadata_content,
                     request.attachment_ids,
+                    request.earlier_tool_trace,
                 )
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(

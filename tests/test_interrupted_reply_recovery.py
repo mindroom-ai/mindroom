@@ -26,7 +26,12 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, TEAM_PROGRESS_PLACEHOLDER, unfinished_streamed_reply
-from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.events import (
+    ToolTraceEntry,
+    build_tool_trace_content,
+    earlier_tool_trace_content,
+    tool_trace_from_content,
+)
 from mindroom.turn_record import TurnRecord
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -86,6 +91,16 @@ def test_a_tool_trace_without_text_is_still_unfinished_work() -> None:
     assert reply is not None
     assert reply.partial_text == ""
     assert reply.tool_trace == TRACE[:1]
+
+
+def test_tool_calls_carried_from_earlier_attempts_come_first() -> None:
+    """A reply regenerated after a stop carries the stopped attempts' calls, so its own stop keeps them."""
+    content = {**_content(STREAM_STATUS_STREAMING, TRACE[1:]), **earlier_tool_trace_content(TRACE[:1])}
+
+    reply = unfinished_streamed_reply("Thinking...", content)
+
+    assert reply is not None
+    assert reply.tool_trace == TRACE
 
 
 @pytest.mark.parametrize("body", ["Thinking...", TEAM_PROGRESS_PLACEHOLDER, "   "])
@@ -307,7 +322,10 @@ async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path)
     final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
     assert final.edits_event_id == REPLY_ID
-    assert cast("dict[str, Any]", final.payload["m.new_content"])["body"] == "The complete report."
+    answer = cast("dict[str, Any]", final.payload["m.new_content"])
+    assert answer["body"] == "The complete report."
+    # Every edit of the new attempt carries the stopped attempt's calls, so stopping it too would not lose them.
+    assert tool_trace_from_content(answer) == list(TRACE)
 
 
 @pytest.mark.asyncio
