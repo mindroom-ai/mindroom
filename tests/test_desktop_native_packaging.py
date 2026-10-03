@@ -77,9 +77,12 @@ chmod +x "$distpath/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop 
         "--python-platform",
         "aarch64-apple-darwin",
     ]
+    # --project makes uv read the repository's pinned build constraints from any working directory.
     assert argument_log.with_suffix(".pip").read_text().splitlines() == [
         "pip",
         "install",
+        "--project",
+        str(repository),
         "--python",
         str(output / "environment/bin/python"),
         "--no-deps",

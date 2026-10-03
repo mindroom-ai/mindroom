@@ -3,17 +3,37 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 README = ROOT / "README.md"
 MACOS_APP_DOC = ROOT / "docs" / "installation" / "macos-app.md"
 MACOS_BUILD_SCRIPT = ROOT / "macos" / "build-macos-app.sh"
+PLATFORM_BACKEND = ROOT / "saas-platform" / "platform-backend"
+# Root uv.lock packages that publish no wheels, whose setuptools build requirements are pinned in pyproject.toml.
+_REVIEWED_SOURCE_BUILDS = {
+    "bibtexparser",
+    "google-search-results",
+    "googlemaps",
+    "mouseinfo",
+    "pyautogui",
+    "pygetwindow",
+    "pyrect",
+    "pyscreeze",
+    "pysher",
+    "python3-xlib",
+    "pytweening",
+    "sgmllib3k",
+    "wikipedia",
+}
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +63,61 @@ def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) 
     # Retrying a release whose wheel is already on PyPI must still publish the app.
     assert "skip-existing: true" in release_workflow
     assert "APP_VERSION: ${{ inputs.release_ref }}" in macos_job
+
+
+# Editable installs add editables to hatchling's build environment; sdist-only dependencies build with setuptools.
+@pytest.mark.parametrize(
+    ("project", "build_packages"),
+    [
+        pytest.param(ROOT, {"editables", "setuptools", "wheel"}, id="mindroom"),
+        pytest.param(PLATFORM_BACKEND, {"editables"}, id="platform-backend"),
+    ],
+)
+def test_build_environments_install_only_pinned_packages(project: Path, build_packages: set[str]) -> None:
+    """Release, helper, and image builds run build code fixed by the commit, not whatever PyPI serves that day."""
+    pyproject = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
+    constraints = pyproject["tool"]["uv"]["build-constraint-dependencies"]
+    pins = {name: version for name, _, version in (constraint.partition("==") for constraint in constraints)}
+    backend = {
+        re.split(r"[^a-z0-9-]", requirement, maxsplit=1)[0] for requirement in pyproject["build-system"]["requires"]
+    }
+    manifest = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))["manifest"]["build-constraints"]
+
+    assert all(re.fullmatch(r"[a-z0-9-]+==[0-9][0-9a-z.]*", constraint) for constraint in constraints), constraints
+    assert len(pins) == len(constraints)
+    assert backend | build_packages <= pins.keys()
+    # `uv sync --locked` reads the build constraints recorded in uv.lock.
+    assert {entry["name"]: entry["specifier"] for entry in manifest} == {
+        name: f"=={version}" for name, version in pins.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("project", "source_builds"),
+    [
+        pytest.param(ROOT, _REVIEWED_SOURCE_BUILDS, id="mindroom"),
+        pytest.param(PLATFORM_BACKEND, set(), id="platform-backend"),
+    ],
+)
+def test_locked_source_builds_were_reviewed_for_build_pins(project: Path, source_builds: set[str]) -> None:
+    """A locked package without wheels builds from source, so its build requirements must join the pins first."""
+    lock = tomllib.loads((project / "uv.lock").read_text(encoding="utf-8"))
+    source_only = {package["name"] for package in lock["package"] if "sdist" in package and not package.get("wheels")}
+
+    assert source_only <= source_builds
+
+
+def test_macos_helper_builds_before_signing_secrets_exist(release_workflow: str) -> None:
+    """Python build code for the helper runs before the signing keychain and without Apple credentials."""
+    steps = yaml.safe_load(release_workflow)["jobs"]["build_macos_app"]["steps"]
+    names = [step.get("name") for step in steps]
+    helper = steps[names.index("Build desktop helper")]
+    app = steps[names.index("Build notarized macOS DMG")]
+
+    assert names.index("Build desktop helper") < names.index("Import Developer ID certificate")
+    assert helper["run"] == "macos/build-desktop-helper.sh"
+    assert "env" not in helper
+    assert app["env"]["SKIP_DESKTOP_HELPER_BUILD"] == "1"
 
 
 @pytest.mark.parametrize("include_matching_pr", [False, True])

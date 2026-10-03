@@ -18,6 +18,7 @@ from mindroom import agents
 from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, get_worker_runtime_context
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
@@ -228,6 +229,68 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
             release.set()
             await asyncio.gather(first, return_exceptions=True)
             await _wait(finished)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thread_exits(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An async worker-routed body keeps its slot on the gateway pool until its proxy request returns."""
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    threads: list[str] = []
+
+    def proxy(**_kwargs: object) -> str:
+        threads.append(threading.current_thread().name)
+        started.set()
+        try:
+            assert release.wait(5)
+            return "done"
+        finally:
+            finished.set()
+
+    async def work() -> str:
+        return "local"
+
+    def build(*_args: object, **_kwargs: object) -> Toolkit:
+        toolkit = Toolkit(name="calculator", tools=[work])
+        toolkit.async_functions = {
+            name: sandbox_proxy._wrap_async_function(
+                function,
+                "calculator",
+                name,
+                runtime_paths=context.runtime_paths,
+                credentials_manager=None,
+            )
+            for name, function in toolkit.async_functions.items()
+        }
+        return toolkit
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        first = asyncio.create_task(client.post("/mcp", json=_call(1)))
+        try:
+            await _wait(started)
+            await client.post("/mcp", json=_cancel(1))
+            assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            assert [name.startswith("mindroom-mcp-gateway-tool") for name in threads] == [True]
+            release.set()
+            await _wait(finished)
+            async with asyncio.timeout(2):
+                while _code(response := await client.post("/mcp", json=_call(1))) == "duplicate_request":  # noqa: ASYNC110
+                    await asyncio.sleep(0)
+            assert response.json()["result"]["structuredContent"] == {"result": "done"}
+        finally:
+            release.set()
+            await asyncio.gather(first, return_exceptions=True)
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 

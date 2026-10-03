@@ -446,3 +446,4 @@ _.embed_captions  # MoviePyVideoTools registers this caption-style override dyna
 _.scrape_website
 _.custom_scrape_website
 _._execute_query
+_.membership_ts  # _SharedWith dataclass equality field (src/mindroom/matrix_rtc/frame_keys.py)

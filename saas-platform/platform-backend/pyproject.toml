@@ -44,6 +44,20 @@ include = [
   "src/main.py",
 ]
 
+[tool.uv]
+# Exact pins for everything uv installs into isolated build environments, so the platform image
+# builds this project with build code fixed by this revision rather than whatever PyPI serves that day.
+# uv sync reads these through uv.lock; its editable install of this project adds editables.
+build-constraint-dependencies = [
+  "editables==0.6",
+  "hatchling==1.32.4",
+  "packaging==26.3",
+  "pathspec==1.1.1",
+  "pluggy==1.6.0",
+  "tomlkit==0.15.1",
+  "trove-classifiers==2026.9.21.13",
+]
+
 [tool.ruff]
 target-version = "py313"
 line-length = 120

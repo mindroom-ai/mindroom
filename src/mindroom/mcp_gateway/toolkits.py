@@ -27,9 +27,10 @@ if TYPE_CHECKING:
     from mindroom.mcp.manager import MCPServerManager
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
-# Synchronous tool bodies hold their thread until they return, even after a timeout or cancel.
-# A separate pool keeps them off the default executor that authentication, OAuth storage, and the
-# Matrix runtime share; the default per-user call limit stays below its size.
+# Synchronous tool bodies and the worker proxy requests of async ones hold their thread until they
+# return, even after a timeout or cancel. A separate pool keeps them off the default executor that
+# authentication, OAuth storage, and the Matrix runtime share, and off the worker proxy pool that chat
+# tool calls share; the default per-user call limit stays below its size.
 _TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-mcp-gateway-tool")
 logger = get_logger(__name__)
 

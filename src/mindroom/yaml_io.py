@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
+from yaml.constructor import ConstructorError
 
 try:
     from yaml import CSafeDumper
@@ -30,6 +31,10 @@ else:
 
 _MAX_UNTRUSTED_DEPTH = 64
 _MAX_UNTRUSTED_NODES = 250_000
+_MAX_UNTRUSTED_MERGE_KEYS = 64
+_MAX_UNTRUSTED_NUMERIC_KEYS = 1024
+_MAX_UNTRUSTED_BASE_60_LENGTH = 64
+_NUMERIC_TAGS = frozenset({"tag:yaml.org,2002:int", "tag:yaml.org,2002:float"})
 
 
 class _DumpOptions(TypedDict, total=False):
@@ -52,11 +57,42 @@ def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     return yaml.load(stream, Loader=SafeLoader)
 
 
+class _UntrustedLoader(SafeLoader):  # ty: ignore[unsupported-base] - both safe loader variants have the same interface
+    """``SafeLoader`` that refuses values whose construction time grows faster than their length."""
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Refuse mappings with many merge keys or many integer and float keys, which build in quadratic time.
+
+        Each merge key is deleted from the middle of the mapping's entries, and numeric keys can share one hash.
+        Sets are mappings too, so this also bounds ``!!set`` members.
+        """
+        if sum(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value) > _MAX_UNTRUSTED_MERGE_KEYS:
+            msg = f"YAML mappings may hold {_MAX_UNTRUSTED_MERGE_KEYS} merge keys at most"
+            raise ConstructorError(None, None, msg, node.start_mark)
+        super().flatten_mapping(node)
+        if sum(key.tag in _NUMERIC_TAGS for key, _ in node.value) > _MAX_UNTRUSTED_NUMERIC_KEYS:
+            msg = f"YAML mappings may hold {_MAX_UNTRUSTED_NUMERIC_KEYS} integer or float keys at most"
+            raise ConstructorError(None, None, msg, node.start_mark)
+
+    def construct_yaml_int(self, node: yaml.Node) -> int:
+        """Refuse long base-60 integers, which convert in time quadratic in their length; base-60 floats overflow first."""
+        # SafeConstructor also builds an int from the ``=`` entry of a mapping node, so check the scalar it reads.
+        value = self.construct_scalar(node)
+        if ":" in value and len(value) > _MAX_UNTRUSTED_BASE_60_LENGTH:
+            msg = f"YAML base-60 integers may hold {_MAX_UNTRUSTED_BASE_60_LENGTH} characters at most"
+            raise ConstructorError(None, None, msg, node.start_mark)
+        return super().construct_yaml_int(node)
+
+
+_UntrustedLoader.add_constructor("tag:yaml.org,2002:int", _UntrustedLoader.construct_yaml_int)
+
+
 def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
     """Parse like ``safe_load`` but refuse documents whose composed tree could exhaust memory or the C stack.
 
     Events are checked before any node is composed: aliases let a short document describe a larger tree,
     the libyaml composer recurses in C once per nesting level, and each composed node costs a few hundred bytes.
+    Construction refuses values whose cost grows faster than their length and reports every failure as ``yaml.YAMLError``.
     """
     depth = 0
     nodes = 0
@@ -72,7 +108,14 @@ def safe_load_without_aliases(stream: str) -> Any:  # noqa: ANN401
             if depth > _MAX_UNTRUSTED_DEPTH or nodes > _MAX_UNTRUSTED_NODES:
                 msg = f"YAML may nest {_MAX_UNTRUSTED_DEPTH} levels and hold {_MAX_UNTRUSTED_NODES} nodes at most"
                 raise yaml.YAMLError(msg)
-    return safe_load(stream)
+    try:
+        return yaml.load(stream, Loader=_UntrustedLoader)  # noqa: S506
+    except yaml.YAMLError:
+        raise
+    except Exception as exc:
+        # SafeConstructor lets builtin errors escape for values it cannot build, such as ValueError for a year-0 date.
+        msg = f"YAML value cannot be constructed: {exc}"
+        raise yaml.YAMLError(msg) from exc
 
 
 @overload

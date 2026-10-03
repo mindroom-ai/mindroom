@@ -8,14 +8,10 @@ the network, so the API must refuse requests without credentials.
 
 from __future__ import annotations
 
-import atexit
-import functools
 import ipaddress
+import os
 import shlex
-import shutil
 import sys
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -48,22 +44,21 @@ def _shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_na
     )
 
 
-@functools.cache
-def _launcher_dir() -> Path:
-    bin_dir = Path(tempfile.mkdtemp(prefix="mindroom-agent-cli-"))
-    atexit.register(shutil.rmtree, bin_dir, ignore_errors=True)
+def _local_bin_dir(runtime_paths: RuntimePaths) -> str:
+    """Return a private directory exposing only `mindroom-agent`, not MindRoom's interpreter and dependencies.
+
+    It lives in MindRoom's own storage rather than shared temp, where another local user
+    could recreate the name with their own programs after a temp cleaner removed it.
+    """
+    bin_dir = runtime_paths.storage_root / "agent_cli_bin"
     launcher = bin_dir / "mindroom-agent"
-    launcher.write_text(_LAUNCHER)
-    launcher.chmod(0o700)
-    return bin_dir
-
-
-def _local_bin_dir() -> str:
-    """Return a private directory exposing only `mindroom-agent`, not MindRoom's interpreter and dependencies."""
-    if not (_launcher_dir() / "mindroom-agent").is_file():
-        # Temp cleaners remove idle files, so a long-running MindRoom makes the launcher again.
-        _launcher_dir.cache_clear()
-    return str(_launcher_dir())
+    # A launcher left by an earlier installation runs that installation's interpreter, and one
+    # that lost its exec bit (a crash before `chmod`, a restore without modes) fails every command.
+    if not launcher.is_file() or launcher.read_text() != _LAUNCHER or not os.access(launcher, os.X_OK):
+        bin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        launcher.write_text(_LAUNCHER)
+        launcher.chmod(0o700)
+    return str(bin_dir)
 
 
 def _safe_origin(value: str) -> str:
@@ -159,7 +154,7 @@ def agent_cli_shell_env(config: Config, runtime_paths: RuntimePaths, agent_name:
     if _shell_runs_in_primary(config, runtime_paths, agent_name):
         api_address = get_api_server_address()
         assert api_address is not None
-        return AgentCliShellEnv(api_address.base_url, token, _local_bin_dir())
+        return AgentCliShellEnv(api_address.base_url, token, _local_bin_dir(runtime_paths))
     primary_url = _worker_primary_url(runtime_paths)
     assert primary_url is not None
     return AgentCliShellEnv(primary_url, token)

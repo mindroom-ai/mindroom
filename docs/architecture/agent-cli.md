@@ -55,7 +55,7 @@ Authentication precedes body parsing; invalid authority and another owner's rece
 The orchestrator owns the registry.
 The response owns its shell, call admission, checkpoint and cleanup across model continuations; HTTP never invokes an Agent.
 Each command of the response's Bash receives the grant in its environment, directly in the primary or with its proxied worker request.
-A primary shell also gets a private directory on its `PATH` that holds only a `mindroom-agent` launcher.
+A primary shell also gets `agent_cli_bin/` in MindRoom's storage first on its `PATH`, a directory only MindRoom's user can change that holds only a `mindroom-agent` launcher.
 The response revokes its grant when it ends, and after a primary crash old grants are invalid immediately.
 
 A Bash window stays open while its admitted calls settle, so an admitted nested shell can still submit its child calls after the outer command returns.

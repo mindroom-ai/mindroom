@@ -95,6 +95,8 @@ class SyncToolCompletionTracker:
     """Expose one context-bound synchronous leaf task to its resource owner.
 
     ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
+    An owner that supplies an executor also runs and retains the blocking call an async
+    entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
     """
 
     executor: Executor | None = None
@@ -448,6 +450,22 @@ async def _run_sync_tool_entrypoint(
         if tracker._cancel_before_start():
             task.cancel()
         raise
+
+
+async def run_async_entrypoint_blocking_call(
+    call: Callable[[], _ToolHookResult],
+    *,
+    executor: Executor,
+) -> _ToolHookResult:
+    """Run one blocking call that an async entrypoint offloads to ``executor``.
+
+    A completion owner with its own executor runs and retains the call there like a synchronous
+    entrypoint; other callers keep prompt cancellation and leave the thread to finish alone.
+    """
+    tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    if tracker is None or tracker.executor is None:
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, call)
+    return await _run_sync_tool_entrypoint(call, {})
 
 
 agno_compat_tool_hooks.install_patch(
