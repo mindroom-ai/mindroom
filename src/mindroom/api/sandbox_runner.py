@@ -137,11 +137,10 @@ def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, dict[str, ToolVal
 
 def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> RuntimePaths:
     """Commit the startup runtime payload together with this runner's own startup env."""
-    credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
+    # Runners never use the credential encryption key, so scrub one passed against the docs before tool code runs.
+    _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
     process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
-    if credentials_encryption_key is not None:
-        process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return constants.RuntimePaths(
             config_path=startup_runtime_paths.config_path,
@@ -1075,7 +1074,6 @@ def _prepare_execute_request(
         runtime_paths,
         execution_env,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
-        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity = _request_execution_identity(request)

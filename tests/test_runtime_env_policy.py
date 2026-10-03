@@ -86,8 +86,8 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
     },
     runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV: {
         "public_worker_startup_env": False,
-        "isolated_worker_runtime_env": True,
-        "trusted_tool_runtime_paths": True,
+        "isolated_worker_runtime_env": False,
+        "trusted_tool_runtime_paths": False,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": False,
     },
@@ -351,13 +351,11 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
         runtime_paths,
         {},
         include_base_execution_env=True,
-        include_credentials_encryption_key=True,
     )
     execution_tool_runtime_paths = sandbox_exec.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
-        include_credentials_encryption_key=False,
     )
     public_worker_startup_env = runtime_env_policy.public_worker_startup_env(process_env)
     isolated_worker_runtime_env = runtime_env_policy.isolated_worker_runtime_env(process_env)

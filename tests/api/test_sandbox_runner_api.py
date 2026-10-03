@@ -785,7 +785,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
     assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
     assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
     assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
-    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == credentials_encryption_key
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
     assert startup_runtime.env_value("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE") == "subprocess"
@@ -794,7 +794,7 @@ def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
 
 
 def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
-    """Linux exposes the original startup env through /proc, so static runners wipe the key entry too."""
+    """Static runners keep no credential key passed to them, and wipe its /proc startup env entry too."""
     if not Path("/proc/self/environ").exists():
         pytest.skip("/proc/self/environ is not available on this platform")
     config_path = tmp_path / "config.yaml"
@@ -832,7 +832,7 @@ def test_static_runner_credentials_encryption_key_is_removed_from_proc_environ(t
 
     # Loading the config logs through the unconfigured structlog default, which
     # prints to stdout ahead of the three values the script prints last.
-    assert result.stdout.splitlines()[-3:] == [encryption_key, "False", "False"]
+    assert result.stdout.splitlines()[-3:] == ["None", "False", "False"]
 
 
 def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
@@ -886,11 +886,11 @@ def test_dedicated_worker_startup_runtime_does_not_rehydrate_dotenv_credentials(
     assert effective_runtime.env_value("TEST_EXECUTION_ENV") is None
 
 
-def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
+def test_dedicated_worker_startup_runtime_scrubs_credentials_encryption_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Dedicated workers may read the encryption key from process env without exposing it to tools."""
+    """Dedicated workers keep no credential key passed in their env, and expose none to tools."""
     wiped_entries: list[tuple[int, int]] = []
     monkeypatch.setattr(
         sandbox_runner_module,
@@ -932,7 +932,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
         {"VIRTUAL_ENV": "/worker-venv"},
     )
 
-    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert startup_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in os.environ
     assert wiped_entries == [(123, 45)]
     assert runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV not in execution_env
@@ -945,7 +945,7 @@ def test_dedicated_worker_startup_runtime_rehydrates_credentials_encryption_key(
 
 
 def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_environ(tmp_path: Path) -> None:
-    """Linux exposes the original startup env through /proc, so wipe the credential key entry too."""
+    """Dedicated workers keep no credential key passed to them, and wipe its /proc startup env entry too."""
     if not Path("/proc/self/environ").exists():
         pytest.skip("/proc/self/environ is not available on this platform")
     config_path = tmp_path / "config.yaml"
@@ -984,7 +984,7 @@ def test_dedicated_worker_credentials_encryption_key_is_removed_from_proc_enviro
 
     # Loading the config logs through the unconfigured structlog default, which
     # prints to stdout ahead of the three values the script prints last.
-    assert result.stdout.splitlines()[-3:] == [encryption_key, "False", "False"]
+    assert result.stdout.splitlines()[-3:] == ["None", "False", "False"]
 
 
 @pytest.mark.asyncio
@@ -1443,7 +1443,9 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
-    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    # A runner holding the credential key never forwards it, even to tools that run no code.
+    assert child_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
+    assert encryption_key not in json.dumps(captured_payload)
     assert "dotenv-key" not in json.dumps(captured_payload)
 
 
@@ -1507,8 +1509,8 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
     assert encryption_key not in json.dumps(captured_payload)
 
 
-def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: Path) -> None:
-    """Trusted non-execution tool runtime paths should keep the key needed to load encrypted credentials."""
+def test_tool_runtime_paths_never_carry_credentials_encryption_key(tmp_path: Path) -> None:
+    """Non-execution tools keep their trusted env, and no tool runtime carries the credential encryption key."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
     encryption_key = base64.urlsafe_b64encode(b"2" * 32).decode("ascii")
@@ -1521,28 +1523,20 @@ def test_non_execution_tool_runtime_keeps_credentials_encryption_key(tmp_path: P
             "GOOGLE_DELEGATED_USER": "workspace-user@example.com",
         },
     )
-    credentials = {"token": "secret", "_source": "ui"}
-    get_runtime_credentials_manager(runtime_paths).save_credentials("custom_tool", credentials)
 
-    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
-        runtime_paths,
-        {},
-        include_credentials_encryption_key=True,
-    )
+    effective_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(runtime_paths, {})
     python_runtime = sandbox_exec_module.tool_runtime_paths_with_request_env(
         runtime_paths,
         {},
         include_base_execution_env=False,
     )
 
-    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) == encryption_key
+    assert effective_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert effective_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") == "/secrets/google-service-account.json"
     assert effective_runtime.env_value("GOOGLE_DELEGATED_USER") == "workspace-user@example.com"
-    assert get_runtime_credentials_manager(effective_runtime).load_credentials("custom_tool") == credentials
     assert python_runtime.env_value(runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV) is None
     assert python_runtime.env_value("GOOGLE_SERVICE_ACCOUNT_FILE") is None
     assert python_runtime.env_value("GOOGLE_DELEGATED_USER") is None
-    assert get_runtime_credentials_manager(python_runtime).load_credentials("custom_tool") is None
 
 
 @pytest.mark.asyncio
