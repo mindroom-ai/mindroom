@@ -37,7 +37,7 @@ Set `config.data` to a full JSON document when you need client options beyond th
 ## MatrixRTC Calls
 
 The chart can publish MatrixRTC discovery and optionally proxy the standard authorization and LiveKit signaling paths through its chart-managed nginx server.
-LiveKit and the MatrixRTC authorization service remain separately managed services.
+LiveKit and the MatrixRTC authorization service remain separate services; the optional [MatrixRTC chart](../matrixrtc/README.md) deploys both.
 
 ```yaml
 matrix:
@@ -55,7 +55,7 @@ matrixRTC:
 When enabled, nginx serves `/.well-known/matrix/client` with the configured homeserver and `org.matrix.msc4143.rtc_foci` announcement.
 Route that well-known path from the Matrix server-name origin to this Service when the client uses a different hostname.
 The optional proxy strips `/livekit/jwt/` and `/livekit/sfu/` before forwarding to the configured internal services, and the SFU route supports WebSocket signaling.
-The chart does not deploy either backend, expose LiveKit media ports, configure TURN, issue TLS certificates, or manage backend credentials.
+This chart does not deploy either backend, expose LiveKit media ports, configure TURN, issue TLS certificates, or manage backend credentials.
 See [Voice Calls](../../../docs/voice-calls.md) for the MindRoom agent configuration and complete backend requirements.
 
 ## Base Path
