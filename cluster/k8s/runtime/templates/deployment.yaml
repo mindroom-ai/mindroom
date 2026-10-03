@@ -12,6 +12,7 @@
 {{- $configPath := include "mindroom-runtime.configPath" . -}}
 {{- $storageRoot := trimSuffix "/" (clean .Values.storage.mountPath) -}}
 {{- $generatesApiKey := not .Values.apiAuth.allowUnauthenticatedPrimary -}}
+{{- $stateInitDirs := include "mindroom-runtime.stateStorageInitDirs" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -87,9 +88,9 @@ spec:
             - -c
             - |
               set -eu
-              mkdir -p "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
-              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
-              chmod {{ .Values.stateStorage.initPermissions.chmod }} "/state"{{ if .Values.stateStorage.encryptionKeys.enabled }} "/state/{{ .Values.stateStorage.encryptionKeys.subPath }}"{{ end }}{{ if .Values.stateStorage.syncContinuity.enabled }} "/state/{{ .Values.stateStorage.syncContinuity.subPath }}"{{ end }}
+              mkdir -p {{ $stateInitDirs }}
+              chown -R {{ .Values.stateStorage.initPermissions.runAsUser }}:{{ .Values.stateStorage.initPermissions.fsGroup }} {{ $stateInitDirs }}
+              chmod {{ .Values.stateStorage.initPermissions.chmod }} {{ $stateInitDirs }}
           volumeMounts:
             - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
               mountPath: /state
@@ -196,6 +197,10 @@ spec:
               value: {{ $configPath | quote }}
             - name: HOME
               value: {{ .Values.storage.mountPath | quote }}
+            {{- if .Values.sessionStorage.enabled }}
+            - name: MINDROOM_SESSION_STORAGE_PATH
+              value: {{ .Values.sessionStorage.mountPath | quote }}
+            {{- end }}
             {{- if .Values.runtime.logLevel }}
             - name: LOG_LEVEL
               value: {{ .Values.runtime.logLevel | quote }}
@@ -501,6 +506,19 @@ spec:
               mountPath: {{ .Values.stateStorage.syncContinuity.mountPath }}
               subPath: {{ .Values.stateStorage.syncContinuity.subPath }}
             {{- end }}
+            {{- range .Values.stateStorage.extraSubPaths }}
+            - name: {{ include "mindroom-runtime.stateStorageVolumeName" $ }}
+              mountPath: {{ .mountPath }}
+              subPath: {{ default .name .subPath }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.sessionStorage.enabled }}
+            - name: session-storage
+              mountPath: {{ .Values.sessionStorage.mountPath }}
+            {{- end }}
+            {{- if .Values.knowledgeStorage.enabled }}
+            - name: knowledge-storage
+              mountPath: {{ include "mindroom-runtime.knowledgeStorageMountPath" . }}
             {{- end }}
             {{- if .Values.approvedEgress.enabled }}
             - name: approved-egress-allowlist
@@ -597,6 +615,16 @@ spec:
         - name: {{ include "mindroom-runtime.stateStorageVolumeName" . }}
           persistentVolumeClaim:
             claimName: {{ include "mindroom-runtime.stateStorageClaimName" . }}
+        {{- end }}
+        {{- if .Values.sessionStorage.enabled }}
+        - name: session-storage
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.sessionStorageClaimName" . }}
+        {{- end }}
+        {{- if .Values.knowledgeStorage.enabled }}
+        - name: knowledge-storage
+          persistentVolumeClaim:
+            claimName: {{ include "mindroom-runtime.knowledgeStorageClaimName" . }}
         {{- end }}
         {{- if .Values.approvedEgress.enabled }}
         - name: approved-egress-allowlist

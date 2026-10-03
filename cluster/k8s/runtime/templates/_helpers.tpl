@@ -125,6 +125,61 @@ The static runner sidecar mounts the agents and private_instances directories, s
 {{- default "state-storage" .Values.stateStorage.volumeName -}}
 {{- end -}}
 
+{{- /*
+Quoted state PVC directories, as seen at /state, that the prepare-state-storage init container creates and chowns.
+*/ -}}
+{{- define "mindroom-runtime.stateStorageInitDirs" -}}
+{{- $dirs := list "/state" -}}
+{{- if .Values.stateStorage.encryptionKeys.enabled -}}
+{{- $dirs = append $dirs (printf "/state/%s" .Values.stateStorage.encryptionKeys.subPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.syncContinuity.enabled -}}
+{{- $dirs = append $dirs (printf "/state/%s" .Values.stateStorage.syncContinuity.subPath) -}}
+{{- end -}}
+{{- range .Values.stateStorage.extraSubPaths -}}
+{{- $dirs = append $dirs (printf "/state/%s" (default .name .subPath)) -}}
+{{- end -}}
+{{- range $index, $dir := $dirs }}{{ if $index }} {{ end }}"{{ $dir }}"{{ end -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.sessionStorageClaimName" -}}
+{{- default (printf "%s-sessions" (include "mindroom-runtime.fullname" .)) .Values.sessionStorage.existingClaim -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.knowledgeStorageClaimName" -}}
+{{- default (printf "%s-knowledge" (include "mindroom-runtime.fullname" .)) .Values.knowledgeStorage.existingClaim -}}
+{{- end -}}
+
+{{- /*
+Shared knowledge-base indexes live at <storage.mountPath>/knowledge_db; KnowledgeManager has no override for it.
+*/ -}}
+{{- define "mindroom-runtime.knowledgeStorageMountPath" -}}
+{{- printf "%s/knowledge_db" (trimSuffix "/" (clean .Values.storage.mountPath)) -}}
+{{- end -}}
+
+{{- /*
+Chart-managed PersistentVolumeClaim; takes (list $ claimName valuesBlock) where valuesBlock has accessModes, storageClassName, and size.
+*/ -}}
+{{- define "mindroom-runtime.persistentVolumeClaim" -}}
+{{- $root := index . 0 -}}
+{{- $values := index . 2 -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ index . 1 }}
+  labels:
+    {{- include "mindroom-runtime.labels" $root | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml $values.accessModes | nindent 4 }}
+  {{- if $values.storageClassName }}
+  storageClassName: {{ $values.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $values.size | quote }}
+{{- end -}}
+
 {{- define "mindroom-runtime.contentBundleSourcePath" -}}
 {{- $bundle := index . 1 -}}
 {{- $sourcePath := default "/bundle" $bundle.sourcePath | clean -}}

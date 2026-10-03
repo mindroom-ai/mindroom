@@ -170,6 +170,38 @@ stateStorage:
   size: 20Gi
 ```
 
+`stateStorage.extraSubPaths` overlays more state PVC subpaths, and the init container creates and chowns them with the built-in ones.
+Each entry needs a `name` and an absolute `mountPath`, and `subPath` defaults to `name`.
+For example, keep the tracking journal on the state PVC when `storage` is shared network storage:
+
+```yaml
+stateStorage:
+  enabled: true
+  existingClaim: mindroom-state
+  extraSubPaths:
+    - name: tracking
+      mountPath: /app/agent_data/tracking
+```
+
+## Session and Knowledge Storage
+
+`sessionStorage` gives agent and team session databases their own volume.
+The chart mounts it at `sessionStorage.mountPath` (default `/app/session_state`) and sets `MINDROOM_SESSION_STORAGE_PATH` to that path, so do not also set that variable in `env.extra`.
+`knowledgeStorage` gives shared knowledge-base indexes their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
+Each block creates a `<fullname>-sessions` or `<fullname>-knowledge` PVC from `size`, `storageClassName`, and `accessModes`, or mounts `existingClaim` instead.
+Both volumes must be writable by the runtime user; `podSecurityContext.fsGroup` covers volume types that support ownership management.
+
+```yaml
+sessionStorage:
+  enabled: true
+  existingClaim: mindroom-sessions
+
+knowledgeStorage:
+  enabled: true
+  size: 100Gi
+  storageClassName: fast-rwo
+```
+
 ## Content Bundles
 
 Hosted deployments can copy immutable private content into MindRoom storage before the runtime starts.
