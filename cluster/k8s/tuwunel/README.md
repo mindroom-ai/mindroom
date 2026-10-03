@@ -252,6 +252,7 @@ Check its log for completed migrations, delete the Pod, and then deploy the targ
 
 Tuwunel normally refuses to open a database whose schema version is newer than it supports, and a newer release can change records or RocksDB files in ways an older release does not expect even when the schema version is unchanged, so switching back to the old image is not a rollback.
 To roll back, stop the pod, restore the pre-upgrade snapshot of the claim and any external media, and redeploy the recorded old image and values.
+A CSI `VolumeSnapshot` restores into a new PVC, so also set `storage.existingClaim` to that restored claim; Helm then deletes the chart-created claim, which holds the upgraded database.
 Writes accepted after the snapshot are lost.
 
 ## Notes
