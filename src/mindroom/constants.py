@@ -1115,6 +1115,7 @@ DURABLE_FINAL_OUTCOME_VERSION = 2
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
+EARLIER_TOOL_TRACE_CONTENT_KEY = "io.mindroom.earlier_tool_trace"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
 STREAM_STATUS_APPROVAL_PENDING = "approval_pending"

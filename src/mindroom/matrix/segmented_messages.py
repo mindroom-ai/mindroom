@@ -28,7 +28,9 @@ _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
 # Useful for rebuilding model context, but not part of the visible answer. A
 # long tool trace would otherwise push a segmentable response into a sidecar.
-_INTERNAL_STREAM_KEYS = frozenset({"io.mindroom.tool_trace", "io.mindroom.visible_body"})
+_INTERNAL_STREAM_KEYS = frozenset(
+    {"io.mindroom.tool_trace", "io.mindroom.earlier_tool_trace", "io.mindroom.visible_body"},
+)
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
     "body",
