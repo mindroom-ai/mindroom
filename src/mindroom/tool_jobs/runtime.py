@@ -193,8 +193,8 @@ class _Entry:
         return self.claim if self.claim == claim else None
 
 
-# A conversation's recipient, room, resolved thread, and requester, and whether its work is silent.
-type _HoldKey = tuple[str, str | None, str | None, str | None, bool]
+# A conversation's recipient, room, resolved thread, and requester, whether its work is silent, and whose work it is.
+type _HoldKey = tuple[str, str | None, str | None, str | None, bool, frozenset[str]]
 
 
 def _conversation_key(owner: ToolExecutionIdentity) -> tuple[str, str | None, str | None, str | None]:

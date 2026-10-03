@@ -9,7 +9,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  A newer message in the conversation, or any other turn queued for it, releases that wait while accepted work continues; the reply then keeps holding the work at its response boundary.
+  A newer human message in the conversation, or any turn already queued for its lock, releases that wait while accepted work continues; the reply then keeps holding the work at its response boundary.
+  Other agents' messages and scheduled turns that arrive during such a wait queue as behind any running reply.
   Neither action pauses a job or authorizes a protected tool.
 - One `job` tool provides scoped list, wait and cancel.
   Complete registered toolkits can be excluded, including plugins.
@@ -19,7 +20,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   Waiting is transient visible progress, and Stop on the waiting reply cancels the work it holds.
   Results arriving during streaming wait for a safe response boundary.
   While a reply only waits on background work, it lets the conversation's other turns run and takes its place back to continue with results.
-  A newer reply of the agent takes the work over when it joins that work itself; a turn that never joins it, such as another agent's reply, a reply whose participation check stays silent, or a silent schedule, leaves the reply holding.
+  A newer reply of the agent with the same participants takes the work over when it joins that work itself; a turn that never joins it, such as another agent's reply, a reply whose participation check stays silent, a silent schedule, or a delegated child running inside its caller, leaves the reply holding.
   The reply offers each ready outcome to the model once; one the model leaves unretrieved waits for the conversation's next reply.
   No job completion starts a reply of its own; after a restart the next reply in the conversation retrieves interrupted outcomes.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.

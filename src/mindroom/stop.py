@@ -128,6 +128,11 @@ class StopManager:
             return None
         return tracked
 
+    def active_task(self, message_id: str) -> asyncio.Task[None] | None:
+        """Return the task of the response a message currently tracks, while it is still running."""
+        tracked = self._get_active_tracked_message(message_id)
+        return tracked.task if tracked is not None else None
+
     def can_handle_stop_reaction(self, message_id: str, room_id: str) -> bool:
         """Return whether a stop reaction in ``room_id`` currently has a live semantic consumer."""
         tracked = self._get_active_tracked_message(message_id)

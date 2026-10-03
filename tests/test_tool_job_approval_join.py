@@ -295,7 +295,14 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
             if taken_over:
                 # A newer message alone does not end the wait; a newer reply joining the same work does.
                 signal.notify()
-                key = (context.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id, False)
+                key = (
+                    context.recipient,
+                    owner.room_id,
+                    owner.resolved_thread_id,
+                    owner.requester_id,
+                    False,
+                    frozenset({"leader"}),
+                )
                 newer = runtime.take_hold(key)
                 text = await asyncio.wait_for(pending, 30)
                 runtime.drop_hold(key, newer)

@@ -7,10 +7,13 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.visible_body import visible_body_from_content
+from mindroom.message_target import MessageTarget
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -27,6 +30,7 @@ from mindroom.tool_jobs.completion import (
     _ReadyJobContinuation,
     background_wait_edit,
     background_wait_notice,
+    delegated_child_context,
     join_approval_jobs,
     join_conversation_jobs,
     report_background_wait,
@@ -34,8 +38,9 @@ from mindroom.tool_jobs.completion import (
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import message_origin, test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.response_runner_helpers import _plain_request, _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx, _streaming_adapter
@@ -210,6 +215,155 @@ async def test_auto_join_waits_until_a_newer_join_takes_the_work_over(tmp_path: 
             assert pending_outcome(runtime, "quiet") is not None
     finally:
         finish.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delegated", [False, True])
+async def test_only_a_reply_of_the_same_participants_takes_the_work_over(tmp_path: Path, *, delegated: bool) -> None:
+    """A reply covering fewer agents, or a delegated child inside its caller, never releases the reply holding the work."""
+    paths = test_runtime_paths(tmp_path)
+    owner = completed_delegation_job().owner
+    runtime = await tool_job_runtime(tmp_path)
+    context = replace(
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "done")
+
+    try:
+        await start_job(runtime, "shared", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        with tool_runtime_context(context):
+            holding = join_conversation_jobs(set(), agent_names=() if delegated else ("worker",))
+            assert "Waiting" in (await anext(holding)).content
+            holding_rest = asyncio.ensure_future(anext(holding))
+            if delegated:
+                with delegated_child_context():
+                    assert [item async for item in join_conversation_jobs(set())] == []
+            else:
+                other = join_conversation_jobs(set())
+                assert "Waiting" in (await anext(other)).content
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(holding_rest), 0.05)
+            finish.set()
+            assert (await asyncio.wait_for(holding_rest, JOB_TEST_TIMEOUT)).content is None
+            items = [item async for item in holding]
+            assert len(items) == 1
+            assert 'job_id="shared"' in items[0].prompt
+            if not delegated:
+                await other.aclose()
+    finally:
+        finish.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_job", [False, True])
+async def test_waiting_reply_skips_work_another_turn_retrieved_while_it_waited(  # noqa: C901, PLR0915
+    tmp_path: Path,
+    *,
+    other_job: bool,
+) -> None:
+    """A reply taking its lock back offers only outcomes nobody retrieved meanwhile, and keeps waiting on the rest."""
+    paths = test_runtime_paths(tmp_path)
+    owner = completed_delegation_job().owner
+    runtime = await tool_job_runtime(tmp_path)
+    context = replace(
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$root", "$first")
+    finish, other_finish, waiting, retrieving = (asyncio.Event() for _ in range(4))
+    joined: list[object] = []
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "done")
+
+    async def other_operation() -> BackgroundOutcome:
+        await other_finish.wait()
+        return BackgroundOutcome("completed", "other done")
+
+    def envelope(event_id: str) -> MessageEnvelope:
+        return MessageEnvelope(
+            source_event_id=event_id,
+            target=target,
+            body="hello",
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="general",
+            origin=message_origin(source_kind=MESSAGE_SOURCE_KIND),
+        )
+
+    async def holding_reply(_target: MessageTarget) -> None:
+        with tool_runtime_context(context):
+            async for item in join_conversation_jobs(set()):
+                joined.append(item)
+                if isinstance(item, BackgroundWaitChunk) and item.content is not None:
+                    waiting.set()
+
+    async def retrieving_turn(_target: MessageTarget) -> None:
+        retrieving.set()
+        finish.set()
+        await runtime.wait_ready("quiet", owner=owner, depth=0)
+        # Retrieve only once the waiting reply saw the outcome ready and queued to take the lock back.
+        signal = lifecycle._thread_queued_signals[target.lifecycle_key]
+        while signal.has_waiting_response_turn():  # noqa: ASYNC110 - no event marks a turn taking the lock back
+            await asyncio.sleep(0)
+        waited = await runtime.wait("quiet", owner=owner, depth=0)
+        await runtime.acknowledge_wait("quiet", waited.claim, source_event_id="$other")
+
+    try:
+        await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
+        if other_job:
+            await start_job(
+                runtime,
+                "later",
+                tool_name="tool",
+                depth=0,
+                adapter={},
+                owner=owner,
+                operation=other_operation,
+            )
+        reply = asyncio.create_task(
+            lifecycle.run_locked_response(
+                target=target,
+                response_envelope=envelope("$first"),
+                pipeline_timing=None,
+                locked_operation=holding_reply,
+            ),
+        )
+        await asyncio.wait_for(waiting.wait(), JOB_TEST_TIMEOUT)
+        await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=envelope("$other"),
+            pipeline_timing=None,
+            locked_operation=retrieving_turn,
+        )
+        assert retrieving.is_set()
+        if other_job:
+            # The reply keeps holding the work nobody retrieved, and offers only that work.
+            await asyncio.sleep(0.05)
+            assert not reply.done()
+            other_finish.set()
+        await asyncio.wait_for(reply, JOB_TEST_TIMEOUT)
+        prompts = [item.prompt for item in joined if isinstance(item, _ReadyJobContinuation)]
+        assert all('job_id="quiet"' not in prompt for prompt in prompts)
+        assert len(prompts) == (1 if other_job else 0)
+    finally:
+        finish.set()
+        other_finish.set()
         await runtime.shutdown()
 
 

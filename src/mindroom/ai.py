@@ -114,7 +114,7 @@ from mindroom.response_turn import (
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
-from mindroom.tool_jobs.completion import report_background_wait
+from mindroom.tool_jobs.completion import delegated_child_context, report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -1518,7 +1518,7 @@ async def run_delegated_child_response(
         active_model_name=child.model_name,
         transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
     )
-    with tool_runtime_context(child_context):
+    with tool_runtime_context(child_context), delegated_child_context():
         return await ai_response(
             turn,
             prompt=prompt,

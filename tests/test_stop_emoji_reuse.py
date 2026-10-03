@@ -80,6 +80,14 @@ async def _record_pending_response(bot: AgentBot, message_id: str, target: Messa
     bot._journal_dispatcher.receipt_order = AsyncMock(return_value=1)
 
 
+async def _assert_user_stopped(task: asyncio.Task[None]) -> None:
+    """A STOP cancels the tracked response with its user-stop message, then waits for it to settle."""
+    assert task.done()
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await task
+    assert cancelled.value.args == (USER_STOP_CANCEL_MSG,)
+
+
 @pytest.mark.asyncio
 async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
     """Test that 🛑 reaction only acts as stop button during message generation."""
@@ -138,8 +146,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
 
         # Case 2: Message IS being generated - should handle as stop button
         # Track a message as being generated
-        task = MagicMock()  # Use MagicMock instead of AsyncMock for the task
-        task.done = MagicMock(return_value=False)  # done() is a regular method, not async
+        task = asyncio.create_task(asyncio.Event().wait())
         target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
         bot.stop_manager.set_current(
             message_id="$message:example.com",
@@ -165,7 +172,7 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         send_response.assert_not_awaited()
 
         # The task should have been cancelled
-        task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
+        await _assert_user_stopped(task)
 
 
 @pytest.mark.asyncio
@@ -206,8 +213,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
         },
     )
 
-    task = MagicMock()
-    task.done = MagicMock(return_value=False)
+    task = asyncio.create_task(asyncio.Event().wait())
     target = MessageTarget.resolve("!test:example.com", None, "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
@@ -221,7 +227,7 @@ async def test_stop_emoji_hard_cancels_and_schedules_agno_cleanup_when_run_id_pr
         await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
-    task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
+    await _assert_user_stopped(task)
     send_response.assert_not_awaited()
 
 
@@ -263,8 +269,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
         },
     )
 
-    task = MagicMock()
-    task.done = MagicMock(return_value=False)
+    task = asyncio.create_task(asyncio.Event().wait())
     target = MessageTarget.resolve("!test:example.com", "$thread:example.com", "$message:example.com")
     bot.stop_manager.set_current(
         message_id="$message:example.com",
@@ -278,7 +283,7 @@ async def test_stop_emoji_threaded_target_sends_no_acknowledgement(tmp_path: Pat
         await dispatch_reaction_durably(bot, room, reaction_event)
 
     mock_schedule_cancel.assert_called_once_with("$message:example.com", "run-123")
-    task.cancel.assert_called_once_with(msg=USER_STOP_CANCEL_MSG)
+    await _assert_user_stopped(task)
     send_response.assert_not_awaited()
 
 

@@ -2682,13 +2682,17 @@ class ResponseRunner:
     ) -> bool:
         """Cancel the live response, then durably finalize its turn under the same lock."""
         cancellation_requested = False
+        stopped_task: asyncio.Task[None] | None = None
         self._user_stop_receipt_orders.setdefault(message_id, set()).add(stop_receipt_order)
 
         async def cancel_live_response() -> None:
-            nonlocal cancellation_requested
+            nonlocal cancellation_requested, stopped_task
             if cancellation_requested:
                 return
+            live_task = self.deps.stop_manager.active_task(message_id)
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
+            if cancellation_requested:
+                stopped_task = live_task
 
         async def finalize_locked() -> bool:
             edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
@@ -2712,6 +2716,11 @@ class ResponseRunner:
             return False if unresolved_final else await finalize(approval_settled)
 
         try:
+            await cancel_live_response()
+            if stopped_task is not None:
+                # A reply that only waited on background work had given its lock up; it takes the lock back to settle
+                # its own cancellation, and this Stop must finalize after it rather than first.
+                await asyncio.wait({stopped_task})
             return await self._lifecycle_coordinator.run_locked_target_operation(
                 target=target,
                 while_waiting=cancel_live_response,

@@ -39,6 +39,17 @@ class _WaitNotice:
 
 
 _WAIT_NOTICE: ContextVar[_WaitNotice | None] = ContextVar("background_wait_notice", default=None)
+_DELEGATED_CHILD: ContextVar[bool] = ContextVar("delegated_child_reply", default=False)
+
+
+@contextmanager
+def delegated_child_context() -> Iterator[None]:
+    """Run a delegated child's reply inside its caller: it never joins, so it neither holds work nor frees the lock."""
+    token = _DELEGATED_CHILD.set(True)
+    try:
+        yield
+    finally:
+        _DELEGATED_CHILD.reset(token)
 
 
 @contextmanager
@@ -131,14 +142,15 @@ async def join_conversation_jobs(
     conversation's other turns run; a newer reply that joins the same work releases it.
     """
     context = get_tool_runtime_context()
-    if context is None or job_owns_execution():
+    if context is None or job_owns_execution() or _DELEGATED_CHILD.get():
         return
     runtime = get_background_runtime(context.runtime_paths)
     if runtime is None:
         return
-    participants = {context.agent_name, *(agent_names or ())}
+    participants = frozenset({context.agent_name, *(agent_names or ())})
     silent = context.source_kind == SILENT_SCHEDULE_SOURCE_KIND
-    key = (context.recipient, context.room_id, context.resolved_thread_id, context.requester_id, silent)
+    # A reply holds only the work it joins, so replies of different participants hold their work side by side.
+    key = (context.recipient, context.room_id, context.resolved_thread_id, context.requester_id, silent, participants)
 
     async def pending() -> list[BackgroundJob]:
         jobs = await runtime.conversation_jobs(
@@ -154,18 +166,24 @@ async def join_conversation_jobs(
     if not jobs:
         return
     released = runtime.take_hold(key)
+    # Jobs this reply lost access to are gone for it; the others keep the reply waiting.
+    unavailable: set[str] = set()
     try:
         ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
-        if not ready:
+        while not ready:
             approval = any(job.status == "awaiting_approval" for job in jobs)
             yield BackgroundWaitChunk("⏳ Waiting for approval…" if approval else "⏳ Waiting for background work…")
             # Never yield inside this scope: a generator closed elsewhere would take the lock back in another task.
             async with released_while_waiting():
-                ready = await _wait_until_ready(runtime, jobs, released, pending)
+                await _wait_until_ready(runtime, jobs, released, pending, unavailable)
             yield BackgroundWaitChunk(None)
-        if ready and not released.is_set():
-            attempted.update(job.job_id for job in ready)
-            yield _ReadyJobContinuation(_completion_prompt(ready))
+            # Turns that ran while this reply waited may have retrieved some of the work, so look again under the lock.
+            jobs = [job for job in await pending() if job.job_id not in unavailable]
+            if released.is_set() or not jobs:
+                return
+            ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
+        attempted.update(job.job_id for job in ready)
+        yield _ReadyJobContinuation(_completion_prompt(ready))
     finally:
         runtime.drop_hold(key, released)
 
@@ -175,16 +193,14 @@ async def _wait_until_ready(
     jobs: list[BackgroundJob],
     released: asyncio.Event,
     pending: Callable[[], Awaitable[list[BackgroundJob]]],
-) -> list[BackgroundJob]:
+    unavailable: set[str],
+) -> None:
     """Wait for a ready job, a newer reply taking the hold over, or no remaining jobs this reply can still access."""
-    # Jobs this reply lost access to are gone for it; the others keep the reply waiting.
-    unavailable: set[str] = set()
     ready: list[BackgroundJob] = []
     while jobs and not ready and not released.is_set():
         unavailable |= await _wait_for_ready_jobs(runtime, jobs, released)
         jobs = [job for job in await pending() if job.job_id not in unavailable]
         ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
-    return ready
 
 
 async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> str | None:
