@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -15,6 +18,7 @@ from mindroom.cli.main import app
 from mindroom.config.main import load_config
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -259,3 +263,181 @@ def test_install_bundle_cli_revision_is_stored(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"
+
+
+def test_classify_change_reports_status_paths_and_exit_code(tmp_path: Path) -> None:
+    """Exit codes separate hot-reloadable source edits, other changes, and unclassifiable trees."""
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "config.yaml").write_text("agents: {}\n")
+    new = tmp_path / "new"
+    shutil.copytree(old, new)
+    (new / "config.yaml").write_text("agents: {}\n# edited\n")
+    args = ["config", "classify-change", str(old), str(new), "--json"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"status": "source_only", "sources": ["config.yaml"], "other": []}
+    (new / ".env").write_text("SECRET_VALUE=redacted\n")
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout) == {"status": "non_source", "sources": ["config.yaml"], "other": [".env"]}
+    assert "redacted" not in result.output
+    result = runner.invoke(app, [*args, "--config", "missing.yaml"])
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["status"] == "failed"
+
+
+def test_install_bundle_source_only_refuses_non_source_change(tmp_path: Path) -> None:
+    """The CLI flag reaches the installer and leaves the active tree untouched."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text("agents: {}\n")
+    target = tmp_path / "active"
+    args = ["config", "install-bundle", str(source), "--target", str(target), "--json"]
+    assert runner.invoke(app, args).exit_code == 0
+    (source / "notes.txt").write_text("not a config source\n")
+    result = runner.invoke(app, [*args, "--source-only"])
+    assert result.exit_code == 2, result.output
+    assert "notes.txt" in json.loads(result.stdout)["detail"]
+    assert not (target / "notes.txt").exists()
+
+
+def _active_tree(tmp_path: Path, source_text: str = "agents: {}\n") -> tuple[Path, Path, dict[str, object]]:
+    """Install a single-file tree whose runtime fingerprint is the plain config SHA-256."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text(source_text)
+    target = tmp_path / "active"
+    result = runner.invoke(app, ["config", "install-bundle", str(source), "--target", str(target), "--json"])
+    assert result.exit_code == 0, result.output
+    return source, target, json.loads(result.stdout)
+
+
+def _serve_runtime(monkeypatch: pytest.MonkeyPatch, respond: Callable[[int], dict[str, object] | None]) -> None:
+    """Answer reload-status requests in order; None simulates a lost connection."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "operator-key")
+    calls = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        assert url.endswith("/api/config/reload-status")
+        calls.append(url)
+        payload = respond(len(calls))
+        if payload is None:
+            msg = "connection lost"
+            raise httpx.ConnectError(msg)
+        return httpx.Response(503 if payload["status"] == "unavailable" else 200, json=payload)
+
+    monkeypatch.setattr(httpx, "get", get)
+
+
+def _fingerprint_of(target: Path) -> str:
+    return hashlib.sha256((target / "config.yaml").read_bytes()).hexdigest()
+
+
+def _apply(source: Path, target: Path, *args: str) -> tuple[int, dict[str, object]]:
+    result = runner.invoke(
+        app,
+        ["config", "apply-bundle", str(source), "--target", str(target), "--wait", "0", "--json", *args],
+    )
+    return result.exit_code, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("runtime", "flags", "status", "exit_code", "active"),
+    [
+        ("applies", ["--rollback-on-failure"], "applied", 0, "candidate"),
+        ("rejects", ["--rollback-on-failure"], "rolled_back", 3, "previous"),
+        ("rejects", [], "failed", 2, "candidate"),
+        ("keeps_previous", ["--rollback-on-failure"], "pending", 1, "candidate"),
+        ("needs_restart", ["--rollback-on-failure"], "restart_required", 5, "candidate"),
+        ("disconnects", ["--rollback-on-failure"], "unconfirmed", 4, "candidate"),
+    ],
+)
+def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    flags: list[str],
+    status: str,
+    exit_code: int,
+    active: str,
+) -> None:
+    """Only an exact runtime failure of a changed tree restores the digest-pinned previous tree."""
+    source, target, first = _active_tree(tmp_path)
+    previous_fingerprint = _fingerprint_of(target)
+    (source / "config.yaml").write_text("agents: {}\n# candidate\n")
+
+    def respond(call: int) -> dict[str, object] | None:
+        current = _fingerprint_of(target)
+        if call == 1 or runtime == "keeps_previous":
+            return {"status": "applied", "fingerprint": previous_fingerprint}
+        if runtime == "disconnects":
+            return None
+        if runtime == "rejects" and current != previous_fingerprint:
+            return {"status": "failed", "fingerprint": current}
+        return {"status": "restart_required" if runtime == "needs_restart" else "applied", "fingerprint": current}
+
+    _serve_runtime(monkeypatch, respond)
+    code, receipt = _apply(source, target, *flags)
+    assert (code, receipt["status"]) == (exit_code, status), receipt
+    assert receipt["install"]["status"] == "installed"
+    assert receipt["install"]["previous_digest"] == first["digest"]
+    expected = "agents: {}\n# candidate\n" if active == "candidate" else "agents: {}\n"
+    assert (target / "config.yaml").read_text() == expected
+    if status == "rolled_back":
+        assert receipt["rollback"]["digest"] == first["digest"]
+        assert receipt["rollback_runtime_status"] == "applied"
+        assert (tmp_path / "active.previous/config.yaml").read_text() == "agents: {}\n# candidate\n"
+    else:
+        assert receipt["rollback"] is None
+
+
+@pytest.mark.parametrize("problem", ["missing_key", "runtime_unavailable", "non_source"])
+def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    problem: str,
+) -> None:
+    """Unreadable runtime results and changes a reload cannot apply are refused before the active tree changes."""
+    source, target, _first = _active_tree(tmp_path)
+    fingerprint = _fingerprint_of(target)
+    status = "unavailable" if problem == "runtime_unavailable" else "applied"
+    _serve_runtime(monkeypatch, lambda _call: {"status": status, "fingerprint": fingerprint})
+    if problem == "missing_key":
+        monkeypatch.delenv("MINDROOM_API_KEY")
+    (source / "config.yaml").write_text("agents: {}\n# candidate\n")
+    (source / ".env").write_text("CHANGED=1\n")
+    code, receipt = _apply(source, target, "--rollback-on-failure")
+    assert (code, receipt["status"], receipt["install"]) == (2, "failed", None)
+    assert (target / "config.yaml").read_text() == "agents: {}\n"
+
+
+@pytest.mark.parametrize("case", ["unchanged", "stale_failure", "stale_pending", "previous_changed"])
+def test_apply_bundle_never_rolls_back_an_unproven_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Unchanged trees, reloads that began before install, and altered previous trees are left in place."""
+    source, target, _first = _active_tree(tmp_path)
+    previous_fingerprint = _fingerprint_of(target)
+    if case != "unchanged":
+        (source / "config.yaml").write_text("agents: {}\n# candidate\n")
+    candidate = hashlib.sha256((source / "config.yaml").read_bytes()).hexdigest()
+
+    def respond(call: int) -> dict[str, object]:
+        if case == "stale_pending" and call == 1:
+            return {"status": "pending", "fingerprint": candidate}
+        if case == "previous_changed":
+            if call == 1:
+                return {"status": "applied", "fingerprint": previous_fingerprint}
+            (tmp_path / "active.previous/config.yaml").write_text("agents: {}\n# edited\n")
+        return {"status": "failed", "fingerprint": candidate}
+
+    _serve_runtime(monkeypatch, respond)
+    code, receipt = _apply(source, target, "--rollback-on-failure")
+    expected = {"unchanged": (2, "failed"), "previous_changed": (4, "unconfirmed")}.get(case, (4, "unconfirmed"))
+    assert (code, receipt["status"]) == expected, receipt
+    assert receipt["rollback"] is None
+    assert ("restoring the previous tree failed" in receipt["detail"]) == (case == "previous_changed")
+    assert _fingerprint_of(target) == candidate
