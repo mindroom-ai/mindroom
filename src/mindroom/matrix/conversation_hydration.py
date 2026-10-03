@@ -890,9 +890,10 @@ class ConversationHydrator:
         than its logical message count, and all of it used to be accumulated in
         one list and written in one projection transaction.
 
-        The request ceiling has no counterpart. This is a single
-        ``room_get_event_relations`` call; nio paginates inside it and yields
-        events, not pages, so there is nothing here to count.
+        The request ceiling has no counterpart. nio paginates inside each
+        ``room_get_event_relations`` call and yields events, not pages, so
+        there is nothing here to count. The walk is one such call, and a walk
+        that stops early may add one edits-only call for the root.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -962,7 +963,7 @@ class ConversationHydrator:
         unreadable: _UnreadableHistory | None = None,
         edits_only: bool = False,
     ) -> _Walk:
-        """Walk the relation tree newest first, without filtering by relation type.
+        """Walk the relation tree newest first, filtering by type only for ``edits_only``.
 
         Filtering by ``m.thread`` would miss the edits and replies hanging off
         thread members, which is exactly the content a conversation is made of.
@@ -987,8 +988,9 @@ class ConversationHydrator:
         message and has no window: a threaded reply among its relations must not
         end the walk before the edit it came for arrives.
 
-        ``edits_only`` walks just the event's direct edits, for a message whose
-        edits a windowed walk of the whole tree may never reach.
+        ``edits_only`` walks just the event's direct ``m.replace`` relations,
+        for a message whose edits a windowed walk of the whole tree may never
+        reach.
         """
         events: list[ProjectedEvent] = []
         admitted = 0
