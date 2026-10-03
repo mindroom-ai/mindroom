@@ -124,7 +124,7 @@
 {{- if .Values.knowledgeStorage.enabled -}}
 {{- $mountPaths = append $mountPaths (include "mindroom-runtime.knowledgeStorageMountPath" .) -}}
 {{- end -}}
-{{- range .Values.extraVolumeMounts -}}
+{{- range include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray -}}
 {{- if .mountPath -}}
 {{- $mountPaths = append $mountPaths (clean .mountPath) -}}
 {{- end -}}
@@ -204,9 +204,13 @@
 {{- end -}}
 {{- /* Mount paths and state subpaths already claimed in the runtime container, keyed to the value that claims them. */ -}}
 {{- $claimedMountPaths := dict (clean .Values.storage.mountPath) "storage.mountPath" -}}
-{{- range $index, $mount := .Values.extraVolumeMounts -}}
+{{- range $index, $mount := include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray -}}
 {{- if $mount.mountPath -}}
-{{- $_ := set $claimedMountPaths (clean $mount.mountPath) (printf "extraVolumeMounts[%d].mountPath" $index) -}}
+{{- $label := printf "extraVolumeMounts[%d].mountPath" $index -}}
+{{- if kindIs "map" $.Values.extraVolumeMounts -}}
+{{- $label = printf "extraVolumeMounts.%s.mountPath" $mount.name -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths (clean $mount.mountPath) $label -}}
 {{- end -}}
 {{- end -}}
 {{- $claimedSubPaths := dict -}}
@@ -260,8 +264,8 @@
 {{- fail (printf "sessionStorage.mountPath must differ from %s" (get $claimedMountPaths $mountPath)) -}}
 {{- end -}}
 {{- $_ := set $claimedMountPaths $mountPath "sessionStorage.mountPath" -}}
-{{- range .Values.env.extra -}}
-{{- if eq .name "MINDROOM_SESSION_STORAGE_PATH" -}}
+{{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
+{{- if eq (default "" .name) "MINDROOM_SESSION_STORAGE_PATH" -}}
 {{- fail "env.extra must not set MINDROOM_SESSION_STORAGE_PATH when sessionStorage.enabled=true; the chart sets it to sessionStorage.mountPath" -}}
 {{- end -}}
 {{- end -}}
@@ -335,7 +339,7 @@
 {{- fail (printf "providerCredentials[%d].key is required" $index) -}}
 {{- end -}}
 {{- $envName := index $providerCredentialEnvMap $entry.provider -}}
-{{- range $extraEnv := $.Values.env.extra -}}
+{{- range $extraEnv := include "mindroom-runtime.envList" (list $ $.Values.env.extra "env.extra") | fromJsonArray -}}
 {{- if eq (default "" $extraEnv.name) $envName -}}
 {{- fail (printf "providerCredentials[%d] and env.extra both set %s; remove one of them" $index $envName) -}}
 {{- end -}}
@@ -423,9 +427,9 @@
 {{- if $agentVault.server.smtp.enabled -}}
 {{- $managedVaultEnv = concat $managedVaultEnv (list "AGENT_VAULT_SMTP_HOST" "AGENT_VAULT_SMTP_PORT" "AGENT_VAULT_SMTP_TLS_MODE" "AGENT_VAULT_SMTP_FROM_NAME" "AGENT_VAULT_SMTP_USERNAME" "AGENT_VAULT_SMTP_PASSWORD" "AGENT_VAULT_SMTP_FROM") -}}
 {{- end -}}
-{{- range $index, $entry := $agentVault.server.extraEnv -}}
+{{- range $entry := include "mindroom-runtime.envList" (list $ $agentVault.server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray -}}
 {{- if has (default "" $entry.name) $managedVaultEnv -}}
-{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv[%d] cannot override chart-managed %s" $index $entry.name) -}}
+{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv cannot override chart-managed %s" $entry.name) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -98,10 +98,10 @@ spec:
                   name: {{ $server.smtp.existingSecret }}
                   key: AGENT_VAULT_SMTP_FROM
             {{- end }}
-            {{- with $server.extraEnv }}
+            {{- with include "mindroom-runtime.envList" (list $ $server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with $server.envFrom }}
+          {{- with include "mindroom-runtime.keyedList" (dict "value" $server.envFrom "path" "workers.kubernetes.agentVault.server.envFrom") | fromJsonArray }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}

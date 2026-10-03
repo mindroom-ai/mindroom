@@ -437,6 +437,66 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{/*
+Normalize a list value that may also be written as a map keyed by entry.
+Helm replaces lists wholesale across values files but merges maps key by key, so the map form lets a later file override or remove one entry.
+Map entries render in key order, take nameKey (when set) from their key unless they set it, and drop null entries and null fields.
+String map values become {nameKey: key, scalarKey: value} when scalarKey is set.
+Arguments: dict "value" <list or map> "path" <values path> "nameKey" <field or ""> "scalarKey" <field or "">.
+Returns a JSON array for fromJsonArray.
+*/}}
+{{- define "mindroom-runtime.keyedList" -}}
+{{- $items := list -}}
+{{- if kindIs "map" .value -}}
+{{- range $key := keys .value | sortAlpha -}}
+{{- $item := index $.value $key -}}
+{{- if kindIs "map" $item -}}
+{{- $entry := dict -}}
+{{- with $.nameKey -}}
+{{- $_ := set $entry . $key -}}
+{{- end -}}
+{{- range $field, $fieldValue := $item -}}
+{{- if not (kindIs "invalid" $fieldValue) -}}
+{{- $_ := set $entry $field $fieldValue -}}
+{{- end -}}
+{{- end -}}
+{{- $items = append $items $entry -}}
+{{- else if and $.scalarKey (kindIs "string" $item) -}}
+{{- $items = append $items (dict $.nameKey $key $.scalarKey $item) -}}
+{{- else if kindIs "invalid" $item -}}
+{{- /* A null entry removes an entry set by an earlier values file. */ -}}
+{{- else if $.scalarKey -}}
+{{- fail (printf "%s.%s must be a string, a map, or null; quote numbers and booleans (or use --set-string)" $.path $key) -}}
+{{- else -}}
+{{- fail (printf "%s.%s must be a map or null" $.path $key) -}}
+{{- end -}}
+{{- end -}}
+{{- else if kindIs "slice" .value -}}
+{{- $items = .value -}}
+{{- else if not (kindIs "invalid" .value) -}}
+{{- fail (printf "%s must be a list or a map" .path) -}}
+{{- end -}}
+{{- toJson $items -}}
+{{- end -}}
+
+{{/*
+EnvVar entries from a list or a name-keyed map (see keyedList).
+A map value may be a plain string shorthand for {value: ...}.
+String values are rendered with tpl, so they can reference values such as {{ .Release.Namespace }}.
+Arguments: list <root context> <list or map> <values path>.
+*/}}
+{{- define "mindroom-runtime.envList" -}}
+{{- $root := index . 0 -}}
+{{- $env := list -}}
+{{- range $entry := include "mindroom-runtime.keyedList" (dict "value" (index . 1) "path" (index . 2) "nameKey" "name" "scalarKey" "value") | fromJsonArray -}}
+{{- if kindIs "string" $entry.value -}}
+{{- $_ := set $entry "value" (tpl $entry.value $root) -}}
+{{- end -}}
+{{- $env = append $env $entry -}}
+{{- end -}}
+{{- toJson $env -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
 {{- $extraEnv := dict -}}
 {{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.injectWorkerProxyEnv -}}
@@ -448,12 +508,18 @@ matchLabels:
 {{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
 {{- with .Values.egressProxy.noProxy -}}
-{{- $noProxy := join "," . -}}
-{{- $_ := set $extraEnv "NO_PROXY" $noProxy -}}
-{{- $_ := set $extraEnv "no_proxy" $noProxy -}}
+{{- $noProxy := list -}}
+{{- range . -}}
+{{- $noProxy = append $noProxy (tpl (toString .) $) -}}
+{{- end -}}
+{{- $_ := set $extraEnv "NO_PROXY" (join "," $noProxy) -}}
+{{- $_ := set $extraEnv "no_proxy" (join "," $noProxy) -}}
 {{- end -}}
 {{- end -}}
 {{- range $key, $value := .Values.workers.kubernetes.extraEnv -}}
+{{- if kindIs "string" $value -}}
+{{- $value = tpl $value $ -}}
+{{- end -}}
 {{- $_ := set $extraEnv $key $value -}}
 {{- end -}}
 {{- if $extraEnv -}}
