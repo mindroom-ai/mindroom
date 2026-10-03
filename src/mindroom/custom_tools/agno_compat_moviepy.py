@@ -36,7 +36,7 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # them; create_caption_clips has no explicit font-size parameter.
 # Upstream issue: Tracking gap; no matching issue identified for caption style forwarding.
 # Upstream PR: None identified. The two copied methods retain the pinned SDK's
-# parsing, media settings, and temporary output publication.
+# parsing and media settings; outputs render in private staging and publish through write_agent_file.
 # Remove when: The pinned SDK applies all four embed_captions style arguments to
 # normal and highlighted clips, preserving layout and safe output publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_embed_captions_applies_styles_to_text_clips.

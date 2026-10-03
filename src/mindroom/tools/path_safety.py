@@ -162,7 +162,8 @@ def _write_payload(output: BinaryIO, payload: bytes | BinaryIO) -> None:
 def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes | BinaryIO) -> None:
     """Publish one resolved file by atomic replacement, keeping its permission bits (not setuid/setgid) and owner where permitted.
 
-    Replacing the entry never writes a hard-linked inode or leaves a partial file.
+    Below ``base_dir``, replacing the entry never writes a hard-linked inode or leaves a partial file;
+    an unrestricted path outside it is written in place by path.
     A stream payload is copied in chunks rather than read into memory.
     """
     relative = _relative_below(base_dir, resolved)

@@ -8985,7 +8985,7 @@ Despite the `enable_process_video` config name, the current upstream method it e
 Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
-MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output replaces its target only once it is complete.
+MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output inside the workspace replaces its target only once it is complete, while `unrestricted` writes an output outside the workspace in place.
 A video input above 1 GiB or a caption file above 1 MiB returns an error.
 Video inputs must be plain media files in one of these formats, and other formats are refused: MP4, MOV, M4A, 3GP, 3G2, Motion JPEG 2000, Matroska, WebM, AVI, MPEG-TS, MPEG program stream (`.mpg`, `.vob`), FLV, WMV or other ASF, GIF, Ogg, WAV, MP3, FLAC, and AAC.
 FFmpeg playlists and manifests such as HLS and DASH are refused whatever their file name, because FFmpeg would open the files and URLs they list.
