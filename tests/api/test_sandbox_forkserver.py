@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -241,6 +242,27 @@ def test_request_stopped_before_dispatch_never_runs_and_keeps_the_template(
     assert len(spawned) == 1
 
 
+def test_child_never_runs_a_request_whose_runner_hung_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child whose runner hung up while handing the request over never starts it."""
+    # The watcher would end this test process; the check before the payload must refuse on its own.
+    monkeypatch.setattr(sandbox_forkserver_module, "_exit_when_runner_hangs_up", lambda _conn: None)
+    runner_end, child_end = socket.socketpair()
+    runner_end.close()
+    ran: list[str] = []
+    try:
+        returncode = sandbox_forkserver_module._run_child_request(
+            child_end,
+            sandbox_forkserver_module._ChildRequest(env=None, cwd=None, envelope="payload", timeout_seconds=1.0),
+            lambda envelope: ran.append(envelope) or (0, "", ""),
+        )
+    finally:
+        signal.alarm(0)
+        child_end.close()
+
+    assert returncode == 1
+    assert ran == []
+
+
 def test_template_recycled_when_env_fingerprint_changes(
     stub_manager: tuple[_SandboxForkserver, list[str]],
 ) -> None:
@@ -284,7 +306,7 @@ def test_timeout_kills_child_and_keeps_template_alive(
     stub_manager: tuple[_SandboxForkserver, list[str]],
     tmp_path: Path,
 ) -> None:
-    """A timed-out request must end the fork child without recycling the template."""
+    """A timed-out request must SIGKILL the fork child without recycling the template."""
     manager, spawned = stub_manager
     pid_file = tmp_path / "child.pid"
     # Warm the template first so the short deadline below covers only the

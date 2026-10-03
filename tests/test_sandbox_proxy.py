@@ -589,6 +589,7 @@ def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
         created_at=0.0,
     )
     cancellation = sandbox_proxy_module.WorkerCallCancellation()
+    manager = _TrackingWorkerManager()
     last_post: dict[str, Any] = {}
     client_class = _recording_client_class(captured=last_post, captured_calls=calls, responder=responder)
 
@@ -608,7 +609,7 @@ def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
             function_name="run_shell_command",
             worker_target=None,
             worker_handle=handle,
-            worker_manager=_TrackingWorkerManager(),
+            worker_manager=manager,
             client_factory=client_class,
             cancellation=cancellation,
         )
@@ -617,6 +618,9 @@ def test_cancelled_dedicated_worker_call_stops_at_that_worker() -> None:
     assert cancel_url == "http://worker/api/sandbox-runner/execute/cancel"
     assert cancel == {"request_id": execute["request_id"]}
     assert last_post["headers"] == {"x-mindroom-sandbox-token": _TEST_AUTH_TOKEN}
+    # A stopped call is a tool outcome, never a worker failure.
+    assert manager.failures == []
+    assert manager.touched == ["agent:test"]
 
 
 def _run_worker_proxy_request_with_exception(
