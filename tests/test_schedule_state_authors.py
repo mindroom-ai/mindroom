@@ -205,9 +205,9 @@ async def test_task_written_by_removed_agent_stays_listable_and_cancellable(tmp_
 
 @pytest.mark.asyncio
 async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_path: Path) -> None:
-    """Each poll reads one task state event, checks the homeserver on the create event, and fetches the task event by ID.
+    """Each poll reads one task state event and checks the homeserver on the create event.
 
-    No poll reads full room state.
+    No poll fetches the task event again by its ID or reads full room state.
     """
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@alice:server")), sender=SCHEDULE_WRITER_ID)
@@ -228,7 +228,7 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
         f"{CREATE_STATE_PATH}?format=event",
         CREATE_STATE_PATH,
     ] * 3
-    assert [call.args for call in client.room_get_event.await_args_list] == [(ROOM_ID, f"$state_{TASK_ID}")] * 3
+    client.room_get_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -253,121 +253,17 @@ async def test_non_event_task_state_response_is_a_read_error(
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
 
 
-def _forged_envelope_client(
-    content: dict[str, Any],
-    fetched: nio.RoomGetEventResponse | nio.RoomGetEventError,
-    room_state: list[dict[str, Any]] | None = None,
-) -> AsyncMock:
-    """Return a client whose task state read returned content shaped like a router event.
-
-    The homeserver honours format=event for the room's create event, so only the fetched event can refute the shape.
-    The bare state read returns that envelope's inner content, as after the writer rewrites the state between reads.
-    Full room-state reads return ``room_state``.
-    """
-    forged = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=SCHEDULE_WRITER_ID)
-    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(room_state or [], room_id=ROOM_ID)
-
-    async def send(_response_class: type, _method: str, path: str, **_kwargs: object) -> nio.RoomGetStateEventResponse:
-        if path.startswith(CREATE_STATE_PATH):
-            return room_create_state_response(ROOM_ID, full_event=path.endswith("?format=event"))
-        return nio.RoomGetStateEventResponse(forged, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
-
-    client._send.side_effect = send
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content,
-        "com.mindroom.scheduled.task",
-        TASK_ID,
-        ROOM_ID,
-    )
-    client.room_get_event.side_effect = None
-    client.room_get_event.return_value = fetched
-    return client
-
-
-@pytest.mark.asyncio
-async def test_task_content_shaped_like_a_bot_event_takes_its_sender_from_the_fetched_event(tmp_path: Path) -> None:
-    """A sender written inside state content is never trusted, even when that content matches the bare state."""
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    content = _pending_content(_workflow(created_by="@victim:server"))
-    real_event = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=HUMAN_ID)
-    client = _forged_envelope_client(content, nio.RoomGetEventResponse.from_dict(real_event))
-
-    assert await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths) is None
-    client.room_get_event.assert_awaited_once_with(ROOM_ID, f"$state_{TASK_ID}")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("fetched_fields", "room_state_fields"),
-    [
-        pytest.param({"content": {"status": "cancelled"}}, None, id="other-content"),
-        pytest.param({"state_key": "other_task"}, None, id="other-task"),
-        pytest.param({"type": "m.room.message"}, None, id="other-type"),
-        pytest.param(None, None, id="refused-and-absent-from-room-state"),
-        pytest.param(None, {"content": {"status": "cancelled"}}, id="refused-and-other-room-state-content"),
-    ],
-)
-async def test_task_whose_event_fetched_by_id_does_not_match_is_a_read_error(
-    tmp_path: Path,
-    fetched_fields: dict[str, Any] | None,
-    room_state_fields: dict[str, Any] | None,
-) -> None:
-    """The scheduler fails closed when the event named by the state read is missing or is not that task state.
-
-    A refused event read falls back to current room state, which must hold this task with the same content.
-    """
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    content = _pending_content(_workflow(created_by="@victim:server"))
-    event = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=SCHEDULE_WRITER_ID)
-    fetched = (
-        nio.RoomGetEventError("not found", "M_NOT_FOUND")
-        if fetched_fields is None
-        else nio.RoomGetEventResponse.from_dict({**event, **fetched_fields})
-    )
-    room_state = [] if room_state_fields is None else [{**event, **room_state_fields}]
-    client = _forged_envelope_client(content, fetched, room_state)
-
-    with pytest.raises(RuntimeError, match=rf"did not match its event '\$state_{TASK_ID}'"):
-        await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("room_state_sender", "expected_creator"),
-    [
-        pytest.param(SCHEDULE_WRITER_ID, "@alice:server", id="bot-written"),
-        pytest.param(HUMAN_ID, None, id="human-written"),
-    ],
-)
-async def test_task_event_refused_by_id_takes_its_sender_from_current_room_state(
-    tmp_path: Path,
-    room_state_sender: str,
-    expected_creator: str | None,
-) -> None:
-    """When history visibility hides the named event, the sender comes from the task in current room state."""
-    runtime_paths = schedule_runtime_paths(tmp_path)
-    content = _pending_content(_workflow(created_by="@alice:server"))
-    current = scheduled_task_state_event(TASK_ID, content, room_id=ROOM_ID, sender=room_state_sender)
-    client = _forged_envelope_client(content, nio.RoomGetEventError("not found", "M_NOT_FOUND"), [current])
-
-    task = await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
-
-    assert (None if task is None else task.workflow.created_by) == expected_creator
-    client.room_get_state.assert_awaited_once_with(ROOM_ID)
-
-
 @pytest.mark.asyncio
 async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: Path) -> None:
     """On a homeserver that ignores format=event, state content naming an older bot-written version is refused.
 
-    The writer copies a superseded, genuinely bot-authored version's event ID and content into current state.
+    The writer copies a superseded, genuinely bot-authored version's sender, event ID, and content into current state.
     """
     runtime_paths = schedule_runtime_paths(tmp_path)
     workflow = _workflow(created_by="@victim:server")
     superseded = scheduled_task_state_event(TASK_ID, _pending_content(workflow), room_id=ROOM_ID)
     superseded["event_id"] = "$superseded"
-    current_content = {"event_id": "$superseded", "content": superseded["content"]}
+    current_content = {"sender": superseded["sender"], "event_id": "$superseded", "content": superseded["content"]}
     create_content = {"room_version": "11"}
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client.homeserver = "https://matrix.example"
@@ -378,8 +274,6 @@ async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: 
         return nio.RoomGetStateEventResponse(dict(current_content), "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
 
     client._send.side_effect = ignore_format_event
-    client.room_get_event.side_effect = None
-    client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(superseded)
     client.room_get_state_event.side_effect = None
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         {"membership": "join"},
