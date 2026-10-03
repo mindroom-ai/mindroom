@@ -281,3 +281,21 @@ async def test_failed_replay_record_leaves_the_turn_pending(tmp_path: Path) -> N
     assert await store.is_pending("$source")
     assert await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None
     assert not bot.pending_sync_restart_retry_room_ids
+
+
+@pytest.mark.asyncio
+async def test_long_reply_stays_resumable_behind_its_sidecar_preview(tmp_path: Path) -> None:
+    """An oversized note is stored as a cut-short preview, so recovery cannot require the note suffix there."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    bot.client.upload.return_value = (nio.UploadResponse("mxc://server/sidecar"), None)
+
+    await _replay(bot, request, _streamed(f"{PARTIAL} {'word ' * 8000}"))
+
+    final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert final is not None
+    note = final.payload["m.new_content"]
+    assert "io.mindroom.long_text" in note
+    assert not note["body"].rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+    async with bot.response_recovery_scope(ROOM_ID, REPLY_ID) as permitted:
+        assert permitted
