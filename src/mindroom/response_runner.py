@@ -243,7 +243,7 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
-    "A service restart stopped your previous attempt at replying to the current message, and this reply replaces it. "
+    "Your previous attempt at replying to the current message was interrupted, and this reply replaces it. "
     "What that attempt had shown is in the conversation above. "
     "Tool calls it lists as finished already ran; those it lists as still running may have finished too, "
     "and tool calls hidden from the conversation are not listed. "
@@ -251,7 +251,7 @@ _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "have taken effect."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
-    "A service restart stopped a previous attempt at replying to the current message, and what that attempt did "
+    "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Write your complete reply from the start, and before repeating any tool call with side effects, "
     "check whether it already took effect."
 )

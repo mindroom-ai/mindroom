@@ -15,7 +15,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session, save_runs
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import new_scope_session
+from mindroom.history.storage import is_archived_run, new_scope_session
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.events import (
@@ -329,8 +329,9 @@ def persist_stopped_attempt_snapshot(
     would otherwise lose that work's account, so each newly read attempt is
     appended to the record its reply already has. One record per turn keeps
     every attempt inside even the smallest history window. ``run_id`` names a
-    new record only: once compaction archives the live one, its summary holds
-    the earlier attempts and later ones start a record compaction has not seen.
+    new record only, after the attempt that starts it: once compaction archives
+    the live record, its summary holds those attempts, so rereading one of them
+    is not new and a later attempt starts a record compaction has not seen.
     """
     session = _load_persisted_session(storage=storage, session_id=session_id, is_team=is_team)
     response_event_id = snapshot.run_metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
@@ -354,6 +355,8 @@ def persist_stopped_attempt_snapshot(
                 snapshot,
                 partial_text="\n\n".join(text for text in (earlier.content, snapshot.partial_text) if text),
             )
+    elif is_archived_run(storage, session_id=session_id, run_id=run_id):
+        return False
     persist_interrupted_replay_snapshot(
         storage=storage,
         session=session,

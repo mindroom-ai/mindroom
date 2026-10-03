@@ -461,6 +461,11 @@ def _state_is_empty(state: HistoryScopeState) -> bool:
     return not state.force_compact_before_next_run
 
 
+def is_archived_run(storage: BaseDb, *, session_id: str, run_id: str) -> bool:
+    """Return whether compaction already archived this run, so writing it again would resurrect it."""
+    return bool(archive.archived_run_ids(storage, session_id=session_id, run_ids=[run_id]))
+
+
 def reconcile_compaction_state(
     storage: BaseDb,
     session: AgentSession | TeamSession,

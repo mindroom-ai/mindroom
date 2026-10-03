@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.constants import (
@@ -21,6 +22,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.event_journal import DeliveryStage
+from mindroom.history.storage import archive_compaction_chunk, reconcile_compaction_state
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.response_sources import ResponseAttempt, ResponseSources
@@ -34,6 +36,9 @@ from tests.test_response_runner_focused import _admit_approval_source
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
 
     from mindroom.bot import AgentBot
     from mindroom.response_runner import ResponseRequest
@@ -224,7 +229,7 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
     ((context, history),), _fetch = await _replay(bot, request, _streamed())
 
     (instruction,) = _attempt_context(context)
-    assert instruction.startswith("A service restart stopped your previous attempt at replying to the current message")
+    assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
     (attempt,) = history
     assert attempt.startswith("Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; ")
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in attempt
@@ -370,42 +375,58 @@ async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_an_attempt_after_compaction_starts_a_record_compaction_has_not_seen(tmp_path: Path) -> None:
-    """Reusing an archived record's id would make compaction delete the new account as resurrected."""
+async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path) -> None:
+    """Rereading an archived attempt is not new, and a later attempt gets a record compaction keeps."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = request.response_envelope.target
     identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    scope = HistoryScope(kind="agent", scope_id="general")
 
-    async def fold(visible: ResolvedVisibleMessage) -> None:
+    async def fold(visible: ResolvedVisibleMessage) -> str:
         with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-            await runner._with_interrupted_attempt(
+            answered = await runner._with_interrupted_attempt(
                 request,
                 resolved_target=target,
-                history_scope=HistoryScope(kind="agent", scope_id="general"),
+                history_scope=scope,
                 execution_identity=identity,
             )
+        (instruction,) = [
+            item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"
+        ]
+        return instruction
+
+    def live_runs() -> list[RunOutput | TeamRunOutput]:
+        storage = runner.deps.state_writer.create_storage(identity)
+        try:
+            session = get_agent_session(storage, target.session_id)
+            assert session is not None
+            reconcile_compaction_state(storage, session, scope)
+            return list(session.runs or [])
+        finally:
+            storage.close()
 
     await fold(_streamed())
     storage = runner.deps.state_writer.create_storage(identity)
     try:
         session = get_agent_session(storage, target.session_id)
         assert session is not None
-        (archived,) = session.runs
-        storage.delete_session(target.session_id)
+        archive_compaction_chunk(
+            storage=storage,
+            session=session,
+            scope=scope,
+            summary=SessionSummary(summary="The counter tool ran once."),
+            summary_model="test-model",
+            archived_runs=list(session.runs or []),
+        )
     finally:
         storage.close()
-    await fold(_streamed("A new start", trace=(), latest_edit="$edit-b"))
 
-    storage = runner.deps.state_writer.create_storage(identity)
-    try:
-        session = get_agent_session(storage, target.session_id)
-    finally:
-        storage.close()
-    assert session is not None
-    (record,) = session.runs
-    assert record.run_id != archived.run_id
+    assert "is unknown" in await fold(_streamed())
+    assert live_runs() == []
+    assert "is unknown" not in await fold(_streamed("A new start", trace=(), latest_edit="$edit-b"))
+    (record,) = live_runs()
     assert cast("str", record.content).startswith("A new start")
 
 
