@@ -25,6 +25,7 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
+        "invoice.payment_succeeded",
         "invoice.payment_failed",
     }
 )
