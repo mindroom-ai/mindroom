@@ -280,22 +280,18 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("placeholder", "recovered"),
-    [(False, False), (True, False)],
-    ids=["edit_regeneration", "fresh_placeholder"],
-)
+@pytest.mark.parametrize("existing_event_id", [None, REPLY_ID], ids=["fresh_reply", "edit_regeneration"])
 async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
-    placeholder: bool,
-    recovered: bool,
+    existing_event_id: str | None,
 ) -> None:
-    """An edited answer re-drives, and a placeholder this attempt just sent has no earlier attempt behind it."""
+    """A reply this attempt sends itself, or an answer an edit re-drives, has no stopped attempt behind it."""
     bot = _bot(tmp_path)
     request = replace(
         await _crashed_turn(bot),
-        existing_event_is_placeholder=placeholder,
-        existing_event_is_recovered=recovered,
+        existing_event_id=existing_event_id,
+        existing_event_is_placeholder=False,
+        existing_event_is_recovered=False,
     )
 
     (context,), fetch = await _replay(bot, request, _streamed())
@@ -305,7 +301,7 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_team_reply_reaches_the_new_attempt_without_its_display_chrome(tmp_path: Path) -> None:
+async def test_a_stopped_team_reply_is_passed_on_without_its_display_chrome(tmp_path: Path) -> None:
     """The team header and no-consensus note are presentation, not what the stopped attempt said."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)

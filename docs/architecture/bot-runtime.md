@@ -84,7 +84,7 @@ The source-quiescence request stays latched across supervisor retries and late s
 Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
 A crash leaves the same pending state as orderly shutdown, and in both the interrupted reply stays visibly streaming until replay adopts it and answers again in place.
 When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and gives the new attempt that account in a transient instruction not to repeat calls that may already have taken effect.
-Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the instruction.
+Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the instruction.
 Nothing is stored, so if the process stops again after the new attempt has replaced the old text, the next replay knows only what the newer attempt showed.
 A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, instead gets an instruction warning that side effects may already have happened.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
