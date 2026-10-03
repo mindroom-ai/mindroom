@@ -245,6 +245,7 @@ async def fetch_projected_thread_history(
         visible = projected_visible_messages(page)
         for message in visible:
             message.content = exported_content(message)
+            # About what the message adds to the file; the writer still checks the exact size.
             retained_chars += len(json.dumps(message.to_dict(), ensure_ascii=False))
         if retained_chars > MAX_READ_BYTES:
             msg = (
