@@ -92,6 +92,7 @@ def _set_thread_model(
         room_id=room_id,
         set_by=requester_user_id,
         entity_names=entity_names,
+        config=config,
     )
     model = config.models[model_name]
     return (

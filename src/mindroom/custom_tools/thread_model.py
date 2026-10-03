@@ -136,6 +136,7 @@ class ThreadModelTools(Toolkit):
             room_id=context.room_id,
             set_by=context.requester_id,
             entity_names=self._addressable_entities(context),
+            config=context.config,
         )
         model = context.config.models[model_name]
         return self._payload(

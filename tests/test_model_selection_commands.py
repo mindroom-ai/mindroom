@@ -67,6 +67,7 @@ async def test_explicit_model_operation(
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": operation}
     if model is not None:
@@ -124,6 +125,7 @@ async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path:
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
     executor = harness.controller.deps.command_executor
@@ -172,6 +174,7 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": "reset"}
     if failure == "malformed":
@@ -297,6 +300,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
         room_id=ROOM,
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     await executor.execute(client.rooms[ROOM], event, USER, command, target=target, handled_turn=pending)
     assert _helper_override(paths, config) == "later"

@@ -74,6 +74,12 @@ def _configured_entities(config: Config) -> set[str]:
     return {*config.agents, *config.teams, ROUTER_AGENT_NAME}
 
 
+def _unconfigured_entity_fields(record: OverrideRecord, config: Config) -> set[str]:
+    """Return the record's model fields of entities that are no longer configured."""
+    configured_entities = _configured_entities(config)
+    return _entity_fields(entity for entity in _entity_models(record) if entity not in configured_entities)
+
+
 def _get_thread_model_override(runtime_paths: RuntimePaths, thread_id: str | None) -> OverrideRecord | None:
     """Return the override record stored for one thread root, if any."""
     if thread_id is None:
@@ -103,8 +109,8 @@ def resolve_thread_model_override(
     An override naming a model that no longer exists in the config is stale:
     runtime resolution, `!model`, and the `thread_model` tool must all ignore
     it rather than apply or report it as active. An override of an entity
-    that is no longer configured is left out; the next reset of the thread
-    removes it.
+    that is no longer configured is left out; the next selection or reset in
+    the thread removes it.
     """
     record = _get_thread_model_override(runtime_paths, thread_id)
     configured_entities = _configured_entities(config)
@@ -127,12 +133,19 @@ def set_thread_model_override(
     room_id: str,
     set_by: str,
     entity_names: Iterable[str],
+    config: Config,
 ) -> None:
-    """Persist one thread's model override for the entities its setter may address, keeping every other entity's."""
+    """Persist one thread's model override for the entities its setter may address.
+
+    Other configured entities keep theirs. Overrides of entities that are no
+    longer configured go, so a name configured again starts without one.
+    """
     path = _store_path(runtime_paths)
     overrides = _load_overrides(path)
+    current = overrides.get(thread_id, {})
+    unconfigured = _unconfigured_entity_fields(current, config)
     record = {
-        **overrides.get(thread_id, {}),
+        **{field: value for field, value in current.items() if field not in unconfigured},
         **dict.fromkeys(_entity_fields(entity_names), model_name),
         "room_id": room_id,
         "set_by": set_by,
@@ -157,9 +170,8 @@ def clear_thread_model_override(
     record = overrides.get(thread_id)
     if record is None:
         return False
-    configured_entities = _configured_entities(config)
     fields = _entity_fields(entity_names)
-    removed = fields | _entity_fields(entity for entity in _entity_models(record) if entity not in configured_entities)
+    removed = fields | _unconfigured_entity_fields(record, config)
     if removed.isdisjoint(record):
         return False
     _save_thread_record(
