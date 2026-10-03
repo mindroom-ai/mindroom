@@ -151,7 +151,7 @@ Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
 The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background commands behave like the agent's ordinary shell commands, but their `mindroom-agent` calls stop working when the response ends.
+Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call returns; `calls wait` on earlier receipts works until the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.

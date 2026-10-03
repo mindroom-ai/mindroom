@@ -2,7 +2,7 @@
 
 `mindroom-agent` is installed with MindRoom, including in worker images.
 Its stdlib client reads `MINDROOM_AGENT_CLI_URL` and `MINDROOM_AGENT_CLI_TOKEN` from the environment its response gives each Bash command.
-Each command also gets its own window ID in `MINDROOM_AGENT_CLI_WINDOW`, which the client sends back in the `X-MindRoom-Agent-CLI-Window` header, so calls from overlapping commands belong to the command that made them.
+Each command also gets its window ID in `MINDROOM_AGENT_CLI_WINDOW`, which the client sends back in the `X-MindRoom-Agent-CLI-Window` header, so calls from overlapping commands belong to the command that made them; a nested CLI shell gets its parent command's window.
 Bash is the agent's own shell: it runs in the primary for agents without a worker, or in the agent's ordinary worker through the sandbox proxy.
 The token identifies one response turn; arguments cannot select another requester, agent, worker, or credential owner.
 Minimal mode is opt-in through `!mode <agent> minimal` after deployment and shell-permission preflight.

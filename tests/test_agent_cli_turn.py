@@ -349,6 +349,66 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_open(tmp_path: Path) -> None:
+    """A shell command started through the CLI calls the CLI in its parent command's window, not the newest one."""
+    seen = {}
+    first_open = asyncio.Event()
+    second_open = asyncio.Event()
+    nested_done = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        seen["nested"] = cli_window()
+        return args
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command])])
+    catalog.run_response.agent_id = "helper"
+    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    owner = LiveTurnTools(
+        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async def first() -> str:
+        seen["first"] = cli_window()
+        first_open.set()
+        await second_open.wait()
+        queued = await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=uuid4(),
+                toolkit="shell",
+                function="run_shell_command",
+                arguments={"args": "nested"},
+            ),
+        )
+        while (await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
+            await asyncio.sleep(0.001)
+        nested_done.set()
+        return "first"
+
+    async def second() -> str:
+        seen["second"] = cli_window()
+        second_open.set()
+        await nested_done.wait()
+        return "second"
+
+    async with asyncio.timeout(5):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        await first_open.wait()
+        await owner.run_native_shell(second)
+        await first_task
+
+    assert seen["nested"] == seen["first"] != seen["second"]
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_another_is_open(tmp_path: Path) -> None:
     """Another command's open window never takes in a call that names no window, a drained one, or an unknown one."""
 
@@ -1199,10 +1259,14 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
 
 
 @pytest.mark.asyncio
-async def test_nested_shell_submits_child_after_outer_shell_returns(tmp_path: Path) -> None:
+async def test_nested_shell_submits_child_after_outer_shell_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
 
     nested_entered = asyncio.Event()
     outer_returning = asyncio.Event()
+    draining = asyncio.Event()
     hooks = []
 
     async def run_shell_command(args: str) -> str:
@@ -1222,6 +1286,8 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(tmp_path: Pa
             return "outer complete"
         nested_entered.set()
         await outer_returning.wait()
+        # Submit while the outer window drains, after its command returned.
+        await draining.wait()
         child = await owner.operation(
             window=cli_window(),
             operation=ToolCallOperation(
@@ -1262,6 +1328,13 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(tmp_path: Pa
         authorize=authorize,
     )
     owner.shell_env = _SHELL_ENV
+    drain_window = owner._drain_window
+
+    async def observed_drain(window: str) -> None:
+        draining.set()
+        await drain_window(window)
+
+    monkeypatch.setattr(owner, "_drain_window", observed_drain)
 
     async def bash(command: str) -> str:
         return command

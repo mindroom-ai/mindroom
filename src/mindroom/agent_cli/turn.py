@@ -324,10 +324,10 @@ class LiveTurnTools(TurnToolBridge):
         self._active[task] = window
 
     @asynccontextmanager
-    async def _window(self, parent: str) -> AsyncIterator[None]:
+    async def _window(self, window: str) -> AsyncIterator[None]:
         async with self._admission:
             self._check_live()
-            self._windows[parent] = copy_context()
+            self._windows[window] = copy_context()
         try:
             yield
         except asyncio.CancelledError:
@@ -335,7 +335,7 @@ class LiveTurnTools(TurnToolBridge):
             raise
         finally:
             await wait_for_future_until_complete(
-                asyncio.create_task(self._drain_window(parent), name="agent-cli-window-drain"),
+                asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
                 on_cancel=self._cancel_active,
             )
 
@@ -345,15 +345,15 @@ class LiveTurnTools(TurnToolBridge):
         for task in self._active:
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-    async def _drain_window(self, parent: str) -> None:
+    async def _drain_window(self, window: str) -> None:
         failures: list[Exception] = []
         while True:
             async with self._admission:
-                tasks = tuple(task for task, owner in self._active.items() if owner == parent)
+                tasks = tuple(task for task, owner in self._active.items() if owner == window)
                 if not tasks:
                     # Recursive children may join while their admitted shell settles.
                     # Only quiescence closes this window's admission.
-                    self._windows.pop(parent, None)
+                    self._windows.pop(window, None)
                     break
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for task in tasks:
