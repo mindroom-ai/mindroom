@@ -117,6 +117,9 @@ config:
   # Leave empty to render the chart default client config from the matrix values.
   # Set this when you want full control over config.json.
   data: ""
+  # Structured config.json settings deep-merged over config.data, or over the chart default when data is empty.
+  # Maps merge key by key across values files, lists replace, and string values are rendered with tpl.
+  values: {}
 
 # Chart-managed nginx server configuration.
 nginx:

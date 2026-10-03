@@ -1,0 +1,166 @@
+"""Rendered config.json checks for the web client chart's structured config values."""
+
+from __future__ import annotations
+
+import json
+import textwrap
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template
+
+CLIENT_CHART = Path("cluster/k8s/client")
+
+SHARED_VALUES = """
+matrix:
+  homeserverUrl: https://chat.example.com
+config:
+  values:
+    auth:
+      allowRegistration: false
+      disablePasswordLogin: true
+    featuredCommunities:
+      openAsDefault: false
+      rooms:
+        - '#lobby:{{ .Values.matrix.homeserverUrl | trimPrefix "https://" }}'
+        - '#general:{{ .Values.matrix.homeserverUrl | trimPrefix "https://" }}'
+    mindroom:
+      computers:
+        apiUrl: "{{ .Values.matrix.homeserverUrl }}"
+      maxUploadBytes: 104857600
+      typingRatio: 0.5
+"""
+
+ENVIRONMENT_VALUES = """
+matrix:
+  homeserverUrl: https://staging.example.com
+config:
+  values:
+    auth:
+      allowRegistration: true
+"""
+
+
+def _values_file(tmp_path: Path, name: str, content: str) -> Path:
+    path = tmp_path / name
+    path.write_text(textwrap.dedent(content), encoding="utf-8")
+    return path
+
+
+def _client_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    return json.loads(next(doc["data"]["config.json"] for doc in docs if "config.json" in doc.get("data", {})))
+
+
+def _render_layered(tmp_path: Path, *contents: str) -> list[dict[str, Any]]:
+    values_files = tuple(
+        _values_file(tmp_path, f"values-{index}.yaml", content) for index, content in enumerate(contents)
+    )
+    return _render_chart(CLIENT_CHART, release_name="mindroom-client", values_files=values_files)
+
+
+def test_default_client_config_is_unchanged_without_structured_values() -> None:
+    """The chart default config.json stays the minimal homeserver document."""
+    docs = _render_chart(CLIENT_CHART, release_name="mindroom-client")
+
+    assert _client_config(docs) == {
+        "defaultHomeserver": 0,
+        "homeserverList": ["https://matrix.example.com"],
+        "allowCustomHomeservers": False,
+        "hashRouter": {"enabled": False, "basename": "/"},
+    }
+
+
+def test_structured_values_merge_over_the_default_config_across_values_files(tmp_path: Path) -> None:
+    """An environment file overrides one nested setting while shared settings and templates follow it."""
+    config = _client_config(_render_layered(tmp_path, SHARED_VALUES, ENVIRONMENT_VALUES))
+
+    assert config == {
+        "defaultHomeserver": 0,
+        "homeserverList": ["https://staging.example.com"],
+        "allowCustomHomeservers": False,
+        "hashRouter": {"enabled": False, "basename": "/"},
+        "auth": {"allowRegistration": True, "disablePasswordLogin": True},
+        "featuredCommunities": {
+            "openAsDefault": False,
+            "rooms": ["#lobby:staging.example.com", "#general:staging.example.com"],
+        },
+        "mindroom": {
+            "computers": {"apiUrl": "https://staging.example.com"},
+            "maxUploadBytes": 104857600,
+            "typingRatio": 0.5,
+        },
+    }
+
+
+def test_structured_values_merge_over_config_data(tmp_path: Path) -> None:
+    """config.data stays the base document, and structured values replace lists and override nested keys."""
+    config = _client_config(
+        _render_layered(
+            tmp_path,
+            """
+            config:
+              data: |
+                {
+                  "defaultHomeserver": 0,
+                  "homeserverList": ["https://chat.example.com"],
+                  "sidebar": {"showThreads": false, "showMindRoom": false},
+                  "featuredCommunities": {"rooms": ["#lobby:chat.example.com", "#help:chat.example.com"]}
+                }
+              values:
+                homeserverList:
+                  - https://staging.example.com
+                sidebar:
+                  showThreads: true
+                featuredCommunities:
+                  rooms:
+                    - "#lobby:staging.example.com"
+            """,
+        ),
+    )
+
+    assert config == {
+        "defaultHomeserver": 0,
+        "homeserverList": ["https://staging.example.com"],
+        "sidebar": {"showThreads": True, "showMindRoom": False},
+        "featuredCommunities": {"rooms": ["#lobby:staging.example.com"]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            """
+            config:
+              data: not json
+              values:
+                auth:
+                  allowRegistration: false
+            """,
+            "config.data must be a JSON object when config.values is set",
+        ),
+        (
+            """
+            config:
+              existingConfigMap: client-config
+              values:
+                auth:
+                  allowRegistration: false
+            """,
+            "config.values requires the chart-managed client config",
+        ),
+    ],
+    ids=["invalid-config-data", "existing-config-map"],
+)
+def test_structured_values_reject_configs_they_cannot_merge_into(tmp_path: Path, values: str, error: str) -> None:
+    """Structured values never disappear silently."""
+    completed = _run_helm_template(
+        CLIENT_CHART,
+        release_name="mindroom-client",
+        values_files=(_values_file(tmp_path, "values.yaml", values),),
+    )
+
+    assert completed.returncode != 0
+    assert error in completed.stderr
