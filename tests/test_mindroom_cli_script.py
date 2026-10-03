@@ -1,4 +1,4 @@
-"""Run the operator CLI helper against a fake curl and check how it sends the provisioner key."""
+"""Run the operator CLI helper against a fake curl and check how it sends the provisioner key and reports failures."""
 
 import json
 import re
@@ -18,13 +18,16 @@ import sys
 
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps({"args": sys.argv[1:], "stdin": sys.stdin.read()}) + "\n")
-print("{}")
+exit_code = int(os.environ["FAKE_CURL_EXIT"])
+if exit_code == 0:
+    print("{}")
+sys.exit(exit_code)
 """
 _PROVISIONER_KEY = "provisioner-key-for-tests"
 
 
-def _run_cli(tmp_path: Path, *args: str) -> list[dict]:
-    """Run a copy of the script, so no repository `.env` is loaded, and return the curl invocations."""
+def _run_cli(tmp_path: Path, *args: str, curl_exit: int = 0) -> list[dict]:
+    """Run a copy of the script, so no repository `.env` is loaded, check it exits with curl's status, and return the curl invocations."""
     script = tmp_path / "cluster/scripts/mindroom-cli.sh"
     script.parent.mkdir(parents=True)
     shutil.copy(_SCRIPTS_DIR / "mindroom-cli.sh", script)
@@ -50,6 +53,7 @@ def _run_cli(tmp_path: Path, *args: str) -> list[dict]:
             "FAKE_LOG": str(log),
             "PROVISIONER_API_KEY": _PROVISIONER_KEY,
             "API_URL": "https://api.example.test",
+            "FAKE_CURL_EXIT": str(curl_exit),
         },
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -57,7 +61,7 @@ def _run_cli(tmp_path: Path, *args: str) -> list[dict]:
         timeout=60,
         check=False,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.returncode == curl_exit, completed.stdout + completed.stderr
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
@@ -79,6 +83,12 @@ def test_cli_sends_provisioner_key_only_over_verified_tls_and_stdin(tmp_path: Pa
     assert "--insecure" not in args
     assert all(_PROVISIONER_KEY not in arg for arg in args)
     assert calls[0]["stdin"] == f"Authorization: Bearer {_PROVISIONER_KEY}\n"
+
+
+@pytest.mark.parametrize("command", ["provision", "deprovision"])
+def test_cli_reports_failed_curl_requests(tmp_path: Path, command: str) -> None:
+    """A request that never reached the platform, such as a refused connection, must not exit successfully."""
+    assert len(_run_cli(tmp_path, command, "7", curl_exit=7)) == 1
 
 
 def test_operator_scripts_never_disable_curl_certificate_checks() -> None:
