@@ -163,11 +163,11 @@ jobs:
 
     - name: Create and push latest manifest
       run: |
-        # Keep latest aligned with explicit publishes.
+        # Use this release's own images; a newer overlapping release may already own the bare arch tags.
         docker manifest create \
           ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:amd64 \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:arm64
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-arm64
 
         docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest
 
