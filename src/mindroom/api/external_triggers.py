@@ -208,6 +208,7 @@ async def _claim_and_execute_trigger(
         )
     if event_claim is ExternalTriggerEventClaim.IN_PROGRESS:
         raise HTTPException(status_code=409, detail="External trigger event is already in progress")
+    await _require_current_replay_scope(replay_store, snapshot, event_id, runtime_paths)
 
     payload = payload.model_copy(update={"event_id": event_id})
     # Only per-fire targets group by thread key; a fixed target thread already
@@ -306,6 +307,31 @@ async def _claim_thread_key(
         await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
         raise HTTPException(status_code=409, detail="External trigger thread is being opened by another delivery")
     return continue_thread_event_id, thread_reservation
+
+
+async def _require_current_replay_scope(
+    replay_store: ExternalTriggerReplayStore,
+    snapshot: TriggerDeliverySnapshot,
+    event_id: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Refuse a fresh claim made in a scope that was retired after this request's snapshot.
+
+    Consuming, deleting, or re-keying a trigger retires its scope, and trigger writes delete a retired
+    scope's replay records and lock, so a claim there can be fresh for an event already delivered.
+    A retired scope never becomes current again, so one still current after the claim was intact during it.
+    """
+    try:
+        is_current = await asyncio.to_thread(
+            _trigger_store(runtime_paths).is_current_replay_scope,
+            snapshot.trigger_id,
+            snapshot.replay_scope,
+        )
+    except ExternalTriggerStoreError as exc:
+        await _release_event_id_best_effort(replay_store, snapshot.replay_scope, event_id)
+        raise HTTPException(status_code=503, detail="External trigger store is not available") from exc
+    if not is_current:
+        raise HTTPException(status_code=404, detail="External trigger not found")
 
 
 def _trigger_store(runtime_paths: RuntimePaths) -> ExternalTriggerStore:

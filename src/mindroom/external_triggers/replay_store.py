@@ -242,9 +242,10 @@ class ExternalTriggerReplayStore:
     def retain_scopes(self, live_scopes: Iterable[str]) -> None:
         """Delete the replay records of every scope outside ``live_scopes``.
 
-        A scope stops authenticating deliveries once its trigger is deleted or
-        its key is rotated, so its records protect nothing and must not keep
-        occupying storage outside the trigger's limits.
+        A scope stops authenticating deliveries once its trigger is consumed,
+        deleted, or re-keyed, and a delivery refuses every claim it made in a
+        scope that is no longer current, so the scope's records and lock protect
+        nothing and must not keep occupying storage outside the trigger's limits.
         """
         live_file_stems = {_scope_file_stem(scope) for scope in live_scopes}
         if not self._root.is_dir():

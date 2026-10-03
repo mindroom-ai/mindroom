@@ -516,6 +516,48 @@ def test_capability_trigger_survives_failed_delivery_for_retry(
     assert third.status_code == 404
 
 
+def test_capability_duplicate_is_not_delivered_after_a_later_trigger_write_drops_its_replay_record(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate that read the trigger before another copy consumed it is refused once its record is gone."""
+    token, snapshot = _create_capability_record(trigger_api)
+    store = ExternalTriggerStore(trigger_api.runtime_paths)
+    assert trigger_api.runtime_paths.control_state_root is not None
+    replay_store = ExternalTriggerReplayStore(trigger_api.runtime_paths.control_state_root)
+    executed: list[TriggerDeliverySnapshot] = []
+
+    async def other_copy_delivers_while_owner_is_checked(*_args: object, **_kwargs: object) -> bool:
+        now = int(time.time())
+        assert replay_store.claim_event_id(snapshot.replay_scope, snapshot.uid, now=now, ttl_seconds=300) is (
+            ExternalTriggerEventClaim.FRESH
+        )
+        replay_store.mark_event_delivered(snapshot.replay_scope, snapshot.uid, now=now, ttl_seconds=300)
+        store.consume_single_use(snapshot.trigger_id, expected_uid=snapshot.uid)
+        # An unrelated trigger write deletes the consumed trigger's replay records.
+        _create_capability_record(trigger_api, trigger_id="callback_456")
+        return True
+
+    async def execute_external_trigger(*, snapshot: TriggerDeliverySnapshot, **_kwargs: object) -> str:
+        executed.append(snapshot)
+        return "$second-message"
+
+    monkeypatch.setattr(
+        "mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room",
+        other_copy_delivers_while_owner_is_checked,
+    )
+    monkeypatch.setattr("mindroom.api.external_triggers.execute_external_trigger", execute_external_trigger)
+
+    response = trigger_api.client.post(
+        f"/api/triggers/{snapshot.trigger_id}",
+        content=_body(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+    assert executed == []
+
+
 def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
     trigger_api: TriggerApiContext,
 ) -> None:

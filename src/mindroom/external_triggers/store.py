@@ -437,6 +437,12 @@ class ExternalTriggerStore:
             # A concurrent duplicate of the consumed delivery must still find its delivered event record.
             self._write_records(records, retained_scope=_replay_scope(record))
 
+    def is_current_replay_scope(self, trigger_id: str, replay_scope: str) -> bool:
+        """Return whether ``replay_scope`` still authenticates deliveries for ``trigger_id``."""
+        with advisory_file_lock(self._lock_path, exclusive=False):
+            record = self._read_records().triggers.get(trigger_id)
+        return record is not None and _replay_scope(record) == replay_scope
+
     def delivery_snapshot(
         self,
         trigger_id: str,
