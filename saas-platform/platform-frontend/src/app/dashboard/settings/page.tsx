@@ -141,7 +141,7 @@ export default function SettingsPage() {
       if (result.status === 'deletion_scheduled') {
         setMessage({
           type: 'info',
-          text: `Account deletion scheduled. Your hosted instances stop now, and paid subscriptions end at the end of their current billing period unless you cancel the deletion. After ${result.grace_period_days} days, scheduled cleanup removes your hosted instances and account data when enabled. Within those ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings to keep your account, and your subscription if its period has not ended. Signing in alone does not cancel deletion.`
+          text: `${result.message} After ${result.grace_period_days} days, scheduled cleanup removes your hosted instances and account data when enabled. Within those ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings to keep your account, and your subscription if its period has not ended. Signing in alone does not cancel deletion.`
         })
         setIsDeletionPending(true)
 
@@ -183,7 +183,7 @@ export default function SettingsPage() {
           clearTimeout(deletionTimeoutRef.current)
           deletionTimeoutRef.current = null
         }
-        setMessage({ type: 'success', text: 'Account deletion has been cancelled.' })
+        setMessage({ type: 'success', text: result.message })
         setIsDeletionPending(false)
         await loadAccountInfo()
       }
