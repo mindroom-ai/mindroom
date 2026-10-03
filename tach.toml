@@ -3806,6 +3806,7 @@ depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
+    "mindroom.thread_export.projected_history",
     "mindroom.thread_export.service",
     "mindroom.thread_export.workspace_sync",
 ]
@@ -3840,6 +3841,8 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.conversation_reads",
+    "mindroom.path_confinement",
+    "mindroom.thread_export.storage",
 ]
 visibility = [
     "mindroom.thread_export.execution",

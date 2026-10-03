@@ -28,6 +28,7 @@ from mindroom.matrix.conversation_hydration import (
 )
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.thread_export import projected_history
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
     ThreadExportIncompleteError,
@@ -587,7 +588,7 @@ async def test_an_unreadable_sidecar_exports_its_preview_marked_incomplete(
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     router: PrincipalStore,
 ) -> None:
-    """The summary lives in message content, and the projection round-trips it whole."""
+    """The summary lives in message content, and the export keeps it and nothing it does not write."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
@@ -601,7 +602,9 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
                 thread_id=ROOT,
                 extra_content={
                     "msgtype": "m.notice",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": ROOT, "m.in_reply_to": {"event_id": ROOT}},
                     THREAD_SUMMARY_KEY: {"version": 1, "summary": "Deploy pipeline fix"},
+                    "formatted_body": "<p>Deploy pipeline fix</p>",
                 },
             ),
         ],
@@ -609,7 +612,34 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
 
     messages = await export(reader_for(router, homeserver))
 
-    assert messages[1].content[THREAD_SUMMARY_KEY] == {"version": 1, "summary": "Deploy pipeline fix"}
+    assert messages[1].content == {
+        "msgtype": "m.notice",
+        "m.relates_to": {"m.in_reply_to": {"event_id": ROOT}},
+        THREAD_SUMMARY_KEY: {"summary": "Deploy pipeline fix"},
+    }
+    assert messages[1].reply_to_event_id == ROOT
+
+
+async def test_a_thread_past_the_export_file_cap_fails_as_too_large(
+    router: PrincipalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages of three messages each fit the cap, and the thread still fails once what it holds passes it."""
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=1_000),
+        [
+            raw(f"$reply-{index:02d}:example.org", "x" * 1_000, ts=1_000 + index, thread_id=ROOT)
+            for index in range(1, 12)
+        ],
+    )
+    reader = reader_for(router, homeserver)
+
+    assert len(await export(reader, page_messages=3)) == 12
+    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", 8_000)
+    with pytest.raises(ThreadExportIncompleteError, match="too large to export"):
+        await export(reader, page_messages=3)
 
 
 async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalStore) -> None:

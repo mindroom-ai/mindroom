@@ -459,6 +459,22 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     return payload
 
 
+def exported_content(message: ResolvedVisibleMessage) -> dict[str, Any]:
+    """Return the only parts of one message's content that its export reads.
+
+    A thread is fetched whole before it is written, so its messages keep these beside their bodies rather than every key their senders chose.
+    """
+    content: dict[str, Any] = {}
+    if isinstance(msgtype := message.content.get("msgtype"), str):
+        content["msgtype"] = msgtype
+    if (reply_to_event_id := message.reply_to_event_id) is not None:
+        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
+    if isinstance(meta := message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+        summary = meta.get("summary")
+        content[_THREAD_SUMMARY_CONTENT_KEY] = {"summary": summary} if isinstance(summary, str) else {}
+    return content
+
+
 def _latest_thread_summary(
     messages: list[ResolvedVisibleMessage],
     *,

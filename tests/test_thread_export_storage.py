@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 from mindroom import yaml_io
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.thread_export import clear_thread_export_root
 from mindroom.thread_export import storage as thread_export_storage
 from mindroom.thread_export.models import ThreadExportRoom
@@ -19,11 +21,13 @@ from mindroom.thread_export.storage import (
     _ROOT_MARKER_TEXT,
     _safe_path_segment,
     _UnsafeThreadExportPathError,
+    exported_content,
     prepare_export_root,
     reconcile_room_directories,
     remove_room_export,
     remove_stale_thread_exports,
     room_has_thread_exports,
+    thread_payload,
     write_room_index,
     write_thread_payload,
 )
@@ -568,6 +572,58 @@ def test_thread_too_long_to_parse_whole_stays_indexed_and_is_not_rewritten(
     with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
         assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
         write_room_index(output_dir, room)
+
+
+def test_exported_content_keeps_everything_a_thread_payload_writes() -> None:
+    """A fetched thread drops the content its export never writes, and the written payload stays the same."""
+    router = "@mindroom_router:localhost"
+    contents: list[dict[str, object]] = [
+        {
+            "msgtype": "m.notice",
+            "body": "Summary text",
+            "formatted_body": "<p>Summary text</p>",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$root", "m.in_reply_to": {"event_id": "$root"}},
+            "io.mindroom.thread_summary": {"version": 1, "summary": "Deploy fix"},
+            "io.mindroom.stream_status": "completed",
+            "padding": ["unused"] * 100,
+        },
+        {"msgtype": "m.text", "body": "later notice", "io.mindroom.thread_summary": {"version": 1}},
+        {"body": "plain", "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}},
+    ]
+    messages = [
+        ResolvedVisibleMessage.from_message_data(
+            {
+                "sender": router,
+                "body": str(content["body"]),
+                "timestamp": index + 1,
+                "event_id": f"$event-{index}",
+                "content": content,
+            },
+            thread_id="$root",
+            latest_event_id=f"$event-{index}",
+        )
+        for index, content in enumerate(contents)
+    ]
+
+    def payload() -> dict[str, object]:
+        return thread_payload(
+            room=_room(),
+            thread_id="$root",
+            messages=messages,
+            exported_at=datetime(2026, 10, 1, tzinfo=UTC),
+            trusted_sender_ids={router},
+        )
+
+    written = payload()
+    for message in messages:
+        message.content = exported_content(message)
+
+    assert payload() == written
+    assert [set(message.content) for message in messages] == [
+        {"msgtype", "m.relates_to", "io.mindroom.thread_summary"},
+        {"msgtype", "io.mindroom.thread_summary"},
+        set(),
+    ]
 
 
 @pytest.mark.parametrize("filename", ["marker", "index"])
