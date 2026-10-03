@@ -15,6 +15,7 @@ from agno.db.base import SessionType
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
+from nio.exceptions import EncryptionError, RemoteProtocolError
 
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
@@ -44,6 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -56,7 +58,7 @@ from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -65,6 +67,7 @@ from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
+    fetch_latest_visible_message,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
@@ -115,12 +118,14 @@ from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
     build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
+    unfinished_streamed_reply,
 )
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
@@ -128,6 +133,7 @@ from mindroom.teams import (
     continue_paused_team_run,
     resolve_team_turn_models,
     select_model_for_team,
+    strip_team_display,
     team_response,
     team_response_stream,
 )
@@ -228,6 +234,18 @@ type _MatrixEventId = str
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
+_INTERRUPTED_ATTEMPT_INSTRUCTION = (
+    "Your previous attempt at replying to the current message was interrupted, and this reply replaces "
+    "everything it showed. What it had shown before stopping is below: tool calls it lists as finished already "
+    "ran, and those it lists as still running may have finished too, so do not repeat those that have side effects; "
+    "a read-only call whose shortened result is not enough may run again. Calls hidden from the conversation or "
+    "made just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
+    "it already took effect."
+)
+_UNKNOWN_ATTEMPT_INSTRUCTION = (
+    "A previous attempt at replying to the current message was interrupted, and what that attempt did "
+    "is unknown. Before repeating any tool call with side effects, check whether it already took effect."
+)
 
 
 async def _cancel_pending_responses(
@@ -497,6 +515,8 @@ class ResponseRequest:
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
     existing_event_is_placeholder: bool = False
+    # Set when replay adopts the reply an earlier attempt at this turn left behind.
+    existing_event_is_recovered: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3548,6 +3568,64 @@ class ResponseRunner:
         )
         return request
 
+    async def _with_interrupted_attempt(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+    ) -> ResponseRequest:
+        """Tell a replayed turn what its stopped attempt already showed and ran.
+
+        A process that stops mid-stream, whether it crashes or shuts down in
+        order, leaves its reply streaming and its sources pending, so replay
+        adopts that reply and answers again in place. The reply in Matrix is
+        the only account of the stopped attempt, so its visible text and tool
+        trace go to the new attempt as transient context that keeps it from
+        repeating finished tools.
+        """
+        event_id = request.existing_event_id
+        if event_id is None or not request.existing_event_is_recovered:
+            return request
+        try:
+            message = await fetch_latest_visible_message(
+                self._client(),
+                room_id=resolved_target.room_id,
+                event_id=event_id,
+                trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
+            )
+        except (EncryptionError, RemoteProtocolError):
+            # A reply this device cannot decrypt, or whose edits the server would
+            # not list, is answered with a warning rather than retried, since a
+            # missing key or a refusing server may never change.
+            message = None
+        unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
+        if unfinished is not None:
+            completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
+            attempt = render_stopped_attempt(
+                partial_text=strip_team_display(unfinished.partial_text),
+                completed_tools=completed_tools,
+                interrupted_tools=interrupted_tools,
+            )
+            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
+        elif message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+            # Unreadable, or stopped before showing anything (an acknowledgement,
+            # hidden or non-streamed tool calls): unknown work, not absent work.
+            instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
+        else:
+            return request
+        self.deps.logger.info(
+            "interrupted_attempt_resumed",
+            response_event_id=event_id,
+            attempt_shown=unfinished is not None,
+        )
+        return replace(
+            request,
+            transient_enrichment_items=(
+                *request.transient_enrichment_items,
+                EnrichmentItem(key="interrupted_attempt", text=instruction, persist=False, minimal_required=True),
+            ),
+        )
+
     async def _prepare_locked_source(
         self,
         request: ResponseRequest,
@@ -3641,11 +3719,14 @@ class ResponseRunner:
             exclude_history_event_id=placeholder_event_id,
         )
         request = self._request_with_locked_target(request, resolved_target)
-        return await self._prepare_locked_source(
+        prepared_request = await self._prepare_locked_source(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
         )
+        if prepared_request is None:
+            return None
+        return await self._with_interrupted_attempt(prepared_request, resolved_target=resolved_target)
 
     async def _begin_locked_turn(
         self,
@@ -4183,7 +4264,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
+            placeholder_message=(None if _is_silent_schedule_response(request) else TEAM_PROGRESS_PLACEHOLDER),
             early_placeholder_state=placeholder_state,
         )
         if request is None:

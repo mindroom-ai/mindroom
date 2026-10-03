@@ -942,6 +942,7 @@ async def test_recovered_turn_adopts_its_existing_visible_response(config: Confi
     assert len(harness.runner.requests) == 1
     assert harness.runner.requests[0].existing_event_id == response_event_id
     assert harness.runner.requests[0].existing_event_is_placeholder is True
+    assert harness.runner.requests[0].existing_event_is_recovered is True
 
 
 @pytest.mark.asyncio
@@ -4292,6 +4293,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     assert request.prompt == interactive.build_selection_prompt(selection)
     assert request.existing_event_id == "$sent-1:localhost"
     assert request.existing_event_is_placeholder is True
+    assert request.existing_event_is_recovered is False
     assert request.response_envelope.target.reply_to_event_id == selection.question_event_id
     assert request.response_envelope.target.resolved_thread_id == selection.thread_id
     assert request.sources == ResponseSources(
@@ -4499,7 +4501,9 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
 
     assert len(harness.gateway.sent) == 1
     assert len(harness.runner.requests) == 2
+    assert harness.runner.requests[0].existing_event_is_recovered is False
     assert harness.runner.requests[1].existing_event_id == "$sent-1:localhost"
+    assert harness.runner.requests[1].existing_event_is_recovered is True
     assert harness.turn_store.is_handled(selection.question_event_id) is True
 
 

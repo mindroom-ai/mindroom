@@ -5518,6 +5518,7 @@ expose = [
     "is_errored_run_output",
     "resolve_team_turn_models",
     "select_model_for_team",
+    "strip_team_display",
     "team_response",
     "team_response_stream",
     "resolve_live_shared_agent_names",
@@ -6315,6 +6316,7 @@ expose = [
     "build_interrupted_replay_snapshot",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
+    "render_stopped_attempt",
     "split_interrupted_tool_trace",
     "tool_execution_call_id",
 ]
@@ -6344,6 +6346,7 @@ expose = [
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "tool_markers_match_trace",
+    "tool_trace_from_content",
 ]
 from = ["mindroom.tool_system.events"]
 
