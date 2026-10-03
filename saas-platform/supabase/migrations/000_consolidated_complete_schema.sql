@@ -327,7 +327,7 @@ CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
--- Function to check if current user is admin
+-- Function to check if current user is an active admin
 CREATE OR REPLACE FUNCTION is_admin()
 RETURNS BOOLEAN AS $$
 BEGIN
@@ -335,6 +335,7 @@ BEGIN
         SELECT 1 FROM accounts
         WHERE id = auth.uid()
         AND is_admin = TRUE
+        AND status = 'active'
         AND deleted_at IS NULL
     );
 END;
