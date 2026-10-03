@@ -682,7 +682,28 @@ async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]
     }
 
 
-@router.post("/bases/{base_id}/upload")
+# The handler parses its multipart body after authentication, so the API docs take the body schema from here.
+# Swagger UI renders array items as file pickers only with ``format: binary``.
+_UPLOAD_REQUEST_BODY = {
+    "required": True,
+    "content": {
+        "multipart/form-data": {
+            "schema": {
+                "type": "object",
+                "required": ["files"],
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "binary", "contentMediaType": "application/octet-stream"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+@router.post("/bases/{base_id}/upload", openapi_extra={"requestBody": _UPLOAD_REQUEST_BODY})
 async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, Any]:
     """Upload the multipart ``files`` parts into a knowledge base folder."""
     # Parsed here because FastAPI reads a File parameter before the router authenticates the caller.

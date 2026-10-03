@@ -28,7 +28,11 @@ if TYPE_CHECKING:
             type="password",
             required=True,
             placeholder="Spotify OAuth access token",
-            description="OAuth access token with required scopes (user-read-private, playlist-modify-public, playlist-modify-private)",
+            description=(
+                "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, "
+                "user-read-currently-playing, playlist-read-private, playlist-modify-public, "
+                "playlist-modify-private, user-modify-playback-state)"
+            ),
         ),
         ConfigField(
             name="default_market",

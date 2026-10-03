@@ -9,6 +9,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+import mindroom.cli.response_activity as response_activity_cli
 from mindroom.cli.main import app
 
 if TYPE_CHECKING:
@@ -24,12 +25,21 @@ def _snapshot(**overrides: object) -> dict[str, object]:
         "admission_paused": False,
         "active_matrix_operations": 0,
         "active_openai_requests": 0,
+        "active_calls": 0,
+        "interruptible_script_runs": 0,
+        "recoverable_script_runs": 0,
         **overrides,
     }
 
 
 def _detailed_snapshot(**overrides: object) -> dict[str, object]:
-    return _snapshot(**{"responses": [], **overrides})
+    return _snapshot(**{"responses": [], "script_runs": [], **overrides})
+
+
+def _without(field: str) -> dict[str, object]:
+    payload = _snapshot()
+    del payload[field]
+    return payload
 
 
 @pytest.mark.parametrize(
@@ -38,9 +48,18 @@ def _detailed_snapshot(**overrides: object) -> dict[str, object]:
         (_snapshot(), 0, "idle"),
         (_snapshot(active_matrix_operations=2, status="busy"), 1, "busy"),
         (_snapshot(active_openai_requests=1, status="busy"), 1, "busy"),
+        (_snapshot(active_calls=1, status="busy"), 1, "busy"),
+        (_snapshot(interruptible_script_runs=1, status="busy"), 1, "busy"),
+        (_snapshot(recoverable_script_runs=2), 0, "idle"),
         (_snapshot(runtime_phase="starting", status="unavailable"), 2, "unavailable"),
         (_snapshot(admission_paused=True, status="unavailable"), 2, "unavailable"),
         (_snapshot(active_matrix_operations=None, admission_paused=None, status="unavailable"), 2, "unavailable"),
+        (_snapshot(active_calls=None, status="unavailable"), 2, "unavailable"),
+        (
+            _snapshot(interruptible_script_runs=None, recoverable_script_runs=None, status="unavailable"),
+            2,
+            "unavailable",
+        ),
     ],
 )
 def test_cli_exit_codes_and_json(
@@ -67,6 +86,11 @@ def test_cli_exit_codes_and_json(
         _snapshot(active_openai_requests=True),
         _snapshot(active_matrix_operations="0"),
         _snapshot(admission_paused="false"),
+        _snapshot(active_calls=-1),
+        _snapshot(recoverable_script_runs=False),
+        _without("active_calls"),
+        _without("interruptible_script_runs"),
+        _without("recoverable_script_runs"),
     ],
 )
 def test_cli_rejects_incomplete_or_malformed_snapshots(
@@ -325,3 +349,117 @@ def test_cli_details_wrong_key_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp
     assert result.exit_code == 2
     assert json.loads(result.stdout)["status"] == "unavailable"
     assert "wrong-key" not in result.output
+
+
+def test_cli_text_reports_calls_and_recoverable_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Busy text names every counted source and keeps recoverable runs visible but uncounted."""
+    payload = _snapshot(status="busy", active_calls=1, interruptible_script_runs=2, recoverable_script_runs=3)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
+    result = runner.invoke(app, ["check-active-responses", "--config", str(tmp_path / "config.yaml")])
+    assert result.exit_code == 1, result.output
+    assert "1 call(s), 2 interruptible script run(s)" in result.stdout
+    assert "Not counted as busy: 3 recoverable script run(s)." in result.stdout
+
+
+def test_cli_details_text_lists_calls_and_script_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Call rows match response rows, and script rows state their restart outcome."""
+    monkeypatch.setenv("MINDROOM_API_KEY", "test-secret")
+    payload = _detailed_snapshot(
+        status="busy",
+        active_calls=1,
+        interruptible_script_runs=1,
+        recoverable_script_runs=1,
+        responses=[{"channel": "call", "responder": "helper", "requester_id": "@alice:example.org"}],
+        script_runs=[
+            {"run_id": "script-1", "responder": "watcher", "requester_id": "@bob:example.org", "recoverable": False},
+            {"run_id": "script-2", "responder": "watcher", "requester_id": "@bob:example.org", "recoverable": True},
+        ],
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, json=payload))
+    result = runner.invoke(app, ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--details"])
+    assert result.exit_code == 1, result.output
+    assert "Call: helper for @alice:example.org" in result.stdout
+    assert "Script: watcher for @bob:example.org (script-1, interrupted by restart)" in result.stdout
+    assert "Script: watcher for @bob:example.org (script-2, recoverable)" in result.stdout
+
+
+class _FakeClock:
+    """Advance monotonic time only through the command's own sleeps."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.now = 1000.0
+        self.sleeps: list[float] = []
+        monkeypatch.setattr(response_activity_cli, "monotonic", lambda: self.now)
+        monkeypatch.setattr(response_activity_cli, "sleep", self.sleep)
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, responses: list[httpx.Response]) -> list[httpx.Response]:
+    """Serve one queued response per poll, repeating the last one."""
+    served: list[httpx.Response] = []
+
+    def get(*_args: object, **_kwargs: object) -> httpx.Response:
+        response = responses[min(len(served), len(responses) - 1)]
+        served.append(response)
+        return response
+
+    monkeypatch.setattr(httpx, "get", get)
+    return served
+
+
+def test_cli_wait_polls_until_idle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A busy runtime that drains within the wait exits zero with the idle snapshot."""
+    clock = _FakeClock(monkeypatch)
+    busy = httpx.Response(200, json=_snapshot(status="busy", active_calls=1))
+    served = _serve(monkeypatch, [busy, busy, httpx.Response(200, json=_snapshot())])
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--wait", "60", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "idle"
+    assert len(served) == 3
+    assert clock.sleeps == [5.0, 5.0]
+
+
+def test_cli_wait_reports_busy_at_the_deadline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Waiting never sleeps past the deadline and keeps the busy exit code."""
+    clock = _FakeClock(monkeypatch)
+    served = _serve(monkeypatch, [httpx.Response(200, json=_snapshot(status="busy", interruptible_script_runs=1))])
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--wait", "12", "--json"],
+    )
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["status"] == "busy"
+    assert clock.sleeps == [5.0, 5.0, 2.0]
+    assert len(served) == 4
+
+
+@pytest.mark.parametrize(
+    "unavailable",
+    [
+        httpx.Response(503, json=_snapshot(admission_paused=True, status="unavailable")),
+        httpx.Response(500, text="server error"),
+        httpx.Response(200, json=_without("active_calls")),
+    ],
+)
+def test_cli_wait_stops_on_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unavailable: httpx.Response,
+) -> None:
+    """An unknown status mid-wait ends with exit 2, even if a later poll would be idle."""
+    _FakeClock(monkeypatch)
+    busy = httpx.Response(200, json=_snapshot(status="busy", active_openai_requests=1))
+    served = _serve(monkeypatch, [busy, unavailable, httpx.Response(200, json=_snapshot())])
+    result = runner.invoke(
+        app,
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--wait", "60", "--json"],
+    )
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["status"] == "unavailable"
+    assert len(served) == 2

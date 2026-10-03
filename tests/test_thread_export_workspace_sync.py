@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
@@ -544,7 +545,7 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
     runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_secret:localhost")))
     export = _export_mock()
 
-    with patch(EXPORT_PATH, new=export):
+    with patch(EXPORT_PATH, new=export), capture_logs() as logs:
         runner.queue_full_pass()
         await runner._run_pass_once()
 
@@ -560,6 +561,8 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
         ("@bob:localhost", "@mindroom_secret:localhost"): bob_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
     }
     assert not ghost_thread.exists()
+    # Every instance from before an upgrade looks like this one until its requester's next turn, so it never warns.
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == []
 
 
 async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> None:

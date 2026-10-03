@@ -9,6 +9,7 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import threading
 import tracemalloc
 from typing import TYPE_CHECKING
@@ -811,7 +812,7 @@ async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["tampered_log", "failed_start", "failed_finish"])
+@pytest.mark.parametrize("failure", ["tampered_log", "failed_start", "failed_finish", "removed_record"])
 async def test_delegations_that_can_never_settle_keep_no_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -847,6 +848,11 @@ async def test_delegations_that_can_never_settle_keep_no_state(
             with (_record_dir(handle) / "events.jsonl").open("a", encoding="utf-8") as events:
                 events.write('{"sequence": 2}\n')
             with pytest.raises(ValueError, match="changed outside the primary"):
+                await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+        elif failure == "removed_record":
+            # The child's worker deleted its record directory mid-run.
+            shutil.rmtree(_record_dir(handle))
+            with pytest.raises(FileNotFoundError):
                 await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
         else:
             with monkeypatch.context() as full:

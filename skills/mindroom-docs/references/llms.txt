@@ -81,5 +81,6 @@
 - [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/)
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/)
+- [Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/)
 - [CLI Reference](https://docs.mindroom.chat/cli/)
 

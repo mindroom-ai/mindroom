@@ -79,6 +79,21 @@ def test_old_config_loads_disabled_local_access_and_saves_complete_extended_payl
     assert load_native_config(path) == saved
 
 
+def test_saved_config_that_allows_mindroom_itself_loads_and_saves_without_it(tmp_path: Path) -> None:
+    """Earlier releases saved MindRoom's own app IDs; those setups must stay usable and editable, while edits refuse them."""
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(mode=0o700)
+    apps = ["chat.mindroom.menubar", "com.example.Editor", "chat.mindroom.desktophelper"]
+    path.write_text(json.dumps(_payload(revision=3, allowed_app_ids=apps)), encoding="utf-8")
+    path.chmod(0o600)
+    loaded = load_native_config(path)
+    assert loaded.allowed_app_ids == ("com.example.Editor",)
+    save_native_config(path, loaded, expected_revision=3)
+    assert json.loads(path.read_text(encoding="utf-8"))["allowed_app_ids"] == ["com.example.Editor"]
+    with pytest.raises(NativeConfigError, match="control MindRoom itself"):
+        loaded.with_allowed_apps(["com.example.Editor", "chat.mindroom.menubar"])
+
+
 def test_extended_config_round_trips_without_checking_saved_root_availability(tmp_path: Path) -> None:
     missing = tmp_path / "removed-after-selection"
     config = NativeDesktopConfig.from_payload(_extended([str(tmp_path), str(missing)], enabled=True))

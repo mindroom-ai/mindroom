@@ -97,6 +97,32 @@ Path prefix prepended to client file locations; empty at the origin root.
 }
 {{- end -}}
 
+{{/*
+Render every string inside a config.values entry with tpl, recursing into maps and lists.
+Arguments: list <root context> <value>.
+Returns JSON {"value": <rendered>} so scalars survive fromJson.
+*/}}
+{{- define "mindroom-client.tplConfigValue" -}}
+{{- $root := index . 0 -}}
+{{- $value := index . 1 -}}
+{{- if kindIs "string" $value -}}
+{{- $value = tpl $value $root -}}
+{{- else if kindIs "map" $value -}}
+{{- $rendered := dict -}}
+{{- range $key, $item := $value -}}
+{{- $_ := set $rendered $key (include "mindroom-client.tplConfigValue" (list $root $item) | fromJson).value -}}
+{{- end -}}
+{{- $value = $rendered -}}
+{{- else if kindIs "slice" $value -}}
+{{- $rendered := list -}}
+{{- range $item := $value -}}
+{{- $rendered = append $rendered (include "mindroom-client.tplConfigValue" (list $root $item) | fromJson).value -}}
+{{- end -}}
+{{- $value = $rendered -}}
+{{- end -}}
+{{- dict "value" $value | toJson -}}
+{{- end -}}
+
 {{- define "mindroom-client.matrixClientWellKnown" -}}
 {{- $wellKnown := dict "m.homeserver" (dict "base_url" .Values.matrix.homeserverUrl) -}}
 {{- $focus := dict "type" "livekit" "livekit_service_url" .Values.matrixRTC.livekitServiceUrl -}}

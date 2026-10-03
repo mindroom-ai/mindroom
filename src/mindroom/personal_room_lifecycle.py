@@ -213,6 +213,19 @@ class PersonalRoomLifecycle:
             self._retry_candidates[candidate] = reinvite_departed_owner or self._retry_candidates.get(candidate, False)
             self._completed_candidates.discard(candidate)
             self._reconciled = False
+        else:
+            self._settle_retry((user_id, source_room_id), reinvite_departed_owner=reinvite_departed_owner)
+
+    def _settle_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> bool:
+        """Forget a failed trigger's retry once a successful attempt covered it, and say whether it did.
+
+        An attempt without re-invite authority does not cover a stored request
+        to re-invite a departed owner, so that request stays pending.
+        """
+        if self._retry_candidates.get(candidate, False) and not reinvite_departed_owner:
+            return False
+        self._retry_candidates.pop(candidate, None)
+        return True
 
     async def handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
         """Recognize exact self-onboarding commands through trusted requester resolution."""
@@ -326,12 +339,9 @@ class PersonalRoomLifecycle:
         if previous is not None and monotonic() < previous.retry_at:
             return False
         user_id, room_id = candidate
+        reinvite_departed_owner = self._retry_candidates.get(candidate, False)
         try:
-            await self._onboard(
-                user_id,
-                room_id,
-                reinvite_departed_owner=self._retry_candidates.get(candidate, False),
-            )
+            await self._onboard(user_id, room_id, reinvite_departed_owner=reinvite_departed_owner)
         except Exception as error:
             backoff = _next_backoff(previous, error)
             if revision == self._config_revision:
@@ -360,9 +370,10 @@ class PersonalRoomLifecycle:
                 )
             return False
         if revision == self._config_revision:
-            self._completed_candidates.add(candidate)
             self._candidate_backoff.pop(candidate, None)
-            self._retry_candidates.pop(candidate, None)
+            # A live trigger can fail during this attempt and ask for a re-invite it did not carry.
+            if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
+                self._completed_candidates.add(candidate)
         return True
 
     def retained_room_ids(self) -> set[str]:

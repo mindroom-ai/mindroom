@@ -6,6 +6,8 @@ import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from contextvars import copy_context
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.credentials import get_runtime_credentials_manager
@@ -27,16 +29,27 @@ if TYPE_CHECKING:
     from mindroom.mcp.manager import MCPServerManager
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
-# Synchronous tool bodies and the worker proxy requests of async ones hold their thread until they
-# return, even after a timeout or cancel. A separate pool keeps them off the default executor that
-# authentication, OAuth storage, and the Matrix runtime share, and off the worker proxy pool that chat
-# tool calls share; the default per-user call limit stays below its size.
+# Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of
+# async ones hold their thread until they return, even after a timeout or cancel. A separate pool keeps
+# them off the default executor that authentication, OAuth storage, and the Matrix runtime share, and
+# off the worker proxy pool that chat tool calls share; the default per-user call limit stays below its size.
 _TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-mcp-gateway-tool")
 logger = get_logger(__name__)
 
 
+async def _on_tool_pool[T](operation: Callable[[], T]) -> T:
+    """Run blocking toolkit work on the gateway pool in the caller's context, like ``asyncio.to_thread``."""
+    return await asyncio.get_running_loop().run_in_executor(_TOOL_EXECUTOR, copy_context().run, operation)
+
+
 async def _lifecycle(operation: Callable[[], object]) -> None:
-    result = operation() if inspect.iscoroutinefunction(operation) else await run_gateway_sync(operation)
+    if inspect.iscoroutinefunction(operation):
+        result = operation()
+    else:
+        # Like run_gateway_sync, a cancelled caller stops waiting while the call keeps owning the thread.
+        task = asyncio.create_task(_on_tool_pool(operation))
+        retain_execution_task(task)
+        result = await asyncio.shield(task)
     if inspect.isawaitable(result):
         await result
 
@@ -180,7 +193,7 @@ async def _build_selected(
             name: function for name, function in toolkit.async_functions.items() if name in typed_names
         }
         return toolkit
-    task = asyncio.create_task(asyncio.to_thread(_build_native, context, entry))
+    task = asyncio.create_task(_on_tool_pool(partial(_build_native, context, entry)))
     retain_execution_task(task)
     try:
         return await asyncio.shield(task)

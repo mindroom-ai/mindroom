@@ -227,7 +227,7 @@ async def test_unsearchable_store_directory_does_not_stop_startup(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_locked_store_is_skipped_quickly_and_imported_by_its_owner(tmp_path: Path) -> None:
-    """Startup waits about a second on a store worker code keeps locked, and its owner still imports it later."""
+    """Startup skips a store worker code keeps locked without waiting, and its owner still imports it later."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
     locked = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     holder = sqlite3.connect(locked, isolation_level=None)

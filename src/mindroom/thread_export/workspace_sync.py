@@ -446,8 +446,9 @@ def _private_targets(
             )
             continue
         if instance.requester_id is None:
-            logger.warning(
-                "Clearing exports of private instance without an owner the primary recorded",
+            # Instances from before owner records moved below tracking/ wait here for their requester's next turn.
+            logger.info(
+                "Clearing exports of private instance until the primary records its owner",
                 agent_name=agent_name,
                 instance_root=str(instance.state_root),
             )

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.session import AgentSession
 
-_KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
+KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
 
 
@@ -88,7 +88,7 @@ def _annotate_knowledge_search_tool(
         memory_search_available=_tool_function_available(tools, _MEMORY_SEARCH_TOOL_NAME, async_mode=async_mode),
     )
     for tool in tools:
-        if isinstance(tool, Function) and tool.name == _KNOWLEDGE_SEARCH_TOOL_NAME:
+        if isinstance(tool, Function) and tool.name == KNOWLEDGE_SEARCH_TOOL_NAME:
             tool.description = description
 
 

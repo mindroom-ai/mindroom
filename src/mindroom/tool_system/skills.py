@@ -32,6 +32,8 @@ from mindroom.tool_system.skill_usage import record_skill_use
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
@@ -505,14 +507,21 @@ def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
     return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
 
 
-def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
-    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them."""
+def parse_skill_markdown(
+    content: str,
+    *,
+    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
+) -> tuple[dict[str, Any], str]:
+    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them.
+
+    The default loader refuses frontmatter that worker code could write to exhaust the primary.
+    """
     match = _match_skill_frontmatter(content)
     if not match:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        frontmatter = yaml_io.safe_load_without_aliases(match.group(1)) or {}
+        frontmatter = load_yaml(match.group(1)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
@@ -522,12 +531,18 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
     return cast("dict[str, Any]", frontmatter), match.group(2).strip()
 
 
-def _parse_skill_frontmatter(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
+def _parse_skill_frontmatter(
+    content: str,
+    *,
+    path: str,
+    allow_missing: bool,
+    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
+) -> tuple[dict[str, Any], str] | None:
     """Split one ``SKILL.md`` into its frontmatter mapping and instructions, or warn and return None."""
     if allow_missing and not _match_skill_frontmatter(content):
         return {}, content
     try:
-        return parse_skill_markdown(content)
+        return parse_skill_markdown(content, load_yaml=load_yaml)
     except SkillMarkdownError as exc:
         logger.warning("Refused skill frontmatter", path=path, error=str(exc))
         return None
@@ -543,7 +558,13 @@ def _read_skill_frontmatter(
     except Exception as exc:
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
-    parsed = _parse_skill_frontmatter(content, path=str(skill_path), allow_missing=allow_missing)
+    # Only operator skill roots are listed here, and agents load them with Agno's plain YAML loader, so parse alike.
+    parsed = _parse_skill_frontmatter(
+        content,
+        path=str(skill_path),
+        allow_missing=allow_missing,
+        load_yaml=yaml_io.safe_load,
+    )
     return None if parsed is None else parsed[0]
 
 
@@ -651,10 +672,10 @@ def workspace_skill_file_names(skill_fd: int, dirname: str) -> list[str]:
     return names[:_MAX_WORKSPACE_SKILL_LISTING_ENTRIES]
 
 
-def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
-    """Build one workspace skill from descriptor reads below its pinned directory."""
+def _read_workspace_skill_markdown(skill_fd: int, source_path: Path) -> str | None:
+    """Return one workspace ``SKILL.md`` read below its pinned directory, or None when it is absent or refused."""
     try:
-        content = read_regular_file_within_root(
+        return read_regular_file_within_root(
             skill_fd,
             SKILL_FILENAME,
             max_bytes=MAX_WORKSPACE_SKILL_FILE_BYTES,
@@ -664,6 +685,10 @@ def _load_workspace_skill(skill_fd: int, source_path: Path) -> Skill | None:
     except (OSError, ValueError) as exc:
         logger.warning("Refused a workspace skill file", path=str(source_path / SKILL_FILENAME), error=str(exc))
         return None
+
+
+def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Skill | None:
+    """Build one workspace skill from its ``SKILL.md`` text and descriptor reads below its pinned directory."""
     parsed = _parse_skill_frontmatter(content, path=str(source_path), allow_missing=True)
     if parsed is None:
         return None
@@ -700,7 +725,8 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
             except FileNotFoundError:
                 pass
             else:
-                skill = _load_workspace_skill(skills_fd, skills_root)
+                content = _read_workspace_skill_markdown(skills_fd, skills_root)
+                skill = None if content is None else _load_workspace_skill(skills_fd, skills_root, content)
                 return [] if skill is None else [skill]
             skill_names = workspace_entry_names(skills_fd, directories=True).names
             if len(skill_names) > _MAX_WORKSPACE_SKILLS:
@@ -711,33 +737,42 @@ def _load_workspace_skills(workspace_root: Path) -> list[Skill]:
                     found=len(skill_names),
                 )
                 skill_names = skill_names[:_MAX_WORKSPACE_SKILLS]
-            skills: list[Skill] = []
-            loaded_bytes = 0
-            for skill_name in skill_names:
-                try:
-                    with open_directory_within_root(skills_fd, skill_name) as skill_fd:
-                        skill = _load_workspace_skill(skill_fd, skills_root / skill_name)
-                except OSError as exc:
-                    logger.warning(
-                        "Refused a workspace skill",
-                        path=str(skills_root / skill_name),
-                        error=type(exc).__name__,
-                    )
-                    continue
-                if skill is None:
-                    continue
-                prompt_parts = (skill.name, skill.description, skill.instructions, skill.metadata or "")
-                loaded_bytes += len("".join(map(str, (*prompt_parts, *skill.scripts, *skill.references))).encode())
-                if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
-                    logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
-                    break
-                skills.append(skill)
-            return skills
+            return _load_workspace_skill_directories(skills_fd, skills_root, skill_names)
     except FileNotFoundError:
         return []
     except OSError as exc:
         logger.warning("Refused workspace skills", path=str(skills_root), error=type(exc).__name__)
         return []
+
+
+def _load_workspace_skill_directories(skills_fd: int, skills_root: Path, skill_names: list[str]) -> list[Skill]:
+    """Load the named skill directories in order until their ``SKILL.md`` files and listings exceed the budget."""
+    skills: list[Skill] = []
+    loaded_bytes = 0
+    for skill_name in skill_names:
+        try:
+            with open_directory_within_root(skills_fd, skill_name) as skill_fd:
+                content = _read_workspace_skill_markdown(skill_fd, skills_root / skill_name)
+                if content is None:
+                    continue
+                # Each file is charged before it is parsed, so skills that fail to load spend the budget too.
+                loaded_bytes += len(content.encode())
+                if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+                    break
+                skill = _load_workspace_skill(skill_fd, skills_root / skill_name, content)
+        except OSError as exc:
+            logger.warning("Refused a workspace skill", path=str(skills_root / skill_name), error=type(exc).__name__)
+            continue
+        if skill is None:
+            continue
+        loaded_bytes += len("".join((*skill.scripts, *skill.references)).encode())
+        if loaded_bytes > _MAX_WORKSPACE_SKILLS_BYTES:
+            break
+        skills.append(skill)
+    else:
+        return skills
+    logger.warning("Workspace skills exceed their budget; skipping the rest", path=str(skills_root))
+    return skills
 
 
 def _normalize_skill(skill: Skill) -> Skill | None:

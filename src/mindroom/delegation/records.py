@@ -9,7 +9,7 @@ import re
 import sys
 import threading
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
@@ -82,8 +82,8 @@ _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 _STATUSES = frozenset({"running", "paused", *_TERMINAL_STATUSES})
 # Memory the kept record states may retain before finished records are dropped, least recently used first.
-# A running or paused record keeps its state until it finishes, a start or finish attempt fails, or its log
-# is refused as tampered, so only delegations whose owner still expects to settle them hold one.
+# A running or paused record keeps its state until it finishes, a start or finish attempt fails, its directory
+# cannot be opened, or its log is refused as tampered, so only delegations whose owner can still settle them hold one.
 _MAX_RETAINED_STATE_BYTES = 64 << 20
 _STATE_RETAINED_BYTES = 1024
 _EVENT_ID_RETAINED_BYTES = 80
@@ -842,7 +842,15 @@ def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -
     """Pin the record directory by a no-follow walk from the child workspace."""
     if create:
         handle.child_workspace.mkdir(parents=True, exist_ok=True)
-    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700) as record_fd:
+    with ExitStack() as stack:
+        try:
+            record_fd = stack.enter_context(
+                open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700),
+            )
+        except OSError:
+            # Keep no state for a record that may never open again; a later open folds its log again.
+            _RECORD_STATES.discard(_record_key(handle))
+            raise
         yield record_fd
 
 

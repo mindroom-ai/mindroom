@@ -159,15 +159,15 @@ def test_request_text_escapes_every_space_except_the_ascii_space() -> None:
     )
 
 
-def test_request_text_flags_non_ascii_look_alikes_and_shows_an_escaped_command() -> None:
-    """Look-alike letters and punctuation read as ASCII, so any non-ASCII request text adds a warning and escaped copy."""
+def test_request_text_flags_non_ascii_look_alikes_and_shows_each_such_field_escaped() -> None:
+    """Look-alike letters and punctuation read as ASCII, so non-ASCII request text adds a warning and escaped copies."""
 
-    def describe(command: str, agent: str = "assistant") -> str:
+    def describe(command: str, agent: str = "assistant", cwd: str = "/Users/test") -> str:
         pending = {
             "request_id": "request-1",
             "requester_id": "@person:example.org",
             "agent_name": agent,
-            "cwd": "/Users/test",
+            "cwd": cwd,
             "command": command,
             "expires_at_ms": 0,
         }
@@ -176,10 +176,15 @@ def test_request_text_flags_non_ascii_look_alikes_and_shows_an_escaped_command()
     spoofed = describe("curl https://\u0430\u0440\u0440\u04cf\u0435.com/x")
     assert "  Command: curl https://\u0430\u0440\u0440\u04cf\u0435.com/x\n" in spoofed
     assert "non-ASCII characters that can look like ASCII" in spoofed
-    assert "  curl https://\\u0430\\u0440\\u0440\\u04cf\\u0435.com/x\n" in spoofed
+    assert "  Command: curl https://\\u0430\\u0440\\u0440\\u04cf\\u0435.com/x\n" in spoofed
     assert "look like ASCII" in describe("curl https://apple\u2024com/x")
-    assert "look like ASCII" in describe("ls", agent="\u0430ssistant")
     assert "look like ASCII" not in describe("curl https://apple.com/x")
+    # The escaped copy shows the field that holds the non-ASCII text, not an unchanged ASCII command.
+    look_alike_agent = describe("ls", agent="\u0430ssistant")
+    assert "  Agent: \\u0430ssistant\n" in look_alike_agent
+    assert "  Command: ls\n" in look_alike_agent
+    assert "  ls\n" not in look_alike_agent
+    assert "  Working directory: /Users/test/Caf\\xe9\n" in describe("ls", cwd="/Users/test/Caf\u00e9")
 
 
 @pytest.mark.asyncio

@@ -30,9 +30,7 @@ __all__ = [
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "WORKER_COMPUTER_ENABLED_ENV",
     "WORKER_EGRESS_PROXY_ENV_BY_KEY",
-    "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
-    "execution_tool_runtime_env",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
@@ -437,7 +435,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES and name != CREDENTIALS_ENCRYPTION_KEY_ENV:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
@@ -495,15 +493,6 @@ def isolated_worker_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if is_isolated_worker_runtime_env_name(key)}
 
 
-def execution_tool_runtime_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Return env safe for sandboxed tool execution snapshots."""
-    return {
-        key: value
-        for key, value in env.items()
-        if is_isolated_worker_runtime_env_name(key) and key != CREDENTIALS_ENCRYPTION_KEY_ENV
-    }
-
-
 def sandbox_runner_startup_process_env(env: Mapping[str, str]) -> dict[str, str]:
     """Return ambient process env safe for non-dedicated sandbox runner startup rehydration."""
     return {
@@ -544,11 +533,6 @@ def credentials_encryption_key_value(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
-
-
-def credentials_encryption_key_from_env(env: Mapping[str, str]) -> str | None:
-    """Return the credential encryption key from an env mapping."""
-    return credentials_encryption_key_value(env.get(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
 
 def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
