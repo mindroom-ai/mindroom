@@ -18926,6 +18926,7 @@ Earlier attachments stay in chronological position through inline annotations, b
 ```
 
 Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
+When a message's file, image, or video is replaced by an edit, later turns use the replacement under a new attachment ID.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -19005,9 +19006,8 @@ Downloaded Matrix media is stored once per content and file type, so events that
 
 ## Limitations
 
-- **Incoming media size** -- downloaded and decrypted payloads must each be at most 64 MiB (67,108,864 bytes).
-  MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
-  This is a post-download check, so use a smaller file when it is rejected.
+- **Incoming media size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted media decrypts to the same size.
+  MindRoom stops a download as soon as it passes that limit, so use a smaller file when it is rejected.
   Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
 - **Earlier media that fails** -- a file, image, or video earlier in the conversation that cannot be downloaded, decrypted, or stored is not tried again for an hour, so later turns do not fetch it each time.
 - **Earlier media per turn** -- one turn downloads at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
