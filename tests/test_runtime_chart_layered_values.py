@@ -375,6 +375,41 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
             (),
             "env.envFrom must be a list or a map",
         ),
+        (
+            """
+            sessionStorage:
+              enabled: true
+            env:
+              extra:
+                MINDROOM_SESSION_STORAGE_PATH: /elsewhere
+            """,
+            (),
+            "env.extra must not set MINDROOM_SESSION_STORAGE_PATH when sessionStorage.enabled=true",
+        ),
+        (
+            """
+            sessionStorage:
+              enabled: true
+            env:
+              extra:
+                MINDROOM_SESSION_STORAGE_PATH:
+                  value: /elsewhere
+            """,
+            (),
+            "env.extra must not set MINDROOM_SESSION_STORAGE_PATH when sessionStorage.enabled=true",
+        ),
+        (
+            """
+            knowledgeStorage:
+              enabled: true
+            extraVolumeMounts:
+              kdb:
+                mountPath: /app/agent_data/knowledge_db
+            """,
+            (),
+            "/app/agent_data/knowledge_db, where knowledgeStorage is mounted, must differ from "
+            "extraVolumeMounts.kdb.mountPath",
+        ),
     ],
     ids=[
         "vault-managed-env",
@@ -383,6 +418,9 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         "scalar-volume",
         "unquoted-number-env",
         "scalar-env-from",
+        "session-path-env-shorthand",
+        "session-path-env-entry",
+        "knowledge-mount-overlap",
     ],
 )
 def test_map_forms_keep_chart_validation(
