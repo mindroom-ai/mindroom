@@ -799,7 +799,7 @@ def _changed_copy(old: Path, new: Path) -> Path:
 
 
 def test_include_edits_and_their_new_or_removed_directories_are_sources(tmp_path: Path) -> None:
-    """Every file the loader reads in either tree, and directories that only hold them, are hot-reloadable."""
+    """Every file the loader reads in either tree, and directories that only hold them, are sources."""
     old = _bundle(tmp_path / "old")
     new = _changed_copy(old, tmp_path / "new")
     (new / "agents.yaml").write_text(

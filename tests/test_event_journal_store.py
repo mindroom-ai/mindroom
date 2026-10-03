@@ -1387,7 +1387,7 @@ class TestRedaction:
             content=text("first edit"),
         )
 
-        assert not installed
+        assert installed is None
         assert "first edit" not in await bodies(alice)
 
     async def test_a_newer_edit_beats_an_in_flight_refetch(self, alice: PrincipalStore) -> None:
@@ -1407,7 +1407,7 @@ class TestRedaction:
             content=text("first"),
         )
 
-        assert not installed
+        assert installed is None
         assert await bodies(alice) == ["newest"]
 
     async def test_a_stale_zero_token_cannot_drop_a_newer_outbox_projection(
@@ -1674,7 +1674,7 @@ class TestBoundedReads:
         The page keeps its newest messages that fit the budget and hands back a
         cursor, so a reader sees history behind it instead of a whole thread.
         """
-        monkeypatch.setattr(reads, "_PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
         for index in range(5):
             await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
 
@@ -1725,7 +1725,7 @@ class TestBoundedReads:
 
         monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 42, 0))
         monkeypatch.setattr(sqlite_backend, "_octet_length", measuring)
-        monkeypatch.setattr(reads, "_PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", 2_500)
         store = EventJournalStore.open_sqlite(tmp_path / "older-library.db")
         try:
             principal = store.principal("agent@alice")
@@ -1756,7 +1756,7 @@ class TestBoundedReads:
         """
         content = text("x") | {"pad": padding}
         stored_bytes = len(json.dumps(content, separators=(",", ":")))
-        for index in range(reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+        for index in range(reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
             await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
 
         tracemalloc.start()
@@ -1800,13 +1800,13 @@ class TestBoundedReads:
             "io.mindroom.tool_trace": {"version": 2, "events": trace},
         }
         stored_bytes = len(json.dumps(content, separators=(",", ":")))
-        for index in range(reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
+        for index in range(reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes + 2):
             await admit(alice, f"$m{index:04d}", ts=1_000 + index, content=content)
 
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2_000)
 
         assert page.next_cursor is not None
-        assert len(page.messages) == reads._PAGE_CONTENT_BUDGET_BYTES // stored_bytes
+        assert len(page.messages) == reads.PAGE_CONTENT_BUDGET_BYTES // stored_bytes
 
     async def test_a_page_is_chronological(self, alice: PrincipalStore) -> None:
         """A page is chronological."""
@@ -3217,7 +3217,7 @@ class TestProjectedInteractivePrompts:
             content=text("Old membership"),
         )
 
-        assert installed
+        assert installed == 0
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()
@@ -3260,7 +3260,7 @@ class TestProjectedInteractivePrompts:
             content=replacement,
         )
 
-        assert installed
+        assert installed == 0
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
         assert page.messages == ()
         assert page.refresh_pending == ()

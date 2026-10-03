@@ -326,7 +326,8 @@ class _MindRoomFileTools(AgnoFileTools):
                 )
             except (OSError, ValueError):
                 continue
-            content = payload.decode("utf-8", errors="ignore")
+            # Translate line endings like Agno's read_text, so multiline queries match CRLF and CR files.
+            content = payload.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
             if lower_query in content.lower():
                 matches.append(
                     {

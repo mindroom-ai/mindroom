@@ -16,9 +16,10 @@ from fastapi import Request
 logger = logging.getLogger(__name__)
 REDACTED = "***redacted***"
 TRUNCATED = "... [truncated]"
-# Only this many characters of each audit string are redacted, which bounds the cost of the recursive assignment
-# regex below. Its worst case, nested assignments followed by a long whitespace run, grows with about the cube of the
-# length: measured at about 30 ms at this length, 60 ms at 320, and 250 ms at 512.
+# Only this many characters of each free-form audit string are redacted, which bounds the cost of the recursive
+# assignment regex below. Its worst case, nested assignments followed by a long whitespace run, grows with about the
+# cube of the length: measured at about 30 ms at this length, 60 ms at 320, and 250 ms at 512.
+# A query string with a recognized secret parameter skips that regex and is kept whole, with those values redacted.
 MAX_AUDIT_TEXT_LENGTH = 256
 _URL_PATTERN = re.compile(r"https?://[^\s'\"<>]+")
 _BEARER_TOKEN_PATTERN = re.compile(

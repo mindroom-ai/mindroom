@@ -103,6 +103,7 @@ nav = [
     { "Sandbox Proxy" = "deployment/sandbox-proxy.md" },
     { "Approved Egress" = "deployment/approved-egress.md" },
     { "Kubernetes" = "deployment/kubernetes.md" },
+    { "Operational Log Events" = "deployment/operational-log-events.md" },
   ] },
   { "CLI Reference" = "cli.md" },
 ]

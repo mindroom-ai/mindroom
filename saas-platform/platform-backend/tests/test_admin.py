@@ -338,15 +338,15 @@ class TestAdminEndpoints:
     def test_admin_refuses_to_activate_an_account_awaiting_deletion(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock
     ):
-        """Setting active would leave deleted_at set, so the admin is pointed at the routes that restore access."""
+        """Setting active would leave deleted_at set, so the admin is pointed at the owner's cancel-deletion."""
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"deleted_at": "2026-09-01T00:00:00Z"}])
 
         response = client.put("/admin/accounts/acc_123/status", json={"status": "active"})
 
         assert response.status_code == 409
-        detail = response.json()["detail"]
-        assert "Set its status to deleted" in detail
-        assert "PUT /admin/accounts/{account_id}" in detail
+        assert response.json()["detail"] == (
+            "Account is awaiting deletion. Set its status to deleted so the owner can cancel the deletion."
+        )
         mock_supabase.table().update.assert_not_called()
 
     def test_admin_activates_an_account_not_awaiting_deletion(
@@ -415,16 +415,6 @@ class TestAdminEndpoints:
         assert response.status_code == 200
         assert set(_auth_cache) == {"acc_other"}
         _auth_cache.clear()
-
-    def test_admin_logout(self, client: TestClient, mock_verify_admin: Mock):
-        """Test admin logout."""
-        # Make request
-        response = client.post("/admin/auth/logout")
-
-        # Verify
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
 
     def test_admin_list_resources(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin listing resources."""

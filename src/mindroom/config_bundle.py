@@ -336,9 +336,19 @@ class BundleChange:
 def _source_files(root: Path, configs: Sequence[Path]) -> set[str]:
     """Return every file the native YAML loader reads from the entrypoints, relative to root."""
     root = root.resolve()
-    return {
-        path.relative_to(root).as_posix() for config in configs for path in load_yaml_config_source(root / config)[1]
-    }
+    files: set[str] = set()
+    for config in configs:
+        try:
+            read = load_yaml_config_source(root / config)[1]
+        except Exception as exc:
+            # Any loader failure makes the tree unclassifiable, including the
+            # KeyError/AttributeError/IndexError the safe constructor raises for
+            # tags such as `!!bool maybe` or `!!int ""`. Some messages echo YAML
+            # values, so name only the file and the error type.
+            msg = f"Cannot load the YAML/include sources of {root / config} ({type(exc).__name__})."
+            raise ValueError(msg) from exc
+        files.update(path.relative_to(root).as_posix() for path in read)
+    return files
 
 
 def classify_bundle_change(old: Path, new: Path, configs: Sequence[Path]) -> BundleChange:

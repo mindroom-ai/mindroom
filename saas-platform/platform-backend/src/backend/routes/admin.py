@@ -15,7 +15,6 @@ from backend.models import (
     AdminGetOneResponse,
     AdminInstanceLifecycleResponse,
     AdminListResponse,
-    AdminLogoutResponse,
     AdminStatsOut,
     AdminUpdateResponse,
     ProvisionResponse,
@@ -309,8 +308,7 @@ async def update_account_status(
                 raise HTTPException(  # noqa: TRY301
                     status_code=409,
                     detail=(
-                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the "
-                        "deletion, or clear deleted_at and set the status with PUT /admin/accounts/{account_id}."
+                        "Account is awaiting deletion. Set its status to deleted so the owner can cancel the deletion."
                     ),
                 )
         result = (
@@ -340,12 +338,6 @@ async def update_account_status(
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
-
-
-@router.post("/admin/auth/logout", response_model=AdminLogoutResponse)
-async def admin_logout() -> dict[str, bool]:
-    """Admin logout placeholder."""
-    return {"success": True}
 
 
 @router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)

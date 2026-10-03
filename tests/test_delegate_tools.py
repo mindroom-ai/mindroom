@@ -886,6 +886,7 @@ class TestDelegateKnowledge:
                 room_id="!room:example.org",
                 set_by="@alice:example.org",
                 entity_names=("leader", "worker"),
+                config=config,
             )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",

@@ -342,7 +342,7 @@ async def test_one_page_cannot_hold_more_than_its_share_of_browser_dns_threads(m
     loop = asyncio.get_running_loop()
 
     def validate(host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
-        if host != "slow.example":
+        if not host.endswith(".slow.example"):
             return [ipaddress.IPv4Address("127.0.0.1")]
         with lock:
             active[0] += 1
@@ -361,7 +361,7 @@ async def test_one_page_cannot_hold_more_than_its_share_of_browser_dns_threads(m
     fast = BrowserDestinationProxy(allow_loopback=True)
     await slow.start()
     await fast.start()
-    stalled = [asyncio.create_task(socks5_connect(slow.endpoint, "slow.example", 80)) for _ in range(40)]
+    stalled = [asyncio.create_task(socks5_connect(slow.endpoint, f"{index}.slow.example", 80)) for index in range(40)]
     try:
         await asyncio.wait_for(saturated.wait(), 5)
         _reader, writer, status = await asyncio.wait_for(
@@ -379,6 +379,66 @@ async def test_one_page_cannot_hold_more_than_its_share_of_browser_dns_threads(m
         await asyncio.gather(*stalled, return_exceptions=True)
         await slow.close()
         await fast.close()
+        echo.close()
+        await echo.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_connections_to_one_slow_host_share_its_lookup_and_leave_slots_for_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Many connections to a host that resolves slowly cannot stall the same browser's other destinations."""
+    release = threading.Event()
+    lookups: list[str] = []
+    entered: list[str] = []
+    resolve = BrowserDestinationProxy._resolve
+
+    def validate(host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
+        lookups.append(host)
+        if host == "slow.example":
+            release.wait(5)
+            msg = "fixture nameserver never answered"
+            raise OSError(msg)
+        return [ipaddress.IPv4Address("127.0.0.1")]
+
+    async def observed_resolve(
+        proxy: BrowserDestinationProxy,
+        host: str,
+        port: int,
+    ) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        entered.append(host)
+        return await resolve(proxy, host, port)
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
+    monkeypatch.setattr(BrowserDestinationProxy, "_resolve", observed_resolve)
+    echo = await asyncio.start_server(lambda _reader, writer: writer.close(), "127.0.0.1", 0)
+    proxy = BrowserDestinationProxy(allow_loopback=True)
+    await proxy.start()
+    stalled = [asyncio.create_task(socks5_connect(proxy.endpoint, "slow.example", 80)) for _ in range(6)]
+    try:
+        async with asyncio.timeout(5):
+            while len(entered) < len(stalled):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        _reader, writer, status = await asyncio.wait_for(
+            socks5_connect(proxy.endpoint, "fast.example", echo.sockets[0].getsockname()[1]),
+            2,
+        )
+        assert status == 0
+        writer.close()
+        await writer.wait_closed()
+        assert lookups.count("slow.example") == 1
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*stalled), 5)
+        assert [result[2] for result in results] == [2] * len(stalled)
+        for _reader, stalled_writer, _status in results:
+            stalled_writer.close()
+            await stalled_writer.wait_closed()
+    finally:
+        release.set()
+        for task in stalled:
+            task.cancel()
+        await asyncio.gather(*stalled, return_exceptions=True)
+        await proxy.close()
         echo.close()
         await echo.wait_closed()
 
@@ -886,6 +946,82 @@ async def test_stalled_destination_connect_is_cancelled(stop: str, monkeypatch: 
         writer.close()
         await writer.wait_closed()
         await proxy.close()
+
+
+async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    while data := await reader.read(1024):
+        writer.write(data)
+        await writer.drain()
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_address_that_drops_connections_falls_back_to_the_next_validated_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first address that never answers leaves the setup deadline to the next address, as Chromium would."""
+    original = asyncio.open_connection
+    cancelled = asyncio.Event()
+
+    def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
+        return [ipaddress.IPv4Address("192.0.2.1"), ipaddress.IPv4Address("127.0.0.1")]
+
+    async def dial(host: str, port: int, **kwargs: object) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        if host != "192.0.2.1":
+            return await original(host, port, **kwargs)
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+        raise AssertionError
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
+    monkeypatch.setattr(asyncio, "open_connection", dial)
+    monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
+    monkeypatch.setattr(browser_proxy, "_SETUP_DEADLINE", 2.0)
+    echo = await asyncio.start_server(_echo, "127.0.0.1", 0)
+    proxy = BrowserDestinationProxy(allow_loopback=True)
+    await proxy.start()
+    try:
+        assert await asyncio.wait_for(_relay_reply(proxy, "dual.example", echo.sockets[0].getsockname()[1]), 1) == 0
+        assert cancelled.is_set()
+    finally:
+        await proxy.close()
+        echo.close()
+        await echo.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner's egress proxy gets the name once and picks the address itself, so its slow tunnel is not cut short."""
+    original_tunnel = browser_proxy._open_upstream_tunnel
+
+    def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
+        return [ipaddress.IPv4Address("8.8.8.8"), ipaddress.IPv4Address("8.8.4.4")]
+
+    async def slow_tunnel(
+        upstream: _UpstreamProxy,
+        target: str,
+        port: int,
+        tls: ssl.SSLContext | None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        await asyncio.sleep(0.2)
+        return await original_tunnel(upstream, target, port, tls)
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
+    monkeypatch.setattr(browser_proxy, "_open_upstream_tunnel", slow_tunnel)
+    monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
+    recorder = _RecordingUpstream()
+    async with recorder as upstream_proxy:
+        proxy = BrowserDestinationProxy(
+            egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy, by_hostname=True),
+        )
+        await proxy.start()
+        try:
+            assert await _relay_reply(proxy, "dual.example", 443) == 0
+        finally:
+            await proxy.close()
+    assert recorder.requests == [b"CONNECT dual.example:443 HTTP/1.1"]
 
 
 @pytest.mark.asyncio

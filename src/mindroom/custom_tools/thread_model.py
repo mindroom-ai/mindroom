@@ -77,11 +77,7 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        override = resolve_thread_model_override(
-            context.runtime_paths,
-            thread_id,
-            configured_models=context.config.models,
-        )
+        override = resolve_thread_model_override(context.runtime_paths, thread_id, config=context.config)
         stale_fields: dict[str, object] = {}
         if override.stale:
             stale_fields["stale_overrides"] = override.stale
@@ -140,6 +136,7 @@ class ThreadModelTools(Toolkit):
             room_id=context.room_id,
             set_by=context.requester_id,
             entity_names=self._addressable_entities(context),
+            config=context.config,
         )
         model = context.config.models[model_name]
         return self._payload(
@@ -167,6 +164,7 @@ class ThreadModelTools(Toolkit):
             context.runtime_paths,
             thread_id,
             entity_names=self._addressable_entities(context),
+            config=context.config,
         )
         return self._payload(
             "ok",

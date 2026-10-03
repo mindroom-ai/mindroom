@@ -67,6 +67,7 @@ def mock_lifecycle():
         patch(f"{lifecycle}.resume_subscriptions", new=AsyncMock()) as resume_subscriptions,
         patch(f"{lifecycle}.cancel_unpaid_subscriptions", new=AsyncMock()) as cancel_unpaid,
         patch(f"{lifecycle}.reconcile_account_instances", new=AsyncMock(return_value=[])) as reconcile,
+        patch(f"{lifecycle}.restart_teardown_grace") as restart_teardown_grace,
     ):
         yield MagicMock(
             end_account_billing_at_period_end=end_billing,
@@ -74,6 +75,7 @@ def mock_lifecycle():
             resume_subscriptions=resume_subscriptions,
             cancel_unpaid_subscriptions=cancel_unpaid,
             reconcile_account_instances=reconcile,
+            restart_teardown_grace=restart_teardown_grace,
         )
 
 
@@ -414,6 +416,7 @@ class TestGDPREndpoints:
         mock_supabase.table.assert_called_once_with("accounts")
         # Billing the deletion set to end renews again, and held instances resume only when their subscription is
         # entitled.
+        mock_lifecycle.restart_teardown_grace.assert_called_once_with(mock_user["account_id"])
         mock_lifecycle.resume_account_billing.assert_awaited_once_with(mock_user["account_id"])
         mock_lifecycle.reconcile_account_instances.assert_awaited_once_with(mock_user["account_id"])
         assert "Stripe could not resume" not in data["message"]
@@ -434,6 +437,21 @@ class TestGDPREndpoints:
         message = response.json()["message"]
         assert "still ends at the end of its billing period" in message
         assert "Restarting your hosted instances failed and is retried automatically." in message
+
+    def test_cancel_deletion_resumes_billing_even_when_the_teardown_grace_restart_fails(
+        self, mock_verify_user, mock_supabase, mock_lifecycle
+    ):
+        """The restore committed, so a retry answers not_pending; a database error must not skip the billing resume."""
+        deleted_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        _account_deleted_at(mock_supabase, deleted_at)
+        mock_supabase.rpc.return_value.execute.return_value = MagicMock(data=True)
+        mock_lifecycle.restart_teardown_grace.side_effect = RuntimeError("database unavailable")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/my/gdpr/cancel-deletion", headers={"Authorization": "Bearer test-token"})
+
+        assert response.status_code == 500
+        mock_lifecycle.resume_account_billing.assert_awaited_once_with("00000000-0000-0000-0000-000000000002")
 
     def test_cancel_deletion_reports_a_restore_the_database_refused(
         self, client, mock_verify_user, mock_supabase, mock_lifecycle

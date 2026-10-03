@@ -645,6 +645,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -712,6 +713,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -774,6 +776,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -848,6 +851,7 @@ class TestAgentBot(AgentBotTestBase):
                     bind_api=MagicMock(),
                     unbind_api=AsyncMock(),
                     touch_live_workers=MagicMock(),
+                    active_runs=AsyncMock(return_value=[]),
                 ),
                 shutdown_requested=asyncio.Event(),
             )
@@ -1059,6 +1063,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1067,6 +1072,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
@@ -1118,7 +1124,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(
+    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(  # noqa: PLR0915
         self,
         tmp_path: Path,
     ) -> None:
@@ -1148,6 +1154,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1156,6 +1163,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
@@ -1227,6 +1235,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1235,6 +1244,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None

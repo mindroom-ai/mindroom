@@ -1406,6 +1406,12 @@ class AgentBot:
         """Expose fail-closed router membership invalidation to the sync supervisor."""
         self._invalidate_agent_reply_memberships(reason=reason)
 
+    @property
+    def active_call_requesters(self) -> tuple[str, ...]:
+        """Return the requester of each voice call this bot has joined or is joining."""
+        call_manager = self._call_manager
+        return () if call_manager is None else call_manager.active_call_requesters
+
     async def reconcile_reply_authorized_calls(self) -> None:
         """Recheck this bot's active calls against the shared reply policy."""
         call_manager = self._call_manager

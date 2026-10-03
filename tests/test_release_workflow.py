@@ -77,7 +77,7 @@ def test_macos_app_publishes_after_matching_pypi_release(release_workflow: str) 
     ],
 )
 def test_build_environments_install_only_pinned_packages(project: Path, build_packages: set[str]) -> None:
-    """Release, helper, and image builds run build code fixed by the commit, not whatever PyPI serves that day."""
+    """Release, helper, and image builds pin the version of every package in their build environments."""
     pyproject = tomllib.loads((project / "pyproject.toml").read_text(encoding="utf-8"))
     constraints = pyproject["tool"]["uv"]["build-constraint-dependencies"]
     pins = {name: version for name, _, version in (constraint.partition("==") for constraint in constraints)}

@@ -24,6 +24,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.agent_storage import create_state_storage, get_agent_session
@@ -576,10 +577,25 @@ async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_rec
 
 
 @pytest.mark.asyncio
+async def test_only_a_redaction_of_an_event_recorded_in_another_room_warns(journal_store: EventJournalStore) -> None:
+    """Deleting a sticker, poll, or old message the journal never admitted is routine, so it logs no warning."""
+    store = await _store(journal_store)
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
+    await store.record_turn(_owned_turn_record(target))
+
+    with capture_logs() as logs:
+        assert await store.mark_source_redacted("$sticker", room_id=target.room_id) is None
+        assert await store.mark_source_redacted("$user_msg", room_id="!elsewhere:example.org") is None
+
+    warnings = [(log["event"], log["redacted_event_id"]) for log in logs if log["log_level"] == "warning"]
+    assert warnings == [("Ignoring redaction of an event recorded in another room", "$user_msg")]
+
+
+@pytest.mark.asyncio
 async def test_room_less_tombstone_from_an_earlier_release_stays_in_effect(journal_store: EventJournalStore) -> None:
     """A tombstone an earlier release wrote for another room's redaction records no room, so it still applies."""
     store = await _store(journal_store)
-    # v2026.10.27 wrote this record for a redaction of an event it had not seen in the redaction's room.
+    # v2026.10.30 wrote this record for a redaction of an event it had not seen in the redaction's room.
     await store._ledger.record_handled_turn(
         TurnRecord.create(["$victim"], redacted_source_event_ids=["$victim"], completed=False),
     )

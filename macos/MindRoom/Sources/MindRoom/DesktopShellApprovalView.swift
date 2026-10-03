@@ -59,7 +59,7 @@ struct DesktopShellApprovalView: View {
                     .font(.callout).foregroundStyle(.orange)
             }
             if request.hasNonASCIICharacters {
-                DesktopLeftToRightText(text: request.asciiEscapedCommand, textStyle: .callout)
+                DesktopLeftToRightText(text: request.asciiEscapedFields, textStyle: .callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             VStack(alignment: .leading, spacing: 2) {

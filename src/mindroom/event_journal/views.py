@@ -299,8 +299,8 @@ class HydrationView(Protocol):
         revision_sender: str,
         revision_transaction_id: str | None = None,
         content: Mapping[str, object],
-    ) -> bool:
-        """Install a point-refetched revision if its refresh token still holds."""
+    ) -> int | None:
+        """Install a point-refetched revision if its refresh token still holds, returning its stored size."""
         ...
 
     async def drop_refetched_message(self, request: RefreshRequest) -> bool:
