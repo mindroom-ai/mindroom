@@ -417,6 +417,35 @@ def test_model_command_show(tmp_path: Path) -> None:
     assert "- `large` (openai large-model) for `test_agent`" in response
 
 
+def test_model_command_ignores_overrides_of_removed_entities(tmp_path: Path) -> None:
+    """A removed agent's thread override is not reported, so `!model` agrees with `!model reset`."""
+    config = _config_with_models(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    set_thread_model_override(
+        runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        room_id=ROOM_ID,
+        set_by="@user:localhost",
+        entity_names=("test_agent", "removed_agent"),
+    )
+
+    def model_command(args_text: str) -> str:
+        return handle_model_command(
+            args_text,
+            config=config,
+            runtime_paths=runtime_paths,
+            membership_index=isolated_membership_index(),
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            requester_user_id="@user:localhost",
+        )
+
+    assert "`removed_agent`" not in model_command("")
+    assert "✅" in model_command("reset")
+    assert "No thread model override" in model_command("")
+
+
 def test_model_help_describes_room_level_fallback() -> None:
     """Reset help must describe the room-level fallback that actually runs."""
     help_text = get_command_help("model")

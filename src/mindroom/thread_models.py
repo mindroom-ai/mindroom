@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.constants import tracking_dir
+from mindroom.constants import ROUTER_AGENT_NAME, tracking_dir
 from mindroom.durable_write import (
     OverrideRecord,
     load_cached_override_records,
@@ -14,9 +14,10 @@ from mindroom.durable_write import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Iterable
+    from collections.abc import Iterable
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 _THREAD_MODELS_FILENAME = "thread_models.json"
@@ -90,19 +91,26 @@ def resolve_thread_model_override(
     runtime_paths: RuntimePaths,
     thread_id: str | None,
     *,
-    configured_models: Container[str],
+    config: Config,
 ) -> _ThreadModelOverrideState:
-    """Classify one thread's stored overrides against the configured model names.
+    """Classify one thread's stored overrides of configured entities against the configured model names.
 
     An override naming a model that no longer exists in the config is stale:
     runtime resolution, `!model`, and the `thread_model` tool must all ignore
-    it rather than apply or report it as active.
+    it rather than apply or report it as active. An override of an entity
+    that is no longer configured is left out, since no requester can address
+    that entity to reset it.
     """
     record = _get_thread_model_override(runtime_paths, thread_id)
-    entity_models = {} if record is None else _entity_models(record)
+    configured_entities = {*config.agents, *config.teams, ROUTER_AGENT_NAME}
+    entity_models = {
+        entity: model
+        for entity, model in ({} if record is None else _entity_models(record)).items()
+        if entity in configured_entities
+    }
     return _ThreadModelOverrideState(
-        active={entity: model for entity, model in entity_models.items() if model in configured_models},
-        stale={entity: model for entity, model in entity_models.items() if model not in configured_models},
+        active={entity: model for entity, model in entity_models.items() if model in config.models},
+        stale={entity: model for entity, model in entity_models.items() if model not in config.models},
     )
 
 

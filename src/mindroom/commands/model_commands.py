@@ -155,7 +155,7 @@ def _available_models_text(config: Config) -> str:
 
 
 def _show_thread_model(config: Config, runtime_paths: RuntimePaths, thread_id: str | None) -> str:
-    overrides = resolve_thread_model_override(runtime_paths, thread_id, configured_models=config.models).active
+    overrides = resolve_thread_model_override(runtime_paths, thread_id, config=config).active
     entities_by_model: dict[str, list[str]] = {}
     for entity_name, model_name in sorted(overrides.items()):
         entities_by_model.setdefault(model_name, []).append(f"`{entity_name}`")

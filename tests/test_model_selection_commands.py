@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 
 def _helper_override(paths: RuntimePaths, config: Config) -> str | None:
-    return resolve_thread_model_override(paths, "$root", configured_models=config.models).active.get("helper")
+    return resolve_thread_model_override(paths, "$root", config=config).active.get("helper")
 
 
 @pytest.mark.parametrize(

@@ -2043,7 +2043,7 @@ async def test_command_an_agent_wrote_for_a_human_runs_with_that_humans_authorit
     await harness.deliver(room, event)
 
     assert harness.turn_store.is_handled(event.event_id) is True
-    overrides = resolve_thread_model_override(runtime_paths_for(config), thread_root, configured_models=config.models)
+    overrides = resolve_thread_model_override(runtime_paths_for(config), thread_root, config=config)
     assert set(overrides.active) == {"research", ROUTER_AGENT_NAME}
 
 
