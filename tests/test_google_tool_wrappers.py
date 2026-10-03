@@ -2226,12 +2226,11 @@ async def test_google_wrapper_drops_cached_services_in_every_worker_after_reset(
     assert results == [(True, True), (True, True)]
 
 
-@pytest.mark.asyncio
-async def test_google_wrapper_replaces_swallowed_async_upload_refresh_rejection(
+def test_google_wrapper_replaces_swallowed_upload_refresh_rejection(
     monkeypatch: pytest.MonkeyPatch,
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Async uploads should return the same reconnect response as synchronous calls."""
+    """Drive uploads return the reconnect response when the upload swallows a refresh rejection."""
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2281,10 +2280,10 @@ async def test_google_wrapper_replaces_swallowed_async_upload_refresh_rejection(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    entrypoint = tool.async_functions["google_drive_upload_file"].entrypoint
+    entrypoint = tool.functions["google_drive_upload_file"].entrypoint
     assert entrypoint is not None
 
-    payload = json.loads(await entrypoint("unused"))
+    payload = json.loads(entrypoint("unused"))
 
     assert payload["oauth_connection_required"] is True
     assert payload["reason"] == "refresh_rejected"
