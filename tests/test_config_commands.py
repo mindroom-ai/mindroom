@@ -2115,6 +2115,7 @@ async def test_handle_config_command_get_shows_prose_as_written_and_masks_creden
         "Explain how bearer authentication works",
         "Authenticate with a bearer JWT from the vault",
         "Look up the API key ID in the vault",
+        "Keep the API key server-side",
         "Use sk-learn for ML",
     ]
     generated_key = "sk-Fake0Key1Fake2Key3"

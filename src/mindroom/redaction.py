@@ -114,9 +114,9 @@ _REVIEW_TOKEN_PATTERN = re.compile(
 # names; a generated key has a long run mixing character classes, so those names stay visible.
 _KEBAB_PREFIXES = ("sk-", "pk-")
 _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
-# Config prose says "ask for the API key before calling" or "bearer JWT"; the word a log pattern
-# takes for a token there is letters only, possibly ending a sentence.
-_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+\.?")
+# Config prose says "ask for the API key before calling", "bearer JWT", or "keep the API key server-side";
+# the word a log pattern takes for a token there is letters, possibly hyphen-joined and ending a sentence.
+_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _PLACEHOLDER_OPEN = "\u27e6"
@@ -520,7 +520,8 @@ def _redact_url_match(match: re.Match[str]) -> str:
 def _redact_prose_token(match: re.Match[str]) -> str:
     """Keep an ordinary word or kebab-case name that authored prose holds where a log would hold a token."""
     token = match.group("token")
-    if _ORDINARY_WORD_PATTERN.fullmatch(token) or not _looks_generated(token):
+    ordinary = _ORDINARY_WORD_PATTERN.fullmatch(token) and not token.lower().startswith(_KEBAB_PREFIXES)
+    if ordinary or not _looks_generated(token):
         return match.group(0)
     return _redact_matched_token(match)
 
