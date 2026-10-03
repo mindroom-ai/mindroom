@@ -83,7 +83,8 @@ Orderly shutdown closes response and journal callback admission before withdrawi
 The source-quiescence request stays latched across supervisor retries and late startup completion, so transport lifecycle notifications cannot reopen admission.
 Interrupted callbacks remain pending for exact replay, including edited messages whose revision has not reached a final response.
 A crash leaves the same pending state as orderly shutdown, and in both the interrupted reply stays visibly streaming until replay adopts it and answers again in place.
-When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and gives the new attempt that partial text and the finished tool results as transient context, so it does not repeat tools that already ran; a reply showing only its placeholder carries nothing forward.
+When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix and records them as an interrupted replay record in the turn's history before answering, with a transient instruction not to repeat the finished tools.
+Each stopped attempt gets its own record, named by its last visible edit, so stopping again before the new attempt shows the earlier tools keeps both accounts; a reply showing only its placeholder carries nothing forward.
 If process shutdown upgrades an earlier generic cancellation, the response attempt retags and retains its existing child until that child finishes unwinding.
 Callback cleanup and response recovery share bounded preparation and finalization budgets; a timeout retains their owners and keeps the Matrix client and journal open until cleanup finishes.
 Shutdown invalidates membership readiness after owners finish, so readiness loss cannot settle an accepted source as revoked authorization.

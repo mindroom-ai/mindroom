@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agno.db.base import SessionType
 from agno.run.base import RunStatus
@@ -56,11 +56,7 @@ from mindroom.event_journal import (
     ApprovalDecision as ContinuationDecision,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import (
-    build_interrupted_replay_snapshot,
-    persist_interrupted_replay_snapshot,
-    render_interrupted_replay_content,
-)
+from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
@@ -236,8 +232,8 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
-    "A service restart stopped your previous attempt at this reply, and this reply replaces it. "
-    "What that attempt had shown is below; tool calls listed as finished already ran. "
+    "A service restart stopped your previous attempt at replying to the current message, and this reply replaces it. "
+    "What that attempt had shown is in the conversation above; tool calls it lists as finished already ran. "
     "Write your complete reply from the start, using those results instead of calling the finished tools again."
 )
 
@@ -3550,7 +3546,12 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        request = await self._with_interrupted_attempt(prepared_request, resolved_target=resolved_target)
+        request = await self._with_interrupted_attempt(
+            prepared_request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        )
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),
@@ -3565,14 +3566,17 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
     ) -> ResponseRequest:
-        """Tell a replayed turn what its stopped attempt already showed and ran.
+        """Record what a replayed turn's stopped attempt already showed and ran before answering again.
 
         A process that stops mid-stream, whether it crashes or shuts down in
         order, leaves its reply streaming and its sources pending, so replay
         adopts that reply and answers again in place. Matrix holds the only
         account of the stopped attempt, so its visible text and tool trace
-        become context that keeps the new attempt from repeating finished tools.
+        become an interrupted replay record in the turn's history, which keeps
+        the new attempt from repeating finished tools.
         """
         event_id = request.existing_event_id
         if event_id is None or not request.existing_event_is_placeholder:
@@ -3584,21 +3588,39 @@ class ResponseRunner:
             trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
         )
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
-        if unfinished is None:
+        if message is None or unfinished is None:
             return request
         completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
-        attempt = render_interrupted_replay_content(
-            build_interrupted_replay_snapshot(
-                user_message=None,
-                user_message_is_structured=False,
-                partial_text=unfinished.partial_text,
-                completed_tools=completed_tools,
-                interrupted_tools=interrupted_tools,
-                run_metadata=None,
-            ),
+        recorder = self._build_turn_recorder(
+            user_message=request.model_prompt or request.prompt,
+            user_message_is_structured=request.current_prompt_is_structured,
+            reply_to_event_id=request.reply_to_event_id,
+            requester_id=request.user_id,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
+        recorder.record_interrupted(
+            run_metadata=recorder.run_metadata,
+            assistant_text=unfinished.partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+        )
+        # A failed write raises and leaves the sources pending for retry, since
+        # answering without this record could repeat the finished tools.
+        await asyncio.to_thread(
+            self._persist_interrupted_turn,
+            recorder=recorder,
+            session_scope=history_scope,
+            session_id=resolved_target.session_id,
+            execution_identity=execution_identity,
+            # One record per stopped attempt: its last visible edit names it, so
+            # rereading that attempt rewrites its record while a later stopped
+            # attempt adds its own beside it.
+            run_id=str(uuid5(NAMESPACE_URL, message.latest_event_id)),
+            is_team=history_scope.kind == "team",
+            response_event_id=event_id,
         )
         self.deps.logger.info(
-            "interrupted_attempt_resumed",
+            "interrupted_attempt_recorded",
             response_event_id=event_id,
             completed_tool_count=len(completed_tools),
         )
@@ -3608,7 +3630,7 @@ class ResponseRunner:
                 *request.transient_enrichment_items,
                 EnrichmentItem(
                     key="interrupted_attempt",
-                    text=f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}",
+                    text=_INTERRUPTED_ATTEMPT_INSTRUCTION,
                     persist=False,
                     minimal_required=True,
                 ),

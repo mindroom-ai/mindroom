@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.agent_storage import get_agent_session
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -95,15 +96,23 @@ def test_only_in_progress_streams_are_unfinished(status: str | None) -> None:
     assert unfinished_streamed_reply(PARTIAL, _content(status)) is None
 
 
-def _streamed(body: str = PARTIAL, *, status: str = STREAM_STATUS_STREAMING) -> ResolvedVisibleMessage:
-    return ResolvedVisibleMessage.synthetic(
+def _streamed(
+    body: str = PARTIAL,
+    *,
+    status: str = STREAM_STATUS_STREAMING,
+    trace: tuple[ToolTraceEntry, ...] = TRACE,
+    latest_edit: str = "$edit-a",
+) -> ResolvedVisibleMessage:
+    message = ResolvedVisibleMessage.synthetic(
         event_id=REPLY_ID,
         sender="@mindroom_general:localhost",
         body=body,
         timestamp=2,
         thread_id="$thread",
-        content={"body": body, **_content(status)},
+        content={"body": body, **_content(status, trace)},
     )
+    message.latest_event_id = latest_edit
+    return message
 
 
 async def _crashed_turn(bot: AgentBot) -> ResponseRequest:
@@ -176,16 +185,38 @@ def _attempt_context(context: ResponseTurnContext) -> list[str]:
     return [item.text for item in context.transient_enrichment_items if item.key == "interrupted_attempt"]
 
 
+def _recorded_attempts(bot: AgentBot, request: ResponseRequest) -> list[str]:
+    """Return the assistant text of every stopped-attempt record in the turn's agent history."""
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = request.response_envelope.target
+    storage = runner.deps.state_writer.create_storage(
+        runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost"),
+    )
+    try:
+        session = get_agent_session(storage, target.session_id)
+    finally:
+        storage.close()
+    runs = [] if session is None else session.runs or []
+    return [
+        cast("str", run.content)
+        for run in runs
+        # The faked model never records completion, so its own turn ends in a failed record.
+        if isinstance(run.metadata, dict) and run.metadata.get("mindroom_original_status") == "cancelled"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_did(tmp_path: Path) -> None:
     """The new attempt sees the earlier text and finished tools, then replaces the reply like any answer."""
     bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
 
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
+    (context,), _fetch = await _replay(bot, request, _streamed())
 
-    (attempt,) = _attempt_context(context)
-    assert attempt.startswith("A service restart stopped your previous attempt at this reply")
-    assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in attempt
+    (instruction,) = _attempt_context(context)
+    assert instruction.startswith("A service restart stopped your previous attempt at replying to the current message")
+    (attempt,) = _recorded_attempts(bot, request)
+    assert attempt.startswith("Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; ")
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in attempt
     assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in attempt
     store = bot.journal_principal()
@@ -215,10 +246,12 @@ async def test_replay_without_unfinished_visible_work_answers_as_before(
 ) -> None:
     """Without visible work to carry forward the replay is an ordinary answer."""
     bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
 
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), visible)
+    (context,), _fetch = await _replay(bot, request, visible)
 
     assert _attempt_context(context) == []
+    assert _recorded_attempts(bot, request) == []
     assert not await bot.journal_principal().is_pending("$source")
 
 
@@ -232,3 +265,45 @@ async def test_regenerating_an_existing_answer_never_reads_a_stopped_attempt(tmp
 
     fetch.assert_not_awaited()
     assert _attempt_context(context) == []
+
+
+@pytest.mark.asyncio
+async def test_each_stopped_attempt_keeps_its_own_record(tmp_path: Path) -> None:
+    """A second stop before the new attempt shows the old tools must not erase their record."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = request.response_envelope.target
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    second = _streamed("A new start", trace=(), latest_edit="$edit-b")
+
+    for visible in (_streamed(), _streamed(), second):
+        with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
+            await runner._with_interrupted_attempt(
+                request,
+                resolved_target=target,
+                history_scope=HistoryScope(kind="agent", scope_id="general"),
+                execution_identity=identity,
+            )
+
+    first_attempt, second_attempt = _recorded_attempts(bot, request)
+    assert "The `counter` tool finished" in first_attempt
+    assert second_attempt.startswith("A new start")
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> None:
+    """Answering without the record could repeat finished tools, so the turn stays owed instead."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    with (
+        patch.object(runner, "_persist_interrupted_turn", side_effect=RuntimeError("database is locked")),
+        pytest.raises(RuntimeError, match="database is locked"),
+    ):
+        await _replay(bot, request, _streamed())
+
+    store = bot.journal_principal()
+    assert await store.is_pending("$source")
+    assert await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is None

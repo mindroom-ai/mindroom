@@ -33,7 +33,7 @@ from mindroom.execution_preparation import (
 )
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    render_interrupted_replay_content,
+    _render_interrupted_replay_content,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_visible_messages import _stream_status_from_content
@@ -90,7 +90,7 @@ def _get_unseen_messages(
 
 
 def _render_normalized_interrupted_replay(body: str) -> str:
-    return render_interrupted_replay_content(
+    return _render_interrupted_replay_content(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=_clean_partial_reply_body(body),

@@ -35,7 +35,7 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
-    render_interrupted_replay_content,
+    _render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -105,7 +105,7 @@ async def _aiter(*events: object) -> AsyncIterator[object]:
 
 
 def _render_cleaned_interrupted_replay(body: str) -> str:
-    return render_interrupted_replay_content(
+    return _render_interrupted_replay_content(
         InterruptedReplaySnapshot(
             user_message="",
             partial_text=clean_partial_reply_text(body),
