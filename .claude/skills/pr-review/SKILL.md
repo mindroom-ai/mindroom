@@ -3,25 +3,29 @@ name: pr-review
 description: Zero-tolerance pull request review. Every issue is a blocker. Use when reviewing PRs for merge readiness.
 ---
 
-Review the pull request with a **zero-tolerance standard**. Every issue you find is a blocker — there is no such thing as a "minor issue" or "non-blocking suggestion". Either the PR is flawless and ready to merge, or it has problems that MUST be fixed before merging. Do not approve a PR with caveats like "ready to merge but consider..." or "minor nit:". If you would mention it, it must be fixed.
+Review the pull request with a **zero-tolerance standard**. Every issue you find is a blocker — there is no such thing as a "minor issue" or "non-blocking suggestion". Either the PR is flawless and ready to merge, or it has problems that MUST be fixed before merging. Do not approve a PR with caveats like "ready to merge but consider..." or "minor nit:". If you would report it as an issue, it must be fixed.
 
 **Your verdict must be one of**:
 - ✅ **APPROVE** — The code is near-perfect. No issues found. Merge immediately.
 - ❌ **CHANGES REQUIRED** — Issues found. List every one. All must be fixed before re-review.
 
 Never approve with suggestions. Never say "looks good overall but...". If there's a "but", it's CHANGES REQUIRED.
+The only notes allowed beside either verdict are the **Edge cases (not blocking)** and **Out of scope** lists defined below.
 
 ## Realistic Issues Only
 
-A finding is an issue only when it has a concrete, realistic scenario: who triggers it under a normal configuration and normal use, or which attacker [docs/architecture/security-posture.md](../../../docs/architecture/security-posture.md) covers.
-State that scenario with every finding.
-Edge cases that need an unusual configuration plus unusual data, or that only an operator could cause, are not issues and do not block; list them, one line each, under **Edge cases (not blocking)**.
-Do not ask for mechanisms the change does not need, such as new limits, caches, retries, fallbacks, or hardening.
+A bug or security finding is an issue only when it has a concrete, realistic scenario: who triggers it in normal use of a supported configuration or operator workflow, including config edits, upgrades, and restarts, or which attacker [docs/architecture/security-posture.md](../../../docs/architecture/security-posture.md) covers.
+State that scenario with each such finding.
+A bug or security finding without such a scenario is an edge case, for example one that needs an unusual configuration plus unusual data, or deliberate operator misuse such as hand-editing internal state.
+Attacks the security posture covers are never edge cases.
+Edge cases do not block; list them, one line each, under **Edge cases (not blocking)**.
+Checklist items without a runtime trigger, such as duplication, structure, tests, and docs, keep the standard below.
+Do not ask for mechanisms that no realistic scenario needs, such as new limits, caches, retries, fallbacks, or hardening.
 
 ## Out-of-Scope Problems
 
-Report real problems the PR did not cause, such as pre-existing bugs in nearby code, under **Out of scope** with evidence.
-They do not block this PR and must not be fixed in it.
+Report real problems in code this PR does not change, and that the Scope and Refactor Standard below does not require it to fix, under **Out of scope** with evidence.
+They do not block this PR and are fixed separately; rough edges in code the PR changes stay in scope.
 
 ## Scope and Refactor Standard
 

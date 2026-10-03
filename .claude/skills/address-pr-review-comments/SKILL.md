@@ -13,7 +13,7 @@ Assume the user has not read or vetted every review comment.
 Treat comments as symptoms, not a patch list.
 
 Critically evaluate each claim before editing.
-Decide whether it is a real bug, code-quality improvement, test or docs gap, stale comment, overengineering, or scope creep.
+Decide whether it is a real bug, code-quality improvement, test or docs gap, stale comment, overengineering, scope creep, edge case, or out-of-scope problem.
 
 For every real issue, identify the violated invariant, the owning module, and the intended boundary.
 Then fix the root cause at that boundary.
@@ -53,9 +53,9 @@ Before editing, state the grouped findings using these labels:
 - `Real bug`: Behavior is wrong, unsafe, or violates an invariant.
 - `Code-quality cleanup`: The issue is in scope and improves clarity or maintainability without changing behavior.
 - `Test/docs gap`: The implementation is acceptable but missing required verification or documentation.
-- `Overreach / scope creep`: The suggestion expands the PR beyond its intent or adds unnecessary abstraction.
-- `Edge case`: The claim is technically true but needs an unusual configuration plus unusual data, or only an operator could cause it; skip it with a one-line reason.
-- `Out of scope`: A real problem the PR did not cause; write it down where the task tracks work, such as a GitHub issue or the task's tracking file, instead of fixing it here.
+- `Overreach / scope creep`: The suggestion adds something the PR does not need, such as unnecessary abstraction or mechanisms; real problems in unchanged code are `Out of scope` instead.
+- `Edge case`: A bug or security claim with no realistic scenario, as `pr-review` defines it; skip it with a one-line reason.
+- `Out of scope`: A real problem in code the PR does not change; write it down as soon as you classify it, where the task tracks work, such as a GitHub issue or the task's tracking file, instead of fixing it here.
 - `Incorrect / stale`: The claim does not match the current code or misunderstands the design.
 - `Needs clarification`: The correct action depends on product or architectural intent that cannot be inferred.
 
@@ -98,7 +98,7 @@ Do not use performative agreement.
 
 After verification, respond to every actionable review thread.
 For duplicate threads, reply with the same underlying resolution and mention that the duplicate finding was handled by the same fix.
-For incorrect, stale, overreaching, or out-of-scope comments, reply with the concise technical reason before resolving the thread.
+For incorrect, stale, overreaching, edge-case, or out-of-scope comments, reply with the concise technical reason before resolving the thread.
 Top-level PR comments and review summaries cannot be resolved as review threads; reply only when a response is useful.
 
 Use the REST reply endpoint for inline review comments:
