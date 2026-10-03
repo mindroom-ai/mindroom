@@ -232,7 +232,10 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
     (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
 
     assert HOOK_CONTEXT in context.transient_enrichment_items
-    (instruction,) = _attempt_context(context)
+    (item,) = [item for item in context.transient_enrichment_items if item.key == "interrupted_attempt"]
+    assert item.minimal_required
+    assert not item.persist
+    instruction = item.text
     assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
     assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in instruction
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in instruction
@@ -284,7 +287,7 @@ async def test_the_new_attempt_is_told_which_calls_not_to_repeat(
 async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path) -> None:
     """The streaming path receives the same context and still delivers through the adopted reply."""
     bot = _bot(tmp_path)
-    request = await _crashed_turn(bot)
+    request = replace(await _crashed_turn(bot), payload_preparation=None)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     contexts: list[ResponseTurnContext] = []
 
@@ -296,7 +299,6 @@ async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path)
         patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
-        _hooks_prepare(runner),
     ):
         await runner.generate_response(request)
 
