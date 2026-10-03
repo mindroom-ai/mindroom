@@ -976,6 +976,7 @@ See the [journal binding and migration commands](https://docs.mindroom.chat/cli/
 ## Automatic Restart Resumption
 
 `defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
+A reply that a crash or shutdown left mid-stream is ended with the same restart note once its turn replays, keeping what it already showed and did, and is resumed the same way.
 Set it to `false` to suppress those automatic prompts and resume the work manually.
 Resumption still depends on current recovery ownership, room membership, a resolved original requester, and fresh history checks that reject superseded work.
 This setting does not globally disable ordinary durable event replay or stale-response cleanup.

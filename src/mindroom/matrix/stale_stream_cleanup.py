@@ -53,6 +53,7 @@ from mindroom.streaming import (
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_restart_interrupted_body,
     clean_partial_reply_text,
+    restart_interrupted_metadata,
 )
 
 if TYPE_CHECKING:
@@ -740,7 +741,7 @@ async def _repair_restart_marked_message_metadata(
             room_id=room_id,
             target_event_id=target_event_id,
             new_text=state.latest_body,
-            preserved_content=_terminal_stream_content(state.latest_content),
+            extra_content=restart_interrupted_metadata(state.latest_content),
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -772,7 +773,7 @@ async def _cleanup_one_stale_message(
         room_id=room_id,
         target_event_id=target_event_id,
         new_text=build_restart_interrupted_body(state.latest_body),
-        preserved_content=_terminal_stream_content(state.latest_content),
+        extra_content=restart_interrupted_metadata(state.latest_content),
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1322,7 +1323,7 @@ async def _edit_stale_message(
     room_id: str,
     target_event_id: str,
     new_text: str,
-    preserved_content: dict[str, Any] | None,
+    extra_content: dict[str, Any],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
@@ -1331,9 +1332,8 @@ async def _edit_stale_message(
     No thread relation is built: ``build_edit_event_content`` pops ``m.relates_to`` off the
     replacement before sending, so a relation here would never reach the wire.
     """
-    extra_content = _preserved_cleanup_content(preserved_content)
-    should_preserve_visible_body = extra_content is not None and STREAM_VISIBLE_BODY_KEY in extra_content
-    if should_preserve_visible_body and extra_content is not None:
+    should_preserve_visible_body = STREAM_VISIBLE_BODY_KEY in extra_content
+    if should_preserve_visible_body:
         extra_content = dict(extra_content)
         extra_content.pop(STREAM_VISIBLE_BODY_KEY, None)
         extra_content.pop(STREAM_WARMUP_SUFFIX_KEY, None)
@@ -1346,7 +1346,6 @@ async def _edit_stale_message(
     if should_preserve_visible_body:
         canonical_visible_body = content["body"]
         content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
-        extra_content = dict(extra_content or {})
         extra_content[STREAM_VISIBLE_BODY_KEY] = canonical_visible_body
 
     delivered = await edit_message_result(
@@ -1368,37 +1367,12 @@ async def _edit_stale_message(
     return False
 
 
-def _preserved_cleanup_content(content: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return the metadata fields that should survive a restart cleanup edit."""
-    if content is None:
-        return None
-
-    preserved: dict[str, Any] = {}
-    for key, value in content.items():
-        if not isinstance(key, str):
-            continue
-        if (key.startswith("io.mindroom.") and key != "io.mindroom.long_text") or key in {
-            ORIGINAL_SENDER_KEY,
-            "m.mentions",
-        }:
-            preserved[key] = value
-
-    return preserved or None
-
-
 def _has_non_terminal_stream_status(content: dict[str, Any] | None) -> bool:
     """Return whether the message still advertises an active stream state."""
     if content is None:
         return False
     stream_status = content.get(STREAM_STATUS_KEY)
     return isinstance(stream_status, str) and stream_status not in _TERMINAL_STREAM_STATUSES
-
-
-def _terminal_stream_content(content: dict[str, Any] | None) -> dict[str, Any]:
-    """Return metadata with a terminal stream status for cleanup edits."""
-    if content is None:
-        return {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
-    return {**content, STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
 
 
 async def _redact_stop_reactions(

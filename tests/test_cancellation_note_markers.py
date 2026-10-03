@@ -13,12 +13,17 @@ from typing import Literal
 import pytest
 
 from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_INTERRUPTED,
+    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
+    STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.matrix.stale_stream_cleanup import (
     _has_generic_interrupted_note as has_generic_interrupted_note,
@@ -35,10 +40,13 @@ from mindroom.streaming import _STREAM_ERROR_RESPONSE_NOTE as STREAM_ERROR_RESPO
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
     build_cancelled_response_update,
     build_restart_interrupted_body,
+    unfinished_streamed_reply,
 )
 from mindroom.streaming import _format_stream_error_note as format_stream_error_note
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 
 _CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 
@@ -157,3 +165,78 @@ def test_placeholder_only_restart_body_is_the_bare_restart_note() -> None:
     assert body == RESTART_INTERRUPTED_RESPONSE_NOTE
     assert has_restart_interrupted_note(body)
     assert has_resumable_interrupted_note(MessageState(latest_body=body, stream_status=STREAM_STATUS_ERROR))
+
+
+_TRACE = (
+    ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1"),
+    ToolTraceEntry(type="tool_call_started", tool_name="report", args_preview='{"pages": 3}'),
+)
+
+
+@pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+def test_unfinished_streamed_reply_keeps_text_trace_and_metadata(stream_status: str) -> None:
+    """A stopped stream's visible work becomes the restart note and its replay facts."""
+    body = "🔧 `counter` [1]\n\nHalf of the report"
+    content = {
+        "body": body,
+        STREAM_STATUS_KEY: stream_status,
+        STREAM_VISIBLE_BODY_KEY: body,
+        STREAM_WARMUP_SUFFIX_KEY: "⏳ Preparing isolated worker...",
+        ORIGINAL_SENDER_KEY: "@user:localhost",
+        "io.mindroom.ai_run": {"run_id": "run-1"},
+        "io.mindroom.long_text": {"version": 2},
+        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        **(build_tool_trace_content(_TRACE) or {}),
+    }
+
+    reply = unfinished_streamed_reply(body, content)
+
+    assert reply is not None
+    assert reply.partial_text == "Half of the report"
+    assert reply.tool_trace == _TRACE
+    assert reply.note_text == build_restart_interrupted_body(body)
+    assert has_resumable_interrupted_note(
+        MessageState(latest_body=reply.note_text, stream_status=reply.note_metadata[STREAM_STATUS_KEY]),
+    )
+    assert reply.note_metadata == {
+        STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
+        ORIGINAL_SENDER_KEY: "@user:localhost",
+        "io.mindroom.ai_run": {"run_id": "run-1"},
+        **(build_tool_trace_content(_TRACE) or {}),
+    }
+
+
+def test_unfinished_streamed_reply_counts_a_tool_trace_without_text() -> None:
+    """A tool that ran before any prose is still visible work that must not run twice."""
+    content = {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING, **(build_tool_trace_content(_TRACE[:1]) or {})}
+
+    reply = unfinished_streamed_reply("🔧 `counter` [1]", content)
+
+    assert reply is not None
+    assert reply.partial_text == ""
+    assert reply.tool_trace == _TRACE[:1]
+
+
+@pytest.mark.parametrize("body", ["Thinking...", TEAM_PROGRESS_PLACEHOLDER, "   "])
+@pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+def test_placeholder_only_streams_left_nothing_to_settle(body: str, stream_status: str) -> None:
+    """Nothing visible ran behind a bare placeholder, so its turn replays from the start."""
+    assert unfinished_streamed_reply(body, {STREAM_STATUS_KEY: stream_status}) is None
+
+
+@pytest.mark.parametrize(
+    "stream_status",
+    [
+        None,
+        STREAM_STATUS_APPROVAL_PENDING,
+        STREAM_STATUS_CANCELLED,
+        STREAM_STATUS_COMPLETED,
+        STREAM_STATUS_ERROR,
+        STREAM_STATUS_INTERRUPTED,
+    ],
+)
+def test_only_in_progress_streams_are_unfinished(stream_status: str | None) -> None:
+    """Terminal, approval-owned and non-stream messages already have their own owners."""
+    content = {} if stream_status is None else {STREAM_STATUS_KEY: stream_status}
+
+    assert unfinished_streamed_reply("Half of the report", content) is None

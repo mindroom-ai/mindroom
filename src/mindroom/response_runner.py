@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agno.db.base import SessionType
 from agno.run.base import RunStatus
@@ -65,6 +65,7 @@ from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     fetch_latest_visible_body,
+    fetch_latest_visible_message,
     replace_visible_message,
 )
 from mindroom.matrix.presence import should_use_streaming
@@ -115,12 +116,14 @@ from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
     build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
+    unfinished_streamed_reply,
 )
 from mindroom.sync_restart_retry import interrupted_source_needs_retry
 from mindroom.teams import (
@@ -838,7 +841,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
-    register_approval_interruption: Callable[[str, str], None]
+    register_recoverable_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -1914,7 +1917,7 @@ class ResponseRunner:
             visible_text=update,
             failure_reason=failing.failure_reason,
         ):
-            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
+            self.deps.register_recoverable_interruption(failing.source_event_ids[0], failing.room_id)
         return settled
 
     async def _approval_interruption_update(
@@ -3539,6 +3542,13 @@ class ResponseRunner:
         if prepared_request is None:
             return None
         request = prepared_request
+        if await self._settle_unfinished_streamed_reply(
+            request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
+        ):
+            return None
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),
@@ -3547,6 +3557,82 @@ class ResponseRunner:
             runtime_paths=self.deps.runtime_paths,
         )
         return request
+
+    async def _settle_unfinished_streamed_reply(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        history_scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity,
+    ) -> bool:
+        """End an earlier attempt's adopted stream as restart-interrupted instead of running the turn again.
+
+        A process that stops mid-stream, whether it crashes or shuts down in
+        order, leaves its reply streaming and its sources pending, so replay
+        adopts that reply. Running the model again would repeat whatever its
+        tools already did. The reply ends the way a sync restart ends one: the
+        restart note, an interrupted replay record, and sources settled by the
+        note's own FINAL delivery, after which restart recovery resumes the
+        thread. Matrix holds the only account of that attempt, so the replay
+        record is built from its visible text and tool trace.
+        """
+        event_id = request.existing_event_id
+        if event_id is None or not request.existing_event_is_placeholder:
+            return False
+        message = await fetch_latest_visible_message(
+            self._client(),
+            room_id=resolved_target.room_id,
+            event_id=event_id,
+            trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
+        )
+        unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
+        if unfinished is None:
+            return False
+        completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
+        recorder = self._build_turn_recorder(
+            user_message=request.model_prompt or request.prompt,
+            user_message_is_structured=request.current_prompt_is_structured,
+            reply_to_event_id=request.reply_to_event_id,
+            requester_id=request.user_id,
+            matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+        )
+        recorder.record_interrupted(
+            run_metadata=recorder.run_metadata,
+            assistant_text=unfinished.partial_text,
+            completed_tools=completed_tools,
+            interrupted_tools=interrupted_tools,
+        )
+        await self._persist_interrupted_recorder_off_loop(
+            recorder=recorder,
+            session_scope=history_scope,
+            session_id=resolved_target.session_id,
+            execution_identity=execution_identity,
+            # Stable, so a replay that stops again before the note lands rewrites this record.
+            run_id=str(uuid5(NAMESPACE_URL, event_id)),
+            is_team=history_scope.kind == "team",
+            response_event_id=event_id,
+        )
+        source_event_id = request.response_envelope.source_event_id
+        noted = await self.deps.delivery_gateway.edit_text(
+            EditTextRequest(
+                target=resolved_target,
+                event_id=event_id,
+                new_text=unfinished.note_text,
+                extra_content=unfinished.note_metadata,
+                delivery_turn_id=source_event_id,
+                response_attempt=ResponseAttempt(self.deps.agent_name, request.sources),
+            ),
+        )
+        self.deps.logger.info(
+            "unfinished_streamed_reply_settled",
+            source_event_id=source_event_id,
+            response_event_id=event_id,
+            noted=noted,
+        )
+        if noted and resolved_target.resolved_thread_id is not None:
+            self.deps.register_recoverable_interruption(source_event_id, resolved_target.room_id)
+        return True
 
     async def _prepare_locked_source(
         self,
@@ -4183,7 +4269,7 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=session_scope,
             execution_identity=retry_execution_identity,
-            placeholder_message=(None if _is_silent_schedule_response(request) else "🤝 Team Response: Thinking..."),
+            placeholder_message=(None if _is_silent_schedule_response(request) else TEAM_PROGRESS_PLACEHOLDER),
             early_placeholder_state=placeholder_state,
         )
         if request is None:
