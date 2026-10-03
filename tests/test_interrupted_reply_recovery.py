@@ -43,6 +43,7 @@ from tests.ai_user_id_helpers import (
     _team_orchestrator,
     bind_runtime_paths,
 )
+from tests.bot_helpers import _stream_outcome
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.delivery_gateway import StreamingDeliveryRequest
+    from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.response_turn import ResponseTurnContext
 
@@ -324,8 +327,15 @@ async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path)
     assert final.edits_event_id == REPLY_ID
     answer = cast("dict[str, Any]", final.payload["m.new_content"])
     assert answer["body"] == "The complete report."
-    # Every edit of the new attempt carries the stopped attempt's calls, so stopping it too would not lose them.
-    assert tool_trace_from_content(answer) == list(TRACE)
+    # The in-progress edits a later replay would read carry the stopped attempt's calls.
+    sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
+    in_progress = [
+        content.get("m.new_content", content)
+        for content in sent
+        if content.get("m.new_content", content).get(STREAM_STATUS_KEY) == STREAM_STATUS_STREAMING
+    ]
+    assert in_progress
+    assert all(tool_trace_from_content(content) == list(TRACE) for content in in_progress)
 
 
 @pytest.mark.asyncio
@@ -389,23 +399,23 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
 
 @pytest.mark.asyncio
 async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_chrome(tmp_path: Path) -> None:
-    """The team path carries the account too, minus the header and no-consensus note it was displayed with."""
+    """The streamed team path carries the account too, minus its display chrome, and carries the calls forward."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     contexts: list[ResponseTurnContext] = []
 
-    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+    async def fake_team_stream(**kwargs: object) -> AsyncIterator[str]:
         contexts.append(cast("ResponseTurnContext", kwargs["ctx"]))
-        return "Team answer"
+        yield "Team answer"
 
     visible = _streamed(
         f"🤝 **Team Response** (General, Helper):\n\n{PARTIAL}\n\n\n*No team consensus - showing individual responses only*",
     )
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream", new=fake_team_stream),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -417,6 +427,14 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
             orchestrator=_team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
+        delivered: list[StreamingDeliveryRequest] = []
+
+        async def deliver(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+            delivered.append(request)
+            body = "".join([str(chunk) async for chunk in request.response_stream])
+            return _stream_outcome(REPLY_ID, body)
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = deliver
         await coordinator.generate_team_response_helper(
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -432,3 +450,7 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
     assert "\n\nHalf of the report\n\n(turn stopped before completion" in instruction
     assert "Team Response" not in instruction
     assert "consensus" not in instruction
+    # The stream applies this content to every edit, so stopping the team's new attempt keeps the calls.
+    ((stream,),) = [delivered]
+    assert stream.extra_content is not None
+    assert tool_trace_from_content(stream.extra_content) == list(TRACE)
