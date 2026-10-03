@@ -651,6 +651,8 @@ Inside the agent's own tools that directory is `$MINDROOM_AGENT_WORKSPACE/thread
 Each thread file holds `version`, `room` metadata, `thread` metadata including the latest thread summary as `thread.summary`, and a `messages` list.
 Each room directory also holds an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
 A thread file holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose file would exceed 64 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, with a logged warning.
 
 MindRoom re-exports a room within about two seconds of a message, edit, redaction, or membership change in it, batching everything that arrives in that window into one pass, and runs one full pass at startup and after every config reload.
 A full pass also removes exports for threads and rooms that no longer exist or that the agent may no longer read, and clears the export tree of any configured agent whose `thread_exports` was removed.
