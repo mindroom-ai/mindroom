@@ -96,7 +96,7 @@ class SourceEventMetadata:
     sender: str
     timestamp_ms: float | None = None
     discovery_event_id: str | None = None
-    # The entity that wrote this source for ``sender``, which stays its speaker.
+    # The entity that wrote this source for ``sender``; marks an entity-written source that edits never regenerate.
     speaker: str | None = None
 
     def __post_init__(self) -> None:

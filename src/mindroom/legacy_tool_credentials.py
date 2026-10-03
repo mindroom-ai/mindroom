@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Daytona settings saved with the former `verify_ssl: false` default.
 # Legacy format: a `daytona` credential document whose `verify_ssl` is false; the dashboard pre-fills every boolean with its declared default and saves all fields, so every Daytona setup saved through it stored false.
-# Last legacy release: v2026.9.363, whose Daytona field still defaulted to false, as it had since the tool shipped in v0.1.0; replacement: the next release defaults `verify_ssl` to true.
+# Last legacy release: v2026.9.370, whose Daytona field still defaulted to false, as it had since the tool shipped in v0.1.0; replacement: v2026.9.371 defaults `verify_ssl` to true.
 # Handling: before serving, once per storage root and under a lock shared by every starting process, drop a false `verify_ssl` from the primary store and every existing worker store, then write a receipt so a false saved deliberately afterwards is kept.
 # The receipt waits while any stored Daytona document is unreadable, so one readable again later, for example under the right encryption key, is still cleaned.
 # Coverage: tests/test_legacy_tool_credentials.py::test_startup_drops_saved_daytona_verify_ssl_false_once,

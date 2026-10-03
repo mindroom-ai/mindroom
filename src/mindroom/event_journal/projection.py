@@ -652,13 +652,16 @@ def install_refetched_revision(
     expected_revision_event_id: str,
     expected_refresh_token: int,
     expected_membership_epoch: int,
-) -> bool:
+) -> int | None:
     """Install a refetched revision only if nothing changed underneath it.
+
+    Returns the size the content is stored at, which is what a page's content
+    budget counts, or 0 when the message was removed instead.
 
     A newer edit or redaction landing while the refetch was in flight changes
     either the revision identity or the refresh token, so this conditional
     update stops a slow refetch from overwriting fresher truth. Returning
-    ``False`` leaves the debt durable and the message unreadable, which is the
+    ``None`` leaves the debt durable and the message unreadable, which is the
     safe direction.
 
     Content that still holds a sidecar reference is refused for the same
@@ -692,7 +695,7 @@ def install_refetched_revision(
         transaction_id=revision_transaction_id,
         content=content,
     ):
-        return drop_refetched_message(
+        dropped = drop_refetched_message(
             transaction,
             principal_id,
             room_id=room_id,
@@ -701,10 +704,12 @@ def install_refetched_revision(
             expected_refresh_token=expected_refresh_token,
             expected_membership_epoch=expected_membership_epoch,
         )
+        return 0 if dropped else None
     if holds_unresolved_sidecar(content):
-        return False
+        return None
     if is_tombstoned(transaction, principal_id, room_id, revision_event_id):
-        return False
+        return None
+    content_json = _dumps(content)
     row = transaction.fetchone(
         """
         UPDATE visible_messages
@@ -716,7 +721,7 @@ def install_refetched_revision(
         (
             revision_event_id,
             revision_ts,
-            _dumps(content),
+            content_json,
             principal_id,
             room_id,
             logical_event_id,
@@ -726,7 +731,7 @@ def install_refetched_revision(
         ),
     )
     if row is None:
-        return False
+        return None
     record_projected_prompt(
         transaction,
         principal_id,
@@ -737,7 +742,8 @@ def install_refetched_revision(
         membership_epoch=int(row["membership_epoch"]),
         content=content,
     )
-    return True
+    # Stored content is ASCII, so its length in characters is its size in bytes.
+    return len(content_json)
 
 
 def drop_refetched_message(

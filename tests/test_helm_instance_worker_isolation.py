@@ -6,6 +6,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import textwrap
@@ -670,6 +671,159 @@ def test_runtime_chart_checks_bootstrap_path_boundaries(source: str, allowed: bo
     assert (result.returncode == 0) is allowed, result.stderr
     if not allowed:
         assert "overlap" in result.stderr
+
+
+_BOOTSTRAP_BUNDLE_DIGEST = "3" * 64
+_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
+    "workers.backend=kubernetes",
+    "config.source=file",
+    "config.path=/app/agent_data/active/config.yaml",
+    "contentBundles[0].name=policy-pack",
+    "contentBundles[0].image=registry.example.org/team/policy@sha256:" + "2" * 64,
+    "contentBundles[1].name=team-config",
+    f"contentBundles[1].image=registry.example.org/team/config:v1@sha256:{_BOOTSTRAP_BUNDLE_DIGEST}",
+    "contentBundles[1].targetPath=/app/agent_data/config-source",
+    "config.bootstrapContentBundle.name=team-config",
+)
+
+
+@pytest.mark.parametrize(
+    ("sub_path", "source", "image_dir"),
+    [
+        ("", "/app/agent_data/config-source", "/bundle"),
+        ("environments/prod/", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
+        ("environments/prod", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
+        ("environments/dev", "/app/agent_data/config-source/environments/dev", "/bundle/environments/dev"),
+    ],
+)
+def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, source: str, image_dir: str) -> None:
+    """The chart derives the source from the bundle target and the revision from its digest and image directory."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+        release_name="mindroom-runtime",
+        set_string_args=(f"config.bootstrapContentBundle.subPath={sub_path}",),
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert command[command.index("--bootstrap-config-bundle") + 1] == source
+    revision = hashlib.sha256(f"{_BOOTSTRAP_BUNDLE_DIGEST}:{image_dir}".encode()).hexdigest()
+    assert command[command.index("--bootstrap-config-bundle-revision") + 1] == revision
+    transport = _init_container(deployment, "content-bundle-team-config")
+    assert '"/app/agent_data/config-source/"' in transport["args"][0]
+
+
+def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> None:
+    """A bundle without targetPath bootstraps from its default copy location."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        *(setting for setting in _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS if "targetPath" not in setting),
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
+    assert command[command.index("--bootstrap-config-bundle") + 1] == "/app/agent_data/content-bundles/team-config"
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            ("config.bootstrapContentBundle.name=missing",),
+            'config.bootstrapContentBundle.name "missing" must match a contentBundles entry',
+        ),
+        (
+            ("config.bootstrapBundlePath=/app/agent_data/incoming",),
+            "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath",
+        ),
+        (
+            ("config.bootstrapBundleRevision=deploy-2",),
+            "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath",
+        ),
+        (
+            ("contentBundles[1].image=registry.example.org/team/config:v1",),
+            "contentBundles[1].image must be pinned by full sha256 digest",
+        ),
+        (
+            ("contentBundles[1].overwrite=false",),
+            'contentBundles entry "team-config" to keep overwrite enabled',
+        ),
+        (
+            ("config.bootstrapContentBundle.subPath=/environments/prod",),
+            "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
+        ),
+        (
+            ("config.bootstrapContentBundle.subPath=environments/../../active",),
+            "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
+        ),
+        (
+            ("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"),
+            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+        ),
+        (
+            (
+                "contentBundles[1].volumeMounts[0].name=config-input",
+                "contentBundles[1].volumeMounts[0].mountPath=/bundle",
+            ),
+            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+        ),
+        (
+            ("contentBundles[1].targetPath=/app/agent_data/active/incoming",),
+            "config.bootstrapContentBundle must not overlap the config.path directory",
+        ),
+        (
+            (
+                "config.path=/app/agent_data/config-source/active/config.yaml",
+                "config.bootstrapContentBundle.subPath=environments/prod",
+            ),
+            "config.bootstrapContentBundle must not overlap the config.path directory",
+        ),
+        (
+            ("workers.backend=static_runner",),
+            "config.bootstrapContentBundle cannot be combined with workers.backend=static_runner",
+        ),
+        (
+            ("config.bootstrapContentBundle.name=", "config.bootstrapContentBundle.subPath=environments/prod"),
+            "config.bootstrapContentBundle.subPath requires config.bootstrapContentBundle.name",
+        ),
+    ],
+)
+def test_runtime_chart_rejects_invalid_bootstrap_content_bundle(settings: tuple[str, ...], message: str) -> None:
+    """A derived bootstrap must name one digest-pinned, fully replaced bundle and a contained subPath."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+        *settings,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(("replicas", "allowed"), [(0, True), (1, True), (2, False)])
+@pytest.mark.parametrize(
+    "bootstrap",
+    [
+        ("config.bootstrapBundlePath=/app/agent_data/incoming",),
+        _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
+    ],
+)
+def test_runtime_chart_rejects_bootstrap_with_multiple_replicas(
+    bootstrap: tuple[str, ...],
+    replicas: int,
+    allowed: bool,
+) -> None:
+    """Concurrent pods would install into the same config directory at once."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        *bootstrap,
+        f"replicaCount={replicas}",
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if not allowed:
+        assert "requires replicaCount 0 or 1" in result.stderr
 
 
 def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
@@ -2862,6 +3016,112 @@ def test_runtime_chart_agent_vault_bootstrap_publishes_access_grants_admin_token
     assert "agent-vault-grants-admin" in secret_rule["resourceNames"]
 
 
+def _render_agent_vault_jobs(
+    tmp_path: Path,
+    *,
+    job_naming: str,
+    grant_email: str = "maintainer@example.test",
+    kubectl_image: str = "registry.example.test/kubectl:1",
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    values_path = tmp_path / f"values-{job_naming}-{grant_email}-{kubectl_image.replace('/', '_')}.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "workers": {
+                    "backend": "kubernetes",
+                    "sandbox": {"proxyToken": {"value": "test-token"}},
+                    "kubernetes": {
+                        "agentVault": {
+                            "enabled": True,
+                            "cliImage": "infisical/agent-vault:test",
+                            "ownerEmail": "owner@example.test",
+                            "workerCaConfigMapName": "agent-vault-ca",
+                            "jobNaming": job_naming,
+                            "bootstrap": {"enabled": True, "kubectlImage": kubectl_image},
+                            "accessGrants": {
+                                "enabled": True,
+                                "grants": [{"email": grant_email, "workerScope": "shared", "agent": "example-agent"}],
+                            },
+                        },
+                    },
+                },
+                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
+    jobs = {doc["metadata"]["labels"]["app.kubernetes.io/component"]: doc for doc in docs if doc["kind"] == "Job"}
+    return docs, jobs["agent-vault-access-grants"], jobs["agent-vault-bootstrap"]
+
+
+def test_runtime_chart_agent_vault_content_hash_jobs_skip_helm_hooks(tmp_path: Path) -> None:
+    """Hashed Job names let plain `kubectl apply` replace the Jobs without Helm hooks."""
+    docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash")
+
+    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", grants_job["metadata"]["name"])
+    assert re.fullmatch(r"agent-vault-bootstrap-[0-9a-f]{10}", bootstrap_job["metadata"]["name"])
+    for job, base_name in ((grants_job, "agent-vault-access-grants"), (bootstrap_job, "agent-vault-bootstrap")):
+        assert "annotations" not in job["metadata"]
+        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+        assert job["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] == base_name
+    grants_pod = grants_job["spec"]["template"]["spec"]
+    assert grants_pod["automountServiceAccountToken"] is False
+    config_map_name = grants_pod["volumes"][0]["configMap"]["name"]
+    assert re.fullmatch(r"agent-vault-access-grants-[0-9a-f]{10}", config_map_name)
+    assert _resource(docs, "ConfigMap", config_map_name)
+    assert bootstrap_job["spec"]["template"]["spec"]["serviceAccountName"] == "agent-vault-bootstrap"
+
+
+def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path: Path) -> None:
+    """Only the Job whose rendered inputs changed gets a new name, and each grants Job mounts its own config."""
+
+    def names(**overrides: str) -> tuple[str, str, str]:
+        docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", **overrides)
+        config_map_name = grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"]
+        grants = yaml.safe_load(_resource(docs, "ConfigMap", config_map_name)["data"]["access-grants.yaml"])["grants"]
+        assert grants[0]["email"] == overrides.get("grant_email", "maintainer@example.test")
+        return grants_job["metadata"]["name"], config_map_name, bootstrap_job["metadata"]["name"]
+
+    grants_name, config_map_name, bootstrap_name = names()
+    assert names() == (grants_name, config_map_name, bootstrap_name)
+    changed_grants_name, changed_config_map_name, same_bootstrap_name = names(grant_email="second@example.test")
+    assert changed_grants_name != grants_name
+    assert changed_config_map_name != config_map_name
+    assert same_bootstrap_name == bootstrap_name
+    same_grants_name, same_config_map_name, changed_bootstrap_name = names(
+        kubectl_image="registry.example.test/kubectl:2",
+    )
+    assert same_grants_name == grants_name
+    assert same_config_map_name == config_map_name
+    assert changed_bootstrap_name != bootstrap_name
+
+
+def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path: Path) -> None:
+    """The default keeps stable Job names and the Helm hook on the grants Job."""
+    docs, grants_job, bootstrap_job = _render_agent_vault_jobs(tmp_path, job_naming="fixed")
+
+    assert grants_job["metadata"]["name"] == "agent-vault-access-grants"
+    assert grants_job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"] == "agent-vault-access-grants"
+    assert _resource(docs, "ConfigMap", "agent-vault-access-grants")
+    assert grants_job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    assert bootstrap_job["metadata"]["name"] == "agent-vault-bootstrap"
+    assert "annotations" not in bootstrap_job["metadata"]
+
+
+def test_runtime_chart_rejects_unknown_agent_vault_job_naming() -> None:
+    """Job naming accepts only the two documented modes."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "workers.kubernetes.agentVault.jobNaming=hooks",
+    )
+    assert result.returncode != 0
+    assert "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" in result.stderr
+
+
 def test_runtime_chart_rejects_agent_vault_access_token_same_secret_different_keys(tmp_path: Path) -> None:
     """Bootstrap must not apply the same Secret twice with different admin-token keys."""
     values_path = tmp_path / "values.yaml"
@@ -3679,6 +3939,60 @@ def test_runtime_chart_dedicated_workers_skip_static_runner_storage() -> None:
 
     assert [container["name"] for container in pod_spec["containers"]] == ["mindroom"]
     assert "initContainers" not in pod_spec
+
+
+def test_runtime_chart_runs_runtime_image_containers_as_non_root() -> None:
+    """Every runtime-image container enforces non-root, while the state-storage chown step stays explicitly root."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "stateStorage.enabled=true",
+        "stateStorage.create=true",
+        "workers.kubernetes.agentVault.enabled=true",
+        "workers.kubernetes.agentVault.cliImage=infisical/agent-vault:test",
+        "workers.kubernetes.agentVault.ownerEmail=owner@example.test",
+        "workers.kubernetes.agentVault.accessGrants.enabled=true",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].email=maintainer@example.test",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].workerScope=shared",
+        "workers.kubernetes.agentVault.accessGrants.grants[0].agent=helper",
+        release_name="mindroom-runtime",
+    )
+    pod_spec = _resource(docs, "Deployment", "mindroom-runtime")["spec"]["template"]["spec"]
+    containers = {container["name"]: container for container in [*pod_spec["initContainers"], *pod_spec["containers"]]}
+    access_grants = _container(_resource(docs, "Job", "agent-vault-access-grants"), "access-grants")
+    runtime_security = {"runAsNonRoot": True, "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+
+    assert pod_spec["securityContext"] == {"fsGroup": 1000, "fsGroupChangePolicy": "OnRootMismatch"}
+    for name in ("prepare-sandbox-runner-storage", "mindroom", "sandbox-runner"):
+        assert containers[name]["securityContext"] == runtime_security
+    assert access_grants["securityContext"] == runtime_security
+    assert containers["prepare-state-storage"]["securityContext"] == {
+        "runAsUser": 0,
+        "runAsNonRoot": False,
+        "allowPrivilegeEscalation": False,
+    }
+
+
+def test_runtime_chart_agent_vault_server_runs_as_numeric_non_root_user() -> None:
+    """The vault image names its user, so the chart sets the uid the kubelet needs to enforce runAsNonRoot."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.kubernetes.agentVault.server.enabled=true",
+        "workers.kubernetes.agentVault.server.image=infisical/agent-vault:test",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "agent-vault")
+
+    assert deployment["spec"]["template"]["spec"]["securityContext"] == {
+        "fsGroup": 101,
+        "fsGroupChangePolicy": "OnRootMismatch",
+    }
+    assert _container(deployment, "agent-vault")["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
 
 
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:

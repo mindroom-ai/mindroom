@@ -205,6 +205,8 @@ The rules are:
 4. **Threads with two or more humans** — explicit targeting is required by default; eligible individual agents can use the opt-in participation exception above.
 5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
 
+A thread whose history does not fit in one read, 2,000 messages or 16 MiB of stored content, whichever comes first, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+
 Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
 Mentioning a configured agent that is not joined to the room still counts as an explicit mention for the other agents.
 

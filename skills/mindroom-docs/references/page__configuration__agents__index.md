@@ -502,9 +502,9 @@ GitHub managed OAuth credentials always use the requester's `user` scope, indepe
 Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth, local-only, and model-provider placement unchanged.
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
-Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard.
+Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described below.
 Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
-Worker-executed tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
+Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
@@ -668,7 +668,7 @@ Principal isolation does not trigger a one-time purge or migration of existing e
 
 Shared agents export only rooms where the agent's own Matrix account is currently joined.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`; each tree stays within that agent's configured and invited rooms and is scoped to the requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
-An instance counts as materialized once MindRoom itself has created or used it for its requester, so an instance last used with v2026.10.51 or earlier exports again after its requester's next turn.
+An instance counts as materialized once MindRoom itself has created or used it for its requester, so an instance last used with v2026.10.52 or earlier exports again after its requester's next turn.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
 
 ### Semantic Search Over Exports

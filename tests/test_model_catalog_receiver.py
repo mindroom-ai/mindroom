@@ -346,6 +346,7 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
         model_name="thread",
         set_by=USER,
         entity_names=("helper",),
+        config=config,
     )
     await callback(request())
     assert sent.call_args.kwargs["content"]["selection"] == {
@@ -379,6 +380,7 @@ async def test_selection_reports_only_an_override_governing_every_picker_entity(
         model_name="thread",
         set_by="@other:localhost",
         entity_names=("router", "restricted"),
+        config=config,
     )
 
     await callback(request())

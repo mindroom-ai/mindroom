@@ -25,7 +25,6 @@ from mindroom.desktop.command_parameters import (
 from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.gui_actions import execute_fallback_control, execute_semantic_control
-from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
@@ -139,14 +138,6 @@ class DesktopBridgePolicy:
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
-            raise ValueError(msg)
-        # Saved configuration already refuses these; this also covers one-run --allow-app overrides. Every policy
-        # change goes through replace(), which runs this check again, so admission needs no second one.
-        if reserved := sorted(self.allowed_app_ids & MINDROOM_APP_IDS):
-            msg = (
-                f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
-                "remove it from the allowed applications."
-            )
             raise ValueError(msg)
         if self.allow_control and self.control_lease_expires_at_ms is None:
             msg = "Control-enabled desktop bridge requires a lease expiry."

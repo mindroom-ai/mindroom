@@ -175,7 +175,6 @@ It never receives the credentials-encryption key.
 The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
 A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
 The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
-A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
 Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.

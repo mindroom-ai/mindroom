@@ -567,7 +567,7 @@ async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, 
 
 
 async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
-    """Delete the platform-paid OpenRouter key of one instance and forget its metadata."""
+    """Delete the platform-paid OpenRouter key of one instance and forget it, unless another run recorded a new one."""
     key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
     if key_hash is None:
         return
@@ -576,7 +576,7 @@ async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> Non
         await anyio.to_thread.run_sync(delete_key)
     except OpenRouterKeyNotFoundError:
         logger.info("OpenRouter key %s for instance %s was already deleted", key_hash, instance_id)
-    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=key_hash)
 
 
 async def _delete_resources_outside_release(instance_id: str | int) -> None:
@@ -724,12 +724,15 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     """Provision (or re-provision) a tenant instance and return the portal response payload.
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
-    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
+    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`) and its account is not pending deletion.
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
     Runs that claim the instance without a condition may each create a key, but only the first one recorded is
-    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying.
+    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying. Such a run can
+    still revoke a key that another run recorded but has not published yet. The lifecycle claims with the status it
+    read to avoid that, but a claim expecting `provisioning` still succeeds while another run holds the instance, so a
+    lifecycle resume that read the instance as `provisioning` can overlap that run the same way.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -1009,13 +1012,13 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     }
     # The lifecycle holds instances without the provisioning request knowing, and Helm just set every replica back
     # to one, so a hold that exists now, or lands during the readiness wait, keeps the instance stopped.
-    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+    if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
-    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+    if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
     try:
@@ -1058,10 +1061,13 @@ def refuse_pending_deletion(sb: Any, account_id: str, detail: str) -> None:
         raise HTTPException(status_code=409, detail=detail)
 
 
-def _held_by_lifecycle(sb: Any, instance_id: str | int) -> bool:
-    """Return whether the lifecycle holds the instance right now, or will because its account is pending deletion."""
+def _held_by_lifecycle(sb: Any, instance_id: str | int, *, resuming: bool = False) -> bool:
+    """Return whether the lifecycle holds the instance right now, or will because its account is pending deletion.
+
+    A run that is `resuming` the hold disregards the hold itself, but not a pending deletion.
+    """
     row = get_instance(sb, instance_id, columns="lifecycle_stopped_at,account_id") or {}
-    if row.get("lifecycle_stopped_at") is not None:
+    if row.get("lifecycle_stopped_at") is not None and not resuming:
         return True
     return row.get("account_id") is not None and account_pending_deletion(sb, row["account_id"])
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -674,6 +675,26 @@ def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> N
     assert rendered == {"rendered": "Fix X-1"}
 
 
+def test_workspace_template_render_waits_for_another_render_within_its_deadline() -> None:
+    """A render that overlaps another waits for the single slot instead of failing, but never past its time limit."""
+    slots = todo_template_render_module._render_slots
+    render = todo_template_render_module.render_workspace_template
+    slots.acquire()
+    release = threading.Timer(0.2, slots.release)
+    release.start()
+    try:
+        assert render("Fix {{ X }}", {"X": 1}, max_chars=100, timeout_seconds=5) == "Fix 1"
+    finally:
+        release.join()
+
+    slots.acquire()
+    try:
+        with pytest.raises(ValueError, match="time limit"):
+            render("Fix {{ X }}", {"X": 2}, max_chars=100, timeout_seconds=0.1)
+    finally:
+        slots.release()
+
+
 @_NEEDS_MEMORY_CAP
 def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
     tmp_path: Path,
@@ -749,6 +770,29 @@ def test_list_templates_charges_unreadable_workspace_templates_against_its_budge
     for index in range(20):
         (template_dir / f"invalid-{index:02}.yaml.j2").write_bytes(b"\xff" * 60 * 1024)
     _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
+
+
+@pytest.mark.parametrize("unlisted", ["unscanned", "unparseable"])
+def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted: str,
+) -> None:
+    """A workspace template the listing leaves out still hides the built-in of its name, because apply_template uses it."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    if unlisted == "unscanned":
+        # The entry scan stops before reaching the template, as when worker code fills the window with other entries.
+        monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 0)
+        _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: Workspace todo\n"))
+    else:
+        _write_workspace_template(config, "mindroom-dev", 'name: mindroom-dev\nversion: "1"\ntodos: [\n')
 
     with tool_runtime_context(_tool_context(config)):
         listing = tool.list_templates(agent=_agent())

@@ -312,6 +312,25 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_refuses_instructions_copied_from_redacted_read(self) -> None:
+        """Appending to instructions read back redacted must not replace the real instructions with the marker."""
+        instructions = ["Never share the API key with anyone", "Use sk-learn for ML"]
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", instructions=instructions)},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                shown = tool.get_own_config()
+                shown_instructions = yaml.safe_load(shown.split("```yaml\n", 1)[1].removesuffix("```"))["instructions"]
+                result = tool.update_own_config(instructions=[*shown_instructions, "Be concise"])
+            assert "'instructions' holds the redaction marker" in result
+            assert "omit it to keep the stored value" in result
+            assert "Changes were NOT applied." in result
+            assert load_config_yaml(config_path).agents["coder"].instructions == instructions
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_own_config_advances_registered_api_snapshot_generation(self) -> None:
         """Tool-side self-config writes should advance the in-process API generation immediately."""
         _, config_path = _make_config(

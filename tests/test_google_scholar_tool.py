@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +35,7 @@ def test_search_google_scholar_returns_publication_summaries(monkeypatch: pytest
         lambda _query: iter([_PUBLICATION]),
     )
 
-    result = asyncio.run(GoogleScholarTools().search_google_scholar("attention is all you need"))
+    result = GoogleScholarTools().search_google_scholar("attention is all you need")
 
     publications = json.loads(result)
     assert publications == [
@@ -62,9 +61,9 @@ def test_search_google_scholar_limits_results(monkeypatch: pytest.MonkeyPatch) -
     )
 
     tools = GoogleScholarTools(max_results=3)
-    assert len(json.loads(asyncio.run(tools.search_google_scholar("attention")))) == 3
-    assert len(json.loads(asyncio.run(tools.search_google_scholar("attention", max_results=2)))) == 2
-    assert json.loads(asyncio.run(tools.search_google_scholar("attention", max_results=0))) == []
+    assert len(json.loads(tools.search_google_scholar("attention"))) == 3
+    assert len(json.loads(tools.search_google_scholar("attention", max_results=2))) == 2
+    assert json.loads(tools.search_google_scholar("attention", max_results=0)) == []
 
 
 def test_search_google_scholar_reports_rate_limiting(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,5 +74,5 @@ def test_search_google_scholar_reports_rate_limiting(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(google_scholar_module.scholarly, "search_pubs", raise_blocked)
 
-    result = asyncio.run(GoogleScholarTools().search_google_scholar("attention"))
+    result = GoogleScholarTools().search_google_scholar("attention")
     assert result == google_scholar_module._RATE_LIMIT_MESSAGE
