@@ -152,7 +152,7 @@ def config_classify_change(
 
 # Runtime results that settle an apply without rollback.
 _SETTLED: dict[str, tuple[_ApplyStatus, str]] = {
-    "applied": ("applied", "The runtime applied the candidate's YAML/include sources."),
+    "applied": ("applied", "The runtime applied the candidate."),
     "pending": ("pending", "The runtime has not settled the candidate; confirm it later with config check-applied."),
     "restart_required": (
         "restart_required",
@@ -212,7 +212,6 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
     *,
     config: Path,
     expected_digest: str | None,
-    source_only: bool,
     rollback_on_failure: bool,
     url: str | None,
     wait: float,
@@ -227,12 +226,13 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
         runtime_paths = activate_cli_runtime(target / config)
         before = _status_before_install(runtime_paths, url, wait, timeout)
         # Native config loading may log to stdout before logging is configured.
+        # Only source changes are covered by the fingerprint the runtime reports.
         with redirect_stdout(sys.stderr):
             install = install_config_bundle(
                 source,
                 target,
                 config=config,
-                source_only=source_only,
+                source_only=True,
                 expected_digest=expected_digest,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
@@ -240,8 +240,12 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
     status = _settled_status(runtime_paths, url, install.fingerprint, wait, timeout)
     if status in _SETTLED:
         return _ApplyReceipt(*_SETTLED[status], install, status)
-    # A failure recorded before this install cannot confirm the new tree's result.
-    stale = install.status == "installed" and (before.status, before.fingerprint) == ("failed", install.fingerprint)
+    # A reload of the same fingerprint that began before this install cannot confirm the new tree's result.
+    stale = (
+        install.status == "installed"
+        and before.fingerprint == install.fingerprint
+        and before.status in {"pending", "failed"}
+    )
     if status != "failed" or stale:
         detail = "The candidate is installed, but its runtime result is unconfirmed; inspect before retrying."
         return _ApplyReceipt("unconfirmed", detail, install, status)
@@ -272,11 +276,6 @@ def config_apply_bundle(
     target: Path = typer.Option(..., help="Directory the running MindRoom loads; TARGET.previous retains rollback."),  # noqa: B008
     config: Path = typer.Option(Path("config.yaml"), help="Config file path relative to the bundle root."),  # noqa: B008
     expected_digest: str | None = typer.Option(None, help="Require this whole-tree candidate digest."),
-    source_only: bool = typer.Option(
-        False,
-        "--source-only",
-        help="Refuse changes outside the YAML/include sources of --config.",
-    ),
     rollback_on_failure: bool = typer.Option(
         False,
         "--rollback-on-failure",
@@ -287,13 +286,12 @@ def config_apply_bundle(
     timeout: float = typer.Option(10.0, min=0.001, help="HTTP timeout in seconds."),
     json_output: bool = typer.Option(False, "--json", help="Print the final receipt as JSON."),
 ) -> None:
-    """Install a tree and confirm its reload; exit 0 applied, 1 pending, 2 failed, 3 rolled back, 4 unconfirmed, 5 restart required."""
+    """Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2 failed, 3 rolled back, 4 unconfirmed, 5 restart."""
     receipt = _apply_bundle(
         source,
         target,
         config=config,
         expected_digest=expected_digest,
-        source_only=source_only,
         rollback_on_failure=rollback_on_failure,
         url=url,
         wait=wait,

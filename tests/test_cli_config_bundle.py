@@ -398,7 +398,7 @@ def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
     monkeypatch: pytest.MonkeyPatch,
     problem: str,
 ) -> None:
-    """Preflight and source-only refusals happen before the active tree changes."""
+    """Unreadable runtime results and changes a reload cannot apply are refused before the active tree changes."""
     source, target, _first = _active_tree(tmp_path)
     fingerprint = _fingerprint_of(target)
     status = "unavailable" if problem == "runtime_unavailable" else "applied"
@@ -407,18 +407,18 @@ def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
         monkeypatch.delenv("MINDROOM_API_KEY")
     (source / "config.yaml").write_text("agents: {}\n# candidate\n")
     (source / ".env").write_text("CHANGED=1\n")
-    code, receipt = _apply(source, target, "--source-only", "--rollback-on-failure")
+    code, receipt = _apply(source, target, "--rollback-on-failure")
     assert (code, receipt["status"], receipt["install"]) == (2, "failed", None)
     assert (target / "config.yaml").read_text() == "agents: {}\n"
 
 
-@pytest.mark.parametrize("case", ["unchanged", "stale_failure", "previous_changed"])
+@pytest.mark.parametrize("case", ["unchanged", "stale_failure", "stale_pending", "previous_changed"])
 def test_apply_bundle_never_rolls_back_an_unproven_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
 ) -> None:
-    """Unchanged trees, failures recorded before install, and altered previous trees are left in place."""
+    """Unchanged trees, reloads that began before install, and altered previous trees are left in place."""
     source, target, _first = _active_tree(tmp_path)
     previous_fingerprint = _fingerprint_of(target)
     if case != "unchanged":
@@ -426,6 +426,8 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
     candidate = hashlib.sha256((source / "config.yaml").read_bytes()).hexdigest()
 
     def respond(call: int) -> dict[str, object]:
+        if case == "stale_pending" and call == 1:
+            return {"status": "pending", "fingerprint": candidate}
         if case == "previous_changed":
             if call == 1:
                 return {"status": "applied", "fingerprint": previous_fingerprint}
@@ -434,8 +436,8 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
 
     _serve_runtime(monkeypatch, respond)
     code, receipt = _apply(source, target, "--rollback-on-failure")
-    expected = {"unchanged": (2, "failed"), "stale_failure": (4, "unconfirmed"), "previous_changed": (4, "unconfirmed")}
-    assert (code, receipt["status"]) == expected[case], receipt
+    expected = {"unchanged": (2, "failed"), "previous_changed": (4, "unconfirmed")}.get(case, (4, "unconfirmed"))
+    assert (code, receipt["status"]) == expected, receipt
     assert receipt["rollback"] is None
     assert ("restoring the previous tree failed" in receipt["detail"]) == (case == "previous_changed")
     assert _fingerprint_of(target) == candidate

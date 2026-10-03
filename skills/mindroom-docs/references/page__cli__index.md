@@ -1203,8 +1203,8 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │                   runtime reload.                                                      │
 │ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
 │                   changes, 2 error.                                                    │
-│ apply-bundle      Install a tree and confirm its reload; exit 0 applied, 1 pending, 2  │
-│                   failed, 3 rolled back, 4 unconfirmed, 5 restart required.            │
+│ apply-bundle      Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2    │
+│                   failed, 3 rolled back, 4 unconfirmed, 5 restart.                     │
 │ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
 │                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
@@ -1443,17 +1443,17 @@ Exit codes are `0` when every difference is a source (including no difference), 
 
 ### config apply-bundle
 
-Install a tree into the directory a running MindRoom loads, wait for the runtime to apply it, and optionally restore the previous tree when the runtime rejects it:
+Hot-apply a source-only change to the directory a running MindRoom loads, wait for the runtime to apply it, and optionally restore the previous tree when the runtime rejects it:
 
 ```bash
-mindroom config apply-bundle ./candidate --target ./active --source-only --rollback-on-failure --wait 300 --json
+mindroom config apply-bundle ./candidate --target ./active --rollback-on-failure --wait 300 --json
 ```
 
 The command first reads `GET /api/config/reload-status` and installs nothing unless the runtime reports a reload status, with the same `--url`, `--timeout`, `MINDROOM_API_KEY`, and HTTPS rules as `check-applied`.
-It then runs an ordinary installation without `--force`, honoring `--config`, `--expected-digest`, and `--source-only`, and waits up to `--wait` seconds (default 300) for the runtime result of the installed fingerprint.
+It then runs an ordinary installation without `--force`, honoring `--config` and `--expected-digest`, and waits up to `--wait` seconds (default 300) for the runtime result of the installed fingerprint.
+The installation always uses `--source-only`, because the runtime fingerprint covers only YAML/include sources; changes to `.env`, plugins, or other files are refused before anything is installed and need `install-bundle` and a restart instead.
 With `--rollback-on-failure`, only a `failed` runtime result for the exact fingerprint of a changed installation restores `TARGET.previous`, pinned to the receipt's `previous_digest`, and then waits again for that tree's fingerprint.
-A failure the runtime already reported for the same fingerprint before installation does not count, and pending, unreadable, or restart-required results never roll back.
-The runtime fingerprint covers YAML/include sources only, so `applied` does not confirm `.env` or other files; add `--source-only` to refuse such changes.
+A reload of the same fingerprint that was already pending or failed before installation does not count, and pending, unreadable, or restart-required results never roll back.
 
 | Status | Exit code | Meaning |
 | --- | --- | --- |

@@ -244,9 +244,9 @@ The chart rejects a normalized bootstrap source that equals, contains, or lies i
 
 Initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
 Bundle transport can refresh the separate source directory normally.
-To activate a changed revision without a restart, run `mindroom config apply-bundle SOURCE --target TARGET --source-only --rollback-on-failure --json` in the runtime container.
+To activate a changed revision without a restart, run `mindroom config apply-bundle SOURCE --target TARGET --rollback-on-failure --json` in the runtime container.
 It installs the tree, waits for the runtime to apply its fingerprint, restores the digest-pinned `TARGET.previous` only when the runtime rejects the change, and exits `0` only for `applied`.
-`--source-only` refuses changes outside the YAML/include sources, such as `.env` or plugin files, which need a restart instead of a hot reload; use `mindroom config classify-change` to check a candidate in advance.
+It refuses changes outside the YAML/include sources, such as `.env` or plugin files, which need a restart instead of a hot reload; use `mindroom config classify-change` to check a candidate in advance.
 See [`config apply-bundle`](../../../docs/cli.md#config-apply-bundle) for receipt statuses and exit codes, and [`config install-bundle`](../../../docs/cli.md#config-install-bundle) for drift protection, manual rollback, and filesystem limits.
 Content images need no MindRoom binary.
 
