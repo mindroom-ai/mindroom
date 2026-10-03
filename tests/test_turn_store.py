@@ -579,7 +579,7 @@ async def test_redaction_in_another_room_cannot_tombstone_an_event_without_a_rec
 async def test_room_less_tombstone_from_an_earlier_release_stays_in_effect(journal_store: EventJournalStore) -> None:
     """A tombstone an earlier release wrote for another room's redaction records no room, so it still applies."""
     store = await _store(journal_store)
-    # v2026.10.27 wrote this record for a redaction of an event it had not seen in the redaction's room.
+    # v2026.10.30 wrote this record for a redaction of an event it had not seen in the redaction's room.
     await store._ledger.record_handled_turn(
         TurnRecord.create(["$victim"], redacted_source_event_ids=["$victim"], completed=False),
     )
