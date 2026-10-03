@@ -418,7 +418,7 @@ def test_apply_bundle_settles_one_receipt_and_rolls_back_only_confirmed_failure(
         assert receipt["rollback"] is None
 
 
-@pytest.mark.parametrize("problem", ["missing_key", "runtime_unavailable", "non_source"])
+@pytest.mark.parametrize("problem", ["missing_key", "runtime_unavailable", "non_source", "infinite_wait"])
 def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -434,7 +434,8 @@ def test_apply_bundle_installs_nothing_unless_it_can_confirm_a_source_change(
     (source / "config.yaml").write_text("agents: {}\n# candidate\n")
     if problem == "non_source":
         (source / ".env").write_text("CHANGED=1\n")
-    code, receipt = _apply(source, target, "--rollback-on-failure")
+    wait = ["--wait", "inf"] if problem == "infinite_wait" else []
+    code, receipt = _apply(source, target, "--rollback-on-failure", *wait)
     assert (code, receipt["status"], receipt["install"]) == (2, "failed", None)
     assert (target / "config.yaml").read_text() == "agents: {}\n"
 
@@ -450,7 +451,7 @@ def test_apply_bundle_never_rolls_back_an_unproven_failure(
     previous_fingerprint = _fingerprint_of(target)
     if case != "unchanged":
         (source / "config.yaml").write_text("agents: {}\n# candidate\n")
-    candidate = hashlib.sha256((source / "config.yaml").read_bytes()).hexdigest()
+    candidate = _fingerprint_of(source)
 
     def respond(call: int) -> dict[str, object]:
         if case in {"stale_pending", "stale_unknown"} and call == 1:

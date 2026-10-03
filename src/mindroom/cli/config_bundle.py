@@ -226,13 +226,12 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
         runtime_paths = activate_cli_runtime(target / config)
         before = _status_before_install(runtime_paths, url, wait, timeout)
         # Native config loading may log to stdout before logging is configured.
-        # Only source changes are covered by the fingerprint the runtime reports.
         with redirect_stdout(sys.stderr):
             install = install_config_bundle(
                 source,
                 target,
                 config=config,
-                source_only=True,
+                source_only=True,  # The runtime fingerprint covers only YAML/include sources.
                 expected_digest=expected_digest,
             )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
@@ -251,11 +250,11 @@ def _apply_bundle(  # noqa: PLR0911 - one return per final receipt status
         return _ApplyReceipt("unconfirmed", detail, install, status)
     if not rollback_on_failure or install.previous_digest is None:
         return _ApplyReceipt("failed", "The runtime rejected the candidate, which remains installed.", install, status)
-    previous = target.expanduser().absolute()
+    active = target.expanduser().absolute()
     try:
         with redirect_stdout(sys.stderr):
             rollback = install_config_bundle(
-                previous.with_name(f"{previous.name}.previous"),
+                active.with_name(f"{active.name}.previous"),
                 target,
                 config=config,
                 expected_digest=install.previous_digest,

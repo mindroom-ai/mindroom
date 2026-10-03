@@ -103,7 +103,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
-| `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
+| `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
