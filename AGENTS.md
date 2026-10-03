@@ -373,7 +373,6 @@ These agent paths describe ordinary shared agents; private agents use their reso
 ### Ecosystem Repositories
 
 MindRoom also maintains related repositories under `github.com/mindroom-ai`:
-- `mindroom-element` - our Element fork for MindRoom message UX: collapsible tool-trace rendering, `!` command autocomplete synced from backend commands, long-text sidecar hydration, AI run metadata tooltip, and MindRoom branding/thread-first defaults. See `README.md` and `FORK_CHANGES.md` in that repo.
 - `synapse` - our Synapse fork for MindRoom streaming workloads: optional compact-edit collapsing for superseded `m.replace` events across `/sync`, Sliding Sync, pagination, and context responses, plus `/versions` advertisement via `org.mindroom.compact_edits` and fork-owned Docker/CI flows. See `README.md` and `FORK_CHANGES.md`.
 - `mindroom-librechat` - our LibreChat fork that parses MindRoom inline `<tool>` / `<tool-group>` tags into native `ToolCall` cards so tool execution stays server-side; also includes fork Docker CI and MindRoom-specific UX additions. See `README.md` and `.mindroom/` docs (`fork-context.md`, `tool-tag-rendering.md`).
 - `mindroom-chat` - our AI-native Matrix client, built on Cinny and optimized for MindRoom agent workflows with MindRoom branding/default homeserver config, subpath deployment support (runtime/build base path for `/mindroom`), and thread/auth/sidebar UX refinements. See `README.md` and `FORK_CHANGES.md`.
