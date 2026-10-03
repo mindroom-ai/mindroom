@@ -2456,11 +2456,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Default headers sent only to the Base URL (JSON format)",
           "label": "Headers",
           "name": "headers",
           "options": null,
-          "placeholder": null,
+          "placeholder": "{\"X-Api-Key\": \"value\"}",
           "required": false,
           "type": "password",
           "validation": null
