@@ -164,6 +164,39 @@ async def test_listener_finishes_closing_when_its_owner_is_cancelled_during_shut
 
 
 @pytest.mark.asyncio
+async def test_listener_shutdown_is_bounded_while_a_request_hangs(tmp_path: Path) -> None:
+    """A client that sends part of a request and goes silent delays owner cancellation by at most the grace period."""
+    port = _free_port()
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_SCRIPT_GATEWAY_PORT": str(port)})
+    serving = asyncio.Event()
+
+    async def own_listener() -> None:
+        async with serve_script_gateway_listener(runtime_paths, host="127.0.0.1", broker=None, log_level="INFO"):
+            serving.set()
+            await asyncio.Event().wait()
+
+    with patch("mindroom.api.script_gateway._LISTENER_SHUTDOWN_GRACE_SECONDS", 1):
+        owner = asyncio.create_task(own_listener())
+        await serving.wait()
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            f"POST {_GATEWAY_PREFIX}/calls HTTP/1.1\r\nHost: gateway\r\nContent-Length: 100\r\n\r\n".encode()
+            + b'{"run_id":',
+        )
+        await writer.drain()
+        owner.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(owner), timeout=4)
+            assert owner.cancelled()
+            _assert_port_released(port)
+            # The hung request was in flight and Uvicorn cancelled it after the grace period.
+            assert (await reader.read()).startswith(b"HTTP/1.1 500")
+        finally:
+            writer.close()
+
+
+@pytest.mark.asyncio
 async def test_listener_closes_when_the_context_body_raises(tmp_path: Path) -> None:
     """A failure in the owner's body closes the listener and propagates unchanged."""
     port = _free_port()

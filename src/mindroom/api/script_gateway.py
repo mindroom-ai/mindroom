@@ -48,6 +48,8 @@ logger = get_logger(__name__)
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _LISTENER_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
+# Matches the primary API's shutdown grace; Uvicorn cancels gateway requests still open after it.
+_LISTENER_SHUTDOWN_GRACE_SECONDS = 5
 
 
 class _ScriptGatewayBroker(Protocol):
@@ -266,7 +268,13 @@ async def serve_script_gateway_listener(
     gateway_app.include_router(router)
     bind_script_tool_broker(gateway_app, broker)
     server = _GatewayListenerServer(
-        uvicorn.Config(gateway_app, lifespan="off", log_level=log_level.lower(), ws="none"),
+        uvicorn.Config(
+            gateway_app,
+            lifespan="off",
+            log_level=log_level.lower(),
+            ws="none",
+            timeout_graceful_shutdown=_LISTENER_SHUTDOWN_GRACE_SECONDS,
+        ),
     )
     listener = socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET)
     serve_task = asyncio.create_task(server.serve(sockets=[listener]), name="script_gateway_listener")
@@ -275,6 +283,7 @@ async def serve_script_gateway_listener(
         yield
     finally:
         server.stop_requested = True
-        # Uvicorn's shutdown closes the listener and its connections, so owner cancellation must not interrupt it.
+        # Uvicorn's shutdown closes the listener, then cancels requests still open after the grace period,
+        # so owner cancellation must not interrupt it.
         await run_coroutine_until_complete(asyncio.wait({serve_task}))
     serve_task.result()
