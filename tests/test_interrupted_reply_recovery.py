@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -40,6 +41,7 @@ from tests.ai_user_id_helpers import (
     _make_bot,
     _response_request,
     _runtime_paths,
+    _set_gateway_method,
     _team_orchestrator,
     bind_runtime_paths,
 )
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import StreamingDeliveryRequest
     from mindroom.final_delivery import StreamTransportOutcome
+    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.response_turn import ResponseTurnContext
 
@@ -278,18 +281,19 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
                 *TRACE,
                 ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="2"),
             ),
-            "Already called for the current message, so do not repeat: `counter` (2 calls), `report` (1 call).",
+            "Already called for the current message, so do not repeat: `counter` (2 calls).",
         ),
+        (TRACE[1:], None),
         ((), None),
     ],
-    ids=["calls_listed", "text_only"],
+    ids=["finished_calls_listed", "still_running_only", "text_only"],
 )
 async def test_the_new_attempt_is_told_which_calls_not_to_repeat(
     tmp_path: Path,
     trace: tuple[ToolTraceEntry, ...],
     closing_line: str | None,
 ) -> None:
-    """A closing line counts every listed call, because models follow it even when the message asks for the call again."""
+    """A closing line counts every finished call; a call still running may need to run again for its lost result."""
     bot = _bot(tmp_path)
 
     (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed("Half of the report", trace=trace))
@@ -407,6 +411,8 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
 
     async def fake_team_stream(**kwargs: object) -> AsyncIterator[str]:
         contexts.append(cast("ResponseTurnContext", kwargs["ctx"]))
+        # Run metadata the turn recorded but never published to the live collector.
+        cast("TurnRecorder", kwargs["turn_recorder"]).set_run_metadata({AI_RUN_METADATA_KEY: {"version": 1}})
         yield "Team answer"
 
     visible = _streamed(
@@ -435,6 +441,11 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
             return _stream_outcome(REPLY_ID, body)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = deliver
+        finalize = _set_gateway_method(
+            coordinator.deps.delivery_gateway,
+            "finalize_streamed_response",
+            AsyncMock(wraps=coordinator.deps.delivery_gateway.finalize_streamed_response),
+        )
         await coordinator.generate_team_response_helper(
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -454,3 +465,6 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
     ((stream,),) = [delivered]
     assert stream.extra_content is not None
     assert tool_trace_from_content(stream.extra_content) == list(TRACE)
+    # The carried calls in the live dict must not hide the recorded run metadata from the final edit.
+    finalized = finalize.await_args.args[0]
+    assert finalized.extra_content[AI_RUN_METADATA_KEY] == {"version": 1}

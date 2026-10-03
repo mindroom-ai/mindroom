@@ -249,7 +249,10 @@ _UNKNOWN_ATTEMPT_INSTRUCTION = (
 
 
 def _already_called_line(tools: Sequence[ToolTraceEntry]) -> str | None:
-    """Name the stopped attempt's calls in one closing line, which models follow even when the message asks for them."""
+    """Name finished calls in one closing line, which models follow even when the message asks for them again.
+
+    Calls still running at the stop stay out: listing them kept models from re-running ones whose result was lost.
+    """
     counts = Counter(tool.tool_name for tool in tools)
     if not counts:
         return None
@@ -3619,7 +3622,7 @@ class ResponseRunner:
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
-            already_called = _already_called_line((*completed_tools, *interrupted_tools))
+            already_called = _already_called_line(completed_tools)
             instruction = "\n\n".join(
                 part for part in (_INTERRUPTED_ATTEMPT_INSTRUCTION, attempt, already_called) if part is not None
             )
@@ -4442,6 +4445,11 @@ class ResponseRunner:
             matrix_run_metadata=matrix_run_metadata,
         )
 
+        def team_final_metadata_content() -> dict[str, Any] | None:
+            # The live dict can hold content merged in for the stream before any run metadata is published.
+            fallback = ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata) or {}
+            return {**fallback, **team_run_metadata_content} or None
+
         async def persist_failed_team_turn() -> None:
             if current_task_is_process_shutdown():
                 return
@@ -4586,8 +4594,7 @@ class ResponseRunner:
                     response_identity=response_identity,
                     tool_trace=None,
                     extra_content=_merge_response_extra_content(
-                        team_run_metadata_content
-                        or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        team_final_metadata_content(),
                         request.attachment_ids,
                     ),
                 )
@@ -4683,8 +4690,7 @@ class ResponseRunner:
                             identity=response_identity,
                             tool_trace=None,
                             extra_content=_merge_response_extra_content(
-                                team_run_metadata_content
-                                or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                                team_final_metadata_content(),
                                 request.attachment_ids,
                             ),
                         ),
@@ -4742,8 +4748,7 @@ class ResponseRunner:
                     identity=response_identity,
                     tool_trace=error.tool_trace if show_tool_calls else None,
                     extra_content=_merge_response_extra_content(
-                        team_run_metadata_content
-                        or ai_run_extra_content_from_metadata(team_turn_recorder.run_metadata),
+                        team_final_metadata_content(),
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
