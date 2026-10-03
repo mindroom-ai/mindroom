@@ -120,20 +120,7 @@ async def _resolve_event_content(
     return _with_event_relation(resolved_content, preview_content), True
 
 
-def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
-    if len(payload) <= _MXC_TEXT_MAX_BYTES:
-        return False
-    logger.warning(
-        "mxc_text_payload_exceeds_byte_limit",
-        mxc_url=mxc_url,
-        stage=stage,
-        size_bytes=len(payload),
-        limit_bytes=_MXC_TEXT_MAX_BYTES,
-    )
-    return True
-
-
-async def _download_mxc_text(  # noqa: PLR0911
+async def _download_mxc_text(
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -166,11 +153,6 @@ async def _download_mxc_text(  # noqa: PLR0911
                 )
             except Exception:
                 logger.exception("Failed to decrypt attachment")
-                return None
-            if not isinstance(text_bytes, bytes):
-                logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
-                return None
-            if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
                 return None
         else:
             text_bytes = body
