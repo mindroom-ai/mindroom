@@ -2293,6 +2293,7 @@ class TestRunFirstRunSetup:
         manager.check_uv_installed.return_value = (True, Path("/usr/bin/uv"))
         manager.install_service.return_value = InstallResult(success=True, message="Installed and started")
         manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+        manager.get_service_environment.return_value = {}
         monkeypatch.setattr("mindroom.cli.service._get_service_manager", lambda: manager)
         return manager
 

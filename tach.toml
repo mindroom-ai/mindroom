@@ -4301,6 +4301,9 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.service"
 depends_on = [
+    # Deferred import in the install-time dashboard warning.
+    "mindroom.api.auth",
+    "mindroom.cli.config",
     "mindroom.cli.env_file",
     "mindroom.constants",
     "mindroom.matrix.provisioning_env",
