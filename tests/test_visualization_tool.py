@@ -72,8 +72,12 @@ def test_visualization_refuses_output_dir_outside_the_workspace(tmp_path: Path, 
         visualization_tools()(tool_output_workspace_root=tmp_path, output_dir=output_dir)
 
 
-def test_registry_injects_the_workspace_and_keeps_chart_schemas(tmp_path: Path) -> None:
+def test_registry_injects_the_workspace_and_keeps_chart_schemas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The registered toolkit receives the agent workspace and still advertises the upstream chart parameters."""
+    monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     toolkit = get_tool_by_name(
