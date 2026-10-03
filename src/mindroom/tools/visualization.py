@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.visualization import VisualizationTools
+    from mindroom.tools.agno_compat_visualization import WorkspaceVisualizationTools
 
 
 @register_tool_with_metadata(
     name="visualization",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.NONE,
     display_name="Visualization",
     description="Create bar charts, line charts, pie charts, scatter plots, and histograms using matplotlib",
     category=ToolCategory.DEVELOPMENT,
@@ -28,6 +35,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="charts",
+            description="Directory inside the agent workspace where charts are saved",
         ),
         ConfigField(
             name="enable_create_bar_chart",
@@ -74,6 +82,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["matplotlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/visualization",
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
     function_names=(
         "create_bar_chart",
         "create_histogram",
@@ -82,8 +91,8 @@ if TYPE_CHECKING:
         "create_scatter_plot",
     ),
 )
-def visualization_tools() -> type[VisualizationTools]:
-    """Return Visualization tools for creating charts and plots."""
-    from agno.tools.visualization import VisualizationTools
+def visualization_tools() -> type[WorkspaceVisualizationTools]:
+    """Return Visualization tools that save charts only inside the agent workspace."""
+    from mindroom.tools.agno_compat_visualization import WorkspaceVisualizationTools
 
-    return VisualizationTools
+    return WorkspaceVisualizationTools

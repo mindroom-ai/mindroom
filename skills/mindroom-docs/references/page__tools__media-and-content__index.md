@@ -76,7 +76,7 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 ### Notes
 
 - `moviepy` is the declared Python dependency, and the upstream toolkit also expects FFmpeg support for real audio and video processing.
-- `embed_captions()` defaults the output filename to `<video>_captioned.mp4` when `output_path` is omitted.
+- `embed_captions()` writes `<video>_captioned.mp4` next to the input video when `output_path` is omitted, where `<video>` is the input file name without its extension.
 - Use this tool for simple local media transforms, not remote video discovery or hosting.
 
 ## [`giphy`]

@@ -6,12 +6,13 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import closing, suppress
+from functools import partial
 from math import ceil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
 from agno.tools import moviepy_video as agno_moviepy
-from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
+from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoClip, VideoFileClip
 from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
@@ -19,13 +20,15 @@ from mindroom.file_access import resolve_agent_file
 from mindroom.tools.path_safety import write_agent_file
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import BinaryIO
 
     from mindroom.config.models import FileAccess
 
 _STAGING_PREFIX = "mindroom-moviepy-"
 # Worker code can write the workspace, including sparse files whose logical size far exceeds the disk they use.
-# Parsing builds a few hundred bytes of objects per caption word, so captions get a much smaller cap.
+# Parsing builds a few hundred bytes of objects per caption word, so captions get a much smaller cap;
+# rendering keeps only the active line's rasters, whatever the caption length.
 _MAX_STAGED_VIDEO_BYTES = 1 << 30
 _MAX_STAGED_CAPTION_BYTES = 1 << 20
 # FFmpeg demuxers that read only the file they open; playlists and manifests such as HLS and DASH open other files and URLs.
@@ -70,6 +73,23 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # Remove when: MoviePy cleans temporary audio on every encoding exit.
 # Coverage: tests/test_moviepy_caption_output.py.
 
+# AGNO_COMPAT: MoviePy embed_captions rasterizes every caption line before encoding starts.
+# Reason: Agno builds each line's word clips, full-width background, and composite up front and keeps all of
+# them until encoding ends, so memory grows by megabytes per line at 1080p and long captions exhaust the primary.
+# Each line composite also starts at time zero, so every frame composites every line that has not yet ended.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
+# Upstream PR: None identified.
+# Remove when: The SDK renders caption lines on demand with memory independent of the caption length.
+# Coverage: tests/test_moviepy_caption_layout.py::test_embed_captions_keeps_one_caption_line_in_memory.
+
+# AGNO_COMPAT: MoviePy embed_captions names its default output from the last dot anywhere in the path.
+# Reason: Agno splits video_path at its last dot, so an extensionless video below a dotted or ./ directory
+# gets an output named after that directory and written outside it.
+# Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
+# Upstream PR: None identified.
+# Remove when: The SDK names the default output after the video's file name, beside the video.
+# Coverage: tests/test_moviepy_video_tools.py::test_default_caption_output_lands_next_to_the_input.
+
 # AGNO_COMPAT: MoviePyVideoTools reads and writes model-chosen media paths by name.
 # Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
 # in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
@@ -86,6 +106,41 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # tests/test_moviepy_video_tools.py::test_video_inputs_refuse_playlists_and_manifests,
 # tests/test_moviepy_video_tools.py::test_outputs_publish_without_buffering_the_rendered_file, and
 # tests/test_file_access_contract.py::test_outside_files_follow_file_access.
+
+
+def _caption_layers(
+    subtitle_lines: list[dict[str, Any]],
+    render_line: Callable[[dict[str, Any]], CompositeVideoClip],
+    active_line: dict[int, CompositeVideoClip],
+) -> list[VideoClip]:
+    """Return one bottom-centered clip per subtitle line that draws the line from ``active_line``.
+
+    ``active_line`` holds at most one rendered line, replaced when another line is drawn, so memory does not
+    grow with the caption length. Each line is rendered once here to size its clip, so a line that cannot fit
+    fails before encoding starts.
+    """
+
+    def canvas(index: int) -> CompositeVideoClip:
+        if index not in active_line:
+            for previous in active_line.values():
+                previous.close()
+            active_line.clear()
+            active_line[index] = render_line(subtitle_lines[index])
+        return active_line[index]
+
+    layers = []
+    for index, line in enumerate(subtitle_lines):
+        start, duration = line["start"], line["end"] - line["start"]
+        # A clip draws its first frame when constructed, which renders the line once here.
+        # The rendered line keeps absolute video times, while a layer's frames count from the line start.
+        layer = VideoClip(lambda t, index=index, start=start: canvas(index).get_frame(start + t), duration=duration)
+        mask = VideoClip(
+            lambda t, index=index, start=start: cast("VideoClip", canvas(index).mask).get_frame(start + t),
+            is_mask=True,
+            duration=duration,
+        )
+        layers.append(layer.with_mask(mask).with_start(start).with_position(("center", "bottom")))
+    return layers
 
 
 def _require_plain_media(staged: str) -> None:
@@ -370,6 +425,44 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
 
         return word_clips
 
+    def _render_caption_line(
+        self,
+        line: dict[str, Any],
+        frame_size: tuple[int, int],
+        *,
+        font_size: int,
+        font_color: str,
+        stroke_color: str,
+        stroke_width: int,
+    ) -> CompositeVideoClip:
+        """Render one subtitle line's word clips over its translucent full-width background."""
+        word_clips = self.create_caption_clips(
+            line,
+            frame_size,
+            color=font_color,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            font_size=font_size,
+        )
+        width, height = frame_size
+        bg_height = ceil(max(clip.pos(0)[1] + clip.h for clip in word_clips))
+        if bg_height > height:
+            message = "Caption block exceeds video height; use a smaller font_size."
+            raise ValueError(message)
+
+        # Children keep absolute video times and local canvas positions.
+        # Only the line's layer is positioned against the video.
+        bg_clip = (
+            ColorClip(
+                size=(width, bg_height),
+                color=(0, 0, 0),
+                duration=line["end"] - line["start"],
+            )
+            .with_opacity(0.6)
+            .with_start(line["start"])
+        )
+        return CompositeVideoClip([bg_clip, *word_clips], size=(width, bg_height))
+
     @override
     def embed_captions(
         self,
@@ -398,12 +491,13 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         """
         video = None
         final_video = None
-        all_caption_clips = []
+        active_line: dict[int, CompositeVideoClip] = {}
         staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX))
         try:
-            # If no output path provided, create one based on input video
+            # If no output path provided, write one next to the input video, named after its file name
             if output_path is None:
-                output_path = video_path.rsplit(".", 1)[0] + "_captioned.mp4"
+                source = Path(video_path)
+                output_path = str(source.with_name(f"{source.stem}_captioned.mp4"))
 
             # Load video
             video = VideoFileClip(self._stage_video(video_path, staging))
@@ -419,41 +513,20 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             # Split into lines
             subtitle_lines = self.split_text_into_lines(words)
 
-            # Create caption clips for each line
-            for line in subtitle_lines:
-                word_clips = self.create_caption_clips(
-                    line,
-                    (video.w, video.h),
-                    color=font_color,
-                    stroke_color=stroke_color,
-                    stroke_width=stroke_width,
-                    font_size=font_size,
-                )
-                bg_height = ceil(max(clip.pos(0)[1] + clip.h for clip in word_clips))
-                if bg_height > video.h:
-                    message = "Caption block exceeds video height; use a smaller font_size."
-                    raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
-
-                # Children keep absolute video times and local canvas positions.
-                # Only the outer composite is positioned against the video.
-                bg_clip = (
-                    ColorClip(
-                        size=(video.w, bg_height),
-                        color=(0, 0, 0),
-                        duration=line["end"] - line["start"],
-                    )
-                    .with_opacity(0.6)
-                    .with_start(line["start"])
-                )
-                caption_composite = CompositeVideoClip(
-                    [bg_clip, *word_clips],
-                    size=(video.w, bg_height),
-                ).with_position(("center", "bottom"))
-
-                all_caption_clips.append(caption_composite)
+            render_line = partial(
+                self._render_caption_line,
+                frame_size=(video.w, video.h),
+                font_size=font_size,
+                font_color=font_color,
+                stroke_color=stroke_color,
+                stroke_width=stroke_width,
+            )
 
             # Combine video with all captions
-            final_video = CompositeVideoClip([video, *all_caption_clips], size=video.size)
+            final_video = CompositeVideoClip(
+                [video, *_caption_layers(subtitle_lines, render_line, active_line)],
+                size=video.size,
+            )
 
             # Write output with optimized settings inside the staging directory, then publish it complete
             staged_output = staging / f"output{Path(output_path).suffix}"
@@ -476,7 +549,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         else:
             return output_path
         finally:
-            for clip in all_caption_clips:
+            for clip in active_line.values():
                 with suppress(Exception):
                     clip.close()
             if final_video is not None:

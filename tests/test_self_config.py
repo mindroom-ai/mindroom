@@ -314,7 +314,7 @@ class TestUpdateOwnConfig:
 
     def test_update_refuses_instructions_copied_from_redacted_read(self) -> None:
         """Appending to instructions read back redacted must not replace the real instructions with the marker."""
-        instructions = ["Never share the API key with anyone", "Use sk-learn for ML"]
+        instructions = ["Never share the API key with anyone", "Log in with password: hunter2"]
         _, config_path = _make_config(
             agents={"coder": AgentConfig(display_name="Coder", role="Code", instructions=instructions)},
         )

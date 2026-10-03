@@ -20,10 +20,12 @@ from fastapi import FastAPI
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
+from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.config.agent import AgentConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
@@ -165,7 +167,7 @@ def test_worker_shells_call_back_through_the_address_workers_reach(
 
     assert minimal_shell_problems(config, paths, "helper") == []
     shell_env = agent_cli_shell_env(config, paths, "helper", "grant")
-    assert shell_env.env() == {"MINDROOM_AGENT_CLI_URL": expected, "MINDROOM_AGENT_CLI_TOKEN": "grant"}
+    assert (shell_env.api_url, shell_env.token) == (expected, "grant")
     assert shell_env.bin_dir is None
 
 
@@ -216,6 +218,22 @@ def test_local_launcher_directory_is_private_to_mindroom(tmp_path: Path) -> None
     assert agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant").bin_dir == first
     assert "/old/venv" not in launcher.read_text()
     assert os.access(launcher, os.X_OK)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("api_address")
+async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Path) -> None:
+    """A comma in the storage path does not split the launcher directory into separate PATH entries."""
+    runtime = _runtime_context(tmp_path / "Smith, John")
+    shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant")
+    shell = get_tool_by_name("shell", runtime.runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    run = shell.async_functions["run_shell_command"].entrypoint
+    assert run is not None
+
+    with bound_agent_cli_shell_env(shell_env, window="bash"):
+        output = await run("command -v mindroom-agent")
+
+    assert output.strip() == f"{shell_env.bin_dir}/mindroom-agent"
 
 
 @pytest.mark.usefixtures("api_address")

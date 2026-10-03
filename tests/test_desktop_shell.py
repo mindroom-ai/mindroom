@@ -15,7 +15,7 @@ import pytest
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
 
-ENVIRONMENT = {"PATH": os.defpath, "MINDROOM_TEST_LOGIN_VALUE": "from-login"}
+ENVIRONMENT = {"PATH": os.environ["PATH"], "MINDROOM_TEST_LOGIN_VALUE": "from-login"}
 REQUESTER = "@user:local"
 AGENT = "agent"
 

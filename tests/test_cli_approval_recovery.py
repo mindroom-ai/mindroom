@@ -55,6 +55,7 @@ from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
+    cli_window,
     install_scripted_shell,
     shell_cli_owner,
 )
@@ -540,7 +541,8 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         if nested:
             owner = shell_cli_owner(registry)
             queued = await owner.operation(
-                ToolCallOperation(
+                window=cli_window(),
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="media",

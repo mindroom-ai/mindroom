@@ -21,7 +21,7 @@ from mindroom.config.main import (
 from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.redaction import REDACTED
+from mindroom.redaction import MAX_CANONICAL_JSON_INTEGER, REDACTED
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -148,6 +148,17 @@ def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
+def _fits_room_state(value: Any) -> bool:  # noqa: ANN401
+    """Return whether Matrix canonical JSON, which rejects floats and very large integers, can carry a value."""
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _fits_room_state(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_fits_room_state(item) for item in value)
+    if isinstance(value, int):
+        return abs(value) <= MAX_CANONICAL_JSON_INTEGER
+    return value is None or isinstance(value, str)
+
+
 def _format_value(value: Any) -> str:  # noqa: ANN401
     """Format a value for display as YAML.
 
@@ -214,7 +225,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         config_path_str = args[0]
         try:
             value = _get_nested_value(redacted_config_dict, config_path_str)
-        except (KeyError, IndexError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
             return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{_format_value(value)}\n```", None
@@ -245,7 +256,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         # Get the current value for comparison
         try:
             old_value = _get_nested_value(redacted_config_dict, config_path_str)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, TypeError):
             old_value = None  # Path doesn't exist yet
 
         # Create a copy to test the change
@@ -254,11 +265,11 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         try:
             # Verify the path exists or can be created
             _set_nested_value(test_config_dict, config_path_str, value)
-
-            # Validate the modified config
-            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
-        except (KeyError, IndexError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
+
+        try:
+            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
@@ -280,8 +291,8 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
                 "config_path": config_path_str,
                 "new_value": value,
                 # The pending change is stored in room state that every member can read,
-                # so a value that redaction masks stays out of it.
-                "new_value_withheld": redacted_value != value,
+                # so a value that redaction masks stays out of it, as does one room state cannot carry.
+                "new_value_withheld": redacted_value != value or not _fits_room_state(value),
             }
 
             return preview_msg, change_info

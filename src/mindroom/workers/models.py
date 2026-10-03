@@ -71,8 +71,7 @@ _API_ROUTES = {
     "script-run": "scripts/run",
     "script-status": "scripts",
     "script-cancel": "scripts",
-    "agent-cli-install": "agent-cli/install",
-    "agent-cli-shell": "agent-cli/shell",
+    "execute-cancel": "execute/cancel",
 }
 
 
@@ -88,8 +87,7 @@ def worker_api_endpoint(
         "script-run",
         "script-status",
         "script-cancel",
-        "agent-cli-install",
-        "agent-cli-shell",
+        "execute-cancel",
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""

@@ -96,7 +96,7 @@ def terminal() -> Iterator[tuple[int, int]]:
 @pytest_asyncio.fixture
 async def shell() -> AsyncIterator[DesktopShell]:
     """Run real, harmless commands only after the approver's decision."""
-    local_shell = DesktopShell(environment={"PATH": os.defpath})
+    local_shell = DesktopShell(environment={"PATH": os.environ["PATH"]})
     try:
         yield local_shell
     finally:

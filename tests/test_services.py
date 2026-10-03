@@ -41,6 +41,7 @@ from mindroom.services.systemd import _install_service as _install_systemd_servi
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
+from tests.conftest import normalize_console_output
 
 runner = CliRunner()
 
@@ -733,6 +734,7 @@ def test_service_install_no_confirm(
     mock_manager.install_runtime.return_value = runtime_installed
     mock_manager.install_service.return_value = InstallResult(success=True, message="Installed and started")
     mock_manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+    mock_manager.get_service_environment.return_value = {}
     mock_get_manager.return_value = mock_manager
 
     result = runner.invoke(app, ["service", "install", "-y"])
@@ -742,10 +744,11 @@ def test_service_install_no_confirm(
     assert "After upgrading, rerun mindroom service install" in result.output
     # A failed uv tool install only warns: the service still runs, from uv's cache.
     assert ("Could not install this MindRoom version as a uv tool" in result.output) is not runtime_installed
-    assert mock_manager.method_calls[-3:] == [
+    assert mock_manager.method_calls[-4:] == [
         call.install_runtime(Path("/usr/bin/uv")),
         call.install_service(),
         call.get_log_command(),
+        call.get_service_environment(),
     ]
 
 
@@ -949,6 +952,7 @@ def _login_service_manager(
         message="Installed and started",
     )
     manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+    manager.get_service_environment.return_value = {}
     return manager
 
 
@@ -1077,6 +1081,52 @@ def test_service_install_keeps_the_shell_dashboard_key(
     service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
     assert service_runtime.env_value("MINDROOM_API_KEY") == key
     assert dashboard_requires_credential(service_runtime)
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
+    ("env_content", "warned"),
+    [
+        ("MATRIX_HOMESERVER=https://mindroom.chat\n", True),
+        ("MINDROOM_API_KEY=dash-key\n", False),
+        # The service's own `mindroom run` generates a key when dedicated workers could reach its dashboard.
+        ("MINDROOM_WORKER_BACKEND=docker\n", False),
+    ],
+    ids=["keyless", "keyed", "dedicated-workers"],
+)
+def test_service_install_warns_when_the_service_dashboard_has_no_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+    env_content: str,
+    warned: bool,
+) -> None:
+    """The service listens on every interface and warns only in its logs, so installing it warns where someone reads it."""
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path)
+    manager = _login_service_manager()
+    # The service sees only its unit's paths and `.env`, never this shell.
+    manager.get_service_environment.return_value = {
+        "MINDROOM_CONFIG_PATH": str(runtime_paths.config_path),
+        "MINDROOM_STORAGE_PATH": str(runtime_paths.storage_root),
+    }
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+        output = capsys.readouterr().out
+    else:
+        monkeypatch.delenv("MINDROOM_API_KEY", raising=False)
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+        output = result.output
+
+    output = normalize_console_output(output)
+    assert ("listens on 0.0.0.0:8765 without MINDROOM_API_KEY" in output) is warned
+    if warned:
+        assert f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, then run mindroom service restart." in output
 
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])

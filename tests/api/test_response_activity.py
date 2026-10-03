@@ -131,36 +131,28 @@ def test_openai_request_blocks_idle(test_client: TestClient) -> None:
     assert response.json()["active_openai_requests"] == 1
 
 
-def test_active_call_blocks_idle(test_client: TestClient) -> None:
-    """A joined voice call is live work that a restart would end."""
-    state = config_lifecycle.app_state(main.app)
-    _bind_runtime(state, calls=[ResponseIdentity("helper", "@alice:example.org")])
-    set_runtime_ready()
-    response = test_client.get("/api/responses/activity")
-    assert response.status_code == 200
-    assert response.json()["status"] == "busy"
-    assert response.json()["active_calls"] == 1
-
-
 @pytest.mark.parametrize(
-    ("recoverable", "status", "interruptible", "preserved"),
-    [(False, "busy", 1, 0), (True, "idle", 0, 1)],
+    ("calls", "script_runs", "status", "counts"),
+    [
+        ([ResponseIdentity("helper", "@alice:example.org")], [], "busy", (1, 0, 0)),
+        ([], [_script_run("script-1", recoverable=False)], "busy", (0, 1, 0)),
+        ([], [_script_run("script-1", recoverable=True)], "idle", (0, 0, 1)),
+    ],
+    ids=["call", "interruptible-script", "recoverable-script"],
 )
-def test_only_restart_interrupted_script_runs_block_idle(
+def test_calls_and_restart_interrupted_script_runs_block_idle(
     test_client: TestClient,
-    recoverable: bool,
+    calls: list[ResponseIdentity],
+    script_runs: list[ActiveScriptRunInfo],
     status: str,
-    interruptible: int,
-    preserved: int,
+    counts: tuple[int, int, int],
 ) -> None:
-    """Runs a restart would adopt are reported without making the runtime busy."""
-    state = config_lifecycle.app_state(main.app)
-    _bind_runtime(state, script_runs=[_script_run("script-1", recoverable=recoverable)])
+    """A joined call or a run a restart would interrupt is busy; runs a restart would adopt are only reported."""
+    _bind_runtime(config_lifecycle.app_state(main.app), calls=calls, script_runs=script_runs)
     set_runtime_ready()
     payload = test_client.get("/api/responses/activity").json()
     assert payload["status"] == status
-    assert payload["interruptible_script_runs"] == interruptible
-    assert payload["recoverable_script_runs"] == preserved
+    assert (payload["active_calls"], payload["interruptible_script_runs"], payload["recoverable_script_runs"]) == counts
 
 
 @pytest.mark.parametrize("source", ["active_calls", "active_script_runs"])

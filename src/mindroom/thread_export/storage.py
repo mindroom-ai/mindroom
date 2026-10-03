@@ -20,7 +20,7 @@ import yaml
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.path_confinement import MAX_READ_BYTES, open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -36,6 +36,13 @@ _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
 _EXPORTED_AT_LINE = re.compile(r"^  exported_at: .*$", re.MULTILINE)
+# An unchanged file differs from a new export only in that line's timestamp, so the comparison reads at most this much more.
+_EXPORTED_AT_SLACK_BYTES = 64
+# Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
+# so one rebuild reads at most this much; four files at the read cap is far beyond an ordinary room.
+_MAX_ROOM_INDEX_BYTES = 256 << 20
+# The room index lists the thread files a rebuild left out for its read budget, so they do not count as filename drift.
+_UNINDEXED_FILES_KEY = "unindexed_files"
 
 
 logger = get_logger(__name__)
@@ -412,10 +419,10 @@ def _fsync_directory_fd(directory_fd: int) -> None:
         os.fsync(directory_fd)
 
 
-def _read_text_at(directory_fd: int, filename: str) -> str | None:
+def _read_text_at(directory_fd: int, filename: str, *, max_bytes: int = MAX_READ_BYTES) -> str | None:
     """Read a regular file relative to a pinned directory through a capped no-follow open."""
     try:
-        return read_regular_file_within_root(directory_fd, filename).decode("utf-8")
+        return read_regular_file_within_root(directory_fd, filename, max_bytes=max_bytes).decode("utf-8")
     except (OSError, ValueError):
         return None
 
@@ -457,6 +464,22 @@ def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
     if isinstance(msgtype, str) and msgtype != "m.text":
         payload["msgtype"] = msgtype
     return payload
+
+
+def exported_content(message: ResolvedVisibleMessage) -> dict[str, Any]:
+    """Return the only parts of one message's content that its export reads.
+
+    A thread is fetched whole before it is written, so its messages keep these beside their bodies rather than every key their senders chose.
+    """
+    content: dict[str, Any] = {}
+    if isinstance(msgtype := message.content.get("msgtype"), str):
+        content["msgtype"] = msgtype
+    if (reply_to_event_id := message.reply_to_event_id) is not None:
+        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
+    if isinstance(meta := message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+        summary = meta.get("summary")
+        content[_THREAD_SUMMARY_CONTENT_KEY] = {"summary": summary} if isinstance(summary, str) else {}
+    return content
 
 
 def _latest_thread_summary(
@@ -514,14 +537,17 @@ def _load_export_mapping(text: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[str, object]] | None:
-    """Return one index pair from a thread file below a pinned room directory."""
-    text = _read_text_at(directory_fd, filename)
-    if text is None:
+def _thread_index_entry(filename: str, data: bytes) -> tuple[int, dict[str, object]] | None:
+    """Return one index pair from a thread file read up to one byte past the read cap."""
+    whole = len(data) <= MAX_READ_BYTES
+    try:
+        # A file past the read cap was cut there, so only its header before the messages is decoded.
+        text = (data if whole else data.partition(b"\nmessages:")[0]).decode("utf-8")
+    except UnicodeDecodeError:
         return None
-    payload = _load_export_mapping(text)
+    payload = _load_export_mapping(text) if whole else None
     if payload is None:
-        # Parsing is bounded, so a thread too long to parse whole is indexed from the header before its messages.
+        # Reading and parsing are bounded, so a thread too long for either is indexed from the header before its messages.
         header = _load_export_mapping(text.partition("\nmessages:")[0])
         if header is None:
             return None
@@ -553,18 +579,41 @@ def _thread_index_entry_at(directory_fd: int, filename: str) -> tuple[int, dict[
     return last_timestamp, entry
 
 
-def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, object]:
-    """Build one room index document from the recognizable thread files on disk."""
-    indexed = [
-        indexed_entry
-        for filename in sorted(
-            name for name in os.listdir(room_fd) if _is_thread_export_filename(name) and _regular_file_at(room_fd, name)
-        )
-        if (indexed_entry := _thread_index_entry_at(room_fd, filename)) is not None
-    ]
+def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) -> dict[str, object]:
+    """Build one room index document from the recognizable thread files on disk, newest first within the read budget."""
+    candidates: list[tuple[int, str]] = []
+    for name in os.listdir(room_fd):
+        if not _is_thread_export_filename(name):
+            continue
+        with suppress(FileNotFoundError):
+            status = os.stat(name, dir_fd=room_fd, follow_symlinks=False)
+            if stat.S_ISREG(status.st_mode):
+                candidates.append((status.st_mtime_ns, name))
+    newest_first = [name for _, name in sorted(candidates, reverse=True)]
+    indexed: list[tuple[int, dict[str, object]]] = []
+    unindexed: list[str] = []
+    read_bytes = 0
+    for position, filename in enumerate(newest_first):
+        try:
+            # One byte past the cap shows whether the file was cut there.
+            data = read_regular_file_within_root(room_fd, filename, max_bytes=MAX_READ_BYTES + 1, truncate=True)
+        except (OSError, ValueError):
+            continue
+        # Each file is charged before it is parsed, so files that fail to parse spend the budget too.
+        read_bytes += len(data)
+        if read_bytes > _MAX_ROOM_INDEX_BYTES:
+            logger.warning(
+                "Thread export files exceed the room index budget; leaving older threads out",
+                output_dir=str(output_dir),
+                room_key=room.key,
+            )
+            unindexed = sorted(newest_first[position:])
+            break
+        if (indexed_entry := _thread_index_entry(filename, data)) is not None:
+            indexed.append(indexed_entry)
     indexed.sort(key=lambda item: item[0], reverse=True)
     entries = [entry for _, entry in indexed]
-    return {
+    payload: dict[str, object] = {
         "version": _EXPORT_SCHEMA_VERSION,
         "room": {
             "key": room.key,
@@ -575,10 +624,13 @@ def _room_index_payload(room_fd: int, room: ThreadExportRoom) -> dict[str, objec
         "thread_count": len(entries),
         "threads": entries,
     }
+    if unindexed:
+        payload[_UNINDEXED_FILES_KEY] = unindexed
+    return payload
 
 
 def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
-    """Return the thread filename set declared by the current room index."""
+    """Return the thread filename set the current room index indexed or left out for its read budget."""
     text = _read_text_at(room_fd, _ROOM_INDEX_FILENAME)
     if text is None:
         return None
@@ -586,11 +638,19 @@ def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
         payload = json.loads(text)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict) or not isinstance(threads := payload.get("threads"), list):
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(threads := payload.get("threads"), list)
+        or not isinstance(unindexed := payload.get(_UNINDEXED_FILES_KEY, []), list)
+    ):
         return None
     filenames: set[str] = set()
     for entry in threads:
         if not isinstance(entry, dict) or not isinstance(filename := entry.get("file"), str):
+            return None
+        filenames.add(filename)
+    for filename in unindexed:
+        if not isinstance(filename, str):
             return None
         filenames.add(filename)
     return filenames
@@ -634,7 +694,7 @@ def write_room_index(
     try:
         if not thread_files_changed and _room_index_filename_set_matches(room_fd):
             return
-        payload = _room_index_payload(room_fd, room)
+        payload = _room_index_payload(room_fd, output_dir, room)
         text = f"{json.dumps(payload, indent=2)}\n"
         if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) != text:
             _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
@@ -911,7 +971,9 @@ def write_thread_payload(
             allow_unicode=True,
         )
         # Compare text rather than parse it, so even a thread too long for the bounded parser is not rewritten unchanged.
-        existing = _read_text_at(room_fd, filename)
+        # A larger existing file has changed, so the read stops just past the new export's size, even above the read cap.
+        max_bytes = len(text.encode("utf-8")) + _EXPORTED_AT_SLACK_BYTES
+        existing = _read_text_at(room_fd, filename, max_bytes=max_bytes)
         if existing is not None and _without_exported_at(existing) == _without_exported_at(text):
             return False
         _atomic_write_at(room_fd, filename, text)

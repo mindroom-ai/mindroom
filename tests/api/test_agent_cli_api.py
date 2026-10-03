@@ -14,6 +14,7 @@ from agno.tools.toolkit import Toolkit
 from fastapi import FastAPI
 
 from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
+from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
@@ -111,7 +112,7 @@ async def test_internal_factory_key_error_is_not_client_validation(tmp_path: Pat
     app = FastAPI()
     bind_agent_cli_registry(app, registry)
     app.include_router(router)
-    headers = {"Authorization": f"Bearer {grant.raw_token}"}
+    headers = {"Authorization": f"Bearer {grant.raw_token}", AGENT_CLI_WINDOW_HEADER: "bash"}
     async with (
         httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
@@ -185,30 +186,37 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
         transport=httpx.ASGITransport(app=disconnecting_app),
         base_url="http://test",
     ) as client:
-        outside = await client.post("/api/agent-cli/operations", headers=headers, json=payload)
+        window_headers = headers | {AGENT_CLI_WINDOW_HEADER: "parent-bash"}
+        outside = await client.post("/api/agent-cli/operations", headers=window_headers, json=payload)
         assert (outside.status_code, outside.json()) == (
             409,
-            {"detail": "Agent CLI tool commands require an active Bash call"},
+            {
+                "detail": "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running",
+            },
         )
         async with owner._window("parent-bash"):
             lost = asyncio.create_task(
-                client.post("/api/agent-cli/operations", headers=headers | {"x-lose-reply": "1"}, json=payload),
+                client.post("/api/agent-cli/operations", headers=window_headers | {"x-lose-reply": "1"}, json=payload),
             )
             await accepted.wait()
             lost.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await lost
-            first = await client.post("/api/agent-cli/operations", headers=headers, json=payload)
+            first = await client.post("/api/agent-cli/operations", headers=window_headers, json=payload)
             assert first.status_code == 200
             assert first.json()["status"] == "running"
             for changed in [{"arguments": {"value": "changed"}}, {"function": "different"}, {"toolkit": "different"}]:
-                conflict = await client.post("/api/agent-cli/operations", headers=headers, json=payload | changed)
+                conflict = await client.post(
+                    "/api/agent-cli/operations",
+                    headers=window_headers,
+                    json=payload | changed,
+                )
                 assert conflict.status_code == 409
             wrong = await client.get(f"/api/agent-cli/calls/{call_id}", headers=other_headers)
             unknown = await client.get(f"/api/agent-cli/calls/{call_id}")
             assert (wrong.status_code, wrong.json()) == (unknown.status_code, unknown.json())
             await started.wait()
-            retried = await client.post("/api/agent-cli/operations", headers=headers, json=payload)
+            retried = await client.post("/api/agent-cli/operations", headers=window_headers, json=payload)
             assert retried.json()["status"] == "running"
             release.set()
         completed = await client.get(f"/api/agent-cli/calls/{call_id}", headers=headers)

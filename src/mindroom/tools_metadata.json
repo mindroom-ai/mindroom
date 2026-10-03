@@ -2456,11 +2456,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Default headers sent only to the Base URL (JSON format)",
           "label": "Headers",
           "name": "headers",
           "options": null,
-          "placeholder": null,
+          "placeholder": "{\"X-Api-Key\": \"value\"}",
           "required": false,
           "type": "password",
           "validation": null
@@ -6353,7 +6353,7 @@
         {
           "authored_override": true,
           "default": "charts",
-          "description": null,
+          "description": "Directory inside the agent workspace where charts are saved",
           "label": "Output Directory",
           "name": "output_dir",
           "options": null,
@@ -6444,7 +6444,7 @@
       "display_name": "Visualization",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/visualization",
       "executes_code": false,
-      "file_access": "unconfined",
+      "file_access": "none",
       "function_names": [
         "create_bar_chart",
         "create_histogram",
@@ -11956,18 +11956,6 @@
       "auth_provider": null,
       "category": "research",
       "config_fields": [
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Include Summary",
-          "name": "include_summary",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
         {
           "authored_override": true,
           "default": null,

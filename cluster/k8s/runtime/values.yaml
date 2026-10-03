@@ -87,6 +87,12 @@ runtime:
   timezone: ""
   timing: false
 
+# Optional listener serving only /api/script-gateway to background scripts on dedicated Kubernetes workers.
+# Requires workers.backend=kubernetes and the chart's worker egress NetworkPolicy; see "Background Script Gateway" in the README.
+scriptGateway:
+  enabled: false
+  port: 8767
+
 config:
   # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
@@ -94,9 +100,7 @@ config:
   path: ""
   # Optional native initialize-only installation before run, sourced from one contentBundles entry.
   # Requires source: file and path inside its own directory below storage.mountPath.
-  # The chart derives the source directory from the bundle's targetPath plus subPath and the revision
-  # from the image digest plus selected image directory, so a new image or subPath installs the candidate.
-  # Only for image-only trees: the bundle needs overwrite, no seed or volumeMounts, and no other writer.
+  # The source and revision derive from the bundle's targetPath, subPath, and image digest; see "Content Bundles" in the README.
   bootstrapContentBundle:
     # contentBundles[].name to bootstrap from.
     name: ""
@@ -210,14 +214,9 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/sync_continuity
     subPath: sync_continuity
-  # More state PVC subpaths mounted into the runtime container.
-  # The init container creates and chowns them like the built-in subpaths.
-  # subPath defaults to name.
+  # More state PVC subpaths ({name, mountPath, subPath}) mounted into the runtime container and
+  # prepared like the built-in ones; subPath defaults to name. See "Runtime State Storage" in the README.
   extraSubPaths: []
-  # Example: keep the tracking journal off shared network storage.
-  # extraSubPaths:
-  #   - name: tracking
-  #     mountPath: /app/agent_data/tracking
   initPermissions:
     enabled: true
     image: busybox:1.36
@@ -539,12 +538,8 @@ workers:
             drop:
               - ALL
         resources: {}
-        # NetworkPolicy for the vault server pod.
-        # The API port admits only chart-managed clients: dedicated workers when agentVault.enabled,
-        # the control plane when accessTool.enabled, and the bootstrap and access-grants Jobs.
-        # The proxy port admits approved egress pods when approvedEgress.parentProxy is enabled,
-        # and dedicated workers when approvedEgress is disabled.
-        # Egress allows DNS, TCP 80/443, and smtp.port when smtp.enabled.
+        # NetworkPolicy admitting only in-chart vault clients and limiting egress to DNS, TCP 80/443, and
+        # enabled SMTP; see "Agent Vault Server NetworkPolicy" in the README.
         networkPolicy:
           create: true
           # Leave empty to reuse the server name.
@@ -553,16 +548,9 @@ workers:
           extraIngress: []
           # Raw Kubernetes NetworkPolicyEgressRule entries, for example upstream ports beyond 80/443 or an external database.
           extraEgress: []
-      # How the bootstrap and accessGrants Jobs are named and re-run.
-      # fixed keeps stable Job names and runs accessGrants as a Helm
-      # post-install/post-upgrade hook, so only `helm install`/`helm upgrade`
-      # re-run grants and a changed bootstrap pod template needs the old Job
-      # deleted first. contentHash drops the hook and appends a hash of each
-      # Job's rendered pod spec (and grants config) to its name, so applying
-      # rendered manifests with plain `kubectl apply` creates a fresh Job when
-      # those inputs change and leaves the existing Job alone otherwise. The
-      # grants ConfigMap name gets a hash of its config, so each grants Job
-      # reads the config it was created for.
+      # How the bootstrap and accessGrants Jobs are named and re-run: fixed keeps stable names and a
+      # Helm hook for accessGrants; contentHash appends an input hash so plain `kubectl apply` reruns
+      # changed Jobs. See "Agent Vault Access Grants" in the README.
       jobNaming: fixed
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the
@@ -711,10 +699,8 @@ approvedEgress:
     existingSecret: ""
     key: MINDROOM_SANDBOX_PROXY_TOKEN
   allowlist:
-    # The proxy reads the allowlist only at startup.
-    # Changing inline domains rolls the proxy through a checksum annotation.
-    # The chart cannot hash an existingConfigMap; restart the proxy after editing it,
-    # or set a content hash in podAnnotations, for example checksum/allowlist.
+    # Inline domain changes roll the proxy; after editing an existingConfigMap, restart the proxy
+    # or set a content hash in podAnnotations. See "Worker Egress Proxy" in the README.
     domains: []
     existingConfigMap: ""
     key: allowed-domains.txt

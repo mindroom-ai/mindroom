@@ -108,8 +108,8 @@ def test_wait_timeout_returns_pending_receipt(
     ("body", "expected"),
     [
         (
-            b'{"detail":"Agent CLI tool commands require an active Bash call"}',
-            "Agent CLI request was rejected: Agent CLI tool commands require an active Bash call",
+            b'{"detail":"This shell command\'s Bash call has ended; call mindroom-agent from a Bash call that is still running"}',
+            "Agent CLI request was rejected: This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running",
         ),
         (b"<html>conflict</html>", "Agent CLI request was rejected"),
     ],

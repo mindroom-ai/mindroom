@@ -78,6 +78,14 @@ def _run_helm_template(
     )
 
 
+def _values_files(tmp_path: Path, *values: str | dict[str, Any]) -> tuple[Path, ...]:
+    """Write each values document, dedented YAML text or a mapping, to its own file in Helm merge order."""
+    paths = tuple(tmp_path / f"values-{index}.yaml" for index in range(len(values)))
+    for path, value in zip(paths, values, strict=True):
+        path.write_text(textwrap.dedent(value) if isinstance(value, str) else yaml.safe_dump(value), encoding="utf-8")
+    return paths
+
+
 def _render_instance_chart() -> list[dict[str, Any]]:
     return _render_chart(Path("cluster/k8s/instance"))
 
@@ -693,7 +701,6 @@ _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
         ("", "/app/agent_data/config-source", "/bundle"),
         ("environments/prod/", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
         ("environments/prod", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
-        ("environments/dev", "/app/agent_data/config-source/environments/dev", "/bundle/environments/dev"),
     ],
 )
 def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, source: str, image_dir: str) -> None:
@@ -739,10 +746,6 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
         (
             ("config.bootstrapBundleRevision=deploy-2",),
             "config.bootstrapContentBundle cannot be combined with config.bootstrapBundlePath",
-        ),
-        (
-            ("contentBundles[1].image=registry.example.org/team/config:v1",),
-            "contentBundles[1].image must be pinned by full sha256 digest",
         ),
         (
             ("contentBundles[1].overwrite=false",),
@@ -2419,12 +2422,10 @@ def test_tuwunel_chart_termination_grace_period_outlasts_a_migration_step(
     expected: int | None,
 ) -> None:
     """Killing Tuwunel before a migration step finishes leaves the database half migrated, so the default waits."""
-    values_path = tmp_path / "values.yaml"
-    values_path.write_text(yaml.safe_dump(values))
     docs = _render_chart(
         Path("cluster/k8s/tuwunel"),
         "tuwunel.serverName=example.com",
-        values_files=(values_path,),
+        values_files=_values_files(tmp_path, values),
         release_name="mindroom-tuwunel",
     )
     pod_spec = _resource(docs, "Deployment", "mindroom-tuwunel")["spec"]["template"]["spec"]
@@ -2436,12 +2437,10 @@ def test_tuwunel_chart_termination_grace_period_outlasts_a_migration_step(
 @pytest.mark.parametrize("grace", [-1, 1.5, "abc", True, ""])
 def test_tuwunel_chart_rejects_invalid_termination_grace_period(tmp_path: Path, grace: str | float) -> None:
     """Reject grace periods Kubernetes would refuse during rendering rather than installation."""
-    values_path = tmp_path / "values.yaml"
-    values_path.write_text(yaml.safe_dump({"terminationGracePeriodSeconds": grace}))
     completed = _run_helm_template(
         Path("cluster/k8s/tuwunel"),
         "tuwunel.serverName=example.com",
-        values_files=(values_path,),
+        values_files=_values_files(tmp_path, {"terminationGracePeriodSeconds": grace}),
     )
 
     assert completed.returncode != 0
@@ -2574,9 +2573,8 @@ def _agent_vault_server_values(**server: object) -> dict[str, Any]:
 
 
 def _agent_vault_network_policies(tmp_path: Path, values: dict[str, Any]) -> list[dict[str, Any]]:
-    values_path = tmp_path / "values.yaml"
-    values_path.write_text(yaml.safe_dump(values), encoding="utf-8")
-    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
+    values_files = _values_files(tmp_path, values)
+    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=values_files, release_name="mindroom-runtime")
     return [
         doc
         for doc in docs
@@ -2625,7 +2623,6 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
     if approved_egress and not parent_proxy:
         agent_vault["proxyUrl"] = "http://vault-proxy.example.test:8080"
     values: dict[str, Any] = {
-        "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
         "workers": {
             "backend": "kubernetes",
             "sandbox": {"proxyToken": {"value": "test-token"}},
@@ -2645,52 +2642,31 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
 
     [policy] = _agent_vault_network_policies(tmp_path, values)
 
+    def release_pods(name: str, component: str) -> dict[str, Any]:
+        labels = {"app.kubernetes.io/name": name, "app.kubernetes.io/instance": "mindroom-runtime"}
+        return {"podSelector": {"matchLabels": {**labels, "app.kubernetes.io/component": component}}}
+
+    worker_labels = {
+        "mindroom.ai/component": "worker",
+        "app.kubernetes.io/managed-by": "mindroom",
+        "app.kubernetes.io/name": "mindroom-worker",
+        "mindroom.ai/instance": "demo",
+    }
     expected_ingress = [
         {
             "from": [
                 {
                     "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
-                    "podSelector": {
-                        "matchLabels": {
-                            "mindroom.ai/component": "worker",
-                            "app.kubernetes.io/managed-by": "mindroom",
-                            "app.kubernetes.io/name": "mindroom-worker",
-                            "mindroom.ai/instance": "demo",
-                        },
-                    },
+                    "podSelector": {"matchLabels": worker_labels},
                 },
             ],
             "ports": worker_ports,
         },
         {
             "from": [
-                {
-                    "podSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "mindroom-runtime",
-                            "app.kubernetes.io/instance": "mindroom-runtime",
-                            "app.kubernetes.io/component": "runtime",
-                        },
-                    },
-                },
-                {
-                    "podSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "agent-vault-bootstrap",
-                            "app.kubernetes.io/instance": "mindroom-runtime",
-                            "app.kubernetes.io/component": "agent-vault-bootstrap",
-                        },
-                    },
-                },
-                {
-                    "podSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "agent-vault-access-grants",
-                            "app.kubernetes.io/instance": "mindroom-runtime",
-                            "app.kubernetes.io/component": "agent-vault-access-grants",
-                        },
-                    },
-                },
+                release_pods("mindroom-runtime", "runtime"),
+                release_pods("agent-vault-bootstrap", "agent-vault-bootstrap"),
+                release_pods("agent-vault-access-grants", "agent-vault-access-grants"),
             ],
             "ports": [_VAULT_API_PORT],
         },
@@ -2698,17 +2674,7 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
     if squid_reaches_proxy:
         expected_ingress.append(
             {
-                "from": [
-                    {
-                        "podSelector": {
-                            "matchLabels": {
-                                "app.kubernetes.io/name": "mindroom-runtime-egress-proxy",
-                                "app.kubernetes.io/instance": "mindroom-runtime",
-                                "app.kubernetes.io/component": "approved-egress-proxy",
-                            },
-                        },
-                    },
-                ],
+                "from": [release_pods("mindroom-runtime-egress-proxy", "approved-egress-proxy")],
                 "ports": [_VAULT_PROXY_PORT],
             },
         )
@@ -3081,34 +3047,24 @@ def _render_agent_vault_jobs(
     grant_email: str = "maintainer@example.test",
     kubectl_image: str = "registry.example.test/kubectl:1",
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    values_path = tmp_path / f"values-{job_naming}-{grant_email}-{kubectl_image.replace('/', '_')}.yaml"
-    values_path.write_text(
-        yaml.safe_dump(
-            {
-                "workers": {
-                    "backend": "kubernetes",
-                    "sandbox": {"proxyToken": {"value": "test-token"}},
-                    "kubernetes": {
-                        "agentVault": {
-                            "enabled": True,
-                            "cliImage": "infisical/agent-vault:test",
-                            "ownerEmail": "owner@example.test",
-                            "workerCaConfigMapName": "agent-vault-ca",
-                            "jobNaming": job_naming,
-                            "bootstrap": {"enabled": True, "kubectlImage": kubectl_image},
-                            "accessGrants": {
-                                "enabled": True,
-                                "grants": [{"email": grant_email, "workerScope": "shared", "agent": "example-agent"}],
-                            },
-                        },
-                    },
-                },
-                "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
-            },
-        ),
-        encoding="utf-8",
+    agent_vault = {
+        "enabled": True,
+        "cliImage": "infisical/agent-vault:test",
+        "ownerEmail": "owner@example.test",
+        "workerCaConfigMapName": "agent-vault-ca",
+        "jobNaming": job_naming,
+        "bootstrap": {"enabled": True, "kubectlImage": kubectl_image},
+        "accessGrants": {
+            "enabled": True,
+            "grants": [{"email": grant_email, "workerScope": "shared", "agent": "example-agent"}],
+        },
+    }
+    values = {"workers": {"backend": "kubernetes", "kubernetes": {"agentVault": agent_vault}}}
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=_values_files(tmp_path, values),
+        release_name="mindroom-runtime",
     )
-    docs = _render_chart(Path("cluster/k8s/runtime"), values_files=(values_path,), release_name="mindroom-runtime")
     jobs = {doc["metadata"]["labels"]["app.kubernetes.io/component"]: doc for doc in docs if doc["kind"] == "Job"}
     return docs, jobs["agent-vault-access-grants"], jobs["agent-vault-bootstrap"]
 

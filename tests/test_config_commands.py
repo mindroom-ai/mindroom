@@ -1526,6 +1526,39 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected_reply"),
+    [
+        ("get models.default.id.x", "❌ Configuration path not found: `models.default.id.x`"),
+        ("get agents.writer.tools.x", "❌ Configuration path not found: `agents.writer.tools.x`"),
+        ("set agents.writer.role.x 1", "❌ Configuration path error: `agents.writer.role.x`"),
+        ("set models.default.id.0 1", "❌ Configuration path error: `models.default.id.0`"),
+    ],
+)
+async def test_handle_config_command_reports_paths_through_scalars_and_lists(
+    tmp_path: Path,
+    command: str,
+    expected_reply: str,
+) -> None:
+    """A path that steps into a scalar or uses a name on a list gets the path error reply."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {"writer": {"display_name": "Writer", "role": "Writes", "tools": ["shell"]}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, change_info = await handle_config_command(command, _runtime_paths_for_config(config_path))
+
+    assert response.startswith(expected_reply)
+    assert change_info is None
+
+
+@pytest.mark.asyncio
 async def test_handle_config_command_show_tolerates_invalid_plugin_manifest(tmp_path: Path) -> None:
     """Show should keep working when runtime plugin loading degrades."""
     plugin_root = tmp_path / "plugins" / "bad-name"
@@ -1754,7 +1787,13 @@ def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
             "mcp_servers.remote.headers",
             False,
         ),
-        ('set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"', "agents.assistant.role", True),
+        (
+            'set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"',
+            "agents.assistant.role",
+            False,
+        ),
+        ("set defaults.streaming.update_interval 0.5", "defaults.streaming.update_interval", True),
+        ("set defaults.thread_summary_temperature 0.3", "defaults.thread_summary_temperature", True),
     ],
 )
 async def test_handle_config_command_set_previews_and_applies_ordinary_values(
@@ -1763,7 +1802,7 @@ async def test_handle_config_command_set_previews_and_applies_ordinary_values(
     path: str,
     withheld: bool,
 ) -> None:
-    """Every valid value previews and applies; only values redaction masks are withheld from room state."""
+    """Every valid value previews and applies; values redaction masks or room state cannot carry are withheld."""
     config_path = _write_config_with_secrets(tmp_path)
     runtime_paths = _runtime_paths_for_config(config_path)
 
@@ -2066,6 +2105,43 @@ async def test_handle_config_command_get_shows_typed_fields_with_credential_like
     assert "authorization_url: https://auth.example.test/authorize" in oauth
     assert "authorization_server: https://issuer.example.test" in oauth
     assert "***redacted***" not in authorization + grantable + oauth
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_get_shows_prose_as_written_and_masks_credentials(tmp_path: Path) -> None:
+    """Words that log patterns take for tokens stay visible in typed prose, while real credentials stay masked."""
+    prose = [
+        "Never share the API key with anyone",
+        "Explain how bearer authentication works",
+        "Authenticate with a bearer JWT from the vault",
+        "Look up the API key ID in the vault",
+        "Keep the API key server-side",
+        "Use sk-learn for ML",
+    ]
+    generated_key = "sk-Fake0Key1Fake2Key3"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "writer": {
+                        "display_name": "Writer",
+                        "role": "Writes",
+                        "instructions": [*prose, f"Call it with API key: {generated_key}", "Use bearer abc123def456"],
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    response, _ = await handle_config_command("get agents.writer.instructions", _runtime_paths_for_config(config_path))
+
+    for line in prose:
+        assert f"- {line}\n" in response
+    assert "- 'Call it with API key: ***redacted***'" in response
+    assert "- Use bearer ***redacted***" in response
 
 
 @pytest.mark.asyncio

@@ -255,6 +255,35 @@ def test_media_paths_follow_file_access(
     assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]
 
 
+@pytest.mark.parametrize(
+    ("video_path", "expected_output"),
+    [
+        ("input.mp4", "input_captioned.mp4"),
+        ("v1.2/clip", "v1.2/clip_captioned.mp4"),
+        ("./v1.2/clip", "v1.2/clip_captioned.mp4"),
+        ("v1.2/.clip", "v1.2/.clip_captioned.mp4"),
+    ],
+)
+def test_default_caption_output_lands_next_to_the_input(
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    tmp_path: Path,
+    video_path: str,
+    expected_output: str,
+) -> None:
+    """Without an output path, the captioned video is named after the input file and written beside it."""
+    toolkit, _factories = caption_renderer
+    (tmp_path / "v1.2").mkdir()
+    for name in ("v1.2/clip", "v1.2/.clip"):
+        (tmp_path / name).write_bytes(b"input video")
+    (tmp_path / "empty.srt").write_text("", encoding="utf-8")
+
+    assert toolkit.embed_captions(video_path, "empty.srt") == expected_output
+    assert (tmp_path / expected_output).read_bytes() == b"rendered"
+    assert sorted(path.name for path in tmp_path.glob("*_captioned.mp4")) == (
+        ["input_captioned.mp4"] if expected_output == "input_captioned.mp4" else []
+    )
+
+
 def test_oversized_inputs_fail_before_staging_past_the_limit(
     caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,

@@ -28,6 +28,7 @@ from mindroom.matrix.conversation_hydration import (
 )
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
+from mindroom.thread_export import projected_history
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
     ThreadExportIncompleteError,
@@ -39,6 +40,8 @@ from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+
+    from nio.api import RelationshipType
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -158,6 +161,7 @@ class FakeHomeserver:
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
@@ -165,12 +169,18 @@ class FakeHomeserver:
         """Yield one event's relations in the order the caller asked for.
 
         Newest first is what the bounded walk rests on, so the fake honours the
-        direction rather than accepting and ignoring it.
+        direction rather than accepting and ignoring it. A relation type asks
+        for the event's direct relations of that type only.
         """
         del room_id, recurse, minimum_recursion_depth
         self.relation_calls += 1
+        direct = None if rel_type is None else {"rel_type": rel_type.value, "event_id": event_id}
         sources = sorted(
-            self.relations.get(event_id, []),
+            (
+                source
+                for source in self.relations.get(event_id, [])
+                if direct is None or source["content"].get("m.relates_to") == direct
+            ),
             key=lambda source: (source["origin_server_ts"], source["event_id"]),
             reverse=direction is nio.MessageDirection.back,
         )
@@ -587,7 +597,7 @@ async def test_an_unreadable_sidecar_exports_its_preview_marked_incomplete(
 async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     router: PrincipalStore,
 ) -> None:
-    """The summary lives in message content, and the projection round-trips it whole."""
+    """The summary lives in message content, and the export keeps it and nothing it does not write."""
     homeserver = FakeHomeserver()
     serve_thread(
         homeserver,
@@ -601,7 +611,9 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
                 thread_id=ROOT,
                 extra_content={
                     "msgtype": "m.notice",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": ROOT, "m.in_reply_to": {"event_id": ROOT}},
                     THREAD_SUMMARY_KEY: {"version": 1, "summary": "Deploy pipeline fix"},
+                    "formatted_body": "<p>Deploy pipeline fix</p>",
                 },
             ),
         ],
@@ -609,7 +621,39 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
 
     messages = await export(reader_for(router, homeserver))
 
-    assert messages[1].content[THREAD_SUMMARY_KEY] == {"version": 1, "summary": "Deploy pipeline fix"}
+    assert messages[1].content == {
+        "msgtype": "m.notice",
+        "m.relates_to": {"m.in_reply_to": {"event_id": ROOT}},
+        THREAD_SUMMARY_KEY: {"summary": "Deploy pipeline fix"},
+    }
+    assert messages[1].reply_to_event_id == ROOT
+
+
+@pytest.mark.parametrize("character", ["x", "€"])
+async def test_a_thread_fails_as_too_large_once_it_holds_twice_the_read_cap(
+    router: PrincipalStore,
+    monkeypatch: pytest.MonkeyPatch,
+    character: str,
+) -> None:
+    """Pages of three messages each fit, and a thread past the read cap exports until its UTF-8 content passes twice that."""
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=1_000),
+        [
+            raw(f"$reply-{index:02d}:example.org", character * 1_000, ts=1_000 + index, thread_id=ROOT)
+            for index in range(1, 12)
+        ],
+    )
+    reader = reader_for(router, homeserver)
+    messages = await export(reader, page_messages=3)
+    held = sum(len(json.dumps(message.to_dict(), ensure_ascii=False).encode()) for message in messages)
+
+    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", held * 2 // 3)
+    assert len(await export(reader, page_messages=3)) == 12
+    monkeypatch.setattr(projected_history, "MAX_READ_BYTES", held // 3)
+    with pytest.raises(ThreadExportIncompleteError, match="too large to export"):
+        await export(reader, page_messages=3)
 
 
 async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalStore) -> None:

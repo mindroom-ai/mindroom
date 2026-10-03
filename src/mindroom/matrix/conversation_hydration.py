@@ -45,10 +45,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import nio
+from nio.api import RelationshipType
 
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
@@ -484,6 +485,13 @@ def _reduce_current_revision(
     return winner
 
 
+def _edited_by_sender(original: ProjectedEvent, relations: Sequence[ProjectedEvent]) -> bool:
+    """Return whether the relations hold an edit of one message by its own sender."""
+    return any(
+        relation.replaces_event_id == original.event_id and relation.sender == original.sender for relation in relations
+    )
+
+
 @dataclass
 class ConversationHydrator:
     """One-time conversation hydration and point refetch against Matrix."""
@@ -889,9 +897,11 @@ class ConversationHydrator:
         than its logical message count, and all of it used to be accumulated in
         one list and written in one projection transaction.
 
-        The request ceiling has no counterpart. This is a single
-        ``room_get_event_relations`` call; nio paginates inside it and yields
-        events, not pages, so there is nothing here to count.
+        The request ceiling has no counterpart. nio paginates inside each
+        ``room_get_event_relations`` call and yields events, not pages, so
+        there is nothing here to count. The walk is one such call. A walk that
+        is not complete, because it stopped at a bound or met an unreadable
+        relation, may add one edits-only call for the root.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -921,12 +931,39 @@ class ConversationHydrator:
             window_messages=self.prompt_window_messages,
             unreadable=unreadable,
         )
+        events.extend(relations.events)
+        if (
+            root_projected is not None
+            and not relations.complete
+            and not _edited_by_sender(root_projected, relations.events)
+        ):
+            # The root sits outside the window, but an early edit of it sorts
+            # behind every newer reply, so a walk that stopped short may never
+            # reach it. Its direct edits are fetched on their own, so the root
+            # is not installed at a stale revision.
+            root_edits = await self._fetch_relations(
+                room_id,
+                thread_id,
+                window_messages=None,
+                unreadable=unreadable,
+                edits_only=True,
+            )
+            events.extend(root_edits.events)
+            if root_edits.ceiling_reached and not _edited_by_sender(root_projected, root_edits.events):
+                # Edits arrive newest first, so anyone in the room can push the
+                # sender's own past the ceiling with edits of theirs. The root,
+                # first in the walk, gets the notice a refetch gives rather than
+                # passing as unedited.
+                events[0] = replace(
+                    root_projected,
+                    content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
+                )
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
         # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
-            events=(*events, *relations.events),
+            events=tuple(events),
             complete=relations.complete and readable_root is not None,
             unreadable=relations.unreadable,
         )
@@ -938,8 +975,9 @@ class ConversationHydrator:
         *,
         window_messages: int | None,
         unreadable: _UnreadableHistory | None = None,
+        edits_only: bool = False,
     ) -> _Walk:
-        """Walk the relation tree newest first, without filtering by relation type.
+        """Walk the relation tree newest first, filtering by type only for ``edits_only``.
 
         Filtering by ``m.thread`` would miss the edits and replies hanging off
         thread members, which is exactly the content a conversation is made of.
@@ -963,6 +1001,10 @@ class ConversationHydrator:
         ``window_messages`` is ``None`` for a point refetch, which is one logical
         message and has no window: a threaded reply among its relations must not
         end the walk before the edit it came for arrives.
+
+        ``edits_only`` walks just the event's direct ``m.replace`` relations,
+        for a message whose edits a windowed walk of the whole tree may never
+        reach.
         """
         events: list[ProjectedEvent] = []
         admitted = 0
@@ -972,12 +1014,21 @@ class ConversationHydrator:
         if unreadable is None:
             unreadable = _UnreadableHistory()
         client = self._client()
-        relations = client.room_get_event_relations(
-            room_id=room_id,
-            event_id=event_id,
-            direction=nio.MessageDirection.back,
-            recurse=True,
-            minimum_recursion_depth=self.required_recursion_depth,
+        relations = (
+            client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                rel_type=RelationshipType.replacement,
+                direction=nio.MessageDirection.back,
+            )
+            if edits_only
+            else client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                direction=nio.MessageDirection.back,
+                recurse=True,
+                minimum_recursion_depth=self.required_recursion_depth,
+            )
         )
         try:
             # Closed explicitly, because every exit below but exhaustion leaves

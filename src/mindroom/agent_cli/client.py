@@ -10,7 +10,12 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from uuid import UUID
 
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
-from mindroom.agent_cli.shell_contract import AGENT_CLI_TOKEN_ENV, AGENT_CLI_URL_ENV
+from mindroom.agent_cli.shell_contract import (
+    AGENT_CLI_TOKEN_ENV,
+    AGENT_CLI_URL_ENV,
+    AGENT_CLI_WINDOW_ENV,
+    AGENT_CLI_WINDOW_HEADER,
+)
 
 
 class AgentCliUnavailableError(RuntimeError):
@@ -42,6 +47,7 @@ class AgentCliClient:
     def __init__(self) -> None:
         self._url = os.environ.get(AGENT_CLI_URL_ENV, "").rstrip("/")
         self._token = os.environ.get(AGENT_CLI_TOKEN_ENV, "")
+        self._window = os.environ.get(AGENT_CLI_WINDOW_ENV)
         parsed = urlsplit(self._url)
         try:
             if (
@@ -73,10 +79,13 @@ class AgentCliClient:
         return self._request(f"/api/agent-cli/calls/{UUID(call_id)}")
 
     def _request(self, route: str, data: bytes | None = None) -> dict[str, object]:
+        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        if self._window:
+            headers[AGENT_CLI_WINDOW_HEADER] = self._window
         request = Request(  # noqa: S310 - HTTP(S) origin validated at construction.
             self._url + route,
             data=data,
-            headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with self._opener.open(request, timeout=30) as response:

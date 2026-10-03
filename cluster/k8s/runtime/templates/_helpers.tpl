@@ -437,6 +437,23 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.scriptGatewayName" -}}
+{{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.workerPodLabels" -}}
+mindroom.ai/component: worker
+app.kubernetes.io/managed-by: mindroom
+app.kubernetes.io/name: mindroom-worker
+{{- with .Values.workers.kubernetes.extraLabels }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{- define "mindroom-runtime.scriptGatewayHost" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "mindroom-runtime.scriptGatewayName" .) .Release.Namespace -}}
+{{- end -}}
+
 {{/*
 Normalize a list value that may also be written as a map keyed by entry.
 Helm replaces lists wholesale across values files but merges maps key by key, so the map form lets a later file override or remove one entry.
@@ -507,13 +524,16 @@ Arguments: list <root context> <list or map> <values path>.
 {{- $_ := set $extraEnv "http_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
-{{- with .Values.egressProxy.noProxy -}}
 {{- $noProxy := list -}}
-{{- range . -}}
+{{- range .Values.egressProxy.noProxy -}}
 {{- $noProxy = append $noProxy (tpl (toString .) $) -}}
 {{- end -}}
-{{- $_ := set $extraEnv "NO_PROXY" (join "," $noProxy) -}}
-{{- $_ := set $extraEnv "no_proxy" (join "," $noProxy) -}}
+{{- if .Values.scriptGateway.enabled -}}
+{{- $noProxy = append $noProxy (include "mindroom-runtime.scriptGatewayHost" .) -}}
+{{- end -}}
+{{- with $noProxy -}}
+{{- $_ := set $extraEnv "NO_PROXY" (join "," .) -}}
+{{- $_ := set $extraEnv "no_proxy" (join "," .) -}}
 {{- end -}}
 {{- end -}}
 {{- range $key, $value := .Values.workers.kubernetes.extraEnv -}}

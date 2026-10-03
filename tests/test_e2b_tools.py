@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
@@ -16,6 +16,7 @@ from e2b_code_interpreter.models import Execution, Result
 import mindroom.custom_tools.e2b as e2b_module
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.e2b import MindRoomE2BTools
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.metadata import get_tool_by_name
 from tests.conftest import test_runtime_paths
 
@@ -49,8 +50,8 @@ class _FakeFiles:
     stored: dict[str, bytes] = field(default_factory=dict)
     reads: list[str] = field(default_factory=list)
 
-    def write(self, path: str, data: BinaryIO) -> _WriteInfo:
-        self.stored[path] = data.read()
+    def write(self, path: str, data: bytes) -> _WriteInfo:
+        self.stored[path] = data
         return _WriteInfo(path=f"/home/user/{path}")
 
     def read(self, path: str, format: str = "text") -> bytearray:  # noqa: A002
@@ -205,6 +206,19 @@ def test_upload_rejects_non_regular_files(
     tool = make_tool(workspace)
 
     assert "regular file" in _error(tool.upload_file(name))
+    assert _files(tool).stored == {}
+
+
+def test_upload_refuses_oversized_file_before_reading(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A sparse workspace file above the shared read limit is refused instead of buffered whole."""
+    with (workspace / "huge.bin").open("wb") as file:
+        file.truncate(MAX_READ_BYTES + 1)
+    tool = make_tool(workspace)
+
+    assert "size limit" in _error(tool.upload_file("huge.bin"))
     assert _files(tool).stored == {}
 
 
