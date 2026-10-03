@@ -13,6 +13,8 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -92,6 +94,7 @@ from mindroom.workers.backends.kubernetes_resources import worker_auth_token
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import requires_linux
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1367,7 +1370,7 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
     def _timeout(*_args: object, **_kwargs: object) -> object:
         raise subprocess.TimeoutExpired(cmd=["python"], timeout=5.0)
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", _timeout)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _timeout)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1425,7 +1428,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1487,7 +1490,7 @@ def test_subprocess_python_runtime_payload_omits_credentials_encryption_key(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -1615,7 +1618,7 @@ def test_subprocess_execution_preloads_encrypted_persisted_config_without_runtim
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -2185,7 +2188,7 @@ def test_subprocess_serialization_boundary_omits_unrelated_agents(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
@@ -2717,6 +2720,73 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     data = response.json()
     assert data["ok"] is True
     assert '"result": 3' in data["result"]
+
+
+def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancel can reach the runner before its own request; that request then does not run, once."""
+    _set_sandbox_token(monkeypatch)
+    request = {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "kwargs": {}, "request_id": "early"}
+
+    cancel = runner_client.post(
+        "/api/sandbox-runner/execute/cancel",
+        headers=SANDBOX_HEADERS,
+        json={"request_id": "early"},
+    )
+    stopped = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+    retried = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+
+    assert cancel.json() == {"cancelled": False}
+    assert stopped.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert retried.json()["ok"] is True
+
+
+@requires_linux()
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess", "forkserver"])
+def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """A cancelled request ends as a cancelled tool call, and its killed process is not a worker failure."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _refresh_runner_app_from_env()
+    failures: list[object] = []
+    monkeypatch.setattr(
+        sandbox_runner_module.sandbox_worker_prep,
+        "record_worker_failure",
+        lambda *args: failures.append(args),
+    )
+    pid_file = tmp_path / "command.pid"
+    request = {
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"]],
+        "kwargs": {"timeout": 60},
+        "request_id": "running",
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(runner_client.post, "/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() or not pid_file.read_text().strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        cancel = runner_client.post(
+            "/api/sandbox-runner/execute/cancel",
+            headers=SANDBOX_HEADERS,
+            json={"request_id": "running"},
+        )
+        response = running.result(timeout=30)
+
+    assert cancel.json() == {"cancelled": True}
+    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert not failures
+    asyncio.run(assert_linux_pid_not_running(int(pid_file.read_text())))
 
 
 def test_sandbox_runner_execute_returns_422_for_invalid_runtime_config(
@@ -5487,10 +5557,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
         cmd: list[str],
         **run_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        assert run_kwargs["capture_output"] is True
-        assert run_kwargs["text"] is True
         assert isinstance(run_kwargs["timeout"], float)
-        assert run_kwargs["check"] is False
         request_input = str(run_kwargs["input"])
         env = run_kwargs["env"]
         cwd = run_kwargs["cwd"]
@@ -5519,7 +5586,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
 
     with (
         patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create),
-        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+        patch("mindroom.api.sandbox_runner._run_request_subprocess", new=fake_run),
     ):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
@@ -5577,7 +5644,7 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
 
     with (
         patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_create),
-        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+        patch("mindroom.api.sandbox_runner._run_request_subprocess", new=fake_run),
     ):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
@@ -6366,7 +6433,7 @@ def test_worker_routed_python_subprocess_cwd_is_agent_workspace(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="python",
@@ -6434,7 +6501,7 @@ def test_worker_routed_python_subprocess_creates_missing_workspace_cwd(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="python",
@@ -6946,12 +7013,9 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
         cwd = kwargs["cwd"]
         assert cwd is None or isinstance(cwd, str)
         captured_envelope["cwd"] = cwd
-        assert kwargs["capture_output"] is True
-        assert kwargs["text"] is True
         timeout = kwargs["timeout"]
         assert isinstance(timeout, int | float)
         assert timeout >= 1.0
-        assert kwargs["check"] is False
         response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
         return subprocess.CompletedProcess(
             args=_command,
@@ -6960,7 +7024,7 @@ def test_workspace_env_hook_subprocess_serializes_overlay_execution_env(
             stderr=sandbox_protocol_module.response_marker_payload(response.model_dump_json()),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_subprocess_run)
 
     request = sandbox_runner_module.SandboxRunnerExecuteRequest(
         tool_name="shell",

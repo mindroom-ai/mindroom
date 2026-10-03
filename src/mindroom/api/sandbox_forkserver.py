@@ -21,6 +21,7 @@ removed on recycle, shutdown, or orphan exit.
 from __future__ import annotations
 
 import atexit
+import functools
 import hashlib
 import json
 import math
@@ -190,8 +191,12 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         timeout_seconds: float,
+        bind_stop: Callable[[Callable[[], None]], None] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Execute one prepared envelope in a fresh fork of the warm template."""
+        """Execute one prepared envelope in a fresh fork of the warm template.
+
+        ``bind_stop`` receives a function that kills the forked child once it exists.
+        """
         deadline = time.monotonic() + timeout_seconds
         key = python_executable or sys.executable
         fingerprint = _template_fingerprint(key, template_env)
@@ -216,6 +221,7 @@ class _SandboxForkserver:
             request_cwd=request_cwd,
             envelope=envelope,
             deadline=deadline,
+            bind_stop=bind_stop,
         )
 
     def shutdown(self) -> None:
@@ -352,6 +358,7 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         deadline: float,
+        bind_stop: Callable[[Callable[[], None]], None] | None,
     ) -> subprocess.CompletedProcess[str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -384,6 +391,8 @@ class _SandboxForkserver:
             reader = _SocketLineReader(conn, deadline)
             try:
                 child_pid = int(json.loads(reader.read_line())["pid"])
+                if bind_stop is not None:
+                    bind_stop(functools.partial(self._kill_child, child_pid))
                 response = json.loads(reader.read_line())
                 returncode = int(response["returncode"])
                 stdout_text = str(response["stdout"])

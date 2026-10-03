@@ -5,11 +5,13 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import contextlib
 import contextvars
 import functools
 import hashlib
 import json
 import os
+import signal
 import stat
 import sys
 import threading
@@ -93,6 +95,7 @@ from tests.conftest import (
     make_relation_lookup,
     requires_linux,
 )
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -5504,6 +5507,8 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
 def _forward_proxy_to_seeded_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    runner_execution_mode: str = "inprocess",
 ) -> tuple[RuntimePaths, Path, list[dict[str, Any]]]:
     """Forward the primary's proxy calls to a real runner app whose seed config lacks the live `mind` agent."""
     storage_root = tmp_path / "storage"
@@ -5513,7 +5518,10 @@ def _forward_proxy_to_seeded_runner(
     runner_paths = resolve_runtime_paths(
         config_path=seed_config_path,
         storage_path=storage_root,
-        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": runner_execution_mode,
+        },
     )
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runner_paths, runner_token=_TEST_AUTH_TOKEN)
     runner = TestClient(sandbox_runner_app)
@@ -5613,6 +5621,70 @@ async def test_minimal_cli_environment_reaches_the_agents_worker_shell(
     assert isinstance(ordinary, str)
     assert ordinary.endswith("|")
     assert "response-grant" not in json.dumps(sent_payloads[-1])
+
+
+@requires_linux()
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner_execution_mode", ["inprocess", "subprocess", "forkserver"])
+async def test_cancelling_a_worker_shell_call_stops_its_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner_execution_mode: str,
+) -> None:
+    """Stopping a response stops the command its worker shell call started, not only the primary's wait."""
+    primary_paths, workspace, _sent_payloads = _forward_proxy_to_seeded_runner(
+        monkeypatch,
+        tmp_path,
+        runner_execution_mode=runner_execution_mode,
+    )
+    live_config = _live_primary_config(primary_paths)
+    workspace.mkdir(parents=True)
+    tool = get_tool_by_name(
+        "shell",
+        primary_paths,
+        runtime_config=live_config,
+        tool_init_overrides={"base_dir": str(workspace)},
+        worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+    pid_file = tmp_path / "command.pid"
+
+    with tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)):
+        call = asyncio.create_task(entrypoint(["bash", "-c", f"echo $$ > {pid_file}; exec sleep 30"], timeout=60))
+        async with asyncio.timeout(30):
+            while not pid_file.exists() or not pid_file.read_text().strip():  # noqa: ASYNC110 - the worker command signals only through its pid file
+                await asyncio.sleep(0.05)
+        pid = int(pid_file.read_text())
+        call.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await call
+
+    try:
+        await assert_linux_pid_not_running(pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_worker_call_abandoned_before_dispatch_is_never_sent() -> None:
+    """A call cancelled while its worker is still being prepared never reaches the worker."""
+    cancellation = sandbox_proxy_module._WorkerCallCancellation()
+    cancellation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        cancellation.arm(lambda: None)
+
+
+def test_worker_call_abandoned_after_dispatch_asks_the_runner_to_stop() -> None:
+    """Cancelling a dispatched call sends its stop request without making the caller wait for it."""
+    stopped = threading.Event()
+    cancellation = sandbox_proxy_module._WorkerCallCancellation()
+    cancellation.arm(stopped.set)
+
+    cancellation.cancel()
+
+    assert stopped.wait(5)
 
 
 def test_static_runner_saves_attachment_for_agent_added_after_seeding(

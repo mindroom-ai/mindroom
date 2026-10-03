@@ -1839,6 +1839,11 @@ path = "mindroom.api.sandbox_protocol"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.sandbox_request_cancellation"
+depends_on = []
+visibility = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
 path = "mindroom.api.worker_responses"
 depends_on = []
 
@@ -1872,6 +1877,7 @@ depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
     "mindroom.api.sandbox_protocol",
+    "mindroom.api.sandbox_request_cancellation",
     "mindroom.api.sandbox_worker_prep",
     "mindroom.api.worker_responses",
     "mindroom.config.main",

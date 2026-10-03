@@ -23,7 +23,14 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, shell_supervisor, yaml_io
-from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
+from mindroom.api import (
+    sandbox_env_assembly,
+    sandbox_exec,
+    sandbox_forkserver,
+    sandbox_protocol,
+    sandbox_request_cancellation,
+    sandbox_worker_prep,
+)
 from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
@@ -466,6 +473,20 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution_env: dict[str, str] = Field(default_factory=dict)
     extra_env_passthrough: str | None = None
     config_snapshot: dict[str, Any] | None = None
+    # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
+    request_id: str | None = Field(default=None, max_length=64)
+
+
+class SandboxRunnerCancelRequest(BaseModel):
+    """Stop one execute request the primary no longer waits for."""
+
+    request_id: str = Field(max_length=64)
+
+
+class SandboxRunnerCancelResponse(BaseModel):
+    """Whether the request was running when its cancel arrived."""
+
+    cancelled: bool
 
 
 class PreparedSandboxRunnerExecuteRequest(BaseModel):
@@ -1272,11 +1293,18 @@ def _request_preparation_failure_response(
     )
 
 
+def _cancelled_response() -> SandboxRunnerExecuteResponse:
+    return SandboxRunnerExecuteResponse(ok=False, error="Tool call was cancelled.", failure_kind="tool")
+
+
 def _subprocess_failure_response(
     request: SandboxRunnerExecuteRequest | PreparedSandboxRunnerExecuteRequest,
     error: str,
     runtime_paths: RuntimePaths,
 ) -> SandboxRunnerExecuteResponse:
+    if sandbox_request_cancellation.request_cancelled():
+        # The primary stopped this call, so its killed process says nothing about worker health.
+        return _cancelled_response()
     sandbox_worker_prep.record_worker_failure(request.worker_key, error, runtime_paths)
     return SandboxRunnerExecuteResponse(ok=False, error=error, failure_kind="worker")
 
@@ -1322,6 +1350,7 @@ def _execute_request_forkserver(
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
+            bind_stop=sandbox_request_cancellation.bind_request_stop,
         )
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
@@ -1437,16 +1466,13 @@ def _execute_request_subprocess_sync(
             return forkserver_response
 
     try:
-        completed = subprocess.run(
+        completed = _run_request_subprocess(
             sandbox_exec.subprocess_worker_command(
                 _SUBPROCESS_WORKER_ARG,
                 python_executable=subprocess_context.python_executable,
             ),
             input=envelope,
-            capture_output=True,
-            text=True,
             timeout=timeout_seconds,
-            check=False,
             env=subprocess_context.subprocess_env,
             cwd=subprocess_context.subprocess_cwd,
         )
@@ -1456,6 +1482,34 @@ def _execute_request_subprocess_sync(
         return _subprocess_failure_response(request, f"Failed to start sandbox subprocess: {exc}", runtime_paths)
 
     return _parse_subprocess_response(request, runtime_paths, completed)
+
+
+def _run_request_subprocess(
+    args: list[str],
+    *,
+    input: str,  # noqa: A002 - mirrors subprocess.run
+    timeout: float,
+    env: dict[str, str] | None,
+    cwd: str | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one request child like ``subprocess.run``, killable by the primary's cancel."""
+    with subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=cwd,
+    ) as process:
+        sandbox_request_cancellation.bind_request_stop(process.kill)
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 async def _execute_request_subprocess(
@@ -1939,12 +1993,25 @@ async def _execute_worker_browser(
     return SandboxRunnerExecuteResponse(ok=True, result=serialized_result)
 
 
+@router.post("/execute/cancel", response_model=SandboxRunnerCancelResponse)
+async def cancel_tool_call(payload: SandboxRunnerCancelRequest) -> SandboxRunnerCancelResponse:
+    """Stop one execute request; a cancel that arrives first stops that request on arrival."""
+    return SandboxRunnerCancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
+
+
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branches
+async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+    """Execute a tool function locally and return the serialized result, unless the primary cancels it."""
+    with sandbox_request_cancellation.track_request(payload.request_id):
+        if sandbox_request_cancellation.request_cancelled():
+            return _cancelled_response()
+        return await _execute_tool_call(request, payload)
+
+
+async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branches
     request: Request,
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
-    """Execute a tool function locally and return the serialized result."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
@@ -2035,13 +2102,37 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
             config=config,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess(
+    return await _execute_request_inprocess_cancellable(
         payload,
         runtime_paths,
         config,
         prepared_worker,
         runner_token=runner_token,
     )
+
+
+async def _execute_request_inprocess_cancellable(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
+    *,
+    runner_token: str | None,
+) -> SandboxRunnerExecuteResponse:
+    """Run one in-process request as a task the primary's cancel can stop."""
+    call = asyncio.create_task(
+        _execute_request_inprocess(request, runtime_paths, config, prepared_worker, runner_token=runner_token),
+    )
+    loop = asyncio.get_running_loop()
+    sandbox_request_cancellation.bind_request_stop(lambda: loop.call_soon_threadsafe(call.cancel))
+    try:
+        return await call
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            call.cancel()
+            raise
+        return _cancelled_response()
 
 
 if __name__ == "__main__":

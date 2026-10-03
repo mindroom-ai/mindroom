@@ -539,7 +539,7 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
             stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
         )
 
-    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(

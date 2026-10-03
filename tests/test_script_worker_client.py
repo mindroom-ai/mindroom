@@ -254,4 +254,5 @@ def test_worker_api_endpoint_adds_script_operations_without_changing_existing_ur
     assert worker_api_endpoint(handle, "save-attachment") == "http://worker.test/api/sandbox-runner/save-attachment"
     assert worker_api_endpoint(handle, "script-run") == "http://worker.test/api/sandbox-runner/scripts/run"
     assert worker_api_endpoint(handle, "script-status") == "http://worker.test/api/sandbox-runner/scripts"
+    assert worker_api_endpoint(handle, "execute-cancel") == "http://worker.test/api/sandbox-runner/execute/cancel"
     assert worker_api_endpoint(handle, "script-cancel") == "http://worker.test/api/sandbox-runner/scripts"
