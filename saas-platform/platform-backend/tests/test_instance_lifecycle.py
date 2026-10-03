@@ -383,6 +383,30 @@ async def test_plan_redeploy_never_revokes_the_key_another_replica_recorded_but_
     assert platform.instance()["status"] == "provisioning"
 
 
+@pytest.mark.asyncio
+async def test_resume_keeps_the_instance_held_when_its_account_deletion_lands_meanwhile(platform: Platform) -> None:
+    now = datetime.now(UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active"))
+    platform.db.tables["instances"].append(_instance("stopped", **_held(now)))
+    start = platform.start.side_effect
+
+    async def start_while_the_account_deletion_lands(instance_id: Any) -> dict[str, Any]:  # noqa: ANN401
+        # A deletion request on another backend replica marks the account while this replica starts the instance.
+        _pending_deletion(platform, days_ago=0)
+        return await start(instance_id)
+
+    platform.start.side_effect = start_while_the_account_deletion_lands
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
+
+    platform.start.assert_awaited_once_with(7)
+    assert summary.instances_resumed == 0
+    assert platform.scaled_down()
+    assert [key_call.kwargs for key_call in platform.set_key_disabled.await_args_list] == [{"disabled": True}]
+    assert platform.instance()["status"] == "stopped"
+    assert platform.instance()["lifecycle_stopped_at"] is not None
+
+
 def test_manually_stopped_instance_of_entitled_subscription_stays_stopped(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active"))
     platform.db.tables["instances"].append(_instance("stopped"))
@@ -2031,8 +2055,12 @@ def test_account_pending_deletion_cannot_provision_or_start_instances(
 
 
 @pytest.mark.asyncio
-async def test_an_instance_provisioned_for_an_account_pending_deletion_stays_stopped() -> None:
-    # The deletion request's hold ran before this instance row existed, so only the account says to hold it.
+@pytest.mark.parametrize("resume_lifecycle_hold", [False, True])
+async def test_an_instance_provisioned_for_an_account_pending_deletion_stays_stopped(
+    *, resume_lifecycle_hold: bool
+) -> None:
+    # The deletion request's hold ran before this instance row existed, or after a resume read the account, so only
+    # the account says to hold it.
     db = FakeSupabase(
         {
             "accounts": [{"id": ACCOUNT_ID, "deleted_at": "2026-09-28T03:00:00+00:00"}],
@@ -2047,7 +2075,12 @@ async def test_an_instance_provisioned_for_an_account_pending_deletion_stays_sto
         patch(f"{_SERVICE}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
         patch(f"{_SERVICE}.wait_for_deployment_ready", AsyncMock(return_value=True)),
     ):
-        result = await provision_instance(db, data={**_REPROVISION_7, "tier": "byok"}, background_tasks=None)
+        result = await provision_instance(
+            db,
+            data={**_REPROVISION_7, "tier": "byok"},
+            background_tasks=None,
+            resume_lifecycle_hold=resume_lifecycle_hold,
+        )
 
     assert "kept stopped" in result["message"]
     assert db.row("instances", instance_id=7)["status"] == "stopped"

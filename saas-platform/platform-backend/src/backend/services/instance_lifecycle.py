@@ -164,7 +164,7 @@ async def reconcile_subscription_instances(
                 if not entitled:
                     await _hold(sb, instance, subscription, now, summary)
                 elif instance.get("lifecycle_stopped_at"):
-                    await _resume(sb, instance, subscription, summary)
+                    await _resume(sb, instance, subscription, now, summary)
                 else:
                     await _align_plan(sb, instance, subscription)
             except InstanceClaimLostError:
@@ -526,7 +526,7 @@ def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
 
 
 async def _resume(
-    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], summary: LifecycleSummary
+    sb: Client, instance: dict[str, Any], subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
 ) -> None:
     """Undo a lifecycle hold for an entitled subscription."""
     instance_id = instance["instance_id"]
@@ -539,8 +539,12 @@ async def _resume(
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=True)
     else:
         await start_instance(instance_id)
-    # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
-    current = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash,status") or {}
+    # Reprovisioning may have minted a new key, so re-read the instance before enabling it.
+    current = get_instance(sb, instance_id, columns=LIFECYCLE_INSTANCE_COLUMNS) or {}
+    if account_pending_deletion(sb, subscription["account_id"]):
+        # A deletion request on another backend replica landed while the instance started, so it stays held.
+        await _hold(sb, current, subscription, now, summary)
+        return
     try:
         await set_instance_openrouter_key_disabled(current, disabled=False)
     except OpenRouterKeyNotFoundError:
@@ -603,8 +607,8 @@ async def _reprovision(
 ) -> None:
     """Redeploy an instance for its subscription's tier.
 
-    Only resuming a hold passes `resume_lifecycle_hold`; any other redeploy stays stopped when a hold, or an account
-    deletion, lands while it runs.
+    Every redeploy stays stopped when an account deletion lands while it runs, and one that does not resume a hold
+    (`resume_lifecycle_hold`) also when a hold does.
     The redeploy claims the instance only while it still has the status this run read, so instead of overlapping a
     provision that claimed it since, such as a redeploy by another backend replica, it gets `InstanceClaimLostError`.
     """
