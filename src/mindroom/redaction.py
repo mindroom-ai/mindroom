@@ -114,9 +114,9 @@ _REVIEW_TOKEN_PATTERN = re.compile(
 # names; a generated key has a long run mixing character classes, so those names stay visible.
 _KEBAB_PREFIXES = ("sk-", "pk-")
 _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
-# Config prose says "ask for the API key before calling" or "bearer authentication"; the word a log
-# pattern takes for a token there is lowercase or capitalized letters, possibly ending a sentence.
-_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z][a-z]*[.,;:!?]*")
+# Config prose says "ask for the API key before calling" or "bearer JWT"; the word a log pattern
+# takes for a token there is letters only, possibly ending a sentence.
+_ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+\.?")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _PLACEHOLDER_OPEN = "\u27e6"
