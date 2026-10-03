@@ -23,13 +23,6 @@ if TYPE_CHECKING:
     icon_color="text-blue-600",
     config_fields=[
         ConfigField(
-            name="include_summary",
-            label="Include Summary",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="article_length",
             label="Article Length",
             type="number",

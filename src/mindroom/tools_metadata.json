@@ -11958,18 +11958,6 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Include Summary",
-          "name": "include_summary",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": null,
           "description": null,
           "label": "Article Length",
