@@ -921,14 +921,14 @@ class AgentBot:
         )
 
     async def _wait_until_coalesced_dispatch_allowed(self, key: CoalescingKey) -> None:
-        """Hold active follow-up dispatch until the reply for its target no longer holds new messages back."""
+        """Hold active follow-up dispatch until the response lock for its target is idle."""
         if not is_active_follow_up_coalescing_key(key):
             return
-        await self._response_runner.wait_until_follow_ups_may_dispatch(key.room_id, key.thread_id)
+        await self._response_runner.wait_for_thread_response_idle(key.room_id, key.thread_id)
 
     def _coalesced_dispatch_allowed_now(self, key: CoalescingKey) -> bool:
-        """Return whether one coalescing key's target has no reply holding new messages back right now."""
-        return key.thread_id not in self._response_runner.thread_ids_holding_follow_ups(key.room_id)
+        """Return whether one coalescing key's target has no active response right now."""
+        return key.thread_id not in self._response_runner.active_thread_ids_for_room(key.room_id)
 
     def _room_scope_is_single_conversation(self, room_id: str) -> bool:
         """Return whether this agent treats the whole room as one conversation."""

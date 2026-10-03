@@ -1,4 +1,4 @@
-"""The latest reply of an agent holds its conversation's background work until that agent answers a newer message."""
+"""A reply that only waits on background work lets its conversation's other turns run, then takes the lock back."""
 
 from __future__ import annotations
 
@@ -7,14 +7,15 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
-from mindroom.tool_jobs.control import current_human_message_signal
+from mindroom.tool_jobs.control import current_human_message_signal, released_while_waiting
 from tests.conftest import message_origin
 
 _TARGET = MessageTarget.resolve("!room:localhost", "$root", "$first")
+_ROOM_ID, _THREAD_ID = _TARGET.lifecycle_key.room_id, _TARGET.lifecycle_key.thread_id
 
 
 def _envelope(event_id: str, *, source_kind: str = MESSAGE_SOURCE_KIND) -> MessageEnvelope:
@@ -30,165 +31,247 @@ def _envelope(event_id: str, *, source_kind: str = MESSAGE_SOURCE_KIND) -> Messa
 
 
 @dataclass
-class _HoldingReply:
-    """A reply that waits on background work until its human signal releases it."""
+class _Reply:
+    """A reply that may wait inside its model run, then waits on background work at its response boundary."""
 
     lifecycle: ResponseLifecycleCoordinator
+    source: str = "$first"
+    in_model_wait: bool = False
     started: asyncio.Event = field(default_factory=asyncio.Event)
-    released: asyncio.Event = field(default_factory=asyncio.Event)
-    finish: asyncio.Event = field(default_factory=asyncio.Event)
+    model_wait_released: asyncio.Event = field(default_factory=asyncio.Event)
+    waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    work_done: asyncio.Event = field(default_factory=asyncio.Event)
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[str] | None = None
 
     async def _operation(self, _target: MessageTarget) -> str:
-        signal = current_human_message_signal()
-        assert signal is not None
-        signal.subscribe(self.released.set)
         self.started.set()
-        try:
-            await self.finish.wait()
-        finally:
-            signal.unsubscribe(self.released.set)
-        return "$holding"
+        if self.in_model_wait:
+            signal = current_human_message_signal()
+            assert signal is not None
+            signal.subscribe(self.model_wait_released.set)
+            try:
+                await self.model_wait_released.wait()
+            finally:
+                signal.unsubscribe(self.model_wait_released.set)
+        async with released_while_waiting():
+            self.waiting.set()
+            await self.work_done.wait()
+        self.finished.set()
+        return self.source
 
-    async def start(self) -> None:
+    def start(self) -> None:
         self.task = asyncio.create_task(
             self.lifecycle.run_locked_response(
                 target=_TARGET,
-                response_envelope=_envelope("$first"),
+                response_envelope=_envelope(self.source),
                 pipeline_timing=None,
                 locked_operation=self._operation,
             ),
         )
-        await asyncio.wait_for(self.started.wait(), 5)
 
-    async def stop(self) -> None:
-        self.finish.set()
-        assert self.task is not None
-        assert await self.task == "$holding"
+
+async def _run_turn(
+    lifecycle: ResponseLifecycleCoordinator,
+    source: str,
+    *,
+    source_kind: str = MESSAGE_SOURCE_KIND,
+    signal_queued_message: bool = True,
+) -> str:
+    async def operation(_target: MessageTarget) -> str:
+        return source
+
+    return await lifecycle.run_locked_response(
+        target=_TARGET,
+        response_envelope=_envelope(source, source_kind=source_kind),
+        pipeline_timing=None,
+        locked_operation=operation,
+        signal_queued_message=signal_queued_message,
+    )
 
 
 @pytest.mark.asyncio
-async def test_follow_up_ingress_alone_keeps_the_reply_holding() -> None:
-    """A human message this agent may not answer leaves the holding reply waiting."""
+@pytest.mark.parametrize(
+    ("source_kind", "signal_queued_message"),
+    [(MESSAGE_SOURCE_KIND, True), (SCHEDULED_SOURCE_KIND, True), (SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
+async def test_waiting_reply_lets_every_other_turn_run(source_kind: str, *, signal_queued_message: bool) -> None:
+    """While a reply only waits on background work, it is not active and any turn of the conversation runs at once."""
     lifecycle = ResponseLifecycleCoordinator()
-    reply = _HoldingReply(lifecycle)
-    await reply.start()
-    reservation = lifecycle.reserve_waiting_human_message(target=_TARGET, response_envelope=_envelope("$other"))
-    assert reservation is not None
-    await asyncio.sleep(0)
-    assert not reply.released.is_set()
-    # The turn policy decided another agent answers; the reply keeps holding.
-    reservation.cancel()
-    await asyncio.sleep(0)
-    assert not reply.released.is_set()
-    await reply.stop()
+    reply = _Reply(lifecycle)
+    reply.start()
+    await asyncio.wait_for(reply.waiting.wait(), 5)
+    assert not lifecycle.has_active_response_for_target(_TARGET)
+    assert lifecycle.active_thread_ids_for_room(_ROOM_ID) == frozenset()
+    await asyncio.wait_for(lifecycle.wait_for_thread_idle(_ROOM_ID, _THREAD_ID), 5)
+    turn = _run_turn(lifecycle, "$other", source_kind=source_kind, signal_queued_message=signal_queued_message)
+    assert await asyncio.wait_for(turn, 5) == "$other"
+    assert not reply.finished.is_set()
+    reply.work_done.set()
+    assert reply.task is not None
+    assert await reply.task == "$first"
+    assert lifecycle.active_thread_ids_for_room(_ROOM_ID) == frozenset()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("other_message_pending", [False, True])
-async def test_newer_reply_of_the_same_agent_takes_over(other_message_pending: bool) -> None:
-    """Queuing a reply to a newer human message releases the holding reply, and only until that reply starts.
+@pytest.mark.parametrize(
+    ("source_kind", "signal_queued_message"),
+    [(MESSAGE_SOURCE_KIND, True), (SCHEDULED_SOURCE_KIND, True), (SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
+async def test_queued_turn_ends_the_waits_inside_the_model_run(
+    source_kind: str,
+    *,
+    signal_queued_message: bool,
+) -> None:
+    """Any turn queued behind a reply waiting inside its model run lets that reply reach its boundary and run.
 
-    A message still waiting for the turn policy cannot keep releasing the newer reply's own waits.
+    The turn that started consumed its notice, so the waits of its own model run stay attached.
     """
     lifecycle = ResponseLifecycleCoordinator()
-    reply = _HoldingReply(lifecycle)
-    await reply.start()
-    other = (
-        lifecycle.reserve_waiting_human_message(target=_TARGET, response_envelope=_envelope("$other"))
-        if other_message_pending
-        else None
-    )
-    newer_released = asyncio.Event()
+    reply = _Reply(lifecycle, in_model_wait=True)
+    reply.start()
+    await asyncio.wait_for(reply.started.wait(), 5)
+    assert lifecycle.has_active_response_for_target(_TARGET)
+    own_waits_released = asyncio.Event()
 
-    async def newer(_target: MessageTarget) -> str:
+    async def queued(_target: MessageTarget) -> str:
         signal = current_human_message_signal()
         assert signal is not None
-        signal.subscribe(newer_released.set)
-        signal.unsubscribe(newer_released.set)
-        return "$newer"
+        signal.subscribe(own_waits_released.set)
+        signal.unsubscribe(own_waits_released.set)
+        return "$queued"
 
-    follow_up = asyncio.create_task(
+    turn = asyncio.create_task(
         lifecycle.run_locked_response(
             target=_TARGET,
-            response_envelope=_envelope("$second"),
+            response_envelope=_envelope("$queued", source_kind=source_kind),
             pipeline_timing=None,
-            locked_operation=newer,
+            locked_operation=queued,
+            signal_queued_message=signal_queued_message,
         ),
     )
-    await asyncio.wait_for(reply.released.wait(), 5)
-    await reply.stop()
-    assert await follow_up == "$newer"
-    # The newer reply consumed the hand-over, so its own waits stay attached.
-    assert not newer_released.is_set()
-    if other is not None:
-        other.cancel()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("silent", [False, True])
-async def test_scheduled_turn_takes_over_unless_it_is_silent(silent: bool) -> None:
-    """A visible scheduled reply takes the work over like any newer reply; a silent one cannot hold it and queues."""
-    lifecycle = ResponseLifecycleCoordinator()
-    reply = _HoldingReply(lifecycle)
-    await reply.start()
-
-    async def scheduled(_target: MessageTarget) -> str:
-        return "$scheduled"
-
-    queued = asyncio.create_task(
-        lifecycle.run_locked_response(
-            target=_TARGET,
-            response_envelope=_envelope("$fire", source_kind=SCHEDULED_SOURCE_KIND),
-            pipeline_timing=None,
-            locked_operation=scheduled,
-            # The response runner never lets a silent schedule signal the conversation.
-            signal_queued_message=not silent,
-        ),
-    )
-    if silent:
-        await asyncio.sleep(0.05)
-        assert not reply.released.is_set()
-        assert not queued.done()
-    else:
-        await asyncio.wait_for(reply.released.wait(), 5)
-    await reply.stop()
-    assert await queued == "$scheduled"
-    # The scheduled turn is no human message, so the running reply got no queued notice for it.
+    await asyncio.wait_for(reply.model_wait_released.wait(), 5)
+    assert await asyncio.wait_for(turn, 5) == "$queued"
+    assert not own_waits_released.is_set()
+    reply.work_done.set()
+    assert reply.task is not None
+    assert await reply.task == "$first"
     assert not lifecycle._thread_queued_signals[_TARGET.lifecycle_key].has_pending_human_messages()
 
 
 @pytest.mark.asyncio
-async def test_new_messages_reach_the_turn_policy_while_the_reply_only_waits() -> None:
-    """New messages wait behind a generating reply, but not behind one that only waits on background work.
-
-    Otherwise a follow-up this agent would answer could never start the reply that takes the work over.
-    """
+async def test_human_message_ends_the_waits_inside_the_model_run_at_ingress() -> None:
+    """A new human message ends model-run waits as it arrives, so the reply stops holding it back in the queue."""
     lifecycle = ResponseLifecycleCoordinator()
-    room_id, thread_id = _TARGET.lifecycle_key.room_id, _TARGET.lifecycle_key.thread_id
-    generating, waits = asyncio.Event(), asyncio.Event()
-    reply = _HoldingReply(lifecycle)
+    reply = _Reply(lifecycle, in_model_wait=True)
+    reply.start()
+    await asyncio.wait_for(reply.started.wait(), 5)
+    reservation = lifecycle.reserve_waiting_human_message(target=_TARGET, response_envelope=_envelope("$other"))
+    assert reservation is not None
+    await asyncio.wait_for(reply.model_wait_released.wait(), 5)
+    await asyncio.wait_for(reply.waiting.wait(), 5)
+    # Releasing the model-run wait never ends the reply: it keeps waiting at its boundary.
+    assert not reply.finished.is_set()
+    reservation.cancel()
+    reply.work_done.set()
+    assert reply.task is not None
+    assert await reply.task == "$first"
 
-    async def generate_then_wait(target: MessageTarget) -> str:
-        generating.set()
-        await waits.wait()
-        return await reply._operation(target)
 
-    reply.task = asyncio.create_task(
+@pytest.mark.asyncio
+async def test_waiting_reply_takes_the_lock_back_behind_the_turn_that_holds_it() -> None:
+    """A reply whose work became ready continues only once the turn running meanwhile lets the lock go."""
+    lifecycle = ResponseLifecycleCoordinator()
+    reply = _Reply(lifecycle)
+    reply.start()
+    await asyncio.wait_for(reply.waiting.wait(), 5)
+    running, release = asyncio.Event(), asyncio.Event()
+
+    async def other(_target: MessageTarget) -> str:
+        running.set()
+        await release.wait()
+        return "$other"
+
+    turn = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=_TARGET,
+            response_envelope=_envelope("$other"),
+            pipeline_timing=None,
+            locked_operation=other,
+        ),
+    )
+    await asyncio.wait_for(running.wait(), 5)
+    reply.work_done.set()
+    await asyncio.sleep(0.05)
+    assert not reply.finished.is_set()
+    # Taking the lock back makes the reply active again, so new messages queue behind it as usual.
+    assert lifecycle.has_active_response_for_target(_TARGET)
+    release.set()
+    assert await turn == "$other"
+    assert reply.task is not None
+    assert await reply.task == "$first"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiting_reply_settles_under_the_lock() -> None:
+    """Stopping a waiting reply takes the lock back before the reply settles, so it never races the running turn."""
+    lifecycle = ResponseLifecycleCoordinator()
+    settled_while_other_ran: list[bool] = []
+    running, release = asyncio.Event(), asyncio.Event()
+
+    async def waiting_reply(_target: MessageTarget) -> str:
+        try:
+            async with released_while_waiting():
+                await asyncio.Event().wait()
+        finally:
+            settled_while_other_ran.append(running.is_set() and not release.is_set())
+        raise AssertionError
+
+    async def other(_target: MessageTarget) -> str:
+        running.set()
+        await release.wait()
+        return "$other"
+
+    reply = asyncio.create_task(
         lifecycle.run_locked_response(
             target=_TARGET,
             response_envelope=_envelope("$first"),
             pipeline_timing=None,
-            locked_operation=generate_then_wait,
+            locked_operation=waiting_reply,
         ),
     )
-    await asyncio.wait_for(generating.wait(), 5)
-    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset({thread_id})
-    dispatch = asyncio.create_task(lifecycle.wait_until_follow_ups_may_dispatch(room_id, thread_id))
     await asyncio.sleep(0)
-    assert not dispatch.done()
-    waits.set()
-    await asyncio.wait_for(dispatch, 5)
-    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset()
-    await reply.stop()
-    assert lifecycle.thread_ids_holding_follow_ups(room_id) == frozenset()
+    turn = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=_TARGET,
+            response_envelope=_envelope("$other"),
+            pipeline_timing=None,
+            locked_operation=other,
+        ),
+    )
+    await asyncio.wait_for(running.wait(), 5)
+    reply.cancel()
+    await asyncio.sleep(0.05)
+    assert not reply.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reply
+    assert await turn == "$other"
+    assert settled_while_other_ran == [False]
+    assert not lifecycle.has_active_response_for_target(_TARGET)
+
+
+@pytest.mark.asyncio
+async def test_waiting_reply_keeps_its_conversation_lock_from_eviction() -> None:
+    """A full lock table never drops the lock a waiting reply will take back."""
+    lifecycle = ResponseLifecycleCoordinator()
+    reply = _Reply(lifecycle)
+    reply.start()
+    await asyncio.wait_for(reply.waiting.wait(), 5)
+    held = lifecycle._response_lifecycle_locks[_TARGET.lifecycle_key]
+    for index in range(150):
+        lifecycle._response_lifecycle_lock(MessageTarget.resolve("!other:localhost", f"$root{index}", f"$e{index}"))
+    assert lifecycle._response_lifecycle_locks[_TARGET.lifecycle_key] is held
+    reply.work_done.set()
+    assert reply.task is not None
+    assert await reply.task == "$first"

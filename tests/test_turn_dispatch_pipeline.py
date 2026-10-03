@@ -1607,7 +1607,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(bot._turn_controller, "_should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._response_runner,
-                "thread_ids_holding_follow_ups",
+                "active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ) as mock_active_thread_ids,
             patch.object(
@@ -1895,7 +1895,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(
                 bot._response_runner,
-                "thread_ids_holding_follow_ups",
+                "active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
             patch.object(
@@ -2111,7 +2111,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(
                 bot._response_runner,
-                "thread_ids_holding_follow_ups",
+                "active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
             patch.object(

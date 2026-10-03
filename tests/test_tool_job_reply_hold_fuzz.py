@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
+from mindroom.tool_jobs import completion
 from tests import tool_job_reply_hold_fuzz
 from tests.tool_job_reply_hold_fuzz import ReplyHoldFuzzRunner, Step
 
@@ -55,6 +57,11 @@ class ReplyHold(RuleBasedStateMachine):
     def other(self) -> None:
         """A human message the turn policy gives to another agent."""
         self._step("other")
+
+    @rule(human=st.booleans())
+    def quiet(self, *, human: bool) -> None:
+        """A turn of this agent that never joins visible work: a silenced reply, or a silent schedule."""
+        self._step("quiet", human=human)
 
     @precondition(lambda self: any(not gate.is_set() for gate in self.runner.gates.values()))
     @rule(index=_INDEXES)
@@ -116,6 +123,10 @@ def test_generated_conversations_always_hold_outstanding_work() -> None:
             id="the-next-reply-after-a-restart-retrieves-interrupted-work",
         ),
         pytest.param(
+            [Step("message", jobs=1, hold=True), Step("quiet"), Step("quiet", human=False), Step("release")],
+            id="silenced-replies-and-silent-schedules-run-while-the-reply-keeps-holding",
+        ),
+        pytest.param(
             [Step("message", jobs=2, hold=True), Step("message", jobs=1, hold=True), Step("stop"), Step("message")],
             id="stop-on-the-holding-reply-ends-all-earlier-work",
         ),
@@ -126,6 +137,27 @@ async def test_reply_hold_regressions(tmp_path: Path, monkeypatch: pytest.Monkey
     runner = await _runner(tmp_path, monkeypatch)
     try:
         await runner.run(steps)
+    finally:
+        await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_hold_oracle_detects_a_reply_that_keeps_the_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fuzzer must fail when a waiting reply keeps other turns of its conversation waiting."""
+
+    @asynccontextmanager
+    async def kept() -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr(completion, "released_while_waiting", kept)
+    runner = await _runner(tmp_path, monkeypatch)
+    try:
+        await runner.step(Step("message", jobs=1, hold=True))
+        with pytest.raises(AssertionError, match="waited for held background work"):
+            await runner.step(Step("quiet"))
     finally:
         await runner.close()
 

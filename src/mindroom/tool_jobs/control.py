@@ -3,56 +3,49 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
+    from contextlib import AbstractAsyncContextManager
+
+type _ReleaseWhileWaiting = Callable[[], AbstractAsyncContextManager[None]]
 
 
 @dataclass
 class HumanMessageSignal:
-    """Release a reply's waits once its agent starts a newer reply in the conversation."""
+    """Release a reply's waits inside its model run while newer messages or turns wait for its conversation.
+
+    Releasing such a wait never ends the reply's hold on the work: the reply finishes its run and keeps waiting at its
+    response boundary, where it lets the conversation's other turns run.
+    """
 
     _subscribers: set[Callable[[], None]] = field(default_factory=set)
-    # Newer replies of this agent queued in the conversation that have not started yet.
-    _takeovers: int = 0
-    # Set while the reply waits on background work, so a newer message may reach the turn policy meanwhile.
-    _waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    # Newer messages and turns of the conversation still waiting for this reply.
+    _pending: int = 0
 
     def subscribe(self, callback: Callable[[], None]) -> None:
-        """Subscribe one wait, releasing it at once while a newer reply is still queued."""
+        """Subscribe one wait, releasing it at once while anything is still pending."""
         self._subscribers.add(callback)
-        self._waiting.set()
-        if self._takeovers > 0:
+        if self._pending > 0:
             callback()
 
     def unsubscribe(self, callback: Callable[[], None]) -> None:
         """Release a finished wait's subscription."""
         self._subscribers.discard(callback)
-        if not self._subscribers:
-            self._waiting.clear()
-
-    @property
-    def waiting(self) -> bool:
-        """Whether the reply only waits on background work that a newer reply of its agent would take over."""
-        return self._waiting.is_set()
-
-    async def wait_until_waiting(self) -> None:
-        """Return once the reply waits on background work."""
-        await self._waiting.wait()
 
     def notify(self) -> None:
-        """A newer reply queued: release subscribed waits until it starts, without changing the execution of their jobs."""
-        self._takeovers += 1
+        """A newer message or turn waits: release subscribed waits without changing the execution of their jobs."""
+        self._pending += 1
         for callback in tuple(self._subscribers):
             callback()
 
-    def takeover_started(self) -> None:
-        """A queued newer reply started or gave up, so later waits stay attached unless another one is queued."""
-        self._takeovers -= 1
+    def settle(self) -> None:
+        """A pending message or turn was handled, so later waits stay attached unless another one is pending."""
+        self._pending -= 1
 
 
 @dataclass
@@ -74,6 +67,10 @@ class JobControl:
 
 
 _human_signal: ContextVar[HumanMessageSignal | None] = ContextVar("job_human_signal", default=None)
+_release_while_waiting: ContextVar[_ReleaseWhileWaiting | None] = ContextVar(
+    "reply_release_while_waiting",
+    default=None,
+)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
@@ -83,13 +80,29 @@ def current_human_message_signal() -> HumanMessageSignal | None:
 
 
 @contextmanager
-def human_message_signal_context(signal: HumanMessageSignal | None) -> Iterator[None]:
-    """Bind the human signal of one response lifecycle, or clear it for background work."""
+def human_message_signal_context(
+    signal: HumanMessageSignal | None,
+    release_while_waiting: _ReleaseWhileWaiting | None = None,
+) -> Iterator[None]:
+    """Bind one reply's human signal and its way to let other turns run while it waits, or clear both for jobs."""
     token = _human_signal.set(signal)
+    release_token = _release_while_waiting.set(release_while_waiting)
     try:
         yield
     finally:
+        _release_while_waiting.reset(release_token)
         _human_signal.reset(token)
+
+
+@asynccontextmanager
+async def released_while_waiting() -> AsyncIterator[None]:
+    """Let the conversation's other turns run while the current reply only waits on background work."""
+    release = _release_while_waiting.get()
+    if release is None:
+        yield
+        return
+    async with release():
+        yield
 
 
 @contextmanager

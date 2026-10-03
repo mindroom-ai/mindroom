@@ -173,7 +173,7 @@ class _RecordingResponseRunner:
     process_shutdown_started: bool = False
     admission_waiter: Callable[[], Awaitable[bool]] | None = None
 
-    def thread_ids_holding_follow_ups(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
+    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002

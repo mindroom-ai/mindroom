@@ -488,7 +488,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 release.set()
                 if human:
                     # The newer reply that took the work over has started.
-                    signal.takeover_started()
+                    signal.settle()
                 if approval:
                     await decide()
                 status = "cancelled" if approval == "cancelled" else "completed"

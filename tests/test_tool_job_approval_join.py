@@ -84,14 +84,14 @@ async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("wait_timeout", [0, 0.001])
-@pytest.mark.parametrize("human_release", [False, True])
+@pytest.mark.parametrize("taken_over", [False, True])
 async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     tmp_path: Path,
     team: bool,
     wait_timeout: float,
-    human_release: bool,
+    taken_over: bool,
 ) -> None:
-    """Approved work stays owned and visibly waiting until a result or human release."""
+    """Approved work stays owned and visibly waiting until a result, or until a newer reply takes it over."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
@@ -292,9 +292,13 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
             job_id = jobs[0].job_id
-            if human_release:
+            if taken_over:
+                # A newer message alone does not end the wait; a newer reply joining the same work does.
                 signal.notify()
+                key = (context.recipient, owner.room_id, owner.resolved_thread_id, owner.requester_id, False)
+                newer = runtime.take_hold(key)
                 text = await asyncio.wait_for(pending, 30)
+                runtime.drop_hold(key, newer)
                 assert "Independent work done." in text
                 assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
                 release.set()

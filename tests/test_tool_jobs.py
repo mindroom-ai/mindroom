@@ -756,7 +756,7 @@ async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: 
             waiter = asyncio.create_task(runtime.wait(job.job_id, owner=job_owner(), depth=0))
         await asyncio.sleep(0)
         signal.notify()
-        signal.takeover_started()
+        signal.settle()
         result = await asyncio.wait_for(waiter, JOB_TEST_TIMEOUT)
         assert result.job.status == "running"
         assert result.claim is None
@@ -1446,7 +1446,7 @@ async def test_repeated_human_followups_release_each_wait_until_their_reply_star
                 await asyncio.wait_for(asyncio.shield(waiter), 0.02)
             signal.notify()
             assert (await asyncio.wait_for(waiter, 1)).job.status == "running"
-            signal.takeover_started()
+            signal.settle()
         finish.set()
         assert (await runtime.wait(job.job_id, owner=job_owner(), depth=0)).job.result == "saved"
     finally:

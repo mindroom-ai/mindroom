@@ -47,6 +47,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
+from mindroom.history.session_context import reread_scope_session
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, join_conversation_jobs, report_background_wait
@@ -904,6 +905,12 @@ def _advance_turn_continuation(
     return advanced
 
 
+async def _reread_session_after_waiting(run: TurnRunState) -> None:
+    """Continue from the session as it is now: other turns of the conversation ran while this reply waited."""
+    if run.scope_context is not None:
+        run.scope_context = await run_blocking_until_complete(reread_scope_session, run.scope_context)
+
+
 def _advance_job_continuation(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
@@ -1183,9 +1190,11 @@ async def _settle_joined_blocking_attempt(
         interrupted_tools=(),
     )
     joined_continuation = None
+    waited = False
     if run.job_joins < JOB_JOIN_LIMIT:
         async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
             if isinstance(joined, BackgroundWaitChunk):
+                waited = waited or joined.content is not None
                 await report_background_wait(StreamingPresentation(response_text=response_text), joined.content)
             else:
                 joined_continuation = _advance_job_continuation(
@@ -1198,6 +1207,8 @@ async def _settle_joined_blocking_attempt(
                     joined.prompt,
                 )
     if joined_continuation is not None:
+        if waited:
+            await _reread_session_after_waiting(run)
         return joined_continuation
     _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
@@ -1484,6 +1495,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         resolution = replace(resolution, response_text="")
                     elif settle.response_text and join_document is None:
                         yield adapter.make_text_chunk(settle.response_text)
+                    waited = False
                     if not keep_going and run.job_joins < JOB_JOIN_LIMIT:
                         async for joined in join_conversation_jobs(
                             run.attempted_job_outcomes,
@@ -1495,6 +1507,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 # The published document already holds this attempt's text.
                                 resolution = replace(resolution, response_text="")
                             if isinstance(joined, BackgroundWaitChunk):
+                                waited = waited or joined.content is not None
                                 yield joined
                             else:
                                 continuation = _advance_job_continuation(
@@ -1509,6 +1522,8 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 keep_going = True
                     if join_document is not None and settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
+                    if keep_going and waited:
+                        await _reread_session_after_waiting(run)
                     if not keep_going:
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(

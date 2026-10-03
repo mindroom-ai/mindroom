@@ -157,7 +157,7 @@ def format_job_handle(job: BackgroundJob) -> str:
 
 
 @dataclass(frozen=True)
-class JobWait:
+class _JobWait:
     """A waited job, with the claim on its ready outcome that only the parent's saved tool result acknowledges."""
 
     job: BackgroundJob
@@ -191,6 +191,10 @@ class _Entry:
             self.claim = JobClaim(uuid4().hex)
             return self.claim
         return self.claim if self.claim == claim else None
+
+
+# A conversation's recipient, room, resolved thread, and requester, and whether its work is silent.
+type _HoldKey = tuple[str, str | None, str | None, str | None, bool]
 
 
 def _conversation_key(owner: ToolExecutionIdentity) -> tuple[str, str | None, str | None, str | None]:
@@ -265,6 +269,25 @@ class ToolJobRuntime:
         self.changed = asyncio.Event()
         # Jobs that ended while their approval cards could not be denied yet; the coordinator retries them every pass.
         self.unsettled_approvals: set[str] = set()
+        # The reply holding each conversation's outstanding work; a newer reply's join takes the hold over.
+        self._holds: dict[_HoldKey, asyncio.Event] = {}
+
+    def take_hold(self, key: _HoldKey) -> asyncio.Event:
+        """Make a joining reply the holder of its conversation's outstanding work, releasing the previous holder.
+
+        The returned event is set once a newer reply takes the hold over.
+        """
+        previous = self._holds.get(key)
+        if previous is not None:
+            previous.set()
+        hold = asyncio.Event()
+        self._holds[key] = hold
+        return hold
+
+    def drop_hold(self, key: _HoldKey, hold: asyncio.Event) -> None:
+        """End a reply's hold unless a newer reply already took it over."""
+        if self._holds.get(key) is hold:
+            del self._holds[key]
 
     @staticmethod
     def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
@@ -536,7 +559,7 @@ class ToolJobRuntime:
         depth: int,
         timeout: float | None = None,  # noqa: ASYNC109
         claim: JobClaim | None = None,
-    ) -> JobWait:
+    ) -> _JobWait:
         """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has."""
         timeout = validate_wait_timeout(timeout)
         deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
@@ -545,7 +568,7 @@ class ToolJobRuntime:
             entry = self._entry(job_id, owner, depth)
             claim = entry.claim_for(claim)
             if claim is None:
-                return JobWait(await self._snapshot(entry))
+                return _JobWait(await self._snapshot(entry))
             human_notified = asyncio.Event()
 
             def notify_human() -> None:
@@ -565,10 +588,10 @@ class ToolJobRuntime:
                         claim = entry.claim_for(claim)
                         snapshot = await self._snapshot(entry)
                         retained = claim is not None
-                        return JobWait(snapshot, claim)
+                        return _JobWait(snapshot, claim)
                     remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
                     if human_notified.is_set() or (remaining is not None and remaining <= 0):
-                        return JobWait(await self._snapshot(entry))
+                        return _JobWait(await self._snapshot(entry))
                     changed = entry.changed
                 with suppress(TimeoutError):
                     await asyncio.wait_for(changed.wait(), remaining)
@@ -577,6 +600,16 @@ class ToolJobRuntime:
                 human_signal.unsubscribe(notify_human)
             if not retained:
                 await self.release_wait(job_id, claim)
+
+    async def wait_ready(self, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> None:
+        """Wait until a job's outcome is ready without claiming it, raising once the caller can no longer access it."""
+        while True:
+            async with self._lock:
+                entry = self._entry(job_id, owner, depth)
+                if entry.job.status in TERMINAL_STATUSES:
+                    return
+                changed = entry.changed
+            await changed.wait()
 
     async def release_wait(self, job_id: str, claim: JobClaim | None) -> None:
         """Release an unpersisted claim so completion can still be delivered, even if the caller is cancelled again."""

@@ -6,7 +6,7 @@ import hashlib
 import re
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_storage import (
@@ -167,6 +167,20 @@ def _build_scope_session_context(
         storage_factory=storage_factory,
         session_exists=session_exists,
     )
+
+
+def reread_scope_session(scope_context: ScopeSessionContext) -> ScopeSessionContext:
+    """Read the scope's session again, after other turns of the conversation may have changed it."""
+    if scope_context.session_id is None:
+        return scope_context
+    session = (
+        get_team_session(scope_context.storage, scope_context.session_id)
+        if scope_context.scope.kind == "team"
+        else get_agent_session(scope_context.storage, scope_context.session_id)
+    )
+    if session is None:
+        return scope_context
+    return replace(scope_context, session=session, session_exists=True)
 
 
 @contextmanager

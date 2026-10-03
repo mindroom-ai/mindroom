@@ -252,7 +252,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         assert "released" in str(first.content)
         assert (await lookup(runtime, job_id, owner=owner, depth=0)).status == "running"
 
-        signal.takeover_started()
+        signal.settle()
         model.responses.extend(
             [
                 ModelResponse(tool_calls=[_call("job", "list-call", action="list")]),

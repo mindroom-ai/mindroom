@@ -735,6 +735,7 @@ path = "mindroom.response_turn"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.helper_usage",
+    "mindroom.history.session_context",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",

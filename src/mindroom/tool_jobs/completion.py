@@ -14,7 +14,8 @@ from mindroom.constants import (
     STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.delivery_gateway import EditTextRequest
-from mindroom.tool_jobs.control import current_human_message_signal, job_owns_execution
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.tool_jobs.control import job_owns_execution, released_while_waiting
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError, get_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.message_target import MessageTarget
     from mindroom.streaming import StreamingPresentation
-    from mindroom.tool_jobs.runtime import BackgroundJob, JobWait, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 
 # How many times one reply may continue with ready job results, counted apart from dynamic tool continuations.
@@ -124,7 +125,11 @@ async def join_conversation_jobs(
     *,
     agent_names: Sequence[str] | None = None,
 ) -> AsyncIterator[BackgroundWaitChunk | _ReadyJobContinuation]:
-    """Wait outside the model, yielding visible progress and at most one ready prompt."""
+    """Hold the conversation's outstanding work outside the model, yielding progress and at most one ready prompt.
+
+    The reply takes the hold over from any older reply of its conversation, and while it only waits it lets the
+    conversation's other turns run; a newer reply that joins the same work releases it.
+    """
     context = get_tool_runtime_context()
     if context is None or job_owns_execution():
         return
@@ -132,10 +137,8 @@ async def join_conversation_jobs(
     if runtime is None:
         return
     participants = {context.agent_name, *(agent_names or ())}
-    signal = current_human_message_signal()
-    human = asyncio.Event()
-    if signal is not None:
-        signal.subscribe(human.set)
+    silent = context.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    key = (context.recipient, context.room_id, context.resolved_thread_id, context.requester_id, silent)
 
     async def pending() -> list[BackgroundJob]:
         jobs = await runtime.conversation_jobs(
@@ -147,63 +150,64 @@ async def join_conversation_jobs(
         )
         return [job for job in jobs if job.owner.agent_name in participants and job.job_id not in attempted]
 
+    jobs = await pending()
+    if not jobs:
+        return
+    released = runtime.take_hold(key)
     try:
-        jobs = await pending()
-        if human.is_set() or not jobs:
-            return
         ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
         if not ready:
             approval = any(job.status == "awaiting_approval" for job in jobs)
             yield BackgroundWaitChunk("⏳ Waiting for approval…" if approval else "⏳ Waiting for background work…")
-            ready = await _wait_until_ready(runtime, jobs, human, pending)
+            # Never yield inside this scope: a generator closed elsewhere would take the lock back in another task.
+            async with released_while_waiting():
+                ready = await _wait_until_ready(runtime, jobs, released, pending)
             yield BackgroundWaitChunk(None)
-        if ready and not human.is_set():
+        if ready and not released.is_set():
             attempted.update(job.job_id for job in ready)
             yield _ReadyJobContinuation(_completion_prompt(ready))
     finally:
-        if signal is not None:
-            signal.unsubscribe(human.set)
+        runtime.drop_hold(key, released)
 
 
 async def _wait_until_ready(
     runtime: ToolJobRuntime,
     jobs: list[BackgroundJob],
-    human: asyncio.Event,
+    released: asyncio.Event,
     pending: Callable[[], Awaitable[list[BackgroundJob]]],
 ) -> list[BackgroundJob]:
-    """Wait for a ready job, a human message, or no remaining jobs this reply can still access."""
+    """Wait for a ready job, a newer reply taking the hold over, or no remaining jobs this reply can still access."""
     # Jobs this reply lost access to are gone for it; the others keep the reply waiting.
     unavailable: set[str] = set()
     ready: list[BackgroundJob] = []
-    while jobs and not ready and not human.is_set():
-        unavailable |= await _wait_for_ready_jobs(runtime, jobs, human)
+    while jobs and not ready and not released.is_set():
+        unavailable |= await _wait_for_ready_jobs(runtime, jobs, released)
         jobs = [job for job in await pending() if job.job_id not in unavailable]
         ready = [job for job in jobs if job.status in TERMINAL_STATUSES]
     return ready
 
 
 async def _wait_for_job(runtime: ToolJobRuntime, job: BackgroundJob) -> str | None:
-    """Wait until one job is ready, returning its ID when this reply lost access to it."""
-    waited: JobWait | None = None
+    """Wait until one job is ready, returning its ID when this reply lost access to it.
+
+    The wait claims nothing, so a newer reply can still find, join, and retrieve the same work.
+    """
     try:
-        waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth)
+        await runtime.wait_ready(job.job_id, owner=job.owner, depth=job.depth)
     except JobAccessError:
         return job.job_id
-    finally:
-        if waited is not None:
-            await runtime.release_wait(job.job_id, waited.claim)
     return None
 
 
 async def _wait_for_ready_jobs(
     runtime: ToolJobRuntime,
     jobs: Sequence[BackgroundJob],
-    human: asyncio.Event,
+    released: asyncio.Event,
 ) -> set[str]:
-    """Wait for the first ready job or human message, returning the jobs this reply lost access to."""
+    """Wait for the first ready job or for the hold's release, returning the jobs this reply lost access to."""
     waiters = [asyncio.create_task(_wait_for_job(runtime, job)) for job in jobs]
-    human_wait = asyncio.create_task(human.wait())
-    tasks = [*waiters, human_wait]
+    released_wait = asyncio.create_task(released.wait())
+    tasks = [*waiters, released_wait]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         return {lost for task in waiters if task in done and (lost := task.result()) is not None}

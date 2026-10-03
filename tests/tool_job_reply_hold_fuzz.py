@@ -1,9 +1,10 @@
 """Generated conversations checked against the rule that the latest reply holds outstanding background work.
 
-The response lifecycle, the reply join, and the job runtime are real: they serialize replies, hand work over to a
-newer reply, and decide what each join waits for. Only a reply's model is scripted: it may start jobs, then retrieves
-each ready outcome its join offers, as the model does with the job tool. The event loop may be torn down between any
-two awaits.
+The response lifecycle, the reply join, and the job runtime are real: they serialize turns, let other turns run while a
+reply only waits, hand work over to a newer reply, and decide what each join waits for. Only a reply's model is
+scripted: it may start jobs, then retrieves each ready outcome its join offers, as the model does with the job tool.
+Quiet turns, such as a reply whose participation check stays silent or a silent schedule, never join visible work.
+The event loop may be torn down between any two awaits.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
@@ -49,12 +50,14 @@ _IDLE_ROUNDS = 20_000
 class Step:
     """A printable, shrinkable step; it names jobs by index, never by identity."""
 
-    kind: Literal["message", "other", "release", "stop", "crash"]
+    kind: Literal["message", "other", "quiet", "release", "stop", "crash"]
     # Jobs the reply to a message starts before it joins its conversation's work.
     jobs: int = 0
     # Those jobs wait for a release.
     hold: bool = False
     index: int = 0
+    # A quiet turn answers a human message and may signal it, as a silenced reply does; otherwise it is a silent schedule.
+    human: bool = True
 
 
 @dataclass
@@ -100,6 +103,7 @@ class ReplyHoldFuzzRunner:
         )
         self.model = _Model()
         self.gates: dict[str, asyncio.Event] = {}
+        self.quiet_turns: list[asyncio.Task[str]] = []
         self._order = 0
         self._baseline = asyncio.all_tasks()
 
@@ -140,6 +144,9 @@ class ReplyHoldFuzzRunner:
             gate.set()
         await self._end_tasks()
         await self.runtime.shutdown()
+        for turn in self.quiet_turns:
+            if turn.done() and not turn.cancelled():
+                turn.result()
 
     def _target(self, source: str) -> MessageTarget:
         assert self.owner.room_id is not None
@@ -246,6 +253,37 @@ class ReplyHoldFuzzRunner:
         if reservation is not None:
             reservation.cancel()
 
+    async def _quiet(self, step: Step) -> None:
+        """A turn of this agent that never joins visible work; it must run even while a reply holds that work."""
+        self._order += 1
+        source = f"$quiet{self._order}"
+        envelope = self._envelope(source)
+        if not step.human:
+            envelope = replace(
+                envelope,
+                origin=message_origin(
+                    sender_id=self.owner.requester_id or "",
+                    requester_id=self.owner.requester_id,
+                    source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                ),
+            )
+
+        async def operation(_target: MessageTarget) -> str:
+            return source
+
+        self.quiet_turns.append(
+            asyncio.create_task(
+                self.lifecycle.run_locked_response(
+                    target=self._target(source),
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=operation,
+                    # The response runner never lets a silent schedule add a queued notice.
+                    signal_queued_message=step.human,
+                ),
+            ),
+        )
+
     async def _release(self, step: Step) -> None:
         held = sorted(job_id for job_id, gate in self.gates.items() if not gate.is_set())
         if held:
@@ -298,13 +336,16 @@ class ReplyHoldFuzzRunner:
     async def check(self) -> None:
         """Compare live replies, outstanding work, and consumption with what the runtime saved."""
         live = self._live()
-        # The lifecycle serializes replies, and a newer reply takes over at once.
+        # A newer reply that joins takes the work over at once, and the reply it replaced then finishes.
         assert len(live) <= 1, [reply.source for reply in live]
+        # Waiting replies let the conversation's other turns run, so no turn waits for background work.
+        assert all(turn.done() for turn in self.quiet_turns), "a turn waited for held background work"
         outstanding = self._outstanding()
         limited = bool(self.model.replies) and self.model.replies[-1].joins >= JOB_JOIN_LIMIT
         if outstanding and not self.model.restarted and not limited:
             # Outstanding work always has a holding reply: the latest one.
             assert live == self.model.replies[-1:], [job.job_id for job in outstanding]
+            assert self.runtime._holds, "no reply holds the outstanding work"
         if live:
             # A holding reply retrieves every ready outcome as soon as it is ready.
             ready = [job.job_id for job in outstanding if job.status in TERMINAL_STATUSES]

@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import EditTextRequest
-    from mindroom.tool_jobs.runtime import JobWait
 
 import pytest
 
@@ -167,8 +166,8 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path: Path) -> None:
-    """Turn-end waiting is visible, interruptible, and does not cancel the operation."""
+async def test_auto_join_waits_until_a_newer_join_takes_the_work_over(tmp_path: Path) -> None:
+    """Turn-end waiting is visible, outlasts newer messages, ends when a newer reply joins, and never cancels work."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
@@ -180,7 +179,6 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal, finish = HumanMessageSignal(), asyncio.Event()
-    attempted = set()
 
     async def operation() -> BackgroundOutcome:
         await finish.wait()
@@ -190,21 +188,28 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
         with human_message_signal_context(signal):
             await start_job(runtime, "quiet", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         with tool_runtime_context(context), human_message_signal_context(signal):
-            stream = join_conversation_jobs(attempted)
-            assert "Waiting" in (await anext(stream)).content
+            older = join_conversation_jobs(set())
+            assert "Waiting" in (await anext(older)).content
+            older_rest = asyncio.ensure_future(anext(older))
+            # A newer message or turn ends waits inside a model run, never the hold on the work.
             signal.notify()
-            assert [item.content async for item in stream] == [None]
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(older_rest), 0.05)
+            attempted: set[str] = set()
+            newer = join_conversation_jobs(attempted)
+            assert "Waiting" in (await anext(newer)).content
+            assert (await asyncio.wait_for(older_rest, JOB_TEST_TIMEOUT)).content is None
+            assert [item async for item in older] == []
             assert (await lookup(runtime, "quiet", owner=owner, depth=0)).status == "running"
-            signal.takeover_started()
             finish.set()
-            waited = await runtime.wait("quiet", owner=owner, depth=0)
-            await runtime.release_wait("quiet", waited.claim)
-            items = [item async for item in join_conversation_jobs(attempted)]
-            assert len(items) == 1
-            assert 'job_id="quiet"' in items[0].prompt
+            items = [item async for item in newer]
+            assert items[0].content is None
+            assert len(items) == 2
+            assert 'job_id="quiet"' in items[1].prompt
             assert [item async for item in join_conversation_jobs(attempted)] == []
             assert pending_outcome(runtime, "quiet") is not None
     finally:
+        finish.set()
         await runtime.shutdown()
 
 
@@ -236,21 +241,21 @@ async def test_revocation_during_the_reply_wait_finishes_the_reply(  # noqa: PLR
     finish = asyncio.Event()
     rejoined = asyncio.Event()
     kept_waits = 0
-    original_wait = runtime.wait
+    original_wait = runtime.wait_ready
 
     async def kept() -> BackgroundOutcome:
         await finish.wait()
         return BackgroundOutcome("completed", "Kept result")
 
-    async def wait(job_id: str, **kwargs: Any) -> JobWait:  # noqa: ANN401
+    async def wait_ready(job_id: str, **kwargs: Any) -> None:  # noqa: ANN401
         nonlocal kept_waits
         if job_id == "kept":
             kept_waits += 1
             if kept_waits == 2:
                 rejoined.set()
-        return await original_wait(job_id, **kwargs)
+        await original_wait(job_id, **kwargs)
 
-    monkeypatch.setattr(runtime, "wait", wait)
+    monkeypatch.setattr(runtime, "wait_ready", wait_ready)
 
     try:
         await start_job(runtime, "revoked", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)

@@ -146,7 +146,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
 | `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
 | `response_attempt.py` | Runs one visible response attempt with stop tracking |
-| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `response_lifecycle.py` | Shared response lifecycle helpers, queued-notice state, and the conversation lock a reply gives up while it only waits on background work |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |

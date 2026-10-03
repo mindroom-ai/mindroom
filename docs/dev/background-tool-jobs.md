@@ -9,7 +9,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  When the agent starts a newer reply in the conversation, that wait is released while accepted work continues.
+  A newer message in the conversation, or any other turn queued for it, releases that wait while accepted work continues; the reply then keeps holding the work at its response boundary.
   Neither action pauses a job or authorizes a protected tool.
 - One `job` tool provides scoped list, wait and cancel.
   Complete registered toolkits can be excluded, including plugins.
@@ -18,8 +18,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   After independent work, the reply joins every outstanding job of its agent (or team members) and requester in the conversation, including jobs earlier replies started.
   Waiting is transient visible progress, and Stop on the waiting reply cancels the work it holds.
   Results arriving during streaming wait for a safe response boundary.
-  When the agent starts a newer visible reply there, such as an answer to a newer human message or a scheduled turn, the newer reply takes over; a message that another agent answers leaves the reply holding.
-  A reply that only waits on background work does not hold new messages back, so the turn policy decides who answers them while it waits.
+  While a reply only waits on background work, it lets the conversation's other turns run and takes its place back to continue with results.
+  A newer reply of the agent takes the work over when it joins that work itself; a turn that never joins it, such as another agent's reply, a reply whose participation check stays silent, or a silent schedule, leaves the reply holding.
   The reply offers each ready outcome to the model once; one the model leaves unretrieved waits for the conversation's next reply.
   No job completion starts a reply of its own; after a restart the next reply in the conversation retrieves interrupted outcomes.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
@@ -41,7 +41,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `delegation/job_approvals.py` | Approval cards a background child's job posts and denies when the job ends early |
 | `tool_jobs/completion.py` | The holding reply's join of outstanding jobs and its waiting presentation |
 | `orchestration/tool_job_runtime.py` | Startup, policy revocation, saved Stops, card expiry, retention and shutdown coordination |
-| Response and delivery owners | Serialize replies, preserve published text and tool traces, settle visible delivery |
+| Response and delivery owners | Serialize replies except while one only waits on background work, preserve published text and tool traces, settle visible delivery |
 
 Execution lifetime is independent of a caller's wait.
 Each outcome has one active result claim; only persisted consumption acknowledges it.
@@ -91,9 +91,6 @@ Nested tools stay within their outer execution owner.
 Subagent follow-ups use reusable sessions after the previous child turn finishes; injecting instructions into a running child is outside scope.
 A reply holds only the work of its own requester, so when the agent answers another requester in the conversation, the first requester's work waits for their next message.
 A config reload waits for holding replies like any active reply, applying after at most 10 minutes.
-A newer reply takes the work over before its participation check decides, so when that check keeps the agent silent, the work waits for the requester's next answered message.
-A silent schedule cannot hold visible work, so it queues behind the reply holding that work, and the requester's later messages queued behind it wait until the work finishes or Stop ends it.
-A newer visible reply cannot hold a silent schedule's work, so taking the conversation over leaves that work for the next silent turn.
-Approving a card of an earlier paused reply resumes that reply only once the holding reply's work finishes or a newer reply takes it over.
+A waiting reply whose results become ready, or that was stopped or taken over, continues only once the turn running at that moment lets the conversation go.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.

@@ -247,7 +247,7 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
 Calls wait for the child's response by default.
-With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or until the agent starts answering a newer message in the conversation, and expose the shared waiting controls below, unless `delegate` is excluded.
+With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or until a newer message or turn arrives in the conversation, and expose the shared waiting controls below, unless `delegate` is excluded.
 In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
@@ -318,7 +318,7 @@ background_tool_jobs:
 The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
 Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
 Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
-The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls when the agent answers a newer message.
+The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls when a newer message arrives.
 A tool's own argument named `wait_timeout` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
@@ -327,12 +327,12 @@ Shell handles do not appear in `job(action="list")` or keep a reply waiting, and
 
 | `wait_timeout` | Behavior |
 | --- | --- |
-| Omitted or `null` | Wait until completion or until the agent starts answering a newer message. |
+| Omitted or `null` | Wait until completion or until a newer message or turn arrives in the conversation. |
 | `0` | Return a job handle immediately while execution continues. |
 | Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
 
 Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
-When the agent starts answering a newer message, the foreground wait is released without pausing or cancelling the accepted work.
+When a newer message or turn arrives in the conversation, the foreground wait is released without pausing or cancelling the accepted work, and the reply keeps holding that work once it finishes its answer.
 The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
 
 Pressing **Stop** cancels the reply and requests cancellation of this agent's outstanding managed jobs in the same conversation, including jobs from earlier follow-ups.
@@ -384,7 +384,8 @@ Unmanaged API execution keeps its existing synchronous lifetime and approval res
 
 While background work is outstanding in a conversation, the agent's latest reply stays open and holds it: after its own work, the reply waits for every outstanding job of this agent and requester in the conversation, including jobs that earlier replies started, without repeated model polling.
 Streaming and non-streaming replies show waiting progress, and pressing **Stop** on the waiting reply cancels the work it holds.
-When the agent starts a newer reply in the conversation, such as an answer to a newer message or a scheduled turn, the newer reply takes over the outstanding work and the older reply finishes; a message that another agent answers leaves the waiting reply as it is.
+While the reply only waits, the conversation's other messages and turns are answered meanwhile, and the reply continues in place when results arrive.
+When a newer reply of the agent joins the same outstanding work, it takes that work over and the older reply finishes; a turn that never joins it, such as another agent's reply, leaves the waiting reply as it is.
 Resuming an approved tool follows the same waiting behavior.
 Ready outcomes or approval boundaries cause one continuation of the holding reply using the native result-retrieval tool, up to 20 continuations per reply.
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
