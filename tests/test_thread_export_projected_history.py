@@ -40,6 +40,8 @@ from tests.journal_membership_helpers import admit_room_membership
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
+    from nio.api import RelationshipType
+
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
@@ -158,6 +160,7 @@ class FakeHomeserver:
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
@@ -165,12 +168,18 @@ class FakeHomeserver:
         """Yield one event's relations in the order the caller asked for.
 
         Newest first is what the bounded walk rests on, so the fake honours the
-        direction rather than accepting and ignoring it.
+        direction rather than accepting and ignoring it. A relation type asks
+        for the event's direct relations of that type only.
         """
         del room_id, recurse, minimum_recursion_depth
         self.relation_calls += 1
+        direct = None if rel_type is None else {"rel_type": rel_type.value, "event_id": event_id}
         sources = sorted(
-            self.relations.get(event_id, []),
+            (
+                source
+                for source in self.relations.get(event_id, [])
+                if direct is None or source["content"].get("m.relates_to") == direct
+            ),
             key=lambda source: (source["origin_server_ts"], source["event_id"]),
             reverse=direction is nio.MessageDirection.back,
         )
