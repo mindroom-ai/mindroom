@@ -127,6 +127,7 @@ Decoding stored JSON can take about 10 times its size in memory for a list of sh
 So a page also stops once its estimated decoded size passes 64 MiB, counting its bytes plus 96 bytes per JSON array, 192 per JSON object and 56 per comma or colon.
 
 A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
+Such a thread loses what needs its complete history, as one past the row limit does: untagged continuation in rooms with several responders, thread summaries, and mid-turn judgment.
 
 A page always keeps at least one message, even when that message alone is over the budget.
 
