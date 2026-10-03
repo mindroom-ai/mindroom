@@ -948,6 +948,82 @@ async def test_stalled_destination_connect_is_cancelled(stop: str, monkeypatch: 
         await proxy.close()
 
 
+async def _echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    while data := await reader.read(1024):
+        writer.write(data)
+        await writer.drain()
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_address_that_drops_connections_falls_back_to_the_next_validated_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first address that never answers leaves the setup deadline to the next address, as Chromium would."""
+    original = asyncio.open_connection
+    cancelled = asyncio.Event()
+
+    def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
+        return [ipaddress.IPv4Address("192.0.2.1"), ipaddress.IPv4Address("127.0.0.1")]
+
+    async def dial(host: str, port: int, **kwargs: object) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        if host != "192.0.2.1":
+            return await original(host, port, **kwargs)
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+        raise AssertionError
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
+    monkeypatch.setattr(asyncio, "open_connection", dial)
+    monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
+    monkeypatch.setattr(browser_proxy, "_SETUP_DEADLINE", 2.0)
+    echo = await asyncio.start_server(_echo, "127.0.0.1", 0)
+    proxy = BrowserDestinationProxy(allow_loopback=True)
+    await proxy.start()
+    try:
+        assert await asyncio.wait_for(_relay_reply(proxy, "dual.example", echo.sockets[0].getsockname()[1]), 1) == 0
+        assert cancelled.is_set()
+    finally:
+        await proxy.close()
+        echo.close()
+        await echo.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runner's egress proxy gets the name once and picks the address itself, so its slow tunnel is not cut short."""
+    original_tunnel = browser_proxy._open_upstream_tunnel
+
+    def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
+        return [ipaddress.IPv4Address("8.8.8.8"), ipaddress.IPv4Address("8.8.4.4")]
+
+    async def slow_tunnel(
+        upstream: _UpstreamProxy,
+        target: str,
+        port: int,
+        tls: ssl.SSLContext | None,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        await asyncio.sleep(0.2)
+        return await original_tunnel(upstream, target, port, tls)
+
+    monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
+    monkeypatch.setattr(browser_proxy, "_open_upstream_tunnel", slow_tunnel)
+    monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
+    recorder = _RecordingUpstream()
+    async with recorder as upstream_proxy:
+        proxy = BrowserDestinationProxy(
+            egress=BrowserEgress(http=upstream_proxy, https=upstream_proxy, by_hostname=True),
+        )
+        await proxy.start()
+        try:
+            assert await _relay_reply(proxy, "dual.example", 443) == 0
+        finally:
+            await proxy.close()
+    assert recorder.requests == [b"CONNECT dual.example:443 HTTP/1.1"]
+
+
 @pytest.mark.asyncio
 async def test_pinned_browser_redirect_destinations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: C901, PLR0915 - one real browser fixture lifecycle
     """Real pinned MCP/Chromium cannot send redirected traffic to a denied host."""

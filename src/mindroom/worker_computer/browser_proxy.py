@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     _IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 _SETUP_DEADLINE = 10.0
+# Chromium hands the relay names, so the relay falls back between addresses: an address that silently drops
+# connections is abandoned after this and the next one is dialed, while the last attempt keeps the setup deadline.
+_ATTEMPT_DEADLINE = 1.0
 _MAX_CONNECTIONS = 128
 # One page cannot hold more of the shared browser DNS threads than this, even after its lookups time out.
 _MAX_CONCURRENT_LOOKUPS = 4
@@ -388,20 +391,24 @@ class BrowserDestinationProxy:
             msg = "Browser proxy cannot connect to itself."
             raise ValueError(msg)
         upstream = self._egress._upstream_for(port)
-        tunnel_targets: set[str] = set()
+        # Each target is dialed once: directly at its address, or through a tunnel when the address is None.
+        attempts: dict[str, _IPAddress | None] = {}
         for address in addresses:
-            try:
-                if self._dials_directly(host, address, upstream):
-                    return await asyncio.open_connection(
-                        address.compressed,
-                        port,
-                        family=socket.AF_INET if address.version == 4 else socket.AF_INET6,
-                    )
-                assert upstream is not None
+            if self._dials_directly(host, address, upstream):
+                attempts.setdefault(address.compressed, address)
+            else:
                 # Tunnel to the validated address, so the upstream cannot resolve the name to something else.
-                target = host if self._egress.by_hostname else address.compressed
-                if target not in tunnel_targets:
-                    tunnel_targets.add(target)
+                attempts.setdefault(host if self._egress.by_hostname else address.compressed, None)
+        for index, (target, direct) in enumerate(attempts.items()):
+            try:
+                async with asyncio.timeout(_ATTEMPT_DEADLINE if index < len(attempts) - 1 else None):
+                    if direct is not None:
+                        return await asyncio.open_connection(
+                            target,
+                            port,
+                            family=socket.AF_INET if direct.version == 4 else socket.AF_INET6,
+                        )
+                    assert upstream is not None
                     return await _open_upstream_tunnel(upstream, target, port, self._upstream_tls)
             except _UpstreamTunnelRefusedError as refused:
                 logger.warning(
