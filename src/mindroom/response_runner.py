@@ -2530,11 +2530,11 @@ class ResponseRunner:
         session_id: str,
         execution_identity: ToolExecutionIdentity,
         run_id: str,
-    ) -> None:
+    ) -> bool:
         """Fold one stopped attempt, named by its last visible edit, into the turn's live record."""
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
         try:
-            persist_stopped_attempt_snapshot(
+            return persist_stopped_attempt_snapshot(
                 storage=storage,
                 session_id=session_id,
                 scope_id=session_scope.scope_id,
@@ -3603,12 +3603,7 @@ class ResponseRunner:
         )
         if prepared_request is None:
             return None
-        request = await self._with_interrupted_attempt(
-            prepared_request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-        )
+        request = prepared_request
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.participating_agent_names or (self.deps.agent_name,),
@@ -3646,8 +3641,9 @@ class ResponseRunner:
                 trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
             )
         except (EncryptionError, RemoteProtocolError):
-            # A reply this device cannot decrypt, or whose edits the server will
-            # not list, stays unreadable however often the turn is retried.
+            # A reply this device cannot decrypt, or whose edits the server would
+            # not list, is answered with a warning rather than retried, since a
+            # missing key or a refusing server may never change.
             message = None
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
         if message is None or unfinished is None:
@@ -3674,7 +3670,7 @@ class ResponseRunner:
         # A failed write raises and leaves the sources pending for retry, since
         # answering without this record could repeat the finished tools. The
         # write finishes before cancellation releases the lifecycle lock.
-        await run_blocking_until_complete(
+        appended = await run_blocking_until_complete(
             partial(
                 self._persist_stopped_attempt,
                 recorder.interrupted_snapshot(),
@@ -3691,7 +3687,12 @@ class ResponseRunner:
             response_event_id=event_id,
             completed_tool_count=len(completed_tools),
         )
-        return _with_interrupted_attempt_instruction(request, _INTERRUPTED_ATTEMPT_INSTRUCTION)
+        # Rereading an attempt already recorded means the attempt since then left
+        # no edit, so what that one did is unknown.
+        return _with_interrupted_attempt_instruction(
+            request,
+            _INTERRUPTED_ATTEMPT_INSTRUCTION if appended else _UNKNOWN_ATTEMPT_INSTRUCTION,
+        )
 
     async def _prepare_locked_source(
         self,
@@ -3786,10 +3787,18 @@ class ResponseRunner:
             exclude_history_event_id=placeholder_event_id,
         )
         request = self._request_with_locked_target(request, resolved_target)
-        return await self._prepare_locked_source(
+        prepared_request = await self._prepare_locked_source(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
+        )
+        if prepared_request is None:
+            return None
+        return await self._with_interrupted_attempt(
+            prepared_request,
+            resolved_target=resolved_target,
+            history_scope=history_scope,
+            execution_identity=execution_identity,
         )
 
     async def _begin_locked_turn(

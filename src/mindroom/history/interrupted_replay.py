@@ -322,8 +322,8 @@ def persist_stopped_attempt_snapshot(
     attempt: str,
     snapshot: InterruptedReplaySnapshot,
     is_team: bool,
-) -> None:
-    """Fold one stopped attempt into its turn's live interrupted replay record.
+) -> bool:
+    """Fold one stopped attempt into its turn's live interrupted replay record, reporting whether it was new.
 
     A turn that stops again before its new attempt shows the earlier work
     would otherwise lose that work's account, so each newly read attempt is
@@ -347,7 +347,7 @@ def persist_stopped_attempt_snapshot(
     if earlier is not None:
         assert isinstance(earlier.metadata, dict)
         if earlier.metadata.get(_STOPPED_ATTEMPT_KEY) == attempt:
-            return
+            return False
         run_id = earlier.run_id or run_id
         if isinstance(earlier.content, str) and earlier.content:
             snapshot = replace(
@@ -363,6 +363,7 @@ def persist_stopped_attempt_snapshot(
         snapshot=replace(snapshot, run_metadata={**snapshot.run_metadata, _STOPPED_ATTEMPT_KEY: attempt}),
         is_team=is_team,
     )
+    return True
 
 
 def persist_interrupted_replay(

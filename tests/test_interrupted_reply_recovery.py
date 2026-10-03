@@ -345,16 +345,23 @@ async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> No
     target = request.response_envelope.target
     identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
     second = _streamed("A new start", trace=(), latest_edit="$edit-b")
+    instructions: list[str] = []
 
     for visible in (_streamed(), _streamed(), second, second):
         with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
-            await runner._with_interrupted_attempt(
+            answered = await runner._with_interrupted_attempt(
                 request,
                 resolved_target=target,
                 history_scope=HistoryScope(kind="agent", scope_id="general"),
                 execution_identity=identity,
             )
+        (instruction,) = [
+            item.text for item in answered.transient_enrichment_items if item.key == "interrupted_attempt"
+        ]
+        instructions.append(instruction)
 
+    # Rereading a recorded attempt means the attempt after it left no edit, so its work is unknown.
+    assert ["is unknown" in instruction for instruction in instructions] == [False, True, False, True]
     (record,) = _recorded_attempts(bot, request)
     first_account, second_account = record.split("\n\nA new start")
     assert first_account.startswith("Half of the report")
@@ -422,7 +429,7 @@ async def test_failed_attempt_record_leaves_the_turn_pending(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_a_team_attempt_is_recorded_in_its_team_history(tmp_path: Path) -> None:
-    """A team's stopped attempt lands in the team scope its next attempt reads, without its display chrome."""
+    """A team scope's stopped attempt is recorded in that scope, without its display chrome."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
