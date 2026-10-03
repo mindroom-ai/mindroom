@@ -40,7 +40,8 @@ class SpotifyTools(AgnoSpotifyTools):
     # Remove when: Agno accepts a token provider or refresh credentials and renews expiring tokens itself;
     # saving the renewed token in MindRoom's scoped credential store stays MindRoom behavior.
     # Coverage: tests/test_spotify_tools.py::test_tool_renews_an_expiring_token_before_calling_spotify;
-    # tests/test_spotify_tools.py::test_tool_without_the_client_secret_keeps_the_stored_token.
+    # tests/test_spotify_tools.py::test_tool_without_the_client_secret_keeps_the_stored_token;
+    # tests/test_spotify_tools.py::test_tool_does_not_renew_a_connection_shared_through_the_worker_grant.
     def _make_request(
         self,
         endpoint: str,
@@ -48,6 +49,9 @@ class SpotifyTools(AgnoSpotifyTools):
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Read only the target's own store, which the renewal saves back to.
+        # A connection shared through worker_grantable_credentials keeps its construction-time token,
+        # so it is never copied into this agent's store; the dashboard status check follows the same rule.
         credentials = load_scoped_credentials(
             "spotify",
             credentials_manager=self._credentials_manager,

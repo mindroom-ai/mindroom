@@ -12,11 +12,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.spotify import SpotifyTools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _SPOTIFY_ENV = {"SPOTIFY_CLIENT_ID": "client-id", "SPOTIFY_CLIENT_SECRET": "client-secret"}
 
@@ -49,7 +52,13 @@ def _fake_spotify(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return requests
 
 
-def _spotify_tool(tmp_path: Path, process_env: dict[str, str]) -> tuple[SpotifyTools, CredentialsManager]:
+def _spotify_tool(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    *,
+    worker_target: ResolvedWorkerTarget | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
+) -> tuple[SpotifyTools, CredentialsManager]:
     manager = CredentialsManager(base_path=tmp_path / "credentials")
     manager.save_credentials(
         "spotify",
@@ -65,7 +74,13 @@ def _spotify_tool(tmp_path: Path, process_env: dict[str, str]) -> tuple[SpotifyT
         storage_path=tmp_path,
         process_env=process_env,
     )
-    tool = get_tool_by_name("spotify", runtime_paths, credentials_manager=manager, worker_target=None)
+    tool = get_tool_by_name(
+        "spotify",
+        runtime_paths,
+        credentials_manager=manager,
+        allowed_shared_services=allowed_shared_services,
+        worker_target=worker_target,
+    )
     assert isinstance(tool, SpotifyTools)
     return tool, manager
 
@@ -105,3 +120,24 @@ def test_tool_without_the_client_secret_keeps_the_stored_token(
     assert result == {"error": {"status": 401, "message": "The access token expired"}}
     assert requests == [("https://api.spotify.com/v1/me", "Bearer expired-token")]
     assert manager.load_credentials("spotify") == stored
+
+
+def test_tool_does_not_renew_a_connection_shared_through_the_worker_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted installation-wide connection keeps its token, so the tool never copies it into the agent's store."""
+    tool, manager = _spotify_tool(
+        tmp_path,
+        _SPOTIFY_ENV,
+        worker_target=resolve_worker_target("shared", "general", execution_identity=None),
+        allowed_shared_services=frozenset({"spotify"}),
+    )
+    shared_connection = manager.load_credentials("spotify")
+    requests = _fake_spotify(monkeypatch)
+
+    tool.get_current_user()
+
+    assert requests == [("https://api.spotify.com/v1/me", "Bearer expired-token")]
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials("spotify") is None
+    assert manager.load_credentials("spotify") == shared_connection

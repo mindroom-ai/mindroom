@@ -2829,7 +2829,11 @@ def test_spotify_callback_preserves_runtime_validation_error(
     assert callback_response.json()["detail"] == invalid_detail
 
 
-def _publish_spotify_shared_runtime(api_app: FastAPI) -> constants.RuntimePaths:
+def _publish_spotify_shared_runtime(
+    api_app: FastAPI,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> constants.RuntimePaths:
     """Publish a shared-scope config whose runtime has Spotify OAuth client settings."""
     current_paths = main._app_runtime_paths(api_app)
     runtime_paths = constants.resolve_primary_runtime_paths(
@@ -2841,7 +2845,8 @@ def _publish_spotify_shared_runtime(api_app: FastAPI) -> constants.RuntimePaths:
             "SPOTIFY_CLIENT_SECRET": "client-secret",
         },
     )
-    _publish_committed_runtime_config(api_app, runtime_paths, _config_with_worker_scope("shared").model_dump())
+    config = _config_with_worker_scope("shared", worker_grantable_credentials=worker_grantable_credentials)
+    _publish_committed_runtime_config(api_app, runtime_paths, config.model_dump())
     return runtime_paths
 
 
@@ -2933,6 +2938,44 @@ def test_spotify_status_renews_an_expiring_token(test_client: TestClient, monkey
     assert saved is not None
     assert (saved["access_token"], saved["refresh_token"]) == ("renewed-token", "new-refresh")
     assert saved["expires_at"] >= int(time.time()) + 3500
+
+
+def test_spotify_status_does_not_renew_a_connection_shared_through_the_worker_grant(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted installation-wide connection is shown but not renewed, so it is never copied into the agent's store."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app, worker_grantable_credentials=["spotify"])
+    manager = get_runtime_credentials_manager(runtime_paths)
+    shared_connection = {
+        "access_token": "shared-token",
+        "refresh_token": "shared-refresh",
+        "expires_at": int(time.time()),
+        "_source": "ui",
+    }
+    manager.save_credentials("spotify", shared_connection)
+    renewals: list[str] = []
+
+    def _post(url: str, **_kwargs: object) -> httpx.Response:
+        renewals.append(url)
+        token = {"access_token": "renewed-token", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"Listener with {self.auth}"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener with shared-token"
+    assert renewals == []
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials("spotify") is None
+    assert manager.load_credentials("spotify") == shared_connection
 
 
 def test_spotify_reconnect_saves_the_newly_authorized_account(
