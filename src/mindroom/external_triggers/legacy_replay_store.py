@@ -10,7 +10,7 @@ _SECTIONS = ("nonces", "events", "threads")
 
 # LEGACY_COMPAT: One external-trigger replay file shared by every replay scope.
 # Legacy format: `<control-state>/external_triggers/replay.json` keyed its nonce, event, and thread-key sections by replay scope.
-# Last legacy release: v2026.10.40; replacement: the next release keeps each scope in its own file under `external_triggers/replay/`.
+# Last legacy release: v2026.10.46; replacement: the next release keeps each scope in its own file under `external_triggers/replay/`.
 # Handling: The first replay store call splits a present file into one current file per scope under the old lock, then deletes it; a malformed file fails closed until repaired, and the next trigger record write removes the files of scopes whose trigger was deleted or rotated.
 # Coverage: tests/test_external_trigger_replay_store.py::test_shared_replay_file_is_split_into_scope_files.
 def split_shared_replay_store(raw_store: object) -> dict[str, dict[str, object]] | None:
