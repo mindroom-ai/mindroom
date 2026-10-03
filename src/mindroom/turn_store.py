@@ -740,19 +740,26 @@ class TurnStore:
             if record is not None and record.conversation_target is not None
         }
         if recorded_rooms:
-            known_in_room = recorded_rooms == {room_id}
+            if recorded_rooms != {room_id}:
+                logger.warning(
+                    "Ignoring redaction of an event recorded in another room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
         else:
             known_in_room, _thread_id = await self.deps.relations.admitted_thread_id(
                 room_id=room_id,
                 event_id=source_event_id,
             )
-        if not known_in_room:
-            logger.warning(
-                "Ignoring redaction of an event not known in this room",
-                room_id=room_id,
-                redacted_event_id=source_event_id,
-            )
-            return None
+            if not known_in_room:
+                # Routine for stickers, polls, undecryptable messages, and history from before the journal.
+                logger.debug(
+                    "Ignoring redaction of an event never admitted in this room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
