@@ -1440,6 +1440,33 @@ def test_homegrown_load_tool_makes_toolkit_instructions_available(
     assert instruction_marker in _render_system_prompt(loaded_agent)
 
 
+@pytest.mark.parametrize(
+    ("tool_entry", "excluded"),
+    [
+        ("chat_ui", ()),
+        ({"chat_ui": {"exclude_tools": ["show_canvas"]}}, ("show_canvas",)),
+    ],
+)
+def test_chat_ui_instructions_map_only_the_enabled_functions(
+    tmp_path: Path,
+    tool_entry: object,
+    excluded: tuple[str, ...],
+) -> None:
+    """The agent's prompt names what each chat_ui function works on, and nothing it cannot call."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [tool_entry]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    prompt = _render_system_prompt(agent)
+
+    assert "chat_ui shows parts of MindRoom Chat to the user." in prompt
+    for name in TOOL_METADATA["chat_ui"].function_names:
+        assert (f"\n- {name}(" in prompt) is (name not in excluded)
+    assert "open_panel(panel='computer') shows the Computer panel" in prompt
+    assert "open_panel(panel='members') shows the Members panel" in prompt
+
+
 @pytest.mark.parametrize(("provider", "model_id"), [("codex", "gpt-6-astra"), ("openai", "gpt-6-astra")])
 def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_homegrown_machinery(
     tmp_path: Path,

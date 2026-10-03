@@ -45,6 +45,35 @@ _CANVAS_TITLE_MAX_UNITS = 120
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
 _CANVAS_SIZE_PROBE_EVENT_ID = "$" + "x" * 64
 _CANVAS_PAGE_MAX_BYTES = 4 * 1024 * 1024
+# Added to the agent's instructions. The map lists only the functions the agent has (see
+# ChatUITools.instructions), so include_tools or exclude_tools never advertise a missing function.
+_CHAT_UI_INSTRUCTIONS = (
+    "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and "
+    "none of them touches the user's own computer or browser. Side panels share one place on the screen, so "
+    "opening one replaces whichever is open. Each call only sends a request into the conversation: success "
+    "means it was sent, not that the user saw it."
+)
+_FUNCTION_INSTRUCTIONS: dict[str, str] = {
+    "open_panel": (
+        "open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the "
+        "browser that browser_control drives with target='host'. Use it to let the user watch you on a real "
+        "website, or take over, for example to log in. "
+        "open_panel(panel='members') shows the Members panel: the people and agents in this room."
+    ),
+    "show_computer": (
+        "show_computer() shows the Computer panel, a live view of your own worker browser; it is the same as "
+        "open_panel(panel='computer')."
+    ),
+    "show_canvas": (
+        "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
+        "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
+        "something in; their answer comes back as their next message. For a quick choice between a few "
+        "options, just ask in your reply."
+    ),
+    "open_settings": (
+        "open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting."
+    ),
+}
 
 
 def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], body: str) -> dict[str, object]:
@@ -65,7 +94,7 @@ def _canvas_title_is_valid(title: str) -> bool:
 
 
 class ChatUITools(Toolkit):
-    """Ask MindRoom Chat to reveal a bounded part of its interface."""
+    """Ask MindRoom Chat to show the user one bounded part of its interface."""
 
     def __init__(
         self,
@@ -77,8 +106,20 @@ class ChatUITools(Toolkit):
         self._file_access = file_access
         super().__init__(
             name="chat_ui",
+            add_instructions=True,
             tools=[self.show_computer, self.open_settings, self.open_panel, self.show_canvas],
         )
+
+    @property
+    def instructions(self) -> str:
+        """Map only the functions this agent has; include_tools and exclude_tools remove the others."""
+        enabled = {*self.functions, *self.async_functions}
+        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
+
+    @instructions.setter
+    def instructions(self, _value: str | None) -> None:
+        """Ignore Agno's constructor assignment; the map is derived from the enabled functions."""
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -260,11 +301,12 @@ class ChatUITools(Toolkit):
         )
 
     async def show_computer(self) -> str:
-        """Backward-compatible alias for open_panel(panel='computer').
+        """Show the user the Computer panel: a live view of your own worker browser.
 
-        Request this agent's Computer panel in watch mode. Does not navigate, send
-        a prompt to ChatGPT, or take control. Success means the request was sent,
-        not that the client opened the panel.
+        Identical to open_panel(panel='computer'), which describes it fully; kept so
+        older prompts keep working. Does not navigate, send a prompt to ChatGPT, or
+        take control. Success means the request was sent, not that the client opened
+        the panel.
         """
         return await self._send_action(
             "show_computer",
@@ -272,9 +314,11 @@ class ChatUITools(Toolkit):
         )
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
-        """Request a MindRoom Chat Settings section without changing account settings.
+        """Open the user's MindRoom Chat Settings dialog at one section.
 
-        Success means the UI request was sent, not that the client opened Settings.
+        This works on the Chat app's own settings screen. It changes no setting; the
+        user decides what to do there. Success means the UI request was sent, not that
+        the client opened Settings.
         """
         if section not in _SETTINGS_SECTIONS:
             return self._payload(
@@ -289,16 +333,23 @@ class ChatUITools(Toolkit):
         )
 
     async def open_panel(self, panel: _SidePanel = "members") -> str:
-        """Request a MindRoom Chat panel for the user: members or computer.
+        """Show the user a side panel in MindRoom Chat: 'computer' or 'members'.
 
-        Use panel='computer' to let the user watch this agent's worker browser in
-        the Computer panel. It does not navigate to a URL, send a prompt to
-        ChatGPT, take control, or open or control the user's local browser.
-        Navigate the worker browser separately with browser_control.
+        panel='computer' opens the Computer panel: a live view of your own worker
+        browser, the one browser_control drives with target='host'. The user starts
+        out watching. They can take control, for example to log in; while they have
+        it your browser calls are blocked, and when they hand it back you get a
+        message. Opening the panel does not navigate to a URL, send a prompt to
+        ChatGPT, or take control, and it never opens or controls the user's own
+        browser: navigate first with browser_control, then open the panel.
+
+        panel='members' opens the Members panel, listing the people and agents in
+        this room.
+
         Success means the UI request was sent, not that the client opened a panel.
 
         Args:
-            panel: 'members' for room members, or 'computer' for this agent's worker browser in watch mode.
+            panel: 'computer' for your worker browser, or 'members' for this room's members.
 
         """
         if panel not in _SIDE_PANELS:
@@ -323,10 +374,12 @@ class ChatUITools(Toolkit):
         path: str | None = None,
         canvas_event_id: str | None = None,
     ) -> str:
-        """Show an interactive web page (a canvas) beside this conversation in MindRoom Chat.
+        """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
 
         Use a canvas when seeing or clicking beats reading or typing: dashboards,
-        reports, charts, slides, menus, forms, pickers, and multi-step flows. Pass the
+        reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
+        cannot load any website; to show the user a real website, open it with
+        browser_control and use open_panel(panel='computer') instead. Pass the
         page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
         to an HTML file, which suits pages you build and refine such as slides. Pages up
         to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and

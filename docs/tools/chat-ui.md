@@ -4,7 +4,7 @@ icon: lucide/panels-top-left
 
 # Agent Chat UI Actions
 
-The `chat_ui` toolkit opens MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel, open Settings, show room members, or show an interactive HTML canvas the user can answer.
+The `chat_ui` toolkit shows parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, which the user can answer), the Members panel, or a Settings section.
 It sends a normal Matrix notice with a readable fallback and bounded action metadata.
 The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
 
@@ -30,6 +30,18 @@ MindRoom supplies the addressed requester, configured agent sender, current room
 Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
 
 ## Actions
+
+Each action works on a different thing, and none of them touches the user's own computer or browser:
+
+| Call | What the user sees | What it works on | What comes back to the agent |
+| --- | --- | --- | --- |
+| `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
+| `show_canvas(...)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
+| `open_settings(section=...)` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
+
+The Computer, Canvas, and Members panels share one place on the screen, so opening one replaces whichever is open.
+The toolkit adds the same map to the agent's instructions on every turn, listing only the functions the agent has after `include_tools` or `exclude_tools`.
 
 - `open_panel(panel="computer")` asks Chat to reveal the current agent's worker browser in the Computer panel in watch mode.
 - `open_panel(panel="members")` requests the room's Members side panel and remains the default when `panel` is omitted.
@@ -208,6 +220,16 @@ Canvases are off unless the Chat deployment enables them in its runtime `config.
 
 When they are off, the notice shows its text fallback and its button explains that interactive panels are turned off.
 Automatic opening follows the same `autoOpenFromHomeservers` rule as other UI requests; otherwise the user opens the canvas with the notice's **Open panel** button.
+
+To keep an agent's other `chat_ui` actions but not canvases, exclude the function in the agent's tool entry; the agent then neither has `show_canvas` nor sees it in its instructions:
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - chat_ui:
+          exclude_tools: [show_canvas]
+```
 
 ## Worker computer requirements
 
