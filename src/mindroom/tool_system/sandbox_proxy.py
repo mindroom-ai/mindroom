@@ -1028,6 +1028,14 @@ def _call_proxy_sync(
         return result
 
 
+async def _run_sync_tool_call(call: Callable[[], object]) -> object:
+    """Run one call of a synchronous tool function exactly as its sync entrypoint would run, completion owners included."""
+    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint  # noqa: PLC0415
+
+    return await run_sync_tool_entrypoint(call, {})
+
+
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     """Run one blocking worker proxy call outside asyncio's default executor."""
     # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
@@ -1083,7 +1091,7 @@ def _wrap_sync_function(
     return wrapped
 
 
-def _wrap_async_function(
+def _wrap_async_proxy(
     function: Function,
     tool_name: str,
     function_name: str,
@@ -1101,6 +1109,8 @@ def _wrap_async_function(
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
     assert entrypoint is not None
+    # A sync function keeps the completion ownership its sync entrypoint had; an async one keeps prompt cancellation.
+    run_blocking = _run_in_worker_proxy_executor if inspect.iscoroutinefunction(entrypoint) else _run_sync_tool_call
 
     @functools.wraps(entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
@@ -1110,7 +1120,7 @@ def _wrap_async_function(
         ):
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(*args, **kwargs)
-            return await _run_in_worker_proxy_executor(functools.partial(entrypoint, *args, **kwargs))
+            return await run_blocking(functools.partial(entrypoint, *args, **kwargs))
         cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
@@ -1130,7 +1140,7 @@ def _wrap_async_function(
             cancellation=cancellation,
         )
         try:
-            return await _run_in_worker_proxy_executor(call)
+            return await run_blocking(call)
         except asyncio.CancelledError:
             # The blocking request keeps running after this await is cancelled; stop it at the worker too.
             cancellation.cancel()
@@ -1192,7 +1202,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         for function_name, function in original_functions.items()
     }
     toolkit.async_functions = {
-        function_name: _wrap_async_function(
+        function_name: _wrap_async_proxy(
             function,
             tool_name,
             function_name,

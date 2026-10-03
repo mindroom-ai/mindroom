@@ -123,7 +123,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
-Tool calls running in a [worker](deployment/sandbox-proxy.md), such as `run_shell_command` or `python`, stop with it.
+Tool calls running in a [worker](deployment/sandbox-proxy.md), such as `run_shell_command` or `run_python_code`, stop with it, apart from the exceptions listed there.
 An explicit user stop finalizes the streamed message with:
 
 ```

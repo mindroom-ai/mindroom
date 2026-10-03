@@ -264,7 +264,7 @@ async def test_cancelled_async_worker_proxy_call_keeps_capacity_until_proxy_thre
     def build(*_args: object, **_kwargs: object) -> Toolkit:
         toolkit = Toolkit(name="calculator", tools=[work])
         toolkit.async_functions = {
-            name: sandbox_proxy._wrap_async_function(
+            name: sandbox_proxy._wrap_async_proxy(
                 function,
                 "calculator",
                 name,

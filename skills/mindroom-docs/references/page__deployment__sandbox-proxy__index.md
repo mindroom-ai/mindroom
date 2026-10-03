@@ -566,7 +566,7 @@ Handles are owned by a small worker-local shell supervisor process that the runn
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
-Stopping a response stops its worker calls too, such as `run_shell_command` and `python`.
+Stopping a response stops its worker calls too, such as `run_shell_command` and `run_python_code`.
 Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
 The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
 A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.

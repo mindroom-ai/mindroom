@@ -103,6 +103,7 @@ from tests.conftest import (
     requires_linux,
 )
 from tests.process_helpers import assert_linux_pid_not_running
+from tests.test_agent_tool_calls import _catalog, _events
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -1362,6 +1363,63 @@ async def test_sync_function_placed_on_the_primary_runs_locally_through_its_asyn
     assert caller_threads != [threading.get_ident()]
     assert await entrypoint(place="worker") == "worker"
     assert [url for url, _payload in calls] == ["http://sandbox-runner:8765/api/sandbox-runner/execute"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_primary", [False, True], ids=["worker", "primary"])
+async def test_stopped_sync_tool_call_keeps_its_completion_owner_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_primary: bool,
+) -> None:
+    """A tool catalog still waits for a stopped sync call's thread, as it did before sync functions got async proxies."""
+    entered = threading.Event()
+    finish = threading.Event()
+
+    def blocking(*_args: object, **_kwargs: object) -> str:
+        entered.set()
+        assert finish.wait(10)
+        return "done"
+
+    class PlacedTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.action])
+
+        def action(self) -> str:
+            """Block until released."""
+            return blocking()
+
+        def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+            del function_name, arguments
+            return on_primary
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "_call_proxy_sync", blocking)
+    toolkit = sandbox_proxy_module.maybe_wrap_toolkit_for_sandbox_proxy(
+        "calculator",
+        PlacedTools(),
+        runtime_paths=runtime_paths,
+        credentials_manager=None,
+        worker_target=None,
+    )
+    catalog = await _catalog(tmp_path, [toolkit])
+    call = asyncio.create_task(_events(catalog, "calculator", "action"))
+    assert await asyncio.to_thread(entered.wait, 5)
+    call.cancel()
+    close = asyncio.create_task(catalog.close())
+    try:
+        done, _pending = await asyncio.wait({close}, timeout=0.2)
+        assert not done, "the catalog closed while the stopped call was still running"
+    finally:
+        finish.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await call
+        await close
 
 
 def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest.MonkeyPatch) -> None:
