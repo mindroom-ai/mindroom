@@ -202,6 +202,14 @@ _STATE = {"enabled": True, "existingClaim": "mindroom-state"}
         (
             {
                 "sessionStorage": {"enabled": True},
+                "extraVolumes": [{"name": "sessions", "emptyDir": {}}],
+                "extraVolumeMounts": [{"name": "sessions", "mountPath": "/app/session_state/"}],
+            },
+            "sessionStorage.mountPath must differ from extraVolumeMounts[0].mountPath",
+        ),
+        (
+            {
+                "sessionStorage": {"enabled": True},
                 "env": {"extra": [{"name": SESSION_STORAGE_PATH_ENV, "value": "/elsewhere"}]},
             },
             f"env.extra must not set {SESSION_STORAGE_PATH_ENV} when sessionStorage.enabled=true",

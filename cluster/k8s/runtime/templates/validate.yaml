@@ -171,6 +171,11 @@
 {{- end -}}
 {{- /* Mount paths and state subpaths already claimed in the runtime container, keyed to the value that claims them. */ -}}
 {{- $claimedMountPaths := dict (clean .Values.storage.mountPath) "storage.mountPath" -}}
+{{- range $index, $mount := .Values.extraVolumeMounts -}}
+{{- if $mount.mountPath -}}
+{{- $_ := set $claimedMountPaths (clean $mount.mountPath) (printf "extraVolumeMounts[%d].mountPath" $index) -}}
+{{- end -}}
+{{- end -}}
 {{- $claimedSubPaths := dict -}}
 {{- if .Values.stateStorage.enabled -}}
 {{- if .Values.stateStorage.mountPath -}}
