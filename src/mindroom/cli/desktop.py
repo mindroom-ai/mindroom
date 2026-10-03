@@ -497,10 +497,13 @@ def desktop_setup(
         path = native_config_path(runtime_paths.storage_root)
         try:
             previous = load_native_config(path)
+            base_revision = previous.revision
         except NativeConfigError as exc:
-            if exc.code != "configuration_missing":
+            # Setup saves fresh settings, so it also repairs a malformed or exposed file.
+            if exc.code not in {"configuration_missing", "configuration_repair_required"}:
                 raise
             previous = None
+            base_revision = exc.revision
         controller = PinnedMatrixDevice(controller_user_id, controller_device_id, controller_ed25519)
         check_controller_binding(
             runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
@@ -510,7 +513,7 @@ def desktop_setup(
         # Saved local authority carries over only for the same controller.
         matching = previous if previous is not None and previous.controller == controller else None
         config = NativeDesktopConfig(
-            revision=previous.revision if previous else 0,
+            revision=base_revision,
             enabled=True,
             controller=controller,
             allowed_requester_ids=(session.user_id,),
