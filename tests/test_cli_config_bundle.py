@@ -327,11 +327,11 @@ def test_classify_change_reports_unconstructible_yaml_as_failure(
     assert value.split()[1] not in result.output
 
 
-def _active_tree(tmp_path: Path, source_text: str = "agents: {}\n") -> tuple[Path, Path, dict[str, object]]:
+def _active_tree(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     """Install a single-file tree whose runtime fingerprint is the plain config SHA-256."""
     source = tmp_path / "source"
     source.mkdir()
-    (source / "config.yaml").write_text(source_text)
+    (source / "config.yaml").write_text("agents: {}\n")
     target = tmp_path / "active"
     result = runner.invoke(app, ["config", "install-bundle", str(source), "--target", str(target), "--json"])
     assert result.exit_code == 0, result.output

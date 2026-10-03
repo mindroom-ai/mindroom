@@ -331,9 +331,9 @@ The chart rejects a normalized bootstrap source that equals, contains, or lies i
 
 Without a revision, initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
 Bundle transport can refresh the separate source directory normally.
-To activate a changed revision without a restart, run `mindroom config apply-bundle SOURCE --target TARGET --rollback-on-failure --json` in the runtime container.
+To activate a changed revision without a restart, run `mindroom config apply-bundle SOURCE --target TARGET --config FILENAME --rollback-on-failure --json` in the runtime container, where TARGET and FILENAME are the directory and filename of `config.path`.
 It installs the tree, waits for the runtime to apply its fingerprint, restores the digest-pinned `TARGET.previous` only when the runtime rejects the change, and exits `0` only for `applied`.
-It refuses changes outside the YAML/include sources that a config reload rereads, such as `.env` or plugin files; use `mindroom config classify-change` to check a candidate in advance.
+It refuses changes outside the YAML/include sources that a config reload rereads, such as `.env` or plugin files; [Updating a Bootstrapped Config](#updating-a-bootstrapped-config) shows the full hot path.
 See [`config apply-bundle`](../../../docs/cli.md#config-apply-bundle) for receipt statuses and exit codes, and [`config install-bundle`](../../../docs/cli.md#config-install-bundle) for drift protection, manual rollback, and filesystem limits.
 Content images need no MindRoom binary.
 
@@ -369,12 +369,10 @@ pod=$(kubectl -n mindroom get pods -l app.kubernetes.io/instance=mindroom-runtim
 kubectl -n mindroom exec "$pod" -c mindroom -- rm -rf /app/agent_data/config-candidate
 kubectl -n mindroom cp ./environments/prod "$pod:/app/agent_data/config-candidate" -c mindroom
 kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config classify-change /app/agent_data/active-config /app/agent_data/config-candidate
-kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config install-bundle /app/agent_data/config-candidate --target /app/agent_data/active-config --source-only --json
-kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config check-applied --path /app/agent_data/active-config/config.yaml --fingerprint <receipt-fingerprint> --wait 300
+kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config apply-bundle /app/agent_data/config-candidate --target /app/agent_data/active-config --rollback-on-failure --json
 ```
 
-`classify-change` exits `1` when the change also touches other files, which need the restart path, and `--source-only` makes the installer refuse such a candidate too.
-`check-applied` waits for the `fingerprint` from the installer's JSON receipt; the [CLI reference](../../../docs/cli.md#config-install-bundle) describes rolling back to `active-config.previous` if it fails.
+`classify-change` exits `1` when the change also touches other files, which need the restart path, and `apply-bundle` refuses such a candidate too.
 A hot install keeps the stored revision, so restarts preserve it until the next bundle digest replaces the tree; ship the same change in that image.
 
 ## Provider API Keys from Kubernetes Secrets
