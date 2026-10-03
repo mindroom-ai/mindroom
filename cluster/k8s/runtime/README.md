@@ -39,8 +39,7 @@ kubectl --namespace mindroom exec deploy/mindroom-runtime -c mindroom -- \
   mindroom check-active-responses --details --wait 1800 --url http://127.0.0.1:8765
 ```
 
-The command exits `0` once no admitted Matrix work, OpenAI-compatible request, voice call, or interruptible background script run is active, `1` if work is still active at the deadline, and `2` if status is unavailable.
-Treat every nonzero result, including `kubectl` and authentication failures, as a blocked restart.
+It exits `0` once no live work is active; treat every nonzero result, including `kubectl` and authentication failures, as a blocked restart.
 The command uses the container's `MINDROOM_API_KEY`, so the key stays in the pod, and the loopback URL bypasses any ingress.
 Background script runs that restart startup would adopt, such as runs on dedicated `kubernetes` workers with an isolated script gateway, are listed as recoverable and do not block.
 Wait for them as well when the change alters their recovery contract.

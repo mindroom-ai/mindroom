@@ -80,7 +80,6 @@ matrixRTC:
 ```
 
 The Service names follow `<release>-mindroom-matrixrtc-auth` and `<release>-mindroom-matrixrtc-livekit`; set `fullnameOverride` for shorter names.
-`auth.livekitUrl` here must be the `wss://` form of the client's public `/livekit/sfu/` route, for example `wss://matrix.example.com/livekit/sfu`.
 The client chart must serve `/.well-known/matrix/client` for the Matrix server name so clients and MindRoom discover `livekitServiceUrl`.
 
 ## Network Policy

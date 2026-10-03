@@ -5,15 +5,9 @@
 nameOverride: ""
 fullnameOverride: ""
 
-# Optional rollout progress deadline for the Tuwunel Deployment, in seconds.
-# Leave null to use the Kubernetes default.
-# The Recreate strategy starts the new pod only after the old pod stops, which can take up to terminationGracePeriodSeconds.
-# Set it above the old pod's shutdown time plus the startup probe budget when upgrades can run long database migrations.
+# Rollout progress deadline and post-SIGTERM grace period in seconds; null keeps the Kubernetes default.
+# The long grace period lets a database migration step finish; see "Upgrades and Database Migrations" in the README.
 progressDeadlineSeconds: null
-# Seconds Kubernetes waits after SIGTERM before killing Tuwunel.
-# Tuwunel stops a database migration only at its next safe point, and a kill before then leaves the database half migrated.
-# Set null to use the Kubernetes default of 30 seconds.
-# GKE Autopilot limits the grace period to 600 seconds and lowers larger values with a warning, so set 600 there.
 terminationGracePeriodSeconds: 1800
 
 image:
