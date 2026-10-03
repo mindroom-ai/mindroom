@@ -87,6 +87,7 @@ _COMMAND_TYPES_AN_ENTITY_MAY_RUN_FOR_A_HUMAN = frozenset(
         CommandType.LIST_SCHEDULES,
         CommandType.CANCEL_SCHEDULE,
         CommandType.EDIT_SCHEDULE,
+        CommandType.UNKNOWN,
     },
 )
 
