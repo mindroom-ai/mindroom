@@ -146,7 +146,10 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=_get_spotify_redirect_uri(request, runtime_paths),
-        scope="user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read",
+        scope=(
+            "user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read "
+            "playlist-read-private playlist-modify-public playlist-modify-private user-modify-playback-state"
+        ),
     )
 
     auth_url = sp_oauth.get_authorize_url(state=state)
