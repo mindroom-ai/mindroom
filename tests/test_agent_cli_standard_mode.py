@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -108,15 +109,15 @@ async def test_nested_cli_shell_call_runs_inside_the_outer_window(
     monkeypatch: pytest.MonkeyPatch,
     running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
 ) -> None:
-    """A shell call made through the CLI reuses the outer command's window instead of waiting for it."""
+    """A shell call made through the CLI runs in the outer command's window, without waiting for it."""
     runtime = _helper_runtime(tmp_path, running_api)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    command = _call_and_wait(
+    command = "echo OUTER=$MINDROOM_AGENT_CLI_WINDOW; " + _call_and_wait(
         "00000000-0000-4000-8000-000000000002",
         "shell",
         "run_shell_command",
-        {"args": "echo nested-ok"},
+        {"args": "echo NESTED=$MINDROOM_AGENT_CLI_WINDOW"},
     )
     provider.steps = [[("run_shell_command", {"args": command})], "done"]
 
@@ -124,8 +125,12 @@ async def test_nested_cli_shell_call_runs_inside_the_outer_window(
         assert "done" in await _respond(runtime)
 
     output = _tool_output(provider)
-    assert "nested-ok" in output, output
     assert '"status":"completed"' in output.replace(" ", ""), output
+    outer = re.search(r"OUTER=(native-[0-9a-f]{32})", output)
+    nested = re.search(r"NESTED=(native-[0-9a-f]{32})", output)
+    assert outer is not None, output
+    assert nested is not None, output
+    assert nested.group(1) == outer.group(1)
 
 
 @pytest.mark.asyncio

@@ -199,7 +199,7 @@ Kubernetes background scripts are disabled by default because a general primary 
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
 Set `MINDROOM_SCRIPT_GATEWAY_PORT` to have the primary serve that listener itself on a second port that answers only `/api/script-gateway` routes and returns 404 for every other primary API route.
 The main API port is unchanged, so network policy must still keep workers off it; the environment flag does not create network isolation by itself.
-The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in `cluster/k8s/runtime/README.md`.
+The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its `<fullname>-script-gateway` ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway).
 When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
 Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
 Direct network clients started by the script process do not receive Agent Vault credential injection.
@@ -222,7 +222,7 @@ For Kubernetes, configure the dedicated backend, the gateway-only listener, and 
 ```bash
 export MINDROOM_WORKER_BACKEND=kubernetes
 export MINDROOM_SCRIPT_GATEWAY_PORT=8767
-export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 

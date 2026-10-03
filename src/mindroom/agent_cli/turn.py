@@ -131,9 +131,9 @@ def _with_media(content: object, media_results: list[ModelResponse]) -> str | To
 class LiveTurnTools(TurnToolBridge):
     """Own call receipts separately from admitted operation lifetimes.
 
-    The outer mutex spans canonical hooks. Admission opens only inside the
-    shell leaf; tool calls and describes arriving outside an active
-    Bash call are rejected. Each admitted lifetime gets its own task so a nested
+    The outer mutex spans canonical hooks. Admission opens only around a shell
+    command (minimal Bash's shell leaf or a standard native shell call); tool
+    calls and describes arriving outside their own open Bash window are rejected. Each admitted lifetime gets its own task so a nested
     shell can wait on another CLI call without blocking its parent window.
     """
 
@@ -170,13 +170,10 @@ class LiveTurnTools(TurnToolBridge):
         self._admission = asyncio.Lock()
         self._calls: dict[str, _Call] = {}
         self._schema_documents: dict[ToolKey, str] = {}
-        # Each admitted task belongs to the Bash window that was current when it was admitted.
+        # Each admitted task belongs to the Bash window whose command made the call.
         self._active: dict[asyncio.Task[None], str] = {}
-        self._parent: str | None = None
-        self._window_context: Context | None = None
-        # Standard-mode shell calls can overlap; admission stays open while any of them runs.
-        self._open_parents: list[str] = []
-        self._closing_parents: set[str] = set()
+        # Open Bash windows, which may overlap, and the context their admitted calls run in.
+        self._windows: dict[str, Context] = {}
         self._closed = False
         self._binding_retired = False
         self.control_executions: list[ToolExecution] = []
@@ -200,8 +197,8 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Agent CLI authority is unavailable"
             raise CliAuthenticationError(msg)
 
-    async def operation(self, operation: AgentCliOperation) -> dict[str, object]:
-        """Metadata reads are pure; describes and calls run only inside an active Bash window."""
+    async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
+        """Metadata reads are pure; describes and calls run only inside the caller's open Bash window."""
         self._check_live()
         if self._binding_retired and isinstance(operation, ToolListOperation | ToolSearchOperation):
             msg = "Agent tool catalog is being rebuilt; retry shortly"
@@ -229,14 +226,14 @@ class LiveTurnTools(TurnToolBridge):
         async with self._admission:
             self._check_live()
             if isinstance(operation, ToolCallOperation):
-                return self._submit_call(operation)
-            self._require_bash_window()
+                return self._submit_call(operation, window)
+            window = self._require_bash_window(window)
             self._require_capacity()
             future = asyncio.get_running_loop().create_future()
-            self._admit(_Queued(operation, future))
+            self._admit(_Queued(operation, future), window)
         return await future
 
-    def _submit_call(self, operation: ToolCallOperation) -> dict[str, object]:
+    def _submit_call(self, operation: ToolCallOperation, window: str | None) -> dict[str, object]:
         """Return an existing receipt for a repeated call ID, or admit a new call."""
         call_id = str(operation.call_id)
         arguments = operation.canonical_arguments_json
@@ -250,7 +247,7 @@ class LiveTurnTools(TurnToolBridge):
                 msg = "Call ID already belongs to a different operation"
                 raise CliCallConflictError(msg)
             return call.receipt.model_dump(mode="json")
-        self._require_bash_window()
+        window = self._require_bash_window(window)
         if len(self._calls) >= _MAX_CALL_RECEIPTS:
             msg = f"This response already holds {_MAX_CALL_RECEIPTS} CLI call receipts"
             raise CliOperationError(msg)
@@ -265,13 +262,25 @@ class LiveTurnTools(TurnToolBridge):
             ),
         )
         self._calls[call_id] = call
-        self._admit(_Queued(operation.model_copy(deep=True)))
+        self._admit(_Queued(operation.model_copy(deep=True)), window)
         return call.receipt.model_dump(mode="json")
 
-    def _require_bash_window(self) -> None:
-        if self._parent is None:
-            msg = "Agent CLI tool commands require an active Bash call"
+    def _require_bash_window(self, window: str | None) -> str:
+        if window is None:
+            # A mindroom-agent from another release, or a command that dropped the variable, sends none.
+            msg = (
+                "mindroom-agent sent no window; run this MindRoom release's mindroom-agent "
+                "with its Bash command's MINDROOM_AGENT_CLI_WINDOW"
+            )
             raise CliBashWindowRequiredError(msg)
+        if self.control_executions:
+            # The control fence rejects every window, including ones whose command still runs.
+            msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
+            raise CliBashWindowRequiredError(msg)
+        if window not in self._windows:
+            msg = "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running"
+            raise CliBashWindowRequiredError(msg)
+        return window
 
     def _require_capacity(self) -> None:
         # Finished tasks stay in the set until the window drains and reports their failures.
@@ -309,27 +318,23 @@ class LiveTurnTools(TurnToolBridge):
             raise CliAuthenticationError(msg)
         return call.receipt.model_dump(mode="json")
 
-    def _admit(self, queued: _Queued) -> None:
+    def _admit(self, queued: _Queued, window: str) -> None:
         call = self._calls[str(queued.operation.call_id)] if isinstance(queued.operation, ToolCallOperation) else None
         if call is not None:
-            call.receipt = call.receipt.model_copy(update={"parent_bash_call_id": self._parent})
-        assert self._window_context is not None
-        assert self._parent is not None
+            call.receipt = call.receipt.model_copy(update={"parent_bash_call_id": window})
         task = asyncio.create_task(
             self._dispatch(queued),
             name="agent-cli-admitted",
-            context=self._window_context.copy(),
+            context=self._windows[window].copy(),
         )
         task.add_done_callback(queued.settle_waiter)
-        self._active[task] = self._parent
+        self._active[task] = window
 
     @asynccontextmanager
-    async def _window(self, parent: str) -> AsyncIterator[None]:
+    async def _window(self, window: str) -> AsyncIterator[None]:
         async with self._admission:
             self._check_live()
-            self._open_parents.append(parent)
-            self._parent = parent
-            self._window_context = copy_context()
+            self._windows[window] = copy_context()
         try:
             yield
         except asyncio.CancelledError:
@@ -337,7 +342,7 @@ class LiveTurnTools(TurnToolBridge):
             raise
         finally:
             await wait_for_future_until_complete(
-                asyncio.create_task(self._drain_window(parent), name="agent-cli-window-drain"),
+                asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
                 on_cancel=self._cancel_active,
             )
 
@@ -347,33 +352,15 @@ class LiveTurnTools(TurnToolBridge):
         for task in self._active:
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-    def _reattribute(self) -> None:
-        """Admit later calls under the newest still-running window, or a closing one while it drains."""
-        if self._parent is None:
-            # Closed or fenced after a control execution; never reopen admission here.
-            return
-        running = [parent for parent in self._open_parents if parent not in self._closing_parents]
-        self._parent = (running or self._open_parents)[-1]
-
-    async def _drain_window(self, parent: str) -> None:
+    async def _drain_window(self, window: str) -> None:
         failures: list[Exception] = []
-        async with self._admission:
-            # A finished shell makes no more calls of its own; later ones belong to the shells still running.
-            self._closing_parents.add(parent)
-            self._reattribute()
         while True:
             async with self._admission:
-                tasks = tuple(task for task, owner in self._active.items() if owner == parent)
+                tasks = tuple(task for task, owner in self._active.items() if owner == window)
                 if not tasks:
-                    self._open_parents.remove(parent)
-                    self._closing_parents.discard(parent)
-                    if self._open_parents:
-                        self._reattribute()
-                    else:
-                        # Recursive children may join while their admitted shell
-                        # settles. Only quiescence closes admission for the last Bash.
-                        self._parent = None
-                        self._window_context = None
+                    # Recursive children may join while their admitted shell settles.
+                    # Only quiescence closes this window's admission.
+                    self._windows.pop(window, None)
                     break
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for task in tasks:
@@ -452,7 +439,7 @@ class LiveTurnTools(TurnToolBridge):
 
         async def leaf(values: dict[str, object]) -> object:
             async with self._window(parent):
-                return await self._invoke_shell(binding, values)
+                return await self._invoke_shell(binding, values, window=parent)
 
         events = self._execute(
             binding,
@@ -471,10 +458,7 @@ class LiveTurnTools(TurnToolBridge):
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
-        """Run one standard-mode native shell call inside this response's CLI window and environment.
-
-        Native shell calls may overlap, so a CLI call is attributed to the most recently started one.
-        """
+        """Run one standard-mode native shell call inside its own CLI window and environment."""
         self._check_live()
         if self.shell_env is None:
             msg = "Native shell has no CLI environment"
@@ -482,22 +466,28 @@ class LiveTurnTools(TurnToolBridge):
         parent = f"native-{uuid4().hex}"
         try:
             async with self._window(parent):
-                with bound_agent_cli_shell_env(self.shell_env):
+                with bound_agent_cli_shell_env(self.shell_env, window=parent):
                     result = await run()
         finally:
             media = self._media.pop(parent, [])
         # Media returned by its CLI calls reaches the model with the shell result, as in minimal Bash.
         return _with_media(result, media) if media else result
 
-    async def _invoke_shell(self, binding: PreparedAgentToolBinding, arguments: dict[str, object]) -> object:
-        """Run the agent's own shell function, wherever it runs, with this response's CLI environment."""
+    async def _invoke_shell(
+        self,
+        binding: PreparedAgentToolBinding,
+        arguments: dict[str, object],
+        *,
+        window: str,
+    ) -> object:
+        """Run the agent's own shell function, wherever it runs, with the CLI environment of ``window``."""
         self._check_live()
         if self.shell_env is None:
             msg = "Minimal Bash has no CLI environment"
             raise RuntimeError(msg)
         entrypoint = binding.function.entrypoint
         assert entrypoint is not None
-        with bound_agent_cli_shell_env(self.shell_env):
+        with bound_agent_cli_shell_env(self.shell_env, window=window):
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(**arguments)
             # Sync calls must finish before the owning operation's lifetime ends.
@@ -665,10 +655,9 @@ class LiveTurnTools(TurnToolBridge):
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if event.kind == "continuation_required" and event.execution is not None:
+            # Synchronous fencing happens while the executing call owns the catalog lock:
+            # new calls are rejected, executing lifetimes drain, waiting calls fail at dispatch.
             self.control_executions.append(deepcopy(event.execution))
-            # Synchronous fencing happens while the executing call owns the catalog
-            # lock. Already executing lifetimes drain; waiting calls fail at dispatch.
-            self._parent = None
 
     def _check_dispatch(self) -> None:
         self._check_live()
@@ -721,6 +710,8 @@ class LiveTurnTools(TurnToolBridge):
         call = self._calls[call_id]
         if call.receipt.status != "queued":
             return
+        window = call.receipt.parent_bash_call_id
+        assert window is not None
         arguments = cast("dict[str, object]", read_json(call.arguments_json))
         call.receipt = call.receipt.model_copy(update={"status": "running"})
         started = False
@@ -743,17 +734,15 @@ class LiveTurnTools(TurnToolBridge):
                 binding,
                 call_id,
                 arguments,
-                parent=call.receipt.parent_bash_call_id,
-                shell_leaf=partial(self._invoke_shell, binding) if key.toolkit == "shell" else None,
+                parent=window,
+                shell_leaf=partial(self._invoke_shell, binding, window=window) if key.toolkit == "shell" else None,
                 authorize=authorize,
             )
             async with closing_async_stream(events):
                 async for event in events:
                     self._check_control(event)
                     if event.media is not None:
-                        owner = call.receipt.parent_bash_call_id
-                        assert owner is not None
-                        self._media.setdefault(owner, []).append(event.media)
+                        self._media.setdefault(window, []).append(event.media)
                         media_results.append(event.media)
                     if event.kind == "started":
                         started = True
@@ -833,7 +822,6 @@ class LiveTurnTools(TurnToolBridge):
 
     async def _close(self) -> None:
         async with self._admission:
-            self._parent = None
             for task in self._active:
                 request_task_cancel(task, process_shutdown=self.close_for_shutdown)
             tasks = tuple(self._active)

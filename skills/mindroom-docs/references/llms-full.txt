@@ -4965,7 +4965,7 @@ Team members, call agents, workflow participants, and OpenAI-compatible requests
 The agent keeps all of its tools as ordinary tools as well.
 Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
 The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
-Calls are admitted only while one of the response's shell commands is running; shell commands still run in parallel, and when they overlap, a call is attributed to the most recently started one.
+Calls are admitted only while the shell command that makes them is running or its earlier calls are finishing; shell commands still run in parallel, and each keeps its own calls and their media.
 Media returned by those calls reaches the model with the shell command's result.
 Calls through the CLI count against their own `max_tool_calls_per_turn` budget, separate from the agent's ordinary tool calls.
 Streamed responses show calls made through the CLI as their own tool-trace entries.
@@ -5017,8 +5017,7 @@ Use `calls wait` when the result is still queued, running, or waiting for a deci
 It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
 Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
 Waiting pauses that shell command and its owning response; other conversations can continue.
-New tool calls and schema preparation require an active Bash call.
-Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
+New tool calls and schema preparation must come from a Bash call that is still running or whose earlier calls are still finishing; later ones are rejected instead of being queued for a later call.
 
 Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
 These JSON inputs are mutually exclusive and require a JSON object.
@@ -5070,7 +5069,7 @@ Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
 The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background commands behave like the agent's ordinary shell commands, but their `mindroom-agent` calls stop working when the response ends.
+Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call has returned and its calls have finished; `calls wait` on earlier receipts works until the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
@@ -13799,7 +13798,7 @@ Kubernetes background scripts are disabled by default because a general primary 
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
 Set `MINDROOM_SCRIPT_GATEWAY_PORT` to have the primary serve that listener itself on a second port that answers only `/api/script-gateway` routes and returns 404 for every other primary API route.
 The main API port is unchanged, so network policy must still keep workers off it; the environment flag does not create network isolation by itself.
-The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in `cluster/k8s/runtime/README.md`.
+The runtime Helm chart's `scriptGateway.enabled` value configures the listener, its `<fullname>-script-gateway` ClusterIP Service, the worker and control-plane NetworkPolicies, `NO_PROXY`, and all three environment variables, as described in the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway).
 When Agent Vault is enabled, run-specific Kubernetes script process pods deliberately omit Agent Vault init, token, proxy, and CA material because their lifecycle is scoped to one run.
 Calls through `MindRoomTools` still use the authenticated script gateway and normal live tool-execution routing, so ordinary dedicated tool workers retain their configured Agent Vault boundary.
 Direct network clients started by the script process do not receive Agent Vault credential injection.
@@ -13822,7 +13821,7 @@ For Kubernetes, configure the dedicated backend, the gateway-only listener, and 
 ```bash
 export MINDROOM_WORKER_BACKEND=kubernetes
 export MINDROOM_SCRIPT_GATEWAY_PORT=8767
-export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
+export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindroom.svc.cluster.local:8767/api/script-gateway
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
@@ -19659,6 +19658,7 @@ That hidden-tool warmup copy never includes tool names or tool-trace metadata.
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
+A running `run_shell_command` stops with it, including one that runs in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 An explicit user stop finalizes the streamed message with:
 
 ```
@@ -22727,7 +22727,7 @@ Existing deployments moving from the previous Nio integration must follow the [N
 | [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Multi-tenant SaaS, production |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
 | [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
 | Direct | Development, simple setups |
 
@@ -24981,6 +24981,13 @@ Handles are owned by a small worker-local shell supervisor process that the runn
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
+Stopping a response stops its async worker calls too, such as `run_shell_command`.
+Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
+The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
+A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
+Synchronous worker calls, such as the `python` and `file` tools, still run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`.
+Persistent browser actions also finish on their own: they are short, and interrupting one would close the worker's shared browser and its tabs.
+
 ## Workspace home contract
 
 For worker-routed shell or python requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running the tool.
@@ -25094,6 +25101,7 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 |--------|----------|-------------|
 | POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
 | POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| POST | `/api/sandbox-runner/execute/cancel` | Stop the execute request with the given `request_id` |
 | GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
 | POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
 
@@ -25585,6 +25593,20 @@ workers:
 
 See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
 For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/).
+
+### Chart Reference
+
+Each chart's README documents its values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).
+Optional features are described in these sections:
+
+- [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](https://docs.mindroom.chat/tools/background-scripts/).
+- [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
+- [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files.
+- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
+- Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
+- The [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md) runs the [voice call](https://docs.mindroom.chat/voice-calls/) backend, which the client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy.
+- [Operational log events](https://docs.mindroom.chat/deployment/operational-log-events/) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through the runtime chart's `env.extra`.
 
 ## Worker Backends
 
