@@ -1655,6 +1655,19 @@ async def test_failed_plan_redeploy_is_recorded_and_retried(platform: Platform, 
 
 
 @pytest.mark.asyncio
+async def test_plan_redeploy_that_another_run_claimed_first_is_skipped_without_an_error(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="hobby"))
+    platform.db.tables["instances"].append(_instance("running", tier="pro", **_pro_key()))
+    platform.provision.side_effect = InstanceClaimLostError
+
+    summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    platform.provision.assert_awaited_once()
+    assert summary.errors == []
+    assert platform.instance()["lifecycle_error"] is None
+
+
+@pytest.mark.asyncio
 async def test_plan_change_limits_a_larger_key_of_a_stopped_instance_without_starting_it(platform: Platform) -> None:
     platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
     platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))

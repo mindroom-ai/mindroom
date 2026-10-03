@@ -167,6 +167,10 @@ async def reconcile_subscription_instances(
                     await _resume(sb, instance, subscription, summary)
                 else:
                     await _align_plan(sb, instance, subscription)
+            except InstanceClaimLostError:
+                # The run that claimed the instance first owns its deploy, so this run neither enables a key, clears
+                # the hold, nor records an error.
+                logger.info("Instance %s is already being reprovisioned; skipping it", instance.get("instance_id"))
             except Exception as exc:  # noqa: BLE001
                 _record_error(sb, instance, exc, now, summary)
 
@@ -532,20 +536,15 @@ async def _resume(
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
-        try:
-            # Several backend replicas may resume a torn-down instance at once; only the one that claims it while it
-            # is still deprovisioned deploys it and mints its key.
-            await _reprovision(
-                sb,
-                instance_id,
-                subscription,
-                resume_lifecycle_hold=True,
-                expected_status="deprovisioned" if torn_down else None,
-            )
-        except InstanceClaimLostError:
-            # The request that claimed it owns the deploy, so this run neither enables a key nor clears the hold.
-            logger.info("Instance %s is already being reprovisioned; skipping this resume", instance_id)
-            return
+        # Several backend replicas may resume a torn-down instance at once; only the one that claims it while it
+        # is still deprovisioned deploys it and mints its key.
+        await _reprovision(
+            sb,
+            instance_id,
+            subscription,
+            resume_lifecycle_hold=True,
+            expected_status="deprovisioned" if torn_down else None,
+        )
     else:
         await start_instance(instance_id)
     # Reprovisioning may have minted a new key, so re-read the hash before enabling it.
