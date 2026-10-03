@@ -847,9 +847,7 @@ def test_load_plugins_warns_once_for_a_repeated_unresolvable_plugin(
         assert load_plugins(Config(plugins=[plugin_path]), runtime_paths) == []
         assert load_plugins(Config(plugins=[plugin_path]), runtime_paths) == []
         matching_calls = [
-            call
-            for call in mock_logger.warning.call_args_list
-            if call.args == (message,) and call.kwargs == log_fields
+            call for call in mock_logger.warning.call_args_list if call.args == (message,) and call.kwargs == log_fields
         ]
         assert len(matching_calls) == 1
     finally:
