@@ -13,6 +13,7 @@ from mindroom.desktop import macos_capture, macos_input
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityBackend,
+    AccessibilityError,
     AccessibilityState,
     DesktopApp,
     DesktopRect,
@@ -509,13 +510,20 @@ class PyAutoGuiDesktopProvider:
 
     def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
         """Return a check for right before each Quartz pointer event: the fail-safe, then the window at the point."""
+        posted = False
 
         # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
         def check(point: tuple[int, int]) -> None:
+            nonlocal posted
             self._check_emergency_stop()
             if process_id is not None and macos_input.window_owner_at(point) != process_id:
+                if not posted:
+                    msg = "Another window covers the allowed app at the pointer; nothing was sent."
+                    raise AccessibilityError(msg)
                 msg = "Another window covers the allowed app at the pointer; input stopped and its outcome may be partial."
                 raise AccessibilityActionOutcomeUnknownError(msg)
+            # Every passing check is followed by an event.
+            posted = True
 
         return check
 

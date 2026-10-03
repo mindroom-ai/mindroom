@@ -14,6 +14,7 @@ from PIL import Image
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityCapture,
+    AccessibilityError,
     AccessibilityState,
     DesktopRect,
 )
@@ -532,7 +533,10 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
-    """A foreign top window over the target, or one a drag moves into, stops input before an event reaches it."""
+    """A foreign top window over the target, or one a drag moves into, stops input before an event reaches it.
+
+    Input covered before its first event sends nothing, so only a drag that moves under the window partway is unknown.
+    """
     provider, _, _ = _provider()
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
@@ -591,8 +595,9 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
     act(300)
     assert posted
     posted.clear()
-    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="covers the allowed app"):
+    with pytest.raises(AccessibilityError, match="covers the allowed app") as caught:
         act(1000)
+    assert type(caught.value) is (AccessibilityActionOutcomeUnknownError if action == "drag" else AccessibilityError)
     assert all(event["kind"] != "wheel" and event["point"][0] < 500 for event in posted)
     if action == "drag":
         assert [event["kind"] for event in posted[:2]] == [8, 1]
