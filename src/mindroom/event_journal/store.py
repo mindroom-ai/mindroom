@@ -2211,8 +2211,8 @@ class HeldReplyStore:
             lambda transaction: held_replies.delete(transaction, hold_id, generation=generation),
         )
 
-    async def mark_woken(self, hold_id: str, generation: str) -> bool:
-        """Record that a wake was admitted for this generation; False once another save replaced it."""
-        return await self._backend.write(
+    async def mark_woken(self, hold_id: str, generation: str) -> None:
+        """Record that a wake was admitted for this generation, unless another save replaced it."""
+        await self._backend.write(
             lambda transaction: held_replies.mark_woken(transaction, hold_id, generation),
         )

@@ -297,6 +297,7 @@ class HeldReplyFuzzRunner:
                 request,
                 FinalDeliveryOutcome(terminal_status="completed", event_id=None, suppressed=True),
                 None,
+                continued=None,
                 stop_button_event_id=None,
             )
 
@@ -339,13 +340,21 @@ class HeldReplyFuzzRunner:
             if resumed is None:
                 return
             request = resumed
+            if request.on_lifecycle_lock_acquired is not None:
+                request.on_lifecycle_lock_acquired()
             turn.started = True
             outcome = await self._attempts(turn, request, step, report)
             if report.boundary is not None:
                 self.model.latest_boundary_message = turn.message
                 self.model.unheld_allowed = self.model.unheld_allowed and report.boundary.joins >= JOB_JOIN_LIMIT
                 self.model.uncertain = False
-            await self.runner._settle_held_reply(request, outcome, report.boundary, stop_button_event_id=None)
+            await self.runner._settle_held_reply(
+                request,
+                outcome,
+                report.boundary,
+                continued=request.held_reply,
+                stop_button_event_id=None,
+            )
 
         await self.runner._lifecycle_coordinator.run_locked_response(
             target=request.response_envelope.target,
@@ -389,7 +398,13 @@ class HeldReplyFuzzRunner:
                 raise
             # A Stop: the turn settles its message as stopped before the cancellation ends it.
             outcome = self._delivered(turn, "cancelled", "Stopped.")
-            await self.runner._settle_held_reply(request, outcome, report.boundary, stop_button_event_id=None)
+            await self.runner._settle_held_reply(
+                request,
+                outcome,
+                report.boundary,
+                continued=request.held_reply,
+                stop_button_event_id=None,
+            )
             raise
         return self._delivered(turn, "completed", f"Answer of {turn.source}.")
 

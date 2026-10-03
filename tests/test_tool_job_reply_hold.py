@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -12,6 +12,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.tool_jobs.control import current_human_message_signal
+from mindroom.turn_origin import TurnIntent
 from tests.conftest import message_origin
 
 _TARGET = MessageTarget.resolve("!room:localhost", "$root", "$first")
@@ -104,6 +105,38 @@ async def test_queued_turn_ends_the_waits_inside_the_model_run(
     assert await asyncio.wait_for(turn, 5) == "$queued"
     assert not own_waits_released.is_set()
     assert not lifecycle._thread_queued_signals[_TARGET.lifecycle_key].has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_wake_leaves_the_waits_inside_the_model_run_alone() -> None:
+    """A held message's wake queued behind a reply does not end its waits: that reply takes the work over anyway."""
+    lifecycle = ResponseLifecycleCoordinator()
+    reply = _Reply(lifecycle)
+    reply.start()
+    await asyncio.wait_for(reply.started.wait(), 5)
+    wake = _envelope("held-reply:hold:generation")
+    wake = replace(wake, origin=replace(wake.origin, intent=TurnIntent.HELD_REPLY_CONTINUATION))
+
+    async def continued(_target: MessageTarget) -> str:
+        return wake.source_event_id
+
+    turn = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=_TARGET,
+            response_envelope=wake,
+            pipeline_timing=None,
+            locked_operation=continued,
+            signal_queued_message=False,
+        ),
+    )
+    # The wake queues as its task first runs, and a queued turn would notify the reply's waits right then.
+    await asyncio.sleep(0)
+    assert lifecycle._thread_queued_signals[_TARGET.lifecycle_key]._active_response_turns == 2
+    assert not reply.model_wait_released.is_set()
+    reply.model_wait_released.set()
+    assert reply.task is not None
+    assert await reply.task == "$first"
+    assert await asyncio.wait_for(turn, 5) == wake.source_event_id
 
 
 @pytest.mark.asyncio

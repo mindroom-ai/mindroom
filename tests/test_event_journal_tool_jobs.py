@@ -82,7 +82,7 @@ async def test_held_reply_saves_are_unique_generations_and_wakes_name_one(journa
     replaced, first = await holds.save(hold_id="hold", recipient="general", message_event_id="$one", hold_json="{}")
     assert replaced is None
     assert first.woken_generation is None
-    assert await holds.mark_woken("hold", first.generation)
+    await holds.mark_woken("hold", first.generation)
     replaced, second = await holds.save(
         hold_id="hold",
         recipient="general",
@@ -94,7 +94,8 @@ async def test_held_reply_saves_are_unique_generations_and_wakes_name_one(journa
     assert second.generation != first.generation
     assert (second.woken_generation, second.hold_json) == (None, '{"n": 2}')
     # A wake for the replaced generation no longer applies, and neither does a release of it.
-    assert not await holds.mark_woken("hold", first.generation)
+    await holds.mark_woken("hold", first.generation)
+    assert (await holds.load("hold")) == second
     assert await holds.delete("hold", generation=first.generation) is None
     assert await holds.load_for_message("general", "$one") is None
     assert (await holds.load_for_message("general", "$two")) == second

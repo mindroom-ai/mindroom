@@ -33,6 +33,7 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
+    from mindroom.cancellation import CancelSource
     from mindroom.event_journal import SavedHeldReply
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
@@ -86,9 +87,8 @@ class HeldReply:
     joins: int
     # Outcomes its turns already asked for; one the model left unread waits for the conversation's next reply.
     offered: frozenset[str] = frozenset()
-    # The save that wrote this hold, set once it is saved, and the save a wake was last admitted for.
+    # The save that wrote this hold, set once it is saved.
     generation: str = ""
-    woken_generation: str | None = None
 
 
 def holds_job(key: HoldKey, job: BackgroundJob) -> bool:
@@ -182,7 +182,6 @@ def _restored(saved: SavedHeldReply) -> HeldReply | None:
         joins=int(payload["joins"]),
         offered=frozenset(payload["offered"]),
         generation=saved.generation,
-        woken_generation=saved.woken_generation,
     )
 
 
@@ -227,10 +226,10 @@ def released_edit(hold: HeldReply) -> EditTextRequest:
     )
 
 
-def stopped_edit(hold: HeldReply) -> EditTextRequest:
-    """Show that a Stop ended the work the message held, keeping what the reply already said."""
+def ended_edit(hold: HeldReply, *, cancel_source: CancelSource) -> EditTextRequest:
+    """Show that a Stop or an interruption ended what the message held, keeping what the reply already said."""
     assert hold.message_event_id is not None
-    text, stream_status = build_cancelled_response_update(hold.presentation.response_text, cancel_source="user_stop")
+    text, stream_status = build_cancelled_response_update(hold.presentation.response_text, cancel_source=cancel_source)
     return EditTextRequest(
         target=hold.target,
         event_id=hold.message_event_id,

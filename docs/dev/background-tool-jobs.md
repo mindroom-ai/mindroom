@@ -9,7 +9,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   `background_tool_jobs.enabled` and `exclude_toolkits` are pinned at startup; changing execution policy requires a restart.
 - Tools block by default.
   `wait_timeout: 0` detaches immediately; a positive value limits foreground waiting.
-  A newer human message in the conversation, or any turn already queued for its lock, releases that wait while accepted work continues; the reply then finishes and its message holds the work.
+  A newer human message in the conversation, or any turn already queued for its lock other than a held message's continuation, releases that wait while accepted work continues; the reply then finishes and its message holds the work.
   Other agents' messages and scheduled turns that arrive during such a wait queue as behind any running reply.
   Neither action pauses a job or authorizes a protected tool.
 - One `job` tool provides scoped list, wait and cancel.
@@ -23,7 +23,9 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   A turn that never reaches that boundary, such as another agent's reply, a reply whose participation check stays silent, or a delegated child running inside its caller, leaves the message holding.
   A silent schedule holds its own work without a message, and the turn continuing it is silent too.
   A message offers each ready outcome to the model once, across its own turn and the turns continuing it; one the model leaves unretrieved waits for the conversation's next reply.
-  Work whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
+  Work that a foreground wait claims, or whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
+  A continuation or edit of a held message that ends before its response boundary, because it failed or was stopped or interrupted, releases the hold, and a message the turn did not replace shows how it ended.
+  A continuation a crash cut short runs again from the message as it was held, and retrieves the outcomes the cut-short run already read instead of losing them.
   Stop on a held message cancels the work it holds at once and shows the message as stopped once no turn runs in the conversation; Stop while a turn continues the message stops that turn and the work like any reply.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
@@ -103,7 +105,9 @@ Subagent follow-ups use reusable sessions after the previous child turn finishes
 A message holds only the work of its own requester, so a reply to another requester in the conversation leaves the first requester's message holding its work.
 A continuation runs only once the turn running at that moment lets the conversation go.
 A held message briefly shows its reply as finished before the waiting notice returns, because the hold is saved after the reply's final delivery.
-Work that a failed continuation, a crash before a hold was saved, or the join limit leaves unheld waits for the requester's next answered message.
+Work that a failed or interrupted continuation, a crash before a hold was saved, or the join limit leaves unheld waits for the requester's next answered message.
+A crash after a continuation's final edit but before its hold is saved leaves the hold showing the message as it was before that continuation, so a later takeover or Stop restores that earlier text.
+An ad hoc team's message and its host agent's own message can both hold that agent's work; the first to continue retrieves it, and the other then shows its reply as finished.
 Turning the feature off leaves held messages waiting until it is turned back on.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.

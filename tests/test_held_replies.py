@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -31,7 +31,7 @@ from mindroom.tool_jobs.held_replies import (
     encode_held_reply,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobClaim, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import EditTextRequest
-    from mindroom.response_runner import ResponseRunner
+    from mindroom.response_runner import ResponseRequest, ResponseRunner
     from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 _THREAD = "$thread"
@@ -111,6 +111,7 @@ class _Held:
             replace(self.request, held_reply=held),
             outcome,
             ReplyBoundary(_KEY, notice, joins),
+            continued=held,
             stop_button_event_id=button,
         )
 
@@ -118,22 +119,27 @@ class _Held:
         saved = await self.runner.deps.held_replies.load(_KEY.hold_id)
         return decode_held_reply(saved) if saved is not None else None
 
-    async def start(self, job_id: str, gate: asyncio.Event | None = None) -> None:
+    async def start(self, job_id: str, gate: asyncio.Event | None = None, *, claimed: bool = False) -> JobClaim | None:
+        """Start a job; a ``claimed`` one keeps the claim its start minted, as a foreground wait on it does."""
+
         async def operation() -> BackgroundOutcome:
             if gate is not None:
                 await gate.wait()
             return BackgroundOutcome("completed", f"Result of {job_id}")
 
-        await start_job(
-            self.runtime,
+        _job, claim = await self.runtime.start(
             job_id,
             tool_name="tool",
             depth=0,
-            source_event_id="$event",
+            source_event_id="$origin",
             adapter={},
             owner=self.owner,
             operation=operation,
         )
+        if claimed:
+            return claim
+        await self.runtime.release_wait(job_id, claim)
+        return None
 
 
 @pytest_asyncio.fixture
@@ -204,19 +210,47 @@ async def test_a_reply_leaving_nothing_outstanding_releases_the_hold(held: _Held
 
 
 @pytest.mark.asyncio
-async def test_a_continuation_ending_before_its_boundary_releases_its_hold(held: _Held) -> None:
-    """A continuation that failed, was stopped, or paused leaves its message holding nothing."""
+@pytest.mark.parametrize(
+    ("status", "cancel_source", "delivered", "shown"),
+    [
+        ("error", None, True, None),
+        ("cancelled", "sync_restart", True, None),
+        ("error", None, False, ("Started.\n\n**[Response interrupted]**", "error")),
+        ("cancelled", "user_stop", False, ("Started.\n\n**[Response cancelled by user]**", "cancelled")),
+        ("completed", None, False, ("Started.", "completed")),
+        ("suspended", None, False, None),
+    ],
+)
+async def test_a_turn_ending_before_its_boundary_releases_the_hold_it_ran_on(
+    held: _Held,
+    status: Literal["completed", "cancelled", "error", "suspended"],
+    cancel_source: Literal["user_stop", "sync_restart"] | None,
+    delivered: bool,
+    shown: tuple[str, str] | None,
+) -> None:
+    """A continuation or edit that failed, was stopped or interrupted, or paused leaves its message holding nothing.
+
+    A message nothing replaced would keep its waiting notice, so it shows how the turn ended instead.
+    """
     await held.settle("$reply", "Started.", _WAITING_NOTICE)
     hold = await held.hold()
     assert hold is not None
     await held.runner._settle_held_reply(
-        replace(held.request, held_reply=hold),
-        FinalDeliveryOutcome(terminal_status="error", event_id="$reply", is_visible_response=True),
+        held.request,
+        FinalDeliveryOutcome(
+            terminal_status=status,
+            event_id="$reply",
+            is_visible_response=True,
+            delivery_kind="edited" if delivered else None,
+            cancel_source=cancel_source,
+        ),
         None,
+        continued=hold,
         stop_button_event_id=None,
     )
     assert await held.hold() is None
-    assert len(held.edits) == 1
+    ended = [(edit.new_text, edit.extra_content["io.mindroom.stream_status"]) for edit in held.edits[1:]]
+    assert ended == ([] if shown is None else [shown])
 
 
 @pytest.mark.asyncio
@@ -227,6 +261,7 @@ async def test_a_silent_schedule_holds_its_work_without_a_message(held: _Held) -
         held.request,
         FinalDeliveryOutcome(terminal_status="completed", event_id=None),
         ReplyBoundary(silent_key, _WAITING_NOTICE, 0),
+        continued=None,
         stop_button_event_id=None,
     )
     saved = await held.runner.deps.held_replies.load(silent_key.hold_id)
@@ -251,6 +286,43 @@ async def test_resuming_a_held_message_retrieves_ready_work(held: _Held) -> None
     assert resumed.held_continuation.attempted_job_ids == frozenset({"ready"})
     assert resumed.held_continuation.joins == 2
     assert resumed.held_continuation.presentation.response_text == "Started."
+
+
+@pytest.mark.asyncio
+async def test_an_outcome_a_wait_claims_stays_held_but_not_ready(held: _Held) -> None:
+    """While a foreground wait claims an outcome, the message keeps holding it, and no wake continues with it."""
+    claim = await held.start("claimed", claimed=True)
+    await wait_for_status(held.runtime, "claimed", "completed")
+    work = await conversation_work(held.runtime, _KEY)
+    assert ([job.job_id for job in work.jobs], work.ready) == (["claimed"], ())
+    await held.runtime.release_wait("claimed", claim)
+    work = await conversation_work(held.runtime, _KEY)
+    assert [job.job_id for job in work.ready] == ["claimed"]
+
+
+@pytest.mark.asyncio
+async def test_resuming_after_an_interrupted_continuation_reads_what_it_already_read(held: _Held) -> None:
+    """A continuation a crash interrupted after it read an outcome runs again, so the outcome is not lost."""
+    claim = await held.start("read", claimed=True)
+    await wait_for_status(held.runtime, "read", "completed")
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    wake = held.runner._held_reply_request(
+        hold,
+        _wake_event_id(hold),
+        source_handoff=asyncio.Event(),
+        began=asyncio.Event(),
+    )
+    await held.runtime.acknowledge_wait("read", claim, source_event_id=_wake_event_id(hold))
+    assert (await conversation_work(held.runtime, _KEY)).jobs == ()
+    resumed = await held.runner._resume_held_reply(wake)
+    assert resumed is not None
+    assert resumed.prompt == wake.prompt
+    assert resumed.held_continuation is not None
+    assert resumed.held_continuation.presentation.response_text == "Started."
+    recovered = await held.runner._recover_tool_job_source(resumed)
+    assert 'job_id="read"' in recovered.system_enrichment_items[-1].text
 
 
 @pytest.mark.asyncio
@@ -365,6 +437,21 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
 
 
 @pytest.mark.asyncio
+async def test_stop_on_a_held_message_leaves_outcomes_turns_already_read(held: _Held) -> None:
+    """An outcome an earlier turn read is not the message's outstanding work, so Stop does not mark it stopped."""
+    claim = await held.start("read", claimed=True)
+    await wait_for_status(held.runtime, "read", "completed")
+    await held.runtime.acknowledge_wait("read", claim, source_event_id="$earlier")
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    assert await held.runner.stop_held_reply("$reply", 7)
+    read = await lookup(held.runtime, "read", owner=held.owner, depth=0)
+    running = await lookup(held.runtime, "running", owner=held.owner, depth=0)
+    assert (read.user_stop_receipt_order, running.user_stop_receipt_order) == (None, 7)
+    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
+
+
+@pytest.mark.asyncio
 async def test_work_whose_access_is_unresolved_stays_held(tmp_path: Path) -> None:
     """While room membership resolves, a message keeps holding work it cannot read yet; a proven denial ends that."""
     state = _Held(tmp_path)
@@ -417,6 +504,7 @@ async def test_an_offered_outcome_is_not_offered_again_by_wakes(held: _Held) -> 
         held.request,
         _completed("$reply", "Started."),
         ReplyBoundary(_KEY, _WAITING_NOTICE, 1, offered=frozenset({"ignored"})),
+        continued=None,
         stop_button_event_id=None,
     )
     hold = await held.hold()
@@ -479,6 +567,30 @@ async def test_a_wake_whose_turn_never_begins_releases_its_hold(
         assert held.edits[-1].new_text == "Started."
 
 
+@pytest.mark.asyncio
+async def test_a_wake_whose_turn_began_leaves_its_hold_to_that_turn(
+    held: _Held,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation that began settles its own hold, so its wake neither releases the message nor reverts it."""
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    edits = len(held.edits)
+
+    async def generate(request: ResponseRequest) -> None:
+        assert request.on_lifecycle_lock_acquired is not None
+        request.on_lifecycle_lock_acquired()
+
+    settle = AsyncMock()
+    monkeypatch.setattr(held.runner, "_generate_held_continuation", generate)
+    monkeypatch.setattr(type(held.runner.deps.approval_store), "settle", settle)
+    await held.runner._continue_held_reply(_wake(hold))
+    settle.assert_awaited_once_with(_wake_event_id(hold))
+    assert await held.hold() == hold
+    assert len(held.edits) == edits
+
+
 def test_held_reply_round_trips_through_its_snapshot() -> None:
     """A saved hold restores exactly, and one saved under another key is refused."""
     hold = HeldReply(
@@ -492,7 +604,6 @@ def test_held_reply_round_trips_through_its_snapshot() -> None:
         stop_button_event_id="$button",
         joins=3,
         generation="a" * 32,
-        woken_generation="a" * 32,
     )
     saved = MagicMock(
         hold_id=_KEY.hold_id,

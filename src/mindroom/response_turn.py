@@ -1393,14 +1393,14 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = _turn_run_state(ctx)
     try:
+        if ctx.held_continuation is not None:
+            # The held message keeps its text and trace, even if this turn fails before an attempt extends them.
+            yield StructuredStreamChunk(content=run.prior_response_text, tool_trace=list(run.prior_response_tools))
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            if ctx.held_continuation is not None:
-                # The held message keeps its text and trace; this turn's attempts extend them.
-                yield StructuredStreamChunk(content=run.prior_response_text, tool_trace=list(run.prior_response_tools))
             continuation_count = (
                 resumed_attempt.continuation_count if resumed_attempt is not None else initial_continuation_count
             )

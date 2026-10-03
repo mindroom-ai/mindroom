@@ -752,12 +752,6 @@ class ToolJobRuntime:
             outcome = stopped
         return outcome if outcome is not None and outcome.status in TERMINAL_STATUSES else default
 
-    @staticmethod
-    def _unconsumed(entry: _Entry) -> bool:
-        """Whether no parent run consumed the outcome, no Stop ended the job, and no waiter claims it."""
-        job = entry.job
-        return not job.consumed and job.user_stop_receipt_order is None and entry.claim is None
-
     async def _find(
         self,
         entries: Callable[[], Iterable[_Entry]],
@@ -809,18 +803,19 @@ class ToolJobRuntime:
     ) -> list[tuple[BackgroundJob, bool]]:
         """Outstanding work a reply's message holds for one requester and conversation, each with whether it is readable.
 
-        Work whose access is only unresolved stays held, so a message keeps holding it while room membership resolves;
-        a proven denial ends the hold.
+        Work stays held while a waiter claims it or while its access is only unresolved, such as while room membership
+        resolves; neither is readable then. Consumption, a Stop, or a proven denial ends the hold.
         """
         silent = source_kind == SILENT_SCHEDULE_SOURCE_KIND
         async with self._lock:
             if self._closed:
                 return []
             return [
-                (await self._snapshot(entry), self._authorize(entry.job))
+                (await self._snapshot(entry), entry.claim is None and self._authorize(entry.job))
                 for entry in self._by_conversation.get((transport_agent_name, room_id, thread_id, requester_id))
                 if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) == silent
-                and self._unconsumed(entry)
+                and not entry.job.consumed
+                and entry.job.user_stop_receipt_order is None
                 and not self._denied(entry.job)
             ]
 

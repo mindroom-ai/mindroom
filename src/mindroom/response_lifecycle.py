@@ -18,6 +18,7 @@ from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -403,6 +404,9 @@ class ResponseLifecycleCoordinator:
     ) -> _TurnNotice | None:
         existing_turn = queued_signal.begin_response_turn()
         if not (existing_turn or lifecycle_lock.locked()):
+            return None
+        if response_envelope.origin.intent is TurnIntent.HELD_REPLY_CONTINUATION:
+            # The running reply takes over the work this wake would continue, so the wake must not end its waits.
             return None
         source_event_id = response_envelope.source_event_id
         if signal_queued_message and self._should_signal_queued_message(response_envelope):

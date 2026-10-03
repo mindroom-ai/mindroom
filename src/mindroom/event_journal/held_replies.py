@@ -97,10 +97,9 @@ def delete(transaction: Transaction, hold_id: str, *, generation: str | None = N
     return None if row is None else _saved(row)
 
 
-def mark_woken(transaction: Transaction, hold_id: str, generation: str) -> bool:
-    """Record that a wake was admitted for this generation of a hold; False once another save replaced it."""
-    row = transaction.fetchone(
-        "UPDATE held_replies SET woken_generation = ? WHERE hold_id = ? AND generation = ? RETURNING hold_id",
+def mark_woken(transaction: Transaction, hold_id: str, generation: str) -> None:
+    """Record that a wake was admitted for this generation of a hold, unless another save replaced it."""
+    transaction.execute(
+        "UPDATE held_replies SET woken_generation = ? WHERE hold_id = ? AND generation = ?",
         (generation, hold_id, generation),
     )
-    return row is not None

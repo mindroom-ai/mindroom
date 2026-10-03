@@ -214,7 +214,11 @@ def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
     return [
         entry.job
         for entry in runtime._entries.values()
-        if entry.job.status in TERMINAL_STATUSES and runtime._unconsumed(entry) and runtime._authorize(entry.job)
+        if entry.job.status in TERMINAL_STATUSES
+        and not entry.job.consumed
+        and entry.job.user_stop_receipt_order is None
+        and entry.claim is None
+        and runtime._authorize(entry.job)
     ]
 
 

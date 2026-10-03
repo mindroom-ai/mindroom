@@ -2804,6 +2804,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.post_response_effects",
     "mindroom.tool_system.runtime_context",
+    "mindroom.turn_origin",
 ]
 visibility = [
     "mindroom.response_runner",
