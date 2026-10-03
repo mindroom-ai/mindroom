@@ -174,6 +174,29 @@ def test_script_gateway_adds_no_control_plane_ingress_policy_when_the_runtime_po
     assert _named(docs, "NetworkPolicy", f"{GATEWAY_NAME}-workers") is not None
 
 
+def test_script_gateway_names_stay_distinct_for_the_longest_fullname() -> None:
+    """Truncation never collapses the gateway resources onto each other or onto the main runtime Service."""
+    fullname = "x" * 63
+    docs = _render(
+        "workers.backend=kubernetes",
+        "approvedEgress.enabled=true",
+        "approvedEgress.image.tag=test",
+        "networkPolicy.create=true",
+        f"fullnameOverride={fullname}",
+        "scriptGateway.enabled=true",
+    )
+    policy_names = [doc["metadata"]["name"] for doc in docs if doc["kind"] == "NetworkPolicy"]
+    service_names = [doc["metadata"]["name"] for doc in docs if doc["kind"] == "Service"]
+
+    control_plane_name = f"{'x' * 48}-script-gateway"
+    worker_policy_name = f"{'x' * 40}-script-gateway-workers"
+    assert policy_names.count(control_plane_name) == 1
+    assert policy_names.count(worker_policy_name) == 1
+    assert service_names.count(control_plane_name) == 1
+    assert fullname in service_names
+    assert max(len(control_plane_name), len(worker_policy_name)) <= 63
+
+
 @pytest.mark.parametrize(
     ("set_args", "error"),
     [

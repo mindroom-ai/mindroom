@@ -358,7 +358,20 @@ matchLabels:
 {{- end -}}
 
 {{- define "mindroom-runtime.scriptGatewayName" -}}
-{{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-script-gateway" (include "mindroom-runtime.fullname" . | trunc 48 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.scriptGatewayWorkerPolicyName" -}}
+{{- printf "%s-script-gateway-workers" (include "mindroom-runtime.fullname" . | trunc 40 | trimSuffix "-") -}}
+{{- end -}}
+
+{{- define "mindroom-runtime.workerPodLabels" -}}
+mindroom.ai/component: worker
+app.kubernetes.io/managed-by: mindroom
+app.kubernetes.io/name: mindroom-worker
+{{- with .Values.workers.kubernetes.extraLabels }}
+{{ toYaml . }}
+{{- end }}
 {{- end -}}
 
 {{- define "mindroom-runtime.scriptGatewayHost" -}}

@@ -30,19 +30,14 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ printf "%s-workers" $name | trunc 63 | trimSuffix "-" }}
+  name: {{ include "mindroom-runtime.scriptGatewayWorkerPolicyName" . }}
   namespace: {{ $workerNamespace }}
   labels:
     {{- include "mindroom-runtime.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      mindroom.ai/component: worker
-      app.kubernetes.io/managed-by: mindroom
-      app.kubernetes.io/name: mindroom-worker
-      {{- with .Values.workers.kubernetes.extraLabels }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
+      {{- include "mindroom-runtime.workerPodLabels" . | nindent 6 }}
   policyTypes:
     - Egress
   egress:
@@ -78,12 +73,7 @@ spec:
               kubernetes.io/metadata.name: {{ $workerNamespace | quote }}
           podSelector:
             matchLabels:
-              mindroom.ai/component: worker
-              app.kubernetes.io/managed-by: mindroom
-              app.kubernetes.io/name: mindroom-worker
-              {{- with .Values.workers.kubernetes.extraLabels }}
-              {{- toYaml . | nindent 14 }}
-              {{- end }}
+              {{- include "mindroom-runtime.workerPodLabels" . | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ .Values.scriptGateway.port }}
