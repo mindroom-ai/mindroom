@@ -192,12 +192,7 @@ spec:
               kubernetes.io/metadata.name: {{ include "mindroom-runtime.workerNamespace" . | quote }}
           podSelector:
             matchLabels:
-              mindroom.ai/component: worker
-              app.kubernetes.io/managed-by: mindroom
-              app.kubernetes.io/name: mindroom-worker
-              {{- with .Values.workers.kubernetes.extraLabels }}
-              {{- toYaml . | nindent 14 }}
-              {{- end }}
+              {{- include "mindroom-runtime.workerPodLabels" . | nindent 14 }}
       ports:
         - protocol: TCP
           port: {{ $server.apiPort }}
