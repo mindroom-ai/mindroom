@@ -230,7 +230,7 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     run = shell.async_functions["run_shell_command"].entrypoint
     assert run is not None
 
-    with bound_agent_cli_shell_env(shell_env):
+    with bound_agent_cli_shell_env(shell_env, window="bash"):
         output = await run("command -v mindroom-agent")
 
     assert output.strip() == f"{shell_env.bin_dir}/mindroom-agent"

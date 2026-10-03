@@ -131,9 +131,9 @@ def _with_media(content: object, media_results: list[ModelResponse]) -> str | To
 class LiveTurnTools(TurnToolBridge):
     """Own call receipts separately from admitted operation lifetimes.
 
-    The outer mutex spans canonical hooks. Admission opens only inside the
-    shell leaf; tool calls and describes arriving outside their own open
-    Bash window are rejected. Each admitted lifetime gets its own task so a nested
+    The outer mutex spans canonical hooks. Admission opens only around a shell
+    command (minimal Bash's shell leaf or a standard native shell call); tool
+    calls and describes arriving outside their own open Bash window are rejected. Each admitted lifetime gets its own task so a nested
     shell can wait on another CLI call without blocking its parent window.
     """
 
@@ -267,8 +267,11 @@ class LiveTurnTools(TurnToolBridge):
 
     def _require_bash_window(self, window: str | None) -> str:
         if window is None:
-            # A mindroom-agent from another MindRoom release does not send its window.
-            msg = "mindroom-agent did not name its shell command; use the mindroom-agent of this MindRoom release"
+            # A mindroom-agent from another release, or a command that dropped the variable, sends none.
+            msg = (
+                "mindroom-agent sent no window; run this MindRoom release's mindroom-agent "
+                "with its Bash command's MINDROOM_AGENT_CLI_WINDOW"
+            )
             raise CliBashWindowRequiredError(msg)
         if self.control_executions:
             # The control fence rejects every window, including ones whose command still runs.

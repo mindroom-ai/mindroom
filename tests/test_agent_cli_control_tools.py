@@ -925,7 +925,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         release.set()
         while (await owner.get_call(switch_call["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
             await asyncio.sleep(0)
-        # The fence closes every window, even one whose command is still running.
+        # The fence rejects calls from every window, even one whose command is still running.
         with pytest.raises(CliBashWindowRequiredError, match="continuation requires a rebuilt tool catalog"):
             await owner.operation(
                 window="bash-parent",

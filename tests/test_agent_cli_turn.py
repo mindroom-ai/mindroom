@@ -481,7 +481,7 @@ async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_anoth
     await opened.wait()
     try:
         for window, message in (
-            (None, "did not name its shell command"),
+            (None, "sent no window"),
             ("closed", "Bash call has ended"),
             ("unknown", "Bash call has ended"),
         ):
