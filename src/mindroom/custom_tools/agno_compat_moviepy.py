@@ -176,7 +176,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         return staged
 
     def _publish(self, raw_path: str, payload: bytes | BinaryIO) -> None:
-        """Atomically write one output where the agent's file_access allows, without following links below the workspace."""
+        """Write one output where the agent's file_access allows; below the workspace by atomic no-follow replacement."""
         write_agent_file(raw_path, payload, workspace_root=self._workspace_root, file_access=self._file_access)
 
     @override
