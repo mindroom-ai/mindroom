@@ -32,6 +32,8 @@ from mindroom.tool_system.skill_usage import record_skill_use
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.tools.function import Function
 
     from mindroom.config.main import Config
@@ -505,14 +507,21 @@ def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
     return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
 
 
-def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
-    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them."""
+def parse_skill_markdown(
+    content: str,
+    *,
+    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
+) -> tuple[dict[str, Any], str]:
+    """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as skill loading reads them.
+
+    The default loader refuses frontmatter that worker code could write to exhaust the primary.
+    """
     match = _match_skill_frontmatter(content)
     if not match:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        frontmatter = yaml_io.safe_load_without_aliases(match.group(1)) or {}
+        frontmatter = load_yaml(match.group(1)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
@@ -522,12 +531,18 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
     return cast("dict[str, Any]", frontmatter), match.group(2).strip()
 
 
-def _parse_skill_frontmatter(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
+def _parse_skill_frontmatter(
+    content: str,
+    *,
+    path: str,
+    allow_missing: bool,
+    load_yaml: Callable[[str], Any] = yaml_io.safe_load_without_aliases,
+) -> tuple[dict[str, Any], str] | None:
     """Split one ``SKILL.md`` into its frontmatter mapping and instructions, or warn and return None."""
     if allow_missing and not _match_skill_frontmatter(content):
         return {}, content
     try:
-        return parse_skill_markdown(content)
+        return parse_skill_markdown(content, load_yaml=load_yaml)
     except SkillMarkdownError as exc:
         logger.warning("Refused skill frontmatter", path=path, error=str(exc))
         return None
@@ -543,7 +558,13 @@ def _read_skill_frontmatter(
     except Exception as exc:
         logger.warning("Failed to read skill file", path=str(skill_path), error=str(exc))
         return None
-    parsed = _parse_skill_frontmatter(content, path=str(skill_path), allow_missing=allow_missing)
+    # Only operator skill roots are listed here, and agents load them with Agno's plain YAML loader, so parse alike.
+    parsed = _parse_skill_frontmatter(
+        content,
+        path=str(skill_path),
+        allow_missing=allow_missing,
+        load_yaml=yaml_io.safe_load,
+    )
     return None if parsed is None else parsed[0]
 
 

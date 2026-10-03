@@ -735,6 +735,20 @@ def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path
     assert listing.description == "alpha"
 
 
+def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path: Path) -> None:
+    """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
+    skill_dir = tmp_path / "aliased"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
+        encoding="utf-8",
+    )
+
+    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path])] == ["aliased"]
+    assert skills_module.resolve_skill_listing("aliased", [tmp_path]) is not None
+    assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
+
+
 def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp_path: Path) -> None:
     """Skills without YAML frontmatter should still resolve consistently."""
     skill_dir = tmp_path / "mindroom-dev"
