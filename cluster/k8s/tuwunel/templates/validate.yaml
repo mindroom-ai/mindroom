@@ -22,30 +22,9 @@
 {{- if .Values.tuwunel.oidc.enabled -}}
 {{- $managedSettings = append $managedSettings "identity_provider" -}}
 {{- end -}}
-{{- /* Top-level options extraConfig sets as [global] keys or [global.<key>] tables; duplicates would make tuwunel.toml invalid. */ -}}
-{{- $extraConfigSettings := list -}}
-{{- $inGlobal := true -}}
-{{- range $line := splitList "\n" (default "" .Values.tuwunel.extraConfig) -}}
-{{- $line = trim $line -}}
-{{- if hasPrefix "[" $line -}}
-{{- $inGlobal = false -}}
-{{- with regexFind "^\\[\\[?\\s*global\\.[A-Za-z0-9_-]+" $line -}}
-{{- $extraConfigSettings = append $extraConfigSettings (regexReplaceAll "^\\[\\[?\\s*global\\." . "") -}}
-{{- end -}}
-{{- else if $inGlobal -}}
-{{- with regexFind "^[A-Za-z0-9_-]+\\s*[.=]" $line -}}
-{{- $extraConfigSettings = append $extraConfigSettings (regexReplaceAll "\\s*[.=]$" . "") -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 {{- range $key, $value := .Values.tuwunel.settings -}}
-{{- if not (kindIs "invalid" $value) -}}
-{{- if has $key $managedSettings -}}
+{{- if and (has $key $managedSettings) (not (kindIs "invalid" $value)) -}}
 {{- fail (printf "tuwunel.settings.%s is rendered by the chart; use its dedicated value" $key) -}}
-{{- end -}}
-{{- if has $key $extraConfigSettings -}}
-{{- fail (printf "tuwunel.settings.%s is also set in tuwunel.extraConfig; set each option in one place" $key) -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.tuwunel.oidc.enabled -}}

@@ -30,6 +30,9 @@ tuwunel:
         m.room.name: 50
   extraConfig: |
     allow_legacy_media = true
+    welcome_text = '''
+    login_with_password = false
+    '''
 
     [global.media]
     startup_check = false
@@ -92,6 +95,7 @@ def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> N
     assert "retired_option" not in config
     assert config["default_power_level_content_override"] == {"users_default": 50, "events": {"m.room.name": 50}}
     assert config["allow_legacy_media"] is True
+    assert config["welcome_text"] == "login_with_password = false\n"
     assert config["media"] == {"startup_check": False}
     assert config["well_known"] == {"client": "https://staging.example.com", "server": "staging.example.com:443"}
 
@@ -129,34 +133,8 @@ def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> N
             """,
             "tuwunel.settings.identity_providers[0] must be a string, number, boolean, or list",
         ),
-        (
-            """
-            tuwunel:
-              serverName: example.com
-              settings:
-                login_with_password: false
-              extraConfig: |
-                login_with_password = true
-            """,
-            "tuwunel.settings.login_with_password is also set in tuwunel.extraConfig",
-        ),
-        (
-            """
-            tuwunel:
-              serverName: example.com
-              settings:
-                default_power_level_content_override:
-                  users_default: 50
-              extraConfig: |
-                allow_legacy_media = true
-
-                [global.default_power_level_content_override]
-                users_default = 50
-            """,
-            "tuwunel.settings.default_power_level_content_override is also set in tuwunel.extraConfig",
-        ),
     ],
-    ids=["always-managed-option", "registration-token-option", "array-of-tables", "raw-key", "raw-table"],
+    ids=["always-managed-option", "registration-token-option", "array-of-tables"],
 )
 def test_settings_reject_options_that_cannot_render_cleanly(tmp_path: Path, values: str, error: str) -> None:
     """Duplicate chart options and arrays of tables fail at render time instead of at homeserver startup."""
