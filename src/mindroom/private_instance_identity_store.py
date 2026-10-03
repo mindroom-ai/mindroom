@@ -137,7 +137,7 @@ def ensure_private_instance_identity(
         identity = _matching_identity(existing_identity, requested_identity)
         # LEGACY_COMPAT: Private scope records without the primary's copy below `tracking/`.
         # Legacy format: only `private_instances/<scope>/.mindroom-private-instance.json`, which the static-runner sidecar can write.
-        # Last legacy release: v2026.10.47; replacement: the next release also keeps a copy at `tracking/private_instances/<scope>/.mindroom-private-instance.json`.
+        # Last legacy release: v2026.10.51; replacement: the next release also keeps a copy at `tracking/private_instances/<scope>/.mindroom-private-instance.json`.
         # Handling: the requester's next turn copies its matching record; until then the thread exporter gives that instance no target and clears its export tree.
         # Coverage: tests/test_private_instance_identity.py::test_private_instances_for_agent_ignores_a_record_the_primary_never_wrote.
         if not _primary_record_path(trusted_base_path, scope_root).exists():

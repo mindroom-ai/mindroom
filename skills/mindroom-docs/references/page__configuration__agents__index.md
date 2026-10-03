@@ -668,7 +668,7 @@ Principal isolation does not trigger a one-time purge or migration of existing e
 
 Shared agents export only rooms where the agent's own Matrix account is currently joined.
 Private agents (`private:`) get one export tree per materialized instance under `<storage_root>/private_instances/<scope-key>/<agent>/<private root>/thread_exports/`; each tree stays within that agent's configured and invited rooms and is scoped to the requester's current room memberships, so one requester's private workspace never accumulates other users' conversations.
-An instance counts as materialized once MindRoom itself has created or used it for its requester, so an instance last used with v2026.10.47 or earlier exports again after its requester's next turn.
+An instance counts as materialized once MindRoom itself has created or used it for its requester, so an instance last used with v2026.10.51 or earlier exports again after its requester's next turn.
 A membership lookup failure blocks new writes for that room and leaves existing files in place until a successful lookup proves that access was revoked.
 
 ### Semantic Search Over Exports
