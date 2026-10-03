@@ -42,7 +42,8 @@ class WorkspaceVisualizationTools(VisualizationTools):
     # process working directory, and saves there following links, so an absolute or "../" filename wrote
     # anywhere the process can write and a link planted in a shared workspace redirected the write.
     # Upstream issue: Tracking gap; no matching issue identified on October 3, 2026.
-    # Upstream PR: None identified for a caller-supplied chart writer.
+    # Upstream PR: https://github.com/agno-agi/agno/pull/9470, open on October 3, 2026, keeps chart file names inside
+# output_dir but still saves by path below the working directory, following links.
     # Remove when: VisualizationTools accepts a writer or directory descriptor for charts;
     # retain plain file names, workspace-only saves through no-follow descriptors, and atomic replacement.
     # Coverage: tests/test_visualization_tool.py.
