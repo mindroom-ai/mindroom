@@ -545,6 +545,38 @@ async def test_thread_scan_stops_once_it_retains_its_message_bound() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_scan_counts_edits_of_distinct_originals_toward_its_kept_bound() -> None:
+    """Edits naming different originals are each kept, so they count toward the kept-event bound."""
+    client = AsyncMock()
+    client.user_id = "@agent:localhost"
+    per_page = 100
+    pages_served = 0
+
+    async def edit_pages(*_args: object, **_kwargs: object) -> nio.RoomMessagesResponse:
+        nonlocal pages_served
+        pages_served += 1
+        return _messages_response(
+            [
+                _edit_event(
+                    f"$edit-{pages_served}-{index}:localhost",
+                    f"$made-up-{pages_served}-{index}:localhost",
+                    timestamp=pages_served,
+                    thread_root_id="$other-root:localhost",
+                )
+                for index in range(per_page)
+            ],
+            end=f"page-{pages_served}",
+        )
+
+    client.room_messages = AsyncMock(side_effect=edit_pages)
+
+    with pytest.raises(_ThreadRoomScanBoundError):
+        await fetch_thread_event_sources_via_room_messages(client, _ROOM_ID, "$ancient-root:localhost")
+
+    assert client.room_messages.await_count == _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES // per_page
+
+
+@pytest.mark.asyncio
 async def test_thread_scan_reaches_a_root_behind_hundreds_of_pages_of_other_replies_edits() -> None:
     """Every streaming edit in the room counts toward the scan bound, so a busy room's ordinary thread still fits.
 
