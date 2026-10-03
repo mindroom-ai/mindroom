@@ -56,6 +56,7 @@ def append_denied_tool_result(
 # Remove when: Agent and Team continuation run only the caller's supplied requirements, or expose a public
 # callback over the exact calls they are about to run; MindRoom's argument digest check must remain.
 # Coverage: tests/test_response_runner_focused.py::test_agent_continuation_runs_only_approved_calls;
+# tests/test_delegation_execution.py::test_fresh_delegation_continuation_never_runs_planted_stored_calls;
 # tests/test_delegation_approval_ownership.py::test_saved_child_approval_preserves_executable_ownership;
 # tests/test_team_approval_dynamic_tools.py::test_real_team_member_pause_reopens_with_exact_toolkit_owner.
 def continuation_executes(tool: ToolExecution) -> bool:
