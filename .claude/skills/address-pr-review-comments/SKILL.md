@@ -54,6 +54,8 @@ Before editing, state the grouped findings using these labels:
 - `Code-quality cleanup`: The issue is in scope and improves clarity or maintainability without changing behavior.
 - `Test/docs gap`: The implementation is acceptable but missing required verification or documentation.
 - `Overreach / scope creep`: The suggestion expands the PR beyond its intent or adds unnecessary abstraction.
+- `Edge case`: The claim is technically true but needs an unusual configuration plus unusual data, or only an operator could cause it; skip it with a one-line reason.
+- `Out of scope`: A real problem the PR did not cause; write it down where the task tracks work, such as a GitHub issue or the task's tracking file, instead of fixing it here.
 - `Incorrect / stale`: The claim does not match the current code or misunderstands the design.
 - `Needs clarification`: The correct action depends on product or architectural intent that cannot be inferred.
 

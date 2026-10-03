@@ -40,6 +40,8 @@ After each fix, use fresh read-only reviewers with neutral prompts.
    Verify each finding against current code before editing.
    Fix only real, in-scope issues in the main thread.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
+   Decline edge cases that need an unusual configuration plus unusual data, or that only an operator could cause, with a one-line reason.
+   Write each out-of-scope finding down the same day where the task already tracks work, such as a GitHub issue or the task's tracking file, so it survives context compaction; never fix it in this PR.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.
    After every third review round that still finds many issues or a new major bug class, stop patching and reconsider the design before another patch round.
@@ -80,7 +82,8 @@ Do not edit files, commit, push, or inspect CI.
 
 Output only:
 - Verdict: APPROVE or CHANGES REQUIRED
-- Findings with exact file/line and required fix
+- Findings with exact file/line, the realistic scenario, and required fix
+- Edge cases (not blocking) and Out of scope, if any
 
 If no blockers, say APPROVE and no findings.
 ```

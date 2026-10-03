@@ -11,6 +11,18 @@ Review the pull request with a **zero-tolerance standard**. Every issue you find
 
 Never approve with suggestions. Never say "looks good overall but...". If there's a "but", it's CHANGES REQUIRED.
 
+## Realistic Issues Only
+
+A finding is an issue only when it has a concrete, realistic scenario: who triggers it under a normal configuration and normal use, or which attacker [docs/architecture/security-posture.md](../../../docs/architecture/security-posture.md) covers.
+State that scenario with every finding.
+Edge cases that need an unusual configuration plus unusual data, or that only an operator could cause, are not issues and do not block; list them, one line each, under **Edge cases (not blocking)**.
+Do not ask for mechanisms the change does not need, such as new limits, caches, retries, fallbacks, or hardening.
+
+## Out-of-Scope Problems
+
+Report real problems the PR did not cause, such as pre-existing bugs in nearby code, under **Out of scope** with evidence.
+They do not block this PR and must not be fixed in it.
+
 ## Scope and Refactor Standard
 
 Code touched by a PR must be merge-and-forget quality — no rough edges, no avoidable duplication, no unconventional idioms.
