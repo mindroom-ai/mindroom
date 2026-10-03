@@ -410,6 +410,27 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert any(item["depends_on"] for item in items)
 
 
+def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) -> None:
+    """Quotes, backslashes, and emoji in free-text params should reach the todo titles as typed."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    issue_ref = 'Fix "quoted" C:\\temp 🐛'
+    branch = 'fix/"quoted"'
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(
+            agent=_agent(),
+            name="mindroom-dev",
+            params={"ISSUE_REF": issue_ref, "BRANCH": branch, "REPO": "mindroom"},
+        )
+
+    titles = [item["title"] for item in _read_todos(config)["items"]]
+    assert titles[0] == f"Create living report for {issue_ref} in the repo notes or task file"
+    assert titles[1] == f"Create implementation plan for {issue_ref} on {branch}"
+    assert titles[3] == f"Run focused automated tests for {issue_ref}"
+    assert titles[-1] == f"Push {branch} and open PR if IS_PR is true"
+
+
 def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
     """The review-loop template should not force a rerun after first-round approval."""
     config = _config(tmp_path)
