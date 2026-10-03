@@ -41,6 +41,9 @@ CONTRACT_ROOM_ID = "!room:localhost"
 CONTRACT_REQUESTER_ID = "@alice:localhost"
 CONTRACT_THREAD_ID = "$thread"
 CONTRACT_CANVAS_TITLE = "Choose a plan"
+# Too large to ride inside an edit, so the backend uploads it and the event carries a reference.
+CONTRACT_CANVAS_DOCUMENT_HTML = "<main>" + "<p>Quarterly row</p>" * 2000 + "</main>"
+CONTRACT_CANVAS_DOCUMENT_URL = "mxc://localhost/canvas-document"
 CONTRACT_CANVAS_UPDATE_HTML = (
     '<form data-mindroom-label="Seats chosen"><input name="seats" value="3"><button>Continue</button></form>'
 )
@@ -132,6 +135,7 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         ),
         _ContractCase("show_canvas", "", "show_canvas"),
         _ContractCase("show_canvas/update", "", "show_canvas", "update"),
+        _ContractCase("show_canvas/document", "", "show_canvas", "document"),
     )
     registered_actions = set(ChatUITools().get_async_functions())
     exported_actions = {case.action for case in actions}
@@ -154,7 +158,8 @@ async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
     if case.action == "open_settings":
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
     if case.action == "show_canvas":
-        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=CONTRACT_CANVAS_HTML)
+        html = CONTRACT_CANVAS_DOCUMENT_HTML if case.argument == "document" else CONTRACT_CANVAS_HTML
+        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=html)
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
 
@@ -201,6 +206,9 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             reply_to_event_id="$request" if threaded else None,
             requester_id=CONTRACT_REQUESTER_ID,
             event_id=event_id,
+        )
+        context.client.upload = AsyncMock(
+            return_value=(nio.UploadResponse.from_dict({"content_uri": CONTRACT_CANVAS_DOCUMENT_URL}), None),
         )
         with tool_runtime_context(context):
             result = json.loads(await _invoke_contract_case(ChatUITools(), case))

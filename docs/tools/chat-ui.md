@@ -36,7 +36,7 @@ Delegated transport identities and team contexts are rejected because they canno
   `computer` and `members` are the only supported panel values; `browser` is not a panel value.
 - `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
 - `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
-- `show_canvas(title, html, canvas_event_id=None)` shows agent-written HTML in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases).
+- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases).
 
 Each call sends an `m.room.message` notice in the current conversation.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
@@ -93,20 +93,54 @@ UI requests reveal only the bounded Chat surfaces described above; worker comput
 
 ## Interactive canvases
 
-`show_canvas` lets an agent show a small web page beside the conversation, such as a menu, form, picker, ranking list, or multi-step flow, and read what the user chose.
-Use it when clicking or adjusting is easier than typing.
+`show_canvas` lets an agent show a web page beside the conversation and read what the user chose.
+Use it when seeing or clicking beats reading or typing: dashboards, reports, charts, slides, menus, forms, pickers, and multi-step flows.
 
 ```python
 chat_ui.show_canvas(
     title="Choose a plan",
     html="""
-<style>button { margin: 4px; padding: 8px 12px; }</style>
-<p>Which plan should I set up?</p>
-<button onclick="mindroom.submit({plan: 'basic'}, {label: 'Basic plan'})">Basic</button>
-<button onclick="mindroom.submit({plan: 'pro'}, {label: 'Pro plan'})">Pro</button>
+<style>
+  .plans { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .plan { background: var(--mr-surface); border: 1px solid var(--mr-border);
+          border-radius: var(--mr-radius); padding: 16px; }
+  button { background: var(--mr-accent); color: var(--mr-accent-text); border: 0;
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+</style>
+<div class="plans">
+  <div class="plan"><h3>Basic</h3><p>For trying things out.</p>
+    <button onclick="mindroom.submit({plan: 'basic'}, {label: 'Basic plan'})">Choose Basic</button></div>
+  <div class="plan"><h3>Pro</h3><p>For daily work.</p>
+    <button onclick="mindroom.submit({plan: 'pro'}, {label: 'Pro plan'})">Choose Pro</button></div>
+</div>
 """,
 )
 ```
+
+### Pages and files
+
+Pass the page as `html`, or as `path` to an HTML file in the agent's workspace.
+A path suits pages the agent builds and refines, such as a slide deck: edit the file, then call `show_canvas` again with the same `path` and the canvas ID to show the new version.
+Paths follow the agent's `file_access` setting, so with the default `workspace` access they must stay inside the workspace.
+The page must be UTF-8 text and at most 4 MB.
+
+### Design
+
+Canvases are full web pages, so agents can build polished dashboards and reports.
+Write self-contained HTML with inline CSS and JavaScript; external scripts, styles, fonts, images, and network requests are blocked, so draw charts with inline SVG (or a canvas element) and embed images as `data:` URLs.
+The user can resize the panel and expand it to the full width of the conversation, so use a responsive layout.
+
+MindRoom Chat exposes its current theme as CSS variables, so a page can match light and dark mode without guessing colors:
+
+| Variable | Use |
+|---|---|
+| `--mr-bg` | Page background (the default body background) |
+| `--mr-surface`, `--mr-surface-raised` | Cards and raised elements |
+| `--mr-border` | Borders and dividers |
+| `--mr-text`, `--mr-text-muted` | Text (the default body color) and secondary text |
+| `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
+| `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
+| `--mr-radius`, `--mr-font` | Corner radius and font family |
 
 ### How the answer reaches the agent
 
@@ -135,9 +169,9 @@ A canvas shown outside a thread can be updated from any thread of that room, bec
 
 ### Size
 
-The whole canvas is carried inside the Matrix event, so it must fit within the edit size limit: 27,000 bytes of serialized event, about 24,000 characters of plain ASCII HTML.
-Quotes, backslashes, and newlines count twice, and non-ASCII characters count at their escaped JSON size (six bytes for most characters, twelve for most emoji).
-The tool rejects a larger canvas with an error that reports the measured size.
+A page whose edit fits a Matrix event (27,000 bytes of serialized event, about 24,000 characters of plain ASCII HTML) travels inside the event.
+A larger page, up to 4 MB, is uploaded as Matrix media (encrypted in end-to-end encrypted rooms) and the event carries only a reference that MindRoom Chat downloads, decrypts, and caches.
+The tool reports an error for pages above 4 MB or when the upload fails.
 
 ### Sandbox and limits
 

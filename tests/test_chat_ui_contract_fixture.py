@@ -28,6 +28,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
             "show_canvas",
             "show_canvas/update",
+            "show_canvas/document",
         )
     }
 
@@ -51,6 +52,10 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         if case["id"].endswith("/show_canvas"):
             assert metadata["canvas"]["title"] == "Choose a plan"
             assert "<form" in metadata["canvas"]["html"]
+        if case["id"].endswith("/show_canvas/document"):
+            assert metadata["canvas"]["document"]["url"] == "mxc://localhost/canvas-document"
+            assert metadata["canvas"]["document"]["mimetype"] == "text/html"
+            assert "html" not in metadata["canvas"]
         if case["id"].endswith("/show_canvas/update"):
             replacement = case["replacement"]["content"]
             assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}

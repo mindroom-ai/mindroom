@@ -65,6 +65,7 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         "self",
         "title",
         "html",
+        "path",
         "canvas_event_id",
     )
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
@@ -621,30 +622,168 @@ async def test_title_limit_counts_utf16_units_like_chat(tmp_path: Path) -> None:
     assert result["status"] == "ok"
 
 
+def _serve_upload(context: ToolRuntimeContext, mxc_uri: str = "mxc://example.org/canvas") -> None:
+    context.client.upload = AsyncMock(return_value=(nio.UploadResponse.from_dict({"content_uri": mxc_uri}), None))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("html", ["x" * 26_000, "\U0001f600" * 2_500, '"' * 13_000])
-async def test_oversized_canvas_is_rejected_by_its_serialized_event_size(tmp_path: Path, html: str) -> None:
-    """Escaped characters count at their JSON size, so a 10 KB emoji page is still too large."""
+async def test_large_canvas_is_uploaded_and_referenced(tmp_path: Path, html: str) -> None:
+    """A page whose edit would not fit travels as media; the event keeps only a reference."""
     context = _context(tmp_path)
+    _serve_upload(context)
 
     with tool_runtime_context(context):
         result = json.loads(await ChatUITools().show_canvas(title="Big", html=html))
 
+    assert result["status"] == "ok"
+    upload = context.client.upload.await_args.kwargs
+    assert upload["content_type"] == "text/html"
+    assert upload["filesize"] == len(html.encode("utf-8"))
+    assert upload["data_provider"](None, None).read() == html.encode("utf-8")
+    canvas = _sent_content(context)["io.mindroom.ui_action"]["canvas"]
+    assert canvas == {
+        "title": "Big",
+        "document": {"mimetype": "text/html", "size": len(html.encode("utf-8")), "url": "mxc://example.org/canvas"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_large_canvas_in_an_encrypted_room_references_the_encrypted_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encrypted rooms get an encrypted upload, so the reference carries its key, not a plain URL."""
+    context = _context(tmp_path)
+    encrypted_file = {"url": "mxc://example.org/enc", "key": {"k": "secret"}, "iv": "iv", "hashes": {}, "v": "v2"}
+    upload = AsyncMock(return_value=("mxc://example.org/enc", {"info": {}, "file": encrypted_file}))
+    monkeypatch.setattr("mindroom.custom_tools.chat_ui.upload_media_bytes_as_mxc", upload)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Big", html="x" * 26_000))
+
+    assert result["status"] == "ok"
+    assert _sent_content(context)["io.mindroom.ui_action"]["canvas"]["document"] == {
+        "mimetype": "text/html",
+        "size": 26_000,
+        "file": encrypted_file,
+    }
+
+
+@pytest.mark.asyncio
+async def test_canvas_over_the_page_limit_is_rejected(tmp_path: Path) -> None:
+    """Pages above 4 MB are refused before anything is uploaded or sent."""
+    context = _context(tmp_path)
+    context.client.upload = AsyncMock()
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Huge", html="x" * (4 * 1024 * 1024 + 1)))
+
     assert result["status"] == "error"
-    assert "too large" in result["message"]
-    assert "27000" in result["message"]
+    assert "limit" in result["message"]
+    context.client.upload.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_canvas_just_under_the_edit_ceiling_is_sent(tmp_path: Path) -> None:
-    """A canvas that fits as a later edit is accepted when it is first shown."""
+async def test_failed_canvas_upload_is_reported(tmp_path: Path) -> None:
+    """A page that could not be uploaded is not reported as shown."""
     context = _context(tmp_path)
+    context.client.upload = AsyncMock(return_value=(nio.UploadError("no space"), None))
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Big", html="x" * 26_000))
+
+    assert result == {
+        "action": "show_canvas",
+        "message": "Failed to upload the canvas page.",
+        "status": "error",
+        "tool": "chat_ui",
+    }
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canvas_just_under_the_edit_ceiling_stays_inline(tmp_path: Path) -> None:
+    """A page that fits as a later edit is carried inside the event."""
+    context = _context(tmp_path)
+    context.client.upload = AsyncMock()
 
     with tool_runtime_context(context):
         result = json.loads(await ChatUITools().show_canvas(title="Big", html="x" * 23_000))
 
     assert result["status"] == "ok"
+    assert _sent_content(context)["io.mindroom.ui_action"]["canvas"]["html"] == "x" * 23_000
+    context.client.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_canvas_from_a_workspace_file(tmp_path: Path) -> None:
+    """Agents can show a page they keep in their workspace, such as slides they are building."""
+    workspace = tmp_path / "workspace"
+    (workspace / "slides").mkdir(parents=True)
+    (workspace / "slides" / "deck.html").write_text("<section>Slide 1</section>", encoding="utf-8")
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(
+            await ChatUITools(tool_output_workspace_root=workspace).show_canvas(title="Deck", path="slides/deck.html"),
+        )
+
+    assert result["status"] == "ok"
+    assert _sent_content(context)["io.mindroom.ui_action"]["canvas"] == {
+        "title": "Deck",
+        "html": "<section>Slide 1</section>",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "path", "message"),
+    [
+        (None, "missing.html", "must be an existing file"),
+        (None, "../outside.html", "Canvas path"),
+        ("binary", "deck.html", "UTF-8"),
+        ("empty", "deck.html", "empty"),
+    ],
+)
+async def test_canvas_path_is_confined_to_readable_workspace_text(
+    tmp_path: Path,
+    setup: str | None,
+    path: str,
+    message: str,
+) -> None:
+    """Paths follow the agent's file access and must name a non-empty UTF-8 file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "outside.html").write_text("<p>secret</p>", encoding="utf-8")
+    if setup == "binary":
+        (workspace / "deck.html").write_bytes(b"\xff\xfe\x00")
+    if setup == "empty":
+        (workspace / "deck.html").write_text("  ", encoding="utf-8")
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(
+            await ChatUITools(tool_output_workspace_root=workspace).show_canvas(title="Deck", path=path),
+        )
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("html", "path"), [(None, None), ("<p>1</p>", "deck.html"), ("", "")])
+async def test_canvas_needs_exactly_one_page_source(tmp_path: Path, html: str | None, path: str | None) -> None:
+    """Either inline HTML or a workspace path, never both or neither."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(title="Deck", html=html, path=path))
+
+    assert result["message"] == "Give exactly one of html or path."
+    context.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -756,16 +895,32 @@ async def test_canvas_update_rejects_unreadable_undecryptable_or_deleted_targets
 
 
 @pytest.mark.asyncio
-async def test_oversized_update_is_rejected_before_reading_the_target(tmp_path: Path) -> None:
+async def test_over_limit_update_is_rejected_before_reading_the_target(tmp_path: Path) -> None:
     """A page that cannot be sent is refused without a Matrix round trip."""
     context = _context(tmp_path)
     context.client.room_get_event = AsyncMock()
 
-    result = await _update(context, html="x" * 26_000)
+    result = await _update(context, html="x" * (4 * 1024 * 1024 + 1))
 
-    assert "too large" in result["message"]
+    assert "limit" in result["message"]
     context.client.room_get_event.assert_not_awaited()
     context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_large_update_references_its_uploaded_page_from_the_edit(tmp_path: Path) -> None:
+    """A new version of a large page is uploaded again and the edit carries the new reference."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context))
+    _serve_upload(context, "mxc://example.org/v2")
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    result = await _update(context, html="y" * 26_000)
+
+    assert result["status"] == "ok"
+    canvas = _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["canvas"]
+    assert canvas["document"]["url"] == "mxc://example.org/v2"
+    assert "html" not in canvas
 
 
 @pytest.mark.asyncio

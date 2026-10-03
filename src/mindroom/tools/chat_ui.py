@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -13,12 +13,12 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="chat_ui",
-    file_access=ToolFileAccess.NONE,
+    file_access=ToolFileAccess.AGENT,
     display_name="Chat UI",
     description=(
         "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel "
         "with open_panel(panel='computer'), open Settings, show room members, or show an interactive "
-        "HTML canvas the user can answer with show_canvas. "
+        "web page (dashboard, slides, form) the user can answer with show_canvas. "
         "Sends a UI request; does not navigate or control the user's local browser."
     ),
     category=ToolCategory.COMMUNICATION,
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/chat-ui/",
     function_names=("show_computer", "open_settings", "open_panel", "show_canvas"),
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )
 def chat_ui_tools() -> type[ChatUITools]:
     """Return bounded MindRoom Chat UI action tools."""

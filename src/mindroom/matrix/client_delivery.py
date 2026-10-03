@@ -605,7 +605,7 @@ async def _upload_file_as_mxc(
         logger.exception("Failed to read file before upload", path=str(file_path))
         return None, None
 
-    return await _upload_media_bytes_as_mxc(
+    return await upload_media_bytes_as_mxc(
         client,
         room_id,
         file_bytes,
@@ -614,7 +614,7 @@ async def _upload_file_as_mxc(
     )
 
 
-async def _upload_media_bytes_as_mxc(
+async def upload_media_bytes_as_mxc(
     client: nio.AsyncClient,
     room_id: str,
     media_bytes: bytes,
@@ -811,7 +811,7 @@ async def send_audio_message(
     if not _can_send_to_encrypted_room(client, room_id, operation="send_audio_message"):
         return None
 
-    mxc_uri, upload_payload = await _upload_media_bytes_as_mxc(
+    mxc_uri, upload_payload = await upload_media_bytes_as_mxc(
         client,
         room_id,
         audio_bytes,
@@ -953,4 +953,5 @@ __all__ = [
     "send_message_result",
     "send_room_event_result",
     "send_runtime_encrypted_media_message",
+    "upload_media_bytes_as_mxc",
 ]
