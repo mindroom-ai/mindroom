@@ -186,12 +186,12 @@ async def test_live_retry_disconnect_conflict_and_restart_are_owner_scoped(tmp_p
         transport=httpx.ASGITransport(app=disconnecting_app),
         base_url="http://test",
     ) as client:
-        outside = await client.post("/api/agent-cli/operations", headers=headers, json=payload)
+        window_headers = headers | {AGENT_CLI_WINDOW_HEADER: "parent-bash"}
+        outside = await client.post("/api/agent-cli/operations", headers=window_headers, json=payload)
         assert (outside.status_code, outside.json()) == (
             409,
             {"detail": "Agent CLI tool commands require an active Bash call"},
         )
-        window_headers = headers | {AGENT_CLI_WINDOW_HEADER: "parent-bash"}
         async with owner._window("parent-bash"):
             lost = asyncio.create_task(
                 client.post("/api/agent-cli/operations", headers=window_headers | {"x-lose-reply": "1"}, json=payload),

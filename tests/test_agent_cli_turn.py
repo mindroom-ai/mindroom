@@ -148,10 +148,10 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     assert catalog.run_context.session_state["count"] == 1
     late = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate")
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
-        await owner.operation(window=cli_window(), operation=late)
+        await owner.operation(window="outer-1", operation=late)
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            window=cli_window(),
+            window="outer-1",
             operation=ToolDescribeOperation(operation="tools.describe", toolkit="state", function="mutate"),
         )
     with pytest.raises(CliAuthenticationError):
@@ -182,7 +182,10 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     )
     owner.shell_env = _SHELL_ENV
 
+    windows = []
+
     async def command() -> str:
+        windows.append(cli_window())
         assert cli_window() is not None
         assert current_agent_cli_shell_env() == replace(_SHELL_ENV, window=cli_window())
         queued = await owner.operation(
@@ -200,7 +203,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
     assert current_agent_cli_shell_env() is None
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            window=cli_window(),
+            window=windows[0],
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
     await owner.close()
@@ -342,6 +345,54 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
 
     assert first_result == "first output"
     assert isinstance(second_result, ExceptionGroup)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_another_is_open(tmp_path: Path) -> None:
+    """Another command's open window never takes in a call that names no window, a drained one, or an unknown one."""
+
+    async def change() -> str:
+        return "changed"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [change], authorize)
+    leave = asyncio.Event()
+
+    async def hold_open_window() -> None:
+        async with owner._window("open"):
+            await leave.wait()
+
+    async with owner._window("closed"):
+        pass
+    holder = asyncio.create_task(hold_open_window())
+    await asyncio.sleep(0)
+    try:
+        for window, message in (
+            (None, "did not name its shell command"),
+            ("closed", "active Bash"),
+            ("unknown", "active Bash"),
+        ):
+            with pytest.raises(CliBashWindowRequiredError, match=message):
+                await owner.operation(
+                    window=window,
+                    operation=ToolCallOperation(
+                        operation="tools.call",
+                        call_id=uuid4(),
+                        toolkit="calls",
+                        function="change",
+                    ),
+                )
+            with pytest.raises(CliBashWindowRequiredError, match=message):
+                await owner.operation(
+                    window=window,
+                    operation=ToolDescribeOperation(operation="tools.describe", toolkit="calls", function="change"),
+                )
+    finally:
+        leave.set()
+        await holder
     await owner.close()
 
 
@@ -713,7 +764,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
         await owner.operation(
-            window=cli_window(),
+            window="bash",
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
         )
     new = await _catalog(
@@ -945,7 +996,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert [item["toolkit"] for item in search["items"]] == ["tool12"]
     operation = ToolDescribeOperation(operation="tools.describe", toolkit="tool12", function="selected")
     with pytest.raises(CliBashWindowRequiredError, match="active Bash"):
-        await owner.operation(window=cli_window(), operation=operation)
+        await owner.operation(window="describe-bash", operation=operation)
     assert loaded == []
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(window="describe-bash", operation=operation)

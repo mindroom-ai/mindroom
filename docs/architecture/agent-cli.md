@@ -62,6 +62,6 @@ The response revokes its grant when it ends, and after a primary crash old grant
 
 A Bash window stays open while its admitted calls settle, so an admitted nested shell can still submit its child calls after the outer command returns.
 Admission closes atomically when that work is quiescent, before hooks or model control resume.
-Calls arriving during drainage may join that Bash; calls and describe requests naming a closed or unknown window are rejected.
+Calls arriving during drainage may join that Bash; calls and describe requests naming no window, or a closed or unknown one, are rejected.
 Revocation and explicit control cancellation fence admission immediately.
 An admitted describe request settles when its task ends, including cancellation before the task starts.

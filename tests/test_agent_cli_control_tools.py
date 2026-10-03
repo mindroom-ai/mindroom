@@ -23,7 +23,7 @@ from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls
 from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
-from mindroom.agent_cli.session import CliTurnOwner
+from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_storage import create_session_storage, create_state_storage
@@ -901,7 +901,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         authorize=authorize,
     )
     async with owner._window("bash-parent"):
-        await owner.operation(
+        switch_call = await owner.operation(
             window="bash-parent",
             operation=ToolCallOperation(
                 operation="tools.call",
@@ -923,6 +923,14 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         )
         await asyncio.sleep(0)
         release.set()
+        while (await owner.get_call(switch_call["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+        # The fence closes every window, even one whose command is still running.
+        with pytest.raises(CliBashWindowRequiredError):
+            await owner.operation(
+                window="bash-parent",
+                operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
+            )
     with pytest.raises(ValueError, match="continuation"):
         await describe
     assert materialized == []

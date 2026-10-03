@@ -266,7 +266,11 @@ class LiveTurnTools(TurnToolBridge):
         return call.receipt.model_dump(mode="json")
 
     def _require_bash_window(self, window: str | None) -> str:
-        if window is None or window not in self._windows:
+        if window is None:
+            # A mindroom-agent from another MindRoom release does not send its window.
+            msg = "mindroom-agent did not name its shell command; use the mindroom-agent of this MindRoom release"
+            raise CliBashWindowRequiredError(msg)
+        if window not in self._windows:
             msg = "Agent CLI tool commands require an active Bash call"
             raise CliBashWindowRequiredError(msg)
         return window
