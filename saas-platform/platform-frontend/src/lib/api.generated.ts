@@ -84,26 +84,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/auth/logout": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Admin Logout
-         * @description Admin logout placeholder.
-         */
-        post: operations["admin_logout_admin_auth_logout_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/admin/instance-lifecycle": {
         parameters: {
             query?: never;
@@ -1224,14 +1204,6 @@ export interface components {
             total: number;
         };
         /**
-         * AdminLogoutResponse
-         * @description Admin logout response model.
-         */
-        AdminLogoutResponse: {
-            /** Success */
-            success: boolean;
-        };
-        /**
          * AdminStatsOut
          * @description Admin statistics output model.
          */
@@ -2028,26 +2000,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    admin_logout_admin_auth_logout_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AdminLogoutResponse"];
                 };
             };
         };
