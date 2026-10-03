@@ -7,6 +7,7 @@ import ipaddress
 import socket
 import ssl
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -250,6 +251,7 @@ class BrowserDestinationProxy:
         self._port = 0
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
         self._lookup_slots = asyncio.Semaphore(_MAX_CONCURRENT_LOOKUPS)
+        self._lookups: dict[tuple[str, int], asyncio.Future[list[_IPAddress]]] = {}
 
     async def start(self) -> None:
         """Listen only on an ephemeral loopback port of the process that owns the browser."""
@@ -340,22 +342,33 @@ class BrowserDestinationProxy:
         return host, port
 
     async def _resolve(self, host: str, port: int) -> list[_IPAddress]:
-        """Validate and pin one destination, holding a lookup slot until its thread really finishes."""
-        await self._lookup_slots.acquire()
-        lookup = asyncio.ensure_future(
-            run_browser_dns_lookup(
-                validated_connect_addresses,
-                host,
-                port=port,
-                allow_private_networks=self._allow_private_networks,
-                allow_loopback=self._allow_loopback,
-            ),
-        )
-        lookup.add_done_callback(self._lookup_finished)
-        # A resolver can outlive the setup deadline; the slot stays taken until the lookup ends.
-        return await asyncio.shield(lookup)
+        """Validate and pin one destination, holding a lookup slot until its thread really finishes.
 
-    def _lookup_finished(self, lookup: asyncio.Future[list[_IPAddress]]) -> None:
+        Connections to a destination whose lookup is running share it, so one slow name takes one slot.
+        """
+        key = (host, port)
+        if key not in self._lookups:
+            await self._lookup_slots.acquire()
+            if key in self._lookups:
+                # Another connection started this lookup while this one waited for a slot.
+                self._lookup_slots.release()
+            else:
+                lookup = asyncio.ensure_future(
+                    run_browser_dns_lookup(
+                        validated_connect_addresses,
+                        host,
+                        port=port,
+                        allow_private_networks=self._allow_private_networks,
+                        allow_loopback=self._allow_loopback,
+                    ),
+                )
+                lookup.add_done_callback(partial(self._lookup_finished, key))
+                self._lookups[key] = lookup
+        # A resolver can outlive the setup deadline; the slot stays taken until the lookup ends.
+        return await asyncio.shield(self._lookups[key])
+
+    def _lookup_finished(self, key: tuple[str, int], lookup: asyncio.Future[list[_IPAddress]]) -> None:
+        del self._lookups[key]
         self._lookup_slots.release()
         if not lookup.cancelled():
             # The connection that asked may already have timed out and stopped waiting.
