@@ -271,7 +271,7 @@ class LiveTurnTools(TurnToolBridge):
             msg = "mindroom-agent did not name its shell command; use the mindroom-agent of this MindRoom release"
             raise CliBashWindowRequiredError(msg)
         if self.control_executions:
-            # The control fence closed every window, including ones whose command still runs.
+            # The control fence rejects every window, including ones whose command still runs.
             msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
             raise CliBashWindowRequiredError(msg)
         if window not in self._windows:
@@ -652,10 +652,9 @@ class LiveTurnTools(TurnToolBridge):
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if event.kind == "continuation_required" and event.execution is not None:
+            # Synchronous fencing happens while the executing call owns the catalog lock:
+            # new calls are rejected, executing lifetimes drain, waiting calls fail at dispatch.
             self.control_executions.append(deepcopy(event.execution))
-            # Synchronous fencing happens while the executing call owns the catalog
-            # lock. Already executing lifetimes drain; waiting calls fail at dispatch.
-            self._windows.clear()
 
     def _check_dispatch(self) -> None:
         self._check_live()
@@ -820,7 +819,6 @@ class LiveTurnTools(TurnToolBridge):
 
     async def _close(self) -> None:
         async with self._admission:
-            self._windows.clear()
             for task in self._active:
                 request_task_cancel(task, process_shutdown=self.close_for_shutdown)
             tasks = tuple(self._active)

@@ -840,7 +840,7 @@ async def test_interactive_context_renders_native_question_and_keeps_session(tmp
         context={"interactive": INTERACTIVE_QUESTION_PROMPT},
     )
     guidance = await owner.operation(
-        window=cli_window(),
+        window=None,
         operation=ContextReadOperation(operation="context.read", name="interactive"),
     )
     question = "```interactive" + guidance["text"].split("```interactive", 1)[1].split("```", 1)[0] + "```"

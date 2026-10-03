@@ -871,7 +871,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
     owner.shell_env = _SHELL_ENV
     await owner.retire_binding()
     with pytest.raises(CliOperationError, match="being rebuilt"):
-        await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
+        await owner.operation(window=None, operation=ToolListOperation(operation="tools.list"))
     with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
             window="bash",
@@ -1089,7 +1089,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     cursor = None
     while True:
         page = await owner.operation(
-            window=cli_window(),
+            window=None,
             operation=ToolListOperation(operation="tools.list", cursor=cursor, limit=4),
         )
         names.extend(item["toolkit"] for item in page["items"])
@@ -1100,7 +1100,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert names == [f"tool{index}" for index in range(15)]
     assert loaded == []
     search = await owner.operation(
-        window=cli_window(),
+        window=None,
         operation=ToolSearchOperation(operation="tools.search", query="Metadata", toolkit="tool12", limit=1),
     )
     assert [item["toolkit"] for item in search["items"]] == ["tool12"]
@@ -1241,13 +1241,13 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
         context={"instructions": context},
     )
     first = await owner.operation(
-        window=cli_window(),
+        window=None,
         operation=ContextReadOperation(operation="context.read", name="instructions", limit=65536),
     )
     assert len(canonical_json(first).encode()) <= 65536
     assert first["next_offset"] is not None
     second = await owner.operation(
-        window=cli_window(),
+        window=None,
         operation=ContextReadOperation(
             operation="context.read",
             name="instructions",
@@ -1294,7 +1294,7 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     async with owner._window("bash"):
         await owner.operation(window="bash", operation=operation)
         operation.arguments["value"] = "mutated"
-    receipt = await owner.operation(window=cli_window(), operation=original)
+    receipt = await owner.operation(window=None, operation=original)
     assert called == ["original"]
     assert receipt["status"] == "completed"
     outcome = ToolCallReceipt.model_validate(receipt).outcome

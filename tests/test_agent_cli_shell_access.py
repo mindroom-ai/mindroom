@@ -165,7 +165,7 @@ def test_worker_shells_call_back_through_the_address_workers_reach(
 
     assert minimal_shell_problems(config, paths, "helper") == []
     shell_env = agent_cli_shell_env(config, paths, "helper", "grant")
-    assert shell_env.env() == {"MINDROOM_AGENT_CLI_URL": expected, "MINDROOM_AGENT_CLI_TOKEN": "grant"}
+    assert (shell_env.api_url, shell_env.token) == (expected, "grant")
     assert shell_env.bin_dir is None
 
 

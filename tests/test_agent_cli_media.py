@@ -291,7 +291,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         offset = 0
         while offset is not None:
             page = await owner.operation(
-                window=cli_window(),
+                window=None,
                 operation=ContextReadOperation(operation="context.read", name=name, offset=offset),
             )
             parts.append(page["text"])

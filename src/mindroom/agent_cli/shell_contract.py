@@ -35,11 +35,9 @@ class AgentCliShellEnv:
     window: str | None = None
 
     def env(self) -> dict[str, str]:
-        """Return the variables `mindroom-agent` reads."""
-        env = {AGENT_CLI_URL_ENV: self.api_url, AGENT_CLI_TOKEN_ENV: self.token}
-        if self.window is not None:
-            env[AGENT_CLI_WINDOW_ENV] = self.window
-        return env
+        """Return the variables `mindroom-agent` reads; only an environment bound to a command's window is exported."""
+        assert self.window is not None, "export the CLI environment through bound_agent_cli_shell_env"
+        return {AGENT_CLI_URL_ENV: self.api_url, AGENT_CLI_TOKEN_ENV: self.token, AGENT_CLI_WINDOW_ENV: self.window}
 
 
 _CURRENT: ContextVar[AgentCliShellEnv | None] = ContextVar("agent_cli_shell_env", default=None)

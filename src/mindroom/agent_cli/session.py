@@ -42,7 +42,7 @@ class CliCallConflictError(ValueError):
 
 
 class CliBashWindowRequiredError(ValueError):
-    """A tool operation arrived while no Bash call of its turn was executing."""
+    """A tool call or describe named no open Bash window of its turn."""
 
 
 class CliOperationError(ValueError):
