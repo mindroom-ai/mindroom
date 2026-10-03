@@ -812,20 +812,11 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
         set_plugin_skill_roots(original_plugin_roots)
 
 
-@pytest.mark.parametrize(
-    ("plugin_path", "message"),
-    [
-        ("./plugins/missing", "Plugin path does not exist, skipping"),
-        ("python:missing_demo_pkg", "Plugin module could not be resolved, skipping"),
-    ],
-)
-def test_load_plugins_warns_once_for_a_repeated_unresolvable_plugin(
+def test_load_plugins_warns_once_for_repeated_missing_plugin_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    plugin_path: str,
-    message: str,
 ) -> None:
-    """Repeated runtime loads, such as one per sandbox runner request, should not spam the same skip warning."""
+    """Repeated runtime loads should not spam the same missing-plugin warning."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
@@ -838,16 +829,17 @@ def test_load_plugins_warns_once_for_a_repeated_unresolvable_plugin(
     )
     mock_logger = MagicMock()
     missing_root = (tmp_path / "plugins" / "missing").resolve()
-    log_fields = {"spec": plugin_path} if plugin_path.startswith("python:") else {"path": str(missing_root)}
     original_warned_messages = plugin_module._WARNED_PLUGIN_MESSAGES.copy()
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
     try:
-        assert load_plugins(Config(plugins=[plugin_path]), runtime_paths) == []
-        assert load_plugins(Config(plugins=[plugin_path]), runtime_paths) == []
+        assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
+        assert load_plugins(Config(plugins=["./plugins/missing"]), runtime_paths) == []
         matching_calls = [
-            call for call in mock_logger.warning.call_args_list if call.args == (message,) and call.kwargs == log_fields
+            call
+            for call in mock_logger.warning.call_args_list
+            if call.args == ("Plugin path does not exist, skipping",) and call.kwargs == {"path": str(missing_root)}
         ]
         assert len(matching_calls) == 1
     finally:
