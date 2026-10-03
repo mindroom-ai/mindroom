@@ -898,12 +898,8 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
         )
-        runtime_paths = RuntimePaths(
+        runtime_paths = resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
-            config_dir=tmp_path,
-            env_path=tmp_path / ".env",
-            storage_root=tmp_path / "storage",
-            control_state_root=tmp_path / "control",
             process_env={"MINDROOM_SCRIPT_GATEWAY_PORT": str(gateway_port)},
         )
         shutdown_requested = asyncio.Event()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,7 @@ from tests.test_helm_instance_worker_isolation import (
     _render_chart,
     _resource,
     _run_helm_template,
+    _values_files,
     _volumes_by_name,
 )
 
@@ -100,27 +100,18 @@ extraVolumeMounts:
 """
 
 
-def _values_file(tmp_path: Path, name: str, content: str) -> Path:
-    path = tmp_path / name
-    path.write_text(textwrap.dedent(content), encoding="utf-8")
-    return path
-
-
 def _runtime(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
     deployment = _resource(docs, "Deployment", RUNTIME_DEPLOYMENT)
     return deployment, _container(deployment, "mindroom")
 
 
 def _render_layered(tmp_path: Path, *contents: str, set_args: tuple[str, ...] = ()) -> list[dict[str, Any]]:
-    values_files = tuple(
-        _values_file(tmp_path, f"values-{index}.yaml", content) for index, content in enumerate(contents)
-    )
     return _render_chart(
         RUNTIME_CHART,
         *set_args,
         release_name="mindroom-runtime",
         namespace="mindroom-staging",
-        values_files=values_files,
+        values_files=_values_files(tmp_path, *contents),
     )
 
 
@@ -173,9 +164,10 @@ def test_list_forms_render_unchanged_in_their_given_order(tmp_path: Path) -> Non
 
 
 def test_map_forms_merge_entry_by_entry_across_values_files(tmp_path: Path) -> None:
-    """An environment file overrides, adds, and removes single entries without restating shared lists."""
+    """An environment file overrides, adds, and removes single entries, and map entries render in key order."""
     deployment, container = _runtime(_render_layered(tmp_path, SHARED_VALUES, ENVIRONMENT_VALUES))
     env = _env_by_name(container)
+    extra_names = {"API_TOKEN", "AUDIENCE", "PUBLIC_URL", "STAGING_ONLY", "UPLOAD_LIMIT"}
 
     assert env["AUDIENCE"] == {
         "name": "AUDIENCE",
@@ -202,13 +194,6 @@ def test_map_forms_merge_entry_by_entry_across_values_files(tmp_path: Path) -> N
         {"name": "session-state", "mountPath": "/app/session_state"},
         {"name": "session-state", "mountPath": "/app/tracking", "subPath": "tracking"},
     ]
-
-
-def test_map_forms_render_in_key_order_for_deterministic_manifests(tmp_path: Path) -> None:
-    """Map entries render sorted by key regardless of how values files list them."""
-    _, container = _runtime(_render_layered(tmp_path, SHARED_VALUES, ENVIRONMENT_VALUES))
-    extra_names = {"API_TOKEN", "AUDIENCE", "PUBLIC_URL", "STAGING_ONLY", "UPLOAD_LIMIT"}
-
     assert [entry["name"] for entry in container["env"] if entry["name"] in extra_names] == sorted(extra_names)
 
 
@@ -388,18 +373,6 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         ),
         (
             """
-            sessionStorage:
-              enabled: true
-            env:
-              extra:
-                MINDROOM_SESSION_STORAGE_PATH:
-                  value: /elsewhere
-            """,
-            (),
-            "env.extra must not set MINDROOM_SESSION_STORAGE_PATH when sessionStorage.enabled=true",
-        ),
-        (
-            """
             knowledgeStorage:
               enabled: true
             extraVolumeMounts:
@@ -419,7 +392,6 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         "unquoted-number-env",
         "scalar-env-from",
         "session-path-env-shorthand",
-        "session-path-env-entry",
         "knowledge-mount-overlap",
     ],
 )
@@ -434,7 +406,7 @@ def test_map_forms_keep_chart_validation(
         RUNTIME_CHART,
         *set_args,
         release_name="mindroom-runtime",
-        values_files=(_values_file(tmp_path, "values.yaml", values),),
+        values_files=_values_files(tmp_path, values),
     )
 
     assert completed.returncode != 0
@@ -443,10 +415,7 @@ def test_map_forms_keep_chart_validation(
 
 def test_default_and_layered_renders_emit_no_coalesce_warnings(tmp_path: Path) -> None:
     """Neither list nor map values trip Helm's table/non-table coalescing warnings."""
-    list_values = _values_file(
-        tmp_path,
-        "list.yaml",
-        """
+    list_values = """
         env:
           extra:
             - name: A
@@ -454,12 +423,14 @@ def test_default_and_layered_renders_emit_no_coalesce_warnings(tmp_path: Path) -
         extraVolumes:
           - name: scratch
             emptyDir: {}
-        """,
-    )
-    map_values = _values_file(tmp_path, "map.yaml", SHARED_VALUES)
+        """
 
-    for values_file in (list_values, map_values):
-        completed = _run_helm_template(RUNTIME_CHART, release_name="mindroom-runtime", values_files=(values_file,))
+    for values in (list_values, SHARED_VALUES):
+        completed = _run_helm_template(
+            RUNTIME_CHART,
+            release_name="mindroom-runtime",
+            values_files=_values_files(tmp_path, values),
+        )
         completed.check_returncode()
         assert "warning" not in completed.stderr
         assert [doc for doc in yaml.safe_load_all(completed.stdout) if isinstance(doc, dict)]

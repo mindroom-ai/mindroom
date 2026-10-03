@@ -785,15 +785,10 @@ def test_forced_unmanaged_backup_needs_no_marker_mutation(tmp_path: Path) -> Non
     assert (previous / "prompts/helper.md").read_text() == "Installed prompt"
 
 
-def _changed_copy(old: Path, new: Path) -> Path:
-    shutil.copytree(old, new)
-    return new
-
-
 def test_include_edits_and_their_new_or_removed_directories_are_sources(tmp_path: Path) -> None:
     """Every file the loader reads in either tree, and directories that only hold them, are sources."""
     old = _bundle(tmp_path / "old")
-    new = _changed_copy(old, tmp_path / "new")
+    new = shutil.copytree(old, tmp_path / "new")
     (new / "agents.yaml").write_text(
         "helper:\n  display_name: Helper\n  instructions:\n    - !include_text prompts/helper.md\n"
         "    - !include_text extra/more.md\n",
@@ -820,7 +815,7 @@ def test_include_edits_and_their_new_or_removed_directories_are_sources(tmp_path
 def test_changes_outside_the_source_graph_are_reported(tmp_path: Path, change: str, other: tuple[str, ...]) -> None:
     """Environment, assets, unread files, and include paths that change type are never sources."""
     old = _bundle(tmp_path / "old")
-    new = _changed_copy(old, tmp_path / "new")
+    new = shutil.copytree(old, tmp_path / "new")
     if change == ".env":
         (new / ".env").write_text("MATRIX_SERVER_NAME=other.example.org\n")
     elif change == "asset":
@@ -848,7 +843,7 @@ def test_each_entrypoint_contributes_its_own_sources(tmp_path: Path) -> None:
         (old / "environments" / name / "config.yaml").write_text("agents: {}\n")
     (old / "scripts").mkdir()
     (old / "scripts/run.sh").write_text("true\n")
-    new = _changed_copy(old, tmp_path / "new")
+    new = shutil.copytree(old, tmp_path / "new")
     for name in ("prod", "staging"):
         (new / "environments" / name / "config.yaml").write_text(f"agents: {{}}\n# {name}\n")
     both = [Path("environments/prod/config.yaml"), Path("environments/staging/config.yaml")]
@@ -862,7 +857,7 @@ def test_each_entrypoint_contributes_its_own_sources(tmp_path: Path) -> None:
 def test_unclassifiable_trees_fail_closed(tmp_path: Path, problem: str) -> None:
     """Classification needs both complete source graphs and the installer's tree rules."""
     old = _bundle(tmp_path / "old")
-    new = _changed_copy(old, tmp_path / "new")
+    new = shutil.copytree(old, tmp_path / "new")
     config = Path("config.yaml")
     if problem == "missing_entrypoint":
         (new / "config.yaml").unlink()
