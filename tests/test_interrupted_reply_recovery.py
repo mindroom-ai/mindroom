@@ -230,6 +230,8 @@ async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_di
 
     (instruction,) = _attempt_context(context)
     assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
+    # The account rides in the instruction too, so no history window can drop it.
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in instruction
     (attempt,) = history
     assert attempt.startswith("Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; ")
     assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in attempt
@@ -367,6 +369,7 @@ async def test_every_stopped_attempt_folds_into_one_record(tmp_path: Path) -> No
 
     # Rereading a recorded attempt means the attempt after it left no edit, so its work is unknown.
     assert ["is unknown" in instruction for instruction in instructions] == [False, True, False, True]
+    assert all("The `counter` tool finished" in instruction for instruction in instructions)
     (record,) = _recorded_attempts(bot, request)
     first_account, second_account = record.split("\n\nA new start")
     assert first_account.startswith("Half of the report")
@@ -425,7 +428,9 @@ async def test_compaction_archived_attempts_are_never_resurrected(tmp_path: Path
     finally:
         storage.close()
 
-    assert "is unknown" in await fold(second)
+    reread = await fold(second)
+    assert "is unknown" in reread
+    assert "earlier interrupted attempts" not in reread
     assert live_runs() == []
     assert "is unknown" not in await fold(_streamed("A new start", trace=(), latest_edit="$edit-c"))
     (record,) = live_runs()

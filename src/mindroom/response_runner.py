@@ -244,9 +244,8 @@ _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
     "Your previous attempt at replying to the current message was interrupted, and this reply replaces it. "
-    "What that attempt had shown is in the conversation above. "
-    "Tool calls it lists as finished already ran; those it lists as still running may have finished too, "
-    "and tool calls hidden from the conversation are not listed. "
+    "What it had shown before stopping is below: tool calls it lists as finished already ran, those it lists "
+    "as still running may have finished too, and tool calls hidden from the conversation are not listed. "
     "Write your complete reply from the start, reusing those results instead of repeating calls that may already "
     "have taken effect."
 )
@@ -254,6 +253,9 @@ _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Write your complete reply from the start, and before repeating any tool call with side effects, "
     "check whether it already took effect."
+)
+_EARLIER_ATTEMPTS_HEADER = (
+    "What earlier interrupted attempts had shown, with tool calls listed as finished already run:"
 )
 
 
@@ -2530,7 +2532,7 @@ class ResponseRunner:
         session_id: str,
         execution_identity: ToolExecutionIdentity,
         run_id: str,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Fold one stopped attempt, named by its last visible edit, into the turn's live record."""
         storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
         try:
@@ -3670,7 +3672,7 @@ class ResponseRunner:
         # A failed write raises and leaves the sources pending for retry, since
         # answering without this record could repeat the finished tools. The
         # write finishes before cancellation releases the lifecycle lock.
-        appended = await run_blocking_until_complete(
+        appended, account = await run_blocking_until_complete(
             partial(
                 self._persist_stopped_attempt,
                 recorder.interrupted_snapshot(),
@@ -3687,12 +3689,13 @@ class ResponseRunner:
             response_event_id=event_id,
             completed_tool_count=len(completed_tools),
         )
+        # The account rides in the instruction, so no history window can drop it.
         # Rereading an attempt already recorded means the attempt since then left
         # no edit, so what that one did is unknown.
-        return _with_interrupted_attempt_instruction(
-            request,
-            _INTERRUPTED_ATTEMPT_INSTRUCTION if appended else _UNKNOWN_ATTEMPT_INSTRUCTION,
-        )
+        if appended:
+            return _with_interrupted_attempt_instruction(request, f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{account}")
+        earlier = f"\n\n{_EARLIER_ATTEMPTS_HEADER}\n\n{account}" if account else ""
+        return _with_interrupted_attempt_instruction(request, f"{_UNKNOWN_ATTEMPT_INSTRUCTION}{earlier}")
 
     async def _prepare_locked_source(
         self,
