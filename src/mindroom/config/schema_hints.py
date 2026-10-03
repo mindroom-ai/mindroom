@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic.json_schema import GenerateJsonSchema, JsonDict
 from pydantic_core import core_schema
 
-from mindroom.redaction import REDACTED, redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import REDACTED, redact_config_text, redact_sensitive_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -166,7 +166,7 @@ def _redact_value_for_display(
             return [_redact_for_display(item, items, defs) for item in value]
         return redact_sensitive_data(value)
     if isinstance(value, str):
-        return redact_sensitive_text(value)
+        return redact_config_text(value)
     return value
 
 

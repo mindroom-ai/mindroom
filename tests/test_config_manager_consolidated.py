@@ -418,7 +418,7 @@ def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: d
 def test_agent_update_refuses_instructions_copied_from_redacted_read(tmp_path: Path) -> None:
     """Appending to instructions read back redacted must not replace the real instructions with the marker."""
     config_path = tmp_path / "config.yaml"
-    instructions = ["Never share the API key with anyone", "Use sk-learn for ML"]
+    instructions = ["Never share the API key with anyone", "Log in with password: hunter2"]
     config = Config.model_validate(
         {
             "administrators": ["@admin:example.org"],
