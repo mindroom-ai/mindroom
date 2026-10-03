@@ -171,7 +171,7 @@ class AccessibilityState:
 
 @dataclass(frozen=True, slots=True)
 class AccessibilityCapture:
-    """One revalidated capture target kept local to the desktop bridge."""
+    """One revalidated capture or pointer target kept local to the desktop bridge."""
 
     state: AccessibilityState
     process_id: int | None
@@ -213,8 +213,8 @@ class AccessibilityBackend(Protocol):
         """Revalidate state and bind capture to its exact local process."""
         ...
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Validate a fresh state and focus its app before coordinate fallback."""
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+        """Validate a fresh state, focus its app, and bind coordinate fallback to its process."""
         ...
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
@@ -389,9 +389,11 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return stored
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
-        """Revalidate exact state before focusing an allowed target."""
-        return self._focused_fallback_state(app_id, state_id).public
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
+        """Revalidate exact state before focusing an allowed target, and return the process pointer input must reach."""
+        stored = self._focused_fallback_state(app_id, state_id)
+        process_id = None if stored.application is None else int(stored.application.processIdentifier())
+        return AccessibilityCapture(stored.public, process_id)
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Focus a revalidated target and return a guard to call right before each keyboard input is posted."""
@@ -994,9 +996,9 @@ class ScreenshotOnlyAccessibilityBackend:
         self._state = _primary_screen_state(self._screen_size(), state_id=uuid4().hex)
         return self._state
 
-    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityState:
+    def prepare_fallback(self, app_id: str, state_id: str) -> AccessibilityCapture:
         """Validate that coordinate fallback still targets the latest screen geometry."""
-        return self.prepare_capture(app_id, state_id).state
+        return self.prepare_capture(app_id, state_id)
 
     def prepare_keyboard(self, app_id: str, state_id: str) -> Callable[[], None]:
         """Validate that keyboard fallback still targets the latest screen geometry."""

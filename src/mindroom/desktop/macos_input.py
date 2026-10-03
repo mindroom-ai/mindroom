@@ -25,14 +25,32 @@ def _mouse(kind: int, point: tuple[int, int], button: int, *, count: int = 1) ->
     api.CGEventPost(api.kCGHIDEventTap, event)
 
 
-def move(x: int, y: int) -> None:
+def window_owner_at(point: tuple[int, int]) -> int | None:
+    """Return the process owning the frontmost visible window at one global logical point."""
+    api = _quartz()
+    windows = api.CGWindowListCopyWindowInfo(api.kCGWindowListOptionOnScreenOnly, api.kCGNullWindowID) or ()
+    # Quartz lists on-screen windows front to back; negative layers are the desktop and its icons.
+    for window in windows:
+        bounds = window.get(api.kCGWindowBounds)
+        if window.get(api.kCGWindowLayer, 0) < 0 or window.get(api.kCGWindowAlpha, 1) <= 0 or bounds is None:
+            continue
+        if (
+            bounds["X"] <= point[0] < bounds["X"] + bounds["Width"]
+            and bounds["Y"] <= point[1] < bounds["Y"] + bounds["Height"]
+        ):
+            return int(window[api.kCGWindowOwnerPID])
+    return None
+
+
+def move(x: int, y: int, *, check: Callable[[tuple[int, int]], None]) -> None:
     """Move to a verified global logical point without primary-screen clamping."""
     api = _quartz()
+    check((x, y))
     _mouse(api.kCGEventMouseMoved, (x, y), api.kCGMouseButtonLeft)
 
 
-def click(x: int, y: int, *, button: str, count: int, check: Callable[[], None]) -> None:
-    """Post matching down/up pairs and explicit double-click event counts."""
+def click(x: int, y: int, *, button: str, count: int, check: Callable[[tuple[int, int]], None]) -> None:
+    """Post matching down/up pairs and explicit double-click event counts, checking the point before each."""
     api = _quartz()
     buttons = {
         "left": (api.kCGEventLeftMouseDown, api.kCGEventLeftMouseUp, api.kCGMouseButtonLeft),
@@ -41,9 +59,10 @@ def click(x: int, y: int, *, button: str, count: int, check: Callable[[], None])
     }
     down, up, mouse_button = buttons[button]
     for click_count in range(1, count + 1):
-        check()
+        check((x, y))
         try:
             _mouse(down, (x, y), mouse_button, count=click_count)
+            check((x, y))
         finally:
             _mouse(up, (x, y), mouse_button, count=click_count)
         if click_count < count:
@@ -55,36 +74,37 @@ def drag(
     end: tuple[int, int],
     *,
     duration: float,
-    check: Callable[[], None],
+    check: Callable[[tuple[int, int]], None],
     before_press: Callable[[], object] | None = None,
 ) -> None:
-    """Keep the left button paired through bounded motion and fail-safe interruption."""
+    """Keep the left button paired through bounded motion and interruption, checking each point before it posts."""
     api = _quartz()
-    check()
-    move(*start)
+    move(*start, check=check)
     if before_press is not None:
         before_press()
     point = start
     try:
+        check(start)
         _mouse(api.kCGEventLeftMouseDown, start, api.kCGMouseButtonLeft)
         for step in range(1, 21):
-            check()
-            point = (
+            target = (
                 round(start[0] + (end[0] - start[0]) * step / 20),
                 round(start[1] + (end[1] - start[1]) * step / 20),
             )
+            check(target)
+            point = target
             _mouse(api.kCGEventLeftMouseDragged, point, api.kCGMouseButtonLeft)
             time.sleep(duration / 20)
+        check(point)
     finally:
         _mouse(api.kCGEventLeftMouseUp, point, api.kCGMouseButtonLeft)
 
 
-def scroll(x: int, y: int, *, clicks: int, horizontal: bool, check: Callable[[], None]) -> None:
+def scroll(x: int, y: int, *, clicks: int, horizontal: bool, check: Callable[[tuple[int, int]], None]) -> None:
     """Post a line-based wheel event at an explicitly verified app point."""
     api = _quartz()
-    check()
-    move(x, y)
-    check()
+    move(x, y, check=check)
+    check((x, y))
     event = api.CGEventCreateScrollWheelEvent(
         None,
         api.kCGScrollEventUnitLine,
@@ -98,4 +118,4 @@ def scroll(x: int, y: int, *, clicks: int, horizontal: bool, check: Callable[[],
     api.CGEventPost(api.kCGHIDEventTap, event)
 
 
-__all__ = ["click", "drag", "move", "scroll"]
+__all__ = ["click", "drag", "move", "scroll", "window_owner_at"]
