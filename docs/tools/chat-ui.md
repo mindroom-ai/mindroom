@@ -122,6 +122,7 @@ The answer is an ordinary threaded message from the user that mentions the agent
 
 MindRoom Chat displays that message as a one-line receipt (expandable to the exact data) and carries the same values in `io.mindroom.canvas_response`; other Matrix clients show the text.
 `data` must be JSON-serializable and at most 8 KB.
+Numbers that are not whole (or are too large for a JSON integer) arrive as text, because homeservers refuse them in unencrypted events, and object keys arrive sorted.
 
 ### Updating a canvas in place
 
@@ -150,6 +151,7 @@ MindRoom Chat runs the page in a sandboxed frame with its own opaque origin:
 These protections do not make a canvas a safe place for secrets.
 Browsers do not let a page block WebRTC, so a malicious canvas could still leak what the user types into it.
 Chat therefore shows which agent made each canvas and reminds the user that what they enter may leave the panel.
+Chat does not run canvases during a call, because call frames listen to the page's messages.
 
 ### Turning canvases on in MindRoom Chat
 

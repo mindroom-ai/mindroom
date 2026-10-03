@@ -310,8 +310,9 @@ class ChatUITools(Toolkit):
 
         Keep interactivity inside the page; nothing reaches you until the user
         commits. To commit, call ``window.mindroom.submit(data, {label: "short
-        summary"})`` with JSON data under 8 KB, or use a ``<form>`` (its fields are
-        submitted automatically; its ``data-mindroom-label`` attribute sets the label).
+        summary"})`` with JSON data under 8 KB (decimal numbers arrive as text), or
+        use a ``<form>`` (its fields are submitted automatically; its
+        ``data-mindroom-label`` attribute sets the label).
         Chat shows the user what will be sent and asks them to confirm. The answer
         arrives as the user's next message, formatted as
         ``Canvas response (<canvas_event_id>, revision <event_id>): <label>``
