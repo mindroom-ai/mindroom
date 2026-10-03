@@ -33,6 +33,7 @@ from mindroom.shell_supervisor import (
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -169,21 +170,6 @@ async def _assert_pid_dead(pid: int) -> None:
             return
         await asyncio.sleep(0.05)
     message = f"Process {pid} is still alive"
-    raise AssertionError(message)
-
-
-async def _assert_linux_pid_not_running(pid: int) -> None:
-    """Wait until a Linux process exits, allowing an unreaped zombie."""
-    stat_path = Path(f"/proc/{pid}/stat")
-    for _ in range(40):
-        try:
-            state = stat_path.read_text(encoding="utf-8").split()[2]
-        except (FileNotFoundError, ProcessLookupError):
-            return
-        if state == "Z":
-            return
-        await asyncio.sleep(0.05)
-    message = f"Process {pid} is still running"
     raise AssertionError(message)
 
 
@@ -1044,9 +1030,9 @@ async def test_supervisor_sigkill_terminates_supervised_process_group(
         supervisor.process.kill()
         supervisor.process.wait(timeout=10)
 
-        await _assert_linux_pid_not_running(supervised_pid)
-        await _assert_linux_pid_not_running(script_pid)
-        await _assert_linux_pid_not_running(descendant_pid)
+        await assert_linux_pid_not_running(supervised_pid)
+        await assert_linux_pid_not_running(script_pid)
+        await assert_linux_pid_not_running(descendant_pid)
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(supervised_pid, signal.SIGKILL)
@@ -1123,7 +1109,7 @@ async def test_finished_script_kills_same_group_descendants(
         child_pid = int(child_pid_path.read_text(encoding="utf-8"))
 
         assert "FINISHED" in await _wait_for_finished(socket_path, handle)
-        await _assert_linux_pid_not_running(child_pid)
+        await assert_linux_pid_not_running(child_pid)
     finally:
         if child_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):

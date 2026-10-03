@@ -565,6 +565,12 @@ Handles are owned by a small worker-local shell supervisor process that the runn
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
 
+Stopping a response stops its async worker calls too, such as `run_shell_command` and persistent browser actions.
+Each async worker call carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
+The runner then kills the request's subprocess (or cancels its in-process task), and the shell supervisor kills the command's process group once its relay is gone.
+A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
+Synchronous worker calls, such as the `python` and `file` tools, still run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`.
+
 ## Workspace home contract
 
 For worker-routed shell or python requests with a resolved workspace, MindRoom sets `HOME` and `MINDROOM_AGENT_WORKSPACE` to that workspace before running the tool.
@@ -678,6 +684,7 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 |--------|----------|-------------|
 | POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
 | POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| POST | `/api/sandbox-runner/execute/cancel` | Stop the execute request with the given `request_id` |
 | GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
 | POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
 

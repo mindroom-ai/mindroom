@@ -21,10 +21,12 @@ removed on recycle, shutdown, or orphan exit.
 from __future__ import annotations
 
 import atexit
+import functools
 import hashlib
 import json
 import math
 import os
+import select
 import shutil
 import signal
 import socket
@@ -190,8 +192,12 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         timeout_seconds: float,
+        bind_stop: Callable[[Callable[[], None]], None],
     ) -> subprocess.CompletedProcess[str]:
-        """Execute one prepared envelope in a fresh fork of the warm template."""
+        """Execute one prepared envelope in a fresh fork of the warm template.
+
+        ``bind_stop`` receives a function that stops the request by hanging up on its forked child.
+        """
         deadline = time.monotonic() + timeout_seconds
         key = python_executable or sys.executable
         fingerprint = _template_fingerprint(key, template_env)
@@ -216,6 +222,7 @@ class _SandboxForkserver:
             request_cwd=request_cwd,
             envelope=envelope,
             deadline=deadline,
+            bind_stop=bind_stop,
         )
 
     def shutdown(self) -> None:
@@ -352,6 +359,7 @@ class _SandboxForkserver:
         request_cwd: str | None,
         envelope: str,
         deadline: float,
+        bind_stop: Callable[[Callable[[], None]], None],
     ) -> subprocess.CompletedProcess[str]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -384,6 +392,9 @@ class _SandboxForkserver:
             reader = _SocketLineReader(conn, deadline)
             try:
                 child_pid = int(json.loads(reader.read_line())["pid"])
+                # The template reaps children as they exit, so stopping never signals
+                # a PID another process may reuse: it hangs up, and the child exits.
+                bind_stop(functools.partial(_hang_up, conn))
                 response = json.loads(reader.read_line())
                 returncode = int(response["returncode"])
                 stdout_text = str(response["stdout"])
@@ -413,6 +424,12 @@ class _SandboxForkserver:
             return
         with suppress(OSError):
             os.kill(child_pid, signal.SIGKILL)
+
+
+def _hang_up(conn: socket.socket) -> None:
+    """Stop one request; after the request ended its socket is closed and this does nothing."""
+    with suppress(OSError):
+        conn.shutdown(socket.SHUT_RDWR)
 
 
 _forkserver: _SandboxForkserver | None = None
@@ -528,10 +545,17 @@ def _run_child_request(
         os.environ.update(request.env)
     if request.cwd is not None:
         os.chdir(request.cwd)
+    threading.Thread(target=_exit_when_runner_hangs_up, args=(conn,), daemon=True).start()
     returncode, stdout_text, stderr_text = run_payload(request.envelope)
     conn.settimeout(_CHILD_RESPONSE_WRITE_TIMEOUT_SECONDS)
     _send_json(conn, {"returncode": returncode, "stdout": stdout_text, "stderr": stderr_text})
     return 0
+
+
+def _exit_when_runner_hangs_up(conn: socket.socket) -> None:
+    """Exit when the runner stops this request; it sends nothing after the request line, so readable means hung up."""
+    select.select([conn], [], [])
+    os._exit(1)
 
 
 def _send_json(conn: socket.socket, payload: dict[str, object]) -> None:
