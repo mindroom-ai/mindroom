@@ -15,6 +15,7 @@ from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import (
     platform_administrator_error,
     preserve_tool_overrides,
+    redaction_marker_error,
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
@@ -135,6 +136,9 @@ class SelfConfigTools(Toolkit):
         authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+        marker_error = redaction_marker_error({"display_name": display_name, "role": role, "instructions": instructions})
+        if marker_error is not None:
+            return marker_error
 
         if self.agent_name not in config.agents:
             return f"Error: Agent '{self.agent_name}' not found in configuration."

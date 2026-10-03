@@ -391,6 +391,8 @@ def test_platform_administrator_reads_redacted_agent_config(tmp_path: Path) -> N
             {"op": "replace", "path": "/models/default/extra_kwargs", "value": {"default_headers": "***redacted***"}},
             "/default_headers",
         ),
+        ({"op": "add", "path": "/models/default/host", "value": "https://ops:***@ollama.example.org"}, ""),
+        ({"op": "replace", "path": "/mcp_servers/remote/url", "value": "https://***@mcp.example.org/mcp"}, ""),
     ],
 )
 def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: dict[str, Any], pointer: str) -> None:
@@ -410,6 +412,36 @@ def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: d
     assert "real value" in result
     assert "Changes were NOT applied." in result
     assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_agent_update_refuses_instructions_copied_from_redacted_read(tmp_path: Path) -> None:
+    """Appending to instructions read back redacted must not replace the real instructions with the marker."""
+    config_path = tmp_path / "config.yaml"
+    instructions = ["Never share the API key with anyone", "Use sk-learn for ML"]
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "agents": {"talent": {"display_name": "Talent", "role": "Original", "instructions": instructions}},
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        },
+    )
+    write_config_yaml(config, config_path)
+    config_manager = _config_manager(config_path)
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        shown = config_manager.get_info(info_type="agent_config", name="talent")
+        shown_instructions = yaml.safe_load(shown.split("```yaml\n", 1)[1].removesuffix("```"))["instructions"]
+        result = config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            instructions=[*shown_instructions, "Be concise"],
+        )
+
+    assert "'instructions.0' contains the redaction marker" in result
+    assert "Changes were NOT applied." in result
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["talent"]["instructions"] == instructions
 
 
 def test_available_models_masks_host_credentials(tmp_path: Path) -> None:

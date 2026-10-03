@@ -1931,6 +1931,7 @@ async def test_expired_in_memory_config_change_is_discarded() -> None:
             "models.default.extra_kwargs.base_url",
         ),
         ('set agents.assistant.role "Uses Bearer ***redacted*** tokens"', "agents.assistant.role"),
+        ("set models.default.host https://ops:***@ollama.example.org", "models.default.host"),
     ],
 )
 async def test_config_set_rejects_copied_redaction_markers(tmp_path: Path, command: str, field_path: str) -> None:

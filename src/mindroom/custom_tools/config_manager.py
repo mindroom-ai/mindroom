@@ -113,10 +113,25 @@ def _reject_redaction_markers(changes: list[_ConfigPatchChange]) -> None:
             continue
         pointer = "".join(f"/{token.replace('~', '~0').replace('/', '~1')}" for token in location)
         msg = (
-            f"{change.path + pointer!r} contains the redaction marker {REDACTED!r}, which inspection shows "
-            "in place of a hidden value; set that field to its real value or leave it out of the patch"
+            f"{change.path + pointer!r} contains the redaction marker {REDACTED!r} or a masked URL password, "
+            "which inspection shows in place of a hidden value; set that field to its real value or leave it out "
+            "of the patch"
         )
         raise _ConfigPatchError(msg)
+
+
+def redaction_marker_error(fields: dict[str, object]) -> str | None:
+    """Return a refusal when a field value copies redacted read output, which would replace the hidden real value."""
+    for field_name, value in fields.items():
+        location = redaction_marker_location(value)
+        if location is not None:
+            field_path = ".".join((field_name, *location))
+            return (
+                f"Error: {field_path!r} contains the redaction marker {REDACTED!r} or a masked URL password, "
+                "which configuration reads show in place of a hidden value; set that field to its real value "
+                f"or leave it out.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+            )
+    return None
 
 
 def _reject_normalized_root_nulls(changes: list[_ConfigPatchChange], validated_authored: dict[str, Any]) -> None:
@@ -787,6 +802,9 @@ class ConfigManagerTools(Toolkit):
         authorization_error = platform_administrator_error(config, _PLATFORM_ADMIN_REQUIRED_MESSAGE)
         if authorization_error is not None:
             return f"{authorization_error}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
+        marker_error = redaction_marker_error({"display_name": display_name, "role": role, "instructions": instructions})
+        if marker_error is not None:
+            return marker_error
 
         if operation == "update":
             return self._update_agent_config(
