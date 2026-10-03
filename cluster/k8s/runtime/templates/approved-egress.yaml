@@ -124,10 +124,15 @@ spec:
         {{- with .Values.approvedEgress.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.approvedEgress.podAnnotations .Values.approvedEgress.parentProxy.enabled }}
+      {{- $chartAllowlist := not .Values.approvedEgress.allowlist.existingConfigMap }}
+      {{- if or .Values.approvedEgress.podAnnotations $chartAllowlist .Values.approvedEgress.parentProxy.enabled }}
       annotations:
         {{- with .Values.approvedEgress.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- /* The proxy reads its subPath-mounted allowlist only at startup, so content changes must roll the pod. */}}
+        {{- if $chartAllowlist }}
+        checksum/allowlist: {{ $allowlist | sha256sum | quote }}
         {{- end }}
         {{- if .Values.approvedEgress.parentProxy.enabled }}
         checksum/squid-config: {{ include "mindroom-runtime.approvedEgressSquidConfig" . | sha256sum | quote }}

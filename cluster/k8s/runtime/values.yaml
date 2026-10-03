@@ -633,6 +633,10 @@ approvedEgress:
     existingSecret: ""
     key: MINDROOM_SANDBOX_PROXY_TOKEN
   allowlist:
+    # The proxy reads the allowlist only at startup.
+    # Changing inline domains rolls the proxy through a checksum annotation.
+    # The chart cannot hash an existingConfigMap; restart the proxy after editing it,
+    # or set a content hash in podAnnotations, for example checksum/allowlist.
     domains: []
     existingConfigMap: ""
     key: allowed-domains.txt
