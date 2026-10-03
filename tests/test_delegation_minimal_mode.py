@@ -34,6 +34,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
+    cli_window,
     install_scripted_shell,
     shell_cli_owner,
 )
@@ -248,7 +249,8 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         assert args == "mindroom-agent tools list"
         listing = await shell_cli_owner(live.orchestrator.agent_cli_registry).operation(
-            ToolListOperation(operation="tools.list"),
+            window=cli_window(),
+            operation=ToolListOperation(operation="tools.list"),
         )
         listings.append(str(listing))
         return str(listing)
@@ -338,12 +340,15 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
         owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
         if owner.owner.execution_identity.agent_name == "helper":
             assert args == "mindroom-agent tools list"
-            listing = str(await owner.operation(ToolListOperation(operation="tools.list")))
+            listing = str(
+                await owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list")),
+            )
             child_listings.append(listing)
             return listing
         call_id = uuid4()
         await owner.operation(
-            ToolCallOperation(
+            window=cli_window(),
+            operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="delegate",
                 function="run_subagent",

@@ -61,6 +61,7 @@ from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tools.shell import shell_tools
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths
+from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 from tests.test_compact_context import _make_config
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -92,7 +93,8 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
             for function in ("switch_thread_model", "mutate"):
                 receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
                     await owner.operation(
-                        ToolCallOperation(
+                        window=cli_window(),
+                        operation=ToolCallOperation(
                             operation="tools.call",
                             call_id=uuid4(),
                             toolkit="control",
@@ -259,7 +261,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
     call_id = uuid4()
     async with owner._window("bash-parent"):
         await owner.operation(
-            ToolCallOperation(
+            window="bash-parent",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=call_id,
                 toolkit="delegate",
@@ -282,7 +285,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         followup_id = uuid4()
         async with owner._window("bash-followup"):
             await owner.operation(
-                ToolCallOperation(
+                window="bash-followup",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=followup_id,
                     toolkit="delegate",
@@ -390,7 +394,8 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
     monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
     async with owner._window("bash-parent"):
         await owner.operation(
-            ToolCallOperation(
+            window="bash-parent",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=call_id,
                 toolkit="delegate",
@@ -510,7 +515,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         approval_ids.extend(str(tool.tool_call_id) for tool in paused.tools)
         if mode == "control":
             switched = await owner.operation(
-                ToolCallOperation(
+                window="bash-parent",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="control",
@@ -641,7 +647,8 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
         async def run_window():
             async with owner._window("bash-parent"):
                 await owner.operation(
-                    ToolCallOperation(
+                    window="bash-parent",
+                    operation=ToolCallOperation(
                         operation="tools.call",
                         call_id=call_id,
                         toolkit="delegate",
@@ -757,7 +764,8 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) ->
     with pytest.raises(ExceptionGroup) as error:
         async with owner._window("bash-parent"):
             await owner.operation(
-                ToolCallOperation(
+                window="bash-parent",
+                operation=ToolCallOperation(
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="tools",
@@ -831,7 +839,10 @@ async def test_interactive_context_renders_native_question_and_keeps_session(tmp
         authorize=authorize,
         context={"interactive": INTERACTIVE_QUESTION_PROMPT},
     )
-    guidance = await owner.operation(ContextReadOperation(operation="context.read", name="interactive"))
+    guidance = await owner.operation(
+        window=cli_window(),
+        operation=ContextReadOperation(operation="context.read", name="interactive"),
+    )
     question = "```interactive" + guidance["text"].split("```interactive", 1)[1].split("```", 1)[0] + "```"
     model = DelegationModel(
         id="test",
@@ -891,7 +902,8 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
     )
     async with owner._window("bash-parent"):
         await owner.operation(
-            ToolCallOperation(
+            window="bash-parent",
+            operation=ToolCallOperation(
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="control",
@@ -900,10 +912,14 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         )
         await entered.wait()
         describe = asyncio.create_task(
-            owner.operation(ToolDescribeOperation(operation="tools.describe", toolkit="late", function="late")),
+            owner.operation(
+                window="bash-parent",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="late", function="late"),
+            ),
         )
         await owner.operation(
-            ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
+            window="bash-parent",
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="late", function="late"),
         )
         await asyncio.sleep(0)
         release.set()

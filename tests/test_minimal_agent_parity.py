@@ -63,6 +63,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     PLUGIN,
     ScriptedProvider,
     agent_cli_api,
+    cli_window,
     install_scripted_shell,
     shell_cli_owner,
 )
@@ -93,15 +94,17 @@ class ProtocolShell:
         """Dispatch through the actual owner protocol inside the Bash window."""
         self.bind()
         toolkit, function, values = json.loads(args)
-        listing = await self.owner.operation(ToolListOperation(operation="tools.list"))
+        listing = await self.owner.operation(window=cli_window(), operation=ToolListOperation(operation="tools.list"))
         assert toolkit in str(listing)
         description = await self.owner.operation(
-            ToolDescribeOperation(operation="tools.describe", toolkit=toolkit, function=function),
+            window=cli_window(),
+            operation=ToolDescribeOperation(operation="tools.describe", toolkit=toolkit, function=function),
         )
         assert function in str(description)
         call_id = uuid4()
         await self.owner.operation(
-            ToolCallOperation(
+            window=cli_window(),
+            operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit=toolkit,
                 function=function,
@@ -602,7 +605,10 @@ async def test_interactive_context_actual_response_and_selection(response_harnes
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
         h.shell.bind()
-        document = await h.shell.owner.operation(ContextReadOperation(operation="context.read", name="interactive"))
+        document = await h.shell.owner.operation(
+            window=cli_window(),
+            operation=ContextReadOperation(operation="context.read", name="interactive"),
+        )
         guidance.append(document["text"])
         return document["text"]
 
