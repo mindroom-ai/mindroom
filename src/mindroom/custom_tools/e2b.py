@@ -15,7 +15,11 @@ from agno.tools.function import ToolResult
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.file_access import resolve_agent_file
-from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    read_regular_file_within_root,
+    resolve_path_within_root,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -89,8 +93,8 @@ class MindRoomE2BTools(E2BTools):
                 file_access=self._file_access,
                 field_name="E2B upload",
             )
-            with authorized.open() as file:
-                file_in_sandbox = self.sandbox.files.write(sandbox_path or Path(file_path).name, file)
+            payload = read_regular_file_within_root(authorized.root, authorized.relative)
+            file_in_sandbox = self.sandbox.files.write(sandbox_path or Path(file_path).name, payload)
         except Exception as e:
             return json.dumps({"status": "error", "message": f"Error uploading file: {e}"})
         return file_in_sandbox.path
