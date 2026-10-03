@@ -17,6 +17,7 @@ from pydantic import BaseModel
 REDACTED = "***redacted***"
 REDACTION_FAILED = "[redaction failed]"
 __all__ = [
+    "MAX_CANONICAL_JSON_INTEGER",
     "REDACTED",
     "REDACTION_FAILED",
     "nests_beyond_redaction_depth",

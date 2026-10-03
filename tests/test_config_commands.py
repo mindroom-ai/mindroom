@@ -1787,7 +1787,11 @@ def _written_pending_states(client: AsyncMock) -> list[dict[str, object]]:
             "mcp_servers.remote.headers",
             False,
         ),
-        ('set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"', "agents.assistant.role", False),
+        (
+            'set agents.assistant.role "Explains Bearer tokens, an API key, and sk-learn"',
+            "agents.assistant.role",
+            False,
+        ),
         ("set defaults.streaming.update_interval 0.5", "defaults.streaming.update_interval", True),
         ("set defaults.thread_summary_temperature 0.3", "defaults.thread_summary_temperature", True),
     ],
