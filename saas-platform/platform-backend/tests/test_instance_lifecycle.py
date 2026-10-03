@@ -2093,6 +2093,38 @@ def test_a_trial_duplicating_a_running_earlier_trial_is_cancelled_and_not_bound(
     assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
 
 
+def test_an_update_arriving_before_its_creation_never_binds_a_duplicate_trial(platform: Platform) -> None:
+    # A first subscriber's free-tier row has no Stripe subscription yet, and Stripe delivers events in any order.
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="free", stripe_subscription_id=None))
+    first = {
+        **_stripe_subscription("trialing"),
+        "id": "sub_stripe_first",
+        "created": 1_750_000_000,
+        "trial_start": 1_750_000_000,
+    }
+    later = {**_stripe_subscription("trialing"), "created": 1_750_000_100, "trial_start": 1_750_000_100}
+    history = [
+        Mock(id="sub_stripe_first", status="trialing", created=1_750_000_000, trial_start=1_750_000_000),
+        Mock(id="sub_stripe_1", status="trialing", created=1_750_000_100, trial_start=1_750_000_100),
+    ]
+    webhooks = "backend.routes.webhooks.stripe.Subscription"
+    stripe_status = {"status": "trialing"}
+
+    with (
+        patch(f"{webhooks}.list") as list_subscriptions,
+        patch(f"{webhooks}.retrieve", side_effect=lambda _stripe_id: {**later, **stripe_status}),
+        patch(f"{webhooks}.cancel", side_effect=lambda _stripe_id: stripe_status.update(status="canceled")) as cancel,
+    ):
+        list_subscriptions.return_value.auto_paging_iter.return_value = history
+        _send_webhook("customer.subscription.updated", later)
+        _send_webhook("customer.subscription.created", later)
+        _send_webhook("customer.subscription.created", first)
+
+    assert platform.subscription()["stripe_subscription_id"] == "sub_stripe_first"
+    assert platform.subscription()["status"] == "trialing"
+    cancel.assert_called_once_with("sub_stripe_1")
+
+
 def test_the_earliest_of_two_parallel_trials_is_kept(platform: Platform) -> None:
     trialing = {**_stripe_subscription("trialing"), "created": 1_750_000_000, "trial_start": 1_750_000_000}
     webhooks = "backend.routes.webhooks.stripe.Subscription"

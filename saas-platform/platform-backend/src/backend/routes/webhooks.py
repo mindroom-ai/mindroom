@@ -25,7 +25,6 @@ _LIFECYCLE_EVENT_TYPES = frozenset(
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
-        "invoice.payment_succeeded",
         "invoice.payment_failed",
     }
 )
@@ -163,6 +162,9 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     current_stripe_id = current[0].get("stripe_subscription_id") if current else None
     if current_stripe_id and current_stripe_id != subscription["id"]:
         logger.info("Ignoring update for superseded Stripe subscription %s", subscription["id"])
+        return True, account_id
+    # An update can arrive before the creation event, so it must not bind a duplicate trial either.
+    if not current_stripe_id and _without_repeated_trial(subscription) is None:
         return True, account_id
 
     subscription = stripe.Subscription.retrieve(subscription["id"])
