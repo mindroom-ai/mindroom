@@ -7,6 +7,7 @@ This directory contains utility scripts for MindRoom self-hosting.
 ### 🧪 Testing
 - **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 - **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
+- **`testing/evaluate_skill_learning.py`** - Compare learned skills with no memory and a verbatim correction on fresh tasks
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
@@ -66,6 +67,46 @@ For another Docker deployment, set `POSTGRES_CONTAINER` to its PostgreSQL contai
 ```bash
 uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
+
+### Evaluate learned-skill transfer
+
+After enabling automatic skill learning, creating a skill is not evidence that it helps.
+This opt-in probe runs the production digest reviewer against a fixed synthetic conversation, then compares three treatments using the same provider and model:
+
+| Treatment | What a fresh agent receives |
+| --- | --- |
+| `no_memory` | Only the held-out task |
+| `raw_correction` | The original user correction as instructions, plus the held-out task |
+| `learned_skills` | Skills written by the reviewer, loaded through MindRoom's normal skill loader, plus the held-out task |
+
+Set the provider's API key in the environment and supply a tool-capable model ID:
+
+```bash
+uv run python -m scripts.testing.evaluate_skill_learning --provider openai --model "$EVAL_MODEL" --output-dir "$HOME/.mindroom-evaluations/run-001" --repeats 3
+```
+
+This makes paid model calls: one review plus 27 fresh agent runs by default, with additional requests for tool calls.
+It does not load your live MindRoom config, conversations, or skills; all generated state stays in the new output directory, which must not already exist.
+Each trial gets a new model, agent, and workspace; only learned skill files transfer from training.
+The reviewer never receives held-out prompts or expected answers.
+Arm order rotates across cases and repetitions.
+The review and each trial have a timeout, configurable with `--timeout-seconds` (default 120).
+
+The scenario teaches a sensor-export procedure: convert Celsius to Fahrenheit, sort names, emit exact CSV with one decimal place, and omit prose.
+Two unseen inputs test transfer; an unrelated arithmetic task checks for overgeneralization.
+Scoring checks exact output after normalizing CRLF and one trailing newline, without an LLM judge.
+`report.json` retains each output, pass/fail, tool-call names, provider-reported metrics, elapsed time, review token usage, and separate transfer/control pass counts.
+Review usage is a one-time cost; include it when comparing total cost for a chosen number of future tasks.
+Reported token counts preserve provider accounting conventions; zero or absent usage is not proof a request was free, and no dollar estimate is inferred.
+Generated skills and the synthetic training session remain beside the report for inspection.
+Provider errors stop the run; previously completed trials remain with `completed: false` and must not be treated as a complete comparison.
+
+Interpret this as a small transfer probe, not a general agent benchmark or a skill-promotion gate.
+It exercises digest replay and skill consumption through Agno, without Matrix delivery, full runtime prompts, request forking, or script execution.
+Repetitions reuse one learned artifact; use separate output directories for independent learning attempts.
+Compare learned skills with the raw-correction arm before attributing a gain to skill extraction rather than remembering instructions.
+A no-op review is retained as an empty skill treatment, not hidden or counted as a learning success.
+Offline tests use scripted provider replies to validate isolation, scoring, and accounting; they do not establish that a live model learns successfully.
 
 ### Fuzz journal storage and ingestion
 

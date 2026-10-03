@@ -309,9 +309,17 @@ async def review_conversation(
     skills_root: Path,
     captured: CapturedRequest | None,
     progress: ReviewProgress,
+    skill_roots: Sequence[Path] | None = None,
 ) -> None:
     """Run one review, recording each skill it creates or updates in ``progress`` as the write lands."""
-    catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
+    catalog = await asyncio.to_thread(
+        load_skill_catalog,
+        config,
+        runtime_paths,
+        agent_name,
+        skills_root,
+        skill_roots=skill_roots,
+    )
     tools = SkillTools(skills_root, dict(catalog.entries), catalog.reserved_names, progress=progress)
     review = _fork(config, agent_name, captured, tools, catalog) or await _replay(
         config=config,

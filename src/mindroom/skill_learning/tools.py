@@ -32,7 +32,7 @@ from mindroom.skill_learning.library import (
 from mindroom.tool_system.skills import SKILL_FILENAME, build_agent_skills, list_skill_listings, parse_skill_markdown
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from agno.skills import Skills
 
@@ -93,9 +93,22 @@ class SkillCatalog:
     reserved_names: frozenset[str]
 
 
-def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
+def load_skill_catalog(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    skills_root: Path,
+    *,
+    skill_roots: Sequence[Path] | None = None,
+) -> SkillCatalog:
     """Return the skills the agent loads now, with the strict ownership check that edits use."""
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
+    skills = build_agent_skills(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_root=skills_root.parent,
+        skill_roots=skill_roots,
+    )
     loaded = skills.get_all_skills() if skills is not None else []
     workspace_directories = {
         skill.name: Path(skill.source_path).name for skill in loaded if Path(skill.source_path).parent == skills_root
@@ -111,7 +124,9 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
         )
         for skill in loaded
     }
-    reserved = {name.lower() for name in entries} | {listing.name.lower() for listing in list_skill_listings()}
+    reserved = {name.lower() for name in entries} | {
+        listing.name.lower() for listing in list_skill_listings(roots=skill_roots)
+    }
     return SkillCatalog(skills, entries, frozenset(reserved))
 
 
