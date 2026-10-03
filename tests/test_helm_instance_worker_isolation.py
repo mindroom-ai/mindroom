@@ -687,14 +687,16 @@ _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
 
 
 @pytest.mark.parametrize(
-    ("sub_path", "source"),
+    ("sub_path", "source", "image_dir"),
     [
-        ("", "/app/agent_data/config-source"),
-        ("environments/prod/", "/app/agent_data/config-source/environments/prod"),
+        ("", "/app/agent_data/config-source", "/bundle"),
+        ("environments/prod/", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
+        ("environments/prod", "/app/agent_data/config-source/environments/prod", "/bundle/environments/prod"),
+        ("environments/dev", "/app/agent_data/config-source/environments/dev", "/bundle/environments/dev"),
     ],
 )
-def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, source: str) -> None:
-    """The chart derives the bootstrap source from the bundle target and the revision from its digest."""
+def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, source: str, image_dir: str) -> None:
+    """The chart derives the source from the bundle target and the revision from its digest and image directory."""
     docs = _render_chart(
         Path("cluster/k8s/runtime"),
         *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
@@ -704,7 +706,8 @@ def test_runtime_chart_derives_bootstrap_from_content_bundle(sub_path: str, sour
     deployment = _resource(docs, "Deployment", "mindroom-runtime")
     command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
     assert command[command.index("--bootstrap-config-bundle") + 1] == source
-    assert command[command.index("--bootstrap-config-bundle-revision") + 1] == _BOOTSTRAP_BUNDLE_DIGEST
+    revision = hashlib.sha256(f"{_BOOTSTRAP_BUNDLE_DIGEST}:{image_dir}".encode()).hexdigest()
+    assert command[command.index("--bootstrap-config-bundle-revision") + 1] == revision
     transport = _init_container(deployment, "content-bundle-team-config")
     assert '"/app/agent_data/config-source/"' in transport["args"][0]
 
@@ -753,7 +756,25 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
             "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
         ),
         (
+            ("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"),
+            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+        ),
+        (
+            (
+                "contentBundles[1].volumeMounts[0].name=config-input",
+                "contentBundles[1].volumeMounts[0].mountPath=/bundle",
+            ),
+            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+        ),
+        (
             ("contentBundles[1].targetPath=/app/agent_data/active/incoming",),
+            "config.bootstrapContentBundle must not overlap the config.path directory",
+        ),
+        (
+            (
+                "config.path=/app/agent_data/config-source/active/config.yaml",
+                "config.bootstrapContentBundle.subPath=environments/prod",
+            ),
             "config.bootstrapContentBundle must not overlap the config.path directory",
         ),
         (

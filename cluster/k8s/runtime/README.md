@@ -235,19 +235,22 @@ workers:
 It adds `--bootstrap-config-bundle` and `--bootstrap-config-bundle-revision` to `mindroom run`.
 The bootstrap source is the named bundle's `targetPath` joined with `subPath`, so the example installs from `/app/agent_data/config-source/environments/prod`.
 `subPath` is relative to the bundle root and defaults to the root itself.
-The revision is the 64-character hex sha256 digest of the bundle image, so pin the digest once in `contentBundles` and every new image becomes a new revision.
+The revision is the sha256 of the bundle image digest and the selected image directory, `sourcePath` joined with `subPath`.
+Pin the digest once in `contentBundles`; a new image or a different `sourcePath` or `subPath` becomes a new revision.
 The chart rejects an unknown bundle name and an absolute or `..` subPath.
-It also rejects a selected bundle with `overwrite: false`, because files left from an earlier image would no longer match the digest.
+It also rejects a selected bundle with `overwrite: false`, `seed`, or `volumeMounts`, because the source would no longer match the image digest.
+The derived form is for trees that only the selected image writes.
+Do not point another bundle, a seed script, raw `initContainers`, or `extraVolumeMounts` at the selected source, because the revision would not change with their content.
 A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks.
 A changed revision validates and installs the candidate under the native installer's non-force drift rules.
 
-When another mechanism, such as raw `initContainers` or `extraVolumeMounts`, provides the source tree, set `config.bootstrapBundlePath` to its absolute directory instead.
+When another mechanism, such as a seed script, raw `initContainers`, or `extraVolumeMounts`, provides or changes the source tree, set `config.bootstrapBundlePath` to its absolute directory instead and advance the revision yourself.
 `config.bootstrapBundleRevision` is optional, requires `bootstrapBundlePath`, and is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
 Neither explicit value can be combined with `config.bootstrapContentBundle`.
 Native installation and validation run in the main runtime container, with its image, mounts, and environment, before runtime startup.
 The target directory and filename come from `config.path`; the source must contain that filename at its root.
 The target must be its own directory below `storage.mountPath`, not the storage root or a ConfigMap mount.
-The chart rejects a normalized bootstrap source that equals, contains, or lies inside the target config directory.
+The chart rejects a normalized bootstrap source that equals, contains, or lies inside the target config directory, and a selected bundle `targetPath` that contains the target config directory, because transport removes that path on every start.
 
 Without a revision, initialization preserves any existing active directory, including authored edits, across restarts and content image changes.
 Bundle transport can refresh the separate source directory normally.

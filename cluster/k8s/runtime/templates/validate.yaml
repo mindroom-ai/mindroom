@@ -63,8 +63,8 @@
 {{- if not $selectedBundle -}}
 {{- fail (printf "config.bootstrapContentBundle.name %q must match a contentBundles entry" $bootstrapContentBundle.name) -}}
 {{- end -}}
-{{- if and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite) -}}
-{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- if or (and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite)) (and $selectedBundle.seed $selectedBundle.seed.enabled) $selectedBundle.volumeMounts -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, with no seed or volumeMounts, so the source matches its image digest" $bootstrapContentBundle.name) -}}
 {{- end -}}
 {{- if or (hasPrefix "/" $bootstrapContentBundle.subPath) (has ".." (splitList "/" $bootstrapContentBundle.subPath)) -}}
 {{- fail "config.bootstrapContentBundle.subPath must be a relative path without .. segments" -}}
@@ -97,7 +97,8 @@
 {{- fail (printf "%s must be absolute" $bootstrapKey) -}}
 {{- end -}}
 {{- $source := clean $bootstrap.path -}}
-{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
+{{- $copyRoot := clean $bootstrap.root -}}
+{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $copyRoot)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
 {{- fail (printf "%s must not overlap the config.path directory" $bootstrapKey) -}}
 {{- end -}}
 {{- $mountPaths := list (clean .Values.storage.mountPath) -}}

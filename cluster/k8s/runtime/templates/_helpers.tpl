@@ -140,18 +140,23 @@ The static runner sidecar mounts the agents and private_instances directories, s
 
 {{/*
 Native bootstrap source as JSON: the explicit config.bootstrapBundlePath and revision,
-or the target path plus subPath and image digest of the selected content bundle.
+or the selected content bundle's target path plus subPath, with a revision hashed from its
+image digest and the selected image directory. root is the directory the transport replaces.
 */}}
 {{- define "mindroom-runtime.bootstrapBundle" -}}
-{{- $bootstrap := dict "path" (default "" .Values.config.bootstrapBundlePath) "revision" (default "" .Values.config.bootstrapBundleRevision) -}}
+{{- $bootstrap := dict "path" (default "" .Values.config.bootstrapBundlePath) "root" (default "" .Values.config.bootstrapBundlePath) "revision" (default "" .Values.config.bootstrapBundleRevision) -}}
 {{- $selected := .Values.config.bootstrapContentBundle.name -}}
 {{- if $selected -}}
-{{- $bootstrap = dict "path" "" "revision" "" -}}
+{{- $bootstrap = dict "path" "" "root" "" "revision" "" -}}
 {{- range $bundle := $.Values.contentBundles -}}
 {{- if eq (toString $bundle.name) (toString $selected) -}}
+{{- $subPath := default "" $.Values.config.bootstrapContentBundle.subPath -}}
 {{- $targetPath := include "mindroom-runtime.contentBundleTargetPath" (list $ $bundle) -}}
-{{- $_ := set $bootstrap "path" (clean (printf "%s/%s" $targetPath (default "" $.Values.config.bootstrapContentBundle.subPath))) -}}
-{{- $_ := set $bootstrap "revision" (trimPrefix "@sha256:" (regexFind "@sha256:[a-f0-9]{64}$" (toString $bundle.image))) -}}
+{{- $imagePath := clean (printf "%s/%s" (include "mindroom-runtime.contentBundleSourcePath" (list $ $bundle)) $subPath) -}}
+{{- $digest := trimPrefix "@sha256:" (regexFind "@sha256:[a-f0-9]{64}$" (toString $bundle.image)) -}}
+{{- $_ := set $bootstrap "root" $targetPath -}}
+{{- $_ := set $bootstrap "path" (clean (printf "%s/%s" $targetPath $subPath)) -}}
+{{- $_ := set $bootstrap "revision" (sha256sum (printf "%s:%s" $digest $imagePath)) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

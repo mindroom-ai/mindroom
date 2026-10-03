@@ -91,8 +91,9 @@ config:
   path: ""
   # Optional native initialize-only installation before run, sourced from one contentBundles entry.
   # Requires source: file and path inside its own directory below storage.mountPath.
-  # The chart derives the source directory from the bundle's targetPath plus subPath
-  # and the revision from the bundle image's sha256 digest, so a new image installs the candidate.
+  # The chart derives the source directory from the bundle's targetPath plus subPath and the revision
+  # from the image digest plus selected image directory, so a new image or subPath installs the candidate.
+  # Only for image-only trees: the bundle needs overwrite, no seed or volumeMounts, and no other writer.
   bootstrapContentBundle:
     # contentBundles[].name to bootstrap from.
     name: ""
