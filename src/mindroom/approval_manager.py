@@ -448,11 +448,11 @@ class ApprovalManager:
             return "none"
         return await self.cards.arm_scheduled_call_approval(task_id=task_id, workflow_digest=workflow_digest)
 
-    async def cancel_scheduled_call_approval(self, task_id: str) -> None:
-        """Withdraw a cancelled task's approval and deny its card if it is still pending."""
+    async def withdraw_scheduled_call_approval(self, task_id: str, *, reason: str) -> None:
+        """Withdraw a cancelled or edited task's approval and deny its card if it is still pending."""
         if self.cards is None or self.send_delivery is None:
             return
-        recorded = await self.cards.revoke_scheduled_call_approval(task_id=task_id, reason="Schedule cancelled.")
+        recorded = await self.cards.withdraw_scheduled_call_approval(task_id=task_id, reason=reason)
         if recorded.recorded:
             await self.recover_cards_on_startup()
 

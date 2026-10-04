@@ -833,7 +833,7 @@ def remember_terminal_alias(
     card_event_id: str,
     delivery_id: str,
 ) -> None:
-    """Remember a transport-verified alias only when retained grant audit proves it terminal."""
+    """Remember a transport-verified alias only when a retained automatic approval proves it terminal."""
     transaction.execute(
         """
         INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
@@ -844,6 +844,15 @@ def remember_terminal_alias(
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = audit.principal_id AND cards.delivery_id = audit.delivery_id
           )
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,
+        (card_event_id, principal_id, room_id, delivery_id),
+    )
+    transaction.execute(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT scheduled.principal_id, scheduled.room_id, ? FROM scheduled_call_approvals AS scheduled
+        WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.consumed_delivery_id = ?
         ON CONFLICT (principal_id, card_event_id) DO NOTHING
         """,
         (card_event_id, principal_id, room_id, delivery_id),

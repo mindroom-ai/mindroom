@@ -146,6 +146,7 @@ _TABLES = (
         membership_epoch BIGINT NOT NULL,
         card_event_id TEXT,
         decided_at_ns BIGINT,
+        decided_by TEXT,
         armed_at_ns BIGINT,
         revoked_at_ns BIGINT,
         consumed_at_ns BIGINT,

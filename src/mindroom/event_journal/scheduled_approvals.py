@@ -30,7 +30,7 @@ __all__ = [
     "apply_armed",
     "arm",
     "reserve",
-    "revoke",
+    "withdraw",
 ]
 
 SCHEDULED_APPROVAL_WINDOW_NS = 15 * 60 * 1_000_000_000
@@ -132,10 +132,12 @@ def arm(
     workflow_digest: str,
     now_ns: int,
 ) -> ScheduledApprovalArmState:
-    """Arm an approved binding for the unchanged task firing on time."""
+    """Arm an approved binding for the unchanged task firing on time; only the requester's denial skips it."""
+    _prune(transaction, principal_id, now_ns)
     row = transaction.fetchone(
         """
-        SELECT scheduled.workflow_digest, scheduled.execute_at_ns, scheduled.revoked_at_ns, background.decision
+        SELECT scheduled.workflow_digest, scheduled.execute_at_ns, scheduled.revoked_at_ns, scheduled.decided_by,
+               background.decision
         FROM scheduled_call_approvals AS scheduled
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
@@ -145,11 +147,9 @@ def arm(
     )
     if row is None:
         return "none"
-    if row["revoked_at_ns"] is not None:
-        return "denied"
-    if str(row["workflow_digest"]) != workflow_digest:
+    if row["revoked_at_ns"] is not None or str(row["workflow_digest"]) != workflow_digest:
         return "unarmed"
-    if row["decision"] == "denied":
+    if row["decision"] == "denied" and row["decided_by"] is not None:
         return "denied"
     if row["decision"] != "approved" or abs(now_ns - int(row["execute_at_ns"])) > SCHEDULED_APPROVAL_WINDOW_NS:
         return "unarmed"
@@ -163,8 +163,8 @@ def arm(
     return "armed"
 
 
-def revoke(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
-    """Withdraw a cancelled task's approval for good and deny its card if still pending."""
+def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
+    """Withdraw a cancelled or edited task's approval for good and deny its card if still pending."""
     transaction.execute(
         """
         UPDATE scheduled_call_approvals SET revoked_at_ns = ?

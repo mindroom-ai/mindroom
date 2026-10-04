@@ -6532,7 +6532,6 @@ expose = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "arm_scheduled_call_approval",
-    "cancel_scheduled_call_approval",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
@@ -6540,6 +6539,7 @@ expose = [
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "withdraw_scheduled_call_approval",
 ]
 from = ["mindroom.tool_approval"]
 

@@ -177,7 +177,9 @@ When the task fires, the agent receives a trigger asking it to make that call ex
 If the requester approved the card, the task is unchanged, and it fires within 15 minutes of its scheduled time, the first call with exactly those arguments from the same agent or team, requester, room, and thread is approved once.
 That call publishes an approved receipt card whose `approval_provenance` has `kind: scheduled_approval` with the task, approver, approval time, scheduled time, and arguments digest, and MindRoom logs `scheduled_tool_call_approval_consumed` with the same fields.
 Every other call keeps per-call approval, including a call with different arguments, a second identical call, a call after the router left and rejoined the room, a late fire, a fire of an edited task, and a fire whose card was never answered.
-Denying the card skips the send, and cancelling the task, including the automatic cancellation when its creator leaves the room, withdraws the approval and denies a card that is still pending.
+If the requester denies the card, the task is skipped, while a card that MindRoom denies on its own, for example after the router leaves the room, falls back to per-call approval when the task fires.
+Cancelling or editing the task, including the automatic cancellation when its creator leaves the room, withdraws the approval and denies a card that is still pending.
+The trigger message and the stored task carry the exact arguments without redaction, so do not schedule calls whose arguments contain secrets.
 Recurring schedules cannot pre-approve calls.
 
 ## Timezone

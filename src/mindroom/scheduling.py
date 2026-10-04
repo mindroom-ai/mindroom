@@ -42,10 +42,10 @@ from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in
 from mindroom.tool_approval import (
     ToolApprovalScriptError,
     arm_scheduled_call_approval,
-    cancel_scheduled_call_approval,
     evaluate_tool_approval,
     request_scheduled_call_approval,
     resolve_tool_approval_approver,
+    withdraw_scheduled_call_approval,
 )
 
 if TYPE_CHECKING:
@@ -64,6 +64,10 @@ _SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
+
+# Reasons shown on a scheduled tool call's approval card when its task changes.
+_SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
+_SCHEDULE_EDITED_REASON = "Schedule edited; the call will ask for approval when it runs."
 
 # Shared validation message for edit attempts that change task type.
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
@@ -975,7 +979,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                 task_id=task_id,
                 created_by=task.workflow.created_by,
             )
-            await cancel_scheduled_call_approval(task_id)
+            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
             return None
 
 
@@ -1169,6 +1173,7 @@ async def save_edited_scheduled_task(
             created_at=current_task.created_at,
             matrix_admin=matrix_admin,
         )
+    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_EDITED_REASON)
 
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -1911,17 +1916,23 @@ def _scheduled_call_trigger_message(agent_name: str, tool_name: str, arguments: 
     )
 
 
-def _parse_scheduled_call_time(execute_at: str) -> datetime | str:
-    """Return the exact future UTC send time, or why it cannot be bound."""
+def _parse_scheduled_call(arguments_json: str, execute_at: str) -> tuple[dict[str, object], datetime] | str:
+    """Return the exact arguments and future UTC send time, or why they cannot be bound."""
     try:
-        parsed = datetime.fromisoformat(execute_at)
+        arguments = json.loads(arguments_json)
+    except json.JSONDecodeError:
+        arguments = None
+    if not isinstance(arguments, dict):
+        return "❌ arguments_json must be a JSON object of the call's exact arguments."
+    try:
+        send_at = datetime.fromisoformat(execute_at)
     except ValueError:
         return "❌ execute_at must be an ISO 8601 date and time, e.g. 2026-10-04T09:00:00-04:00."
-    if parsed.tzinfo is None:
+    if send_at.tzinfo is None:
         return "❌ execute_at must include a UTC offset, e.g. 2026-10-04T09:00:00-04:00."
-    if parsed <= datetime.now(UTC):
+    if send_at <= datetime.now(UTC):
         return "❌ execute_at must be in the future."
-    return parsed.astimezone(UTC)
+    return arguments, send_at.astimezone(UTC)
 
 
 async def schedule_approved_tool_call(  # noqa: PLR0911
@@ -1946,15 +1957,10 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
     runtime_paths = runtime.runtime_paths
     if thread_id is None:
         return (None, "❌ Pre-approved tool calls must be scheduled from a thread.")
-    try:
-        arguments = json.loads(arguments_json)
-    except json.JSONDecodeError:
-        arguments = None
-    if not isinstance(arguments, dict):
-        return (None, "❌ arguments_json must be a JSON object of the call's exact arguments.")
-    send_at = _parse_scheduled_call_time(execute_at)
-    if isinstance(send_at, str):
-        return (None, send_at)
+    parsed = _parse_scheduled_call(arguments_json, execute_at)
+    if isinstance(parsed, str):
+        return (None, parsed)
+    arguments, send_at = parsed
     approver_id = resolve_tool_approval_approver(config, runtime_paths, scheduled_by)
     if approver_id is None:
         return (None, "❌ Only a human requester can pre-approve a scheduled tool call.")
@@ -1995,31 +2001,36 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         )
     except ValueError as e:
         return (None, f"❌ Failed to schedule: {e!s}")
-    scheduled_for = _format_scheduled_time(send_at, config.timezone)
-    if not await request_scheduled_call_approval(
-        task_id=task_id,
-        room_id=room_id,
-        thread_id=thread_id,
-        requester_id=scheduled_by,
-        approver_user_id=approver_id,
-        agent_name=agent_name,
-        tool_name=tool_name,
-        arguments=arguments,
-        execute_at=send_at,
-        workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
-        scheduled_for_text=_format_local_time(send_at, config.timezone),
-    ):
-        await _persist_scheduled_task_state(
-            client=runtime.client,
-            room_id=room_id,
+    card_posted = False
+    try:
+        card_posted = await request_scheduled_call_approval(
             task_id=task_id,
-            workflow=workflow,
-            timezone=config.timezone,
-            status="cancelled",
-            created_at=created_at,
-            matrix_admin=runtime.matrix_admin,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=scheduled_by,
+            approver_user_id=approver_id,
+            agent_name=agent_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            execute_at=send_at,
+            workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
+            scheduled_for_text=_format_local_time(send_at, config.timezone),
         )
+    finally:
+        if not card_posted:
+            await _persist_scheduled_task_state(
+                client=runtime.client,
+                room_id=room_id,
+                task_id=task_id,
+                workflow=workflow,
+                timezone=config.timezone,
+                status="cancelled",
+                created_at=created_at,
+                matrix_admin=runtime.matrix_admin,
+            )
+    if not card_posted:
         return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
+    scheduled_for = _format_scheduled_time(send_at, config.timezone)
     _start_scheduled_task(
         runtime.client,
         task_id,
@@ -2201,7 +2212,7 @@ async def cancel_scheduled_task(
 
     if cancel_in_memory:
         _cancel_running_task(task_id)
-    await cancel_scheduled_call_approval(task_id)
+    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
 
     return f"✅ Cancelled task `{task_id}`"
 
@@ -2240,7 +2251,7 @@ async def cancel_all_scheduled_tasks(
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
-                    await cancel_scheduled_call_approval(task_id)
+                    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     cancelled_count += 1
                     logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:

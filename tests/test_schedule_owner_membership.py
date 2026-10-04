@@ -115,7 +115,7 @@ async def test_departed_owner_cancels_persisted_schedule(
     client, workflow, state = _owner_schedule([{"membership": membership}])
     cancel_approval = AsyncMock()
 
-    with patch("mindroom.scheduling.cancel_scheduled_call_approval", new=cancel_approval):
+    with patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=cancel_approval):
         task = await scheduling._reconcile_runnable_task_retrying(
             client,
             "!test:server",
@@ -125,7 +125,7 @@ async def test_departed_owner_cancels_persisted_schedule(
         )
 
     assert task is None
-    cancel_approval.assert_awaited_once_with("owner_task")
+    cancel_approval.assert_awaited_once_with("owner_task", reason="Schedule cancelled.")
     assert state["status"] == "cancelled"
     assert state["workflow"] == workflow.model_dump_json()
     assert state["created_at"] == "2026-09-01T00:00:00+00:00"

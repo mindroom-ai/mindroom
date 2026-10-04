@@ -42,7 +42,6 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "arm_scheduled_call_approval",
-    "cancel_scheduled_call_approval",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
@@ -50,6 +49,7 @@ __all__ = [
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
+    "withdraw_scheduled_call_approval",
 ]
 
 # Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
@@ -318,11 +318,11 @@ async def arm_scheduled_call_approval(task_id: str, workflow_digest: str) -> Sch
     return "none" if manager is None else await manager.arm_scheduled_call_approval(task_id, workflow_digest)
 
 
-async def cancel_scheduled_call_approval(task_id: str) -> None:
-    """Settle a cancelled task's still-pending scheduling-time approval card."""
+async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:
+    """Withdraw a cancelled or edited task's approval and deny its card if it is still pending."""
     manager = approval_manager.get_approval_store()
     if manager is not None:
-        await manager.cancel_scheduled_call_approval(task_id)
+        await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
 
 
 def is_process_active_approval_card(card_event_id: str) -> bool:

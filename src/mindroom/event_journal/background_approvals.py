@@ -210,10 +210,16 @@ def resolve(
         raise RuntimeError(msg)
     transaction.execute(
         """
-        UPDATE scheduled_call_approvals SET card_event_id = ?, decided_at_ns = ?
+        UPDATE scheduled_call_approvals SET card_event_id = ?, decided_at_ns = ?, decided_by = ?
         WHERE principal_id = ? AND delivery_id = ?
         """,
-        (row["acknowledged_event_id"], time.time_ns(), principal_id, str(row["delivery_id"])),
+        (
+            row["acknowledged_event_id"],
+            time.time_ns(),
+            metadata.resolved_by if metadata is not None and decision_status == requested_status else None,
+            principal_id,
+            str(row["delivery_id"]),
+        ),
     )
     approval_card_state.enqueue_resolution(transaction, principal_id, row, stored)
     return approval_card_state.RecordedApprovalDecision(
