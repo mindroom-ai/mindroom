@@ -342,8 +342,10 @@ export default function LandingPage() {
                 MindRoom
               </h1>
             </div>
-            <p className="mt-4 text-xl font-medium leading-8 text-gray-900 dark:text-gray-100">
-              AI agents that know you and your work, in a chat app anyone can use.
+            <p className="mt-4 text-pretty text-xl font-medium leading-8 text-gray-900 dark:text-gray-100">
+              AI agents that know you and your work,{' '}
+              <br className="hidden sm:inline" />
+              in a chat app anyone can use.
             </p>
             <p className="mt-4 max-w-xl text-base leading-7 text-gray-600 dark:text-gray-300">
               A personal agent for everything from family trips to your homelab, and shared agents for teams, connected to email, chat, documents, and code.
