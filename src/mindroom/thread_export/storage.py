@@ -41,6 +41,9 @@ _EXPORTED_AT_SLACK_BYTES = 64
 # libyaml escapes every character outside the Basic Multilingual Plane in ten bytes, so a thread file can be
 # two and a half times the message JSON the fetch guard counts; a larger file is refused before it is compared or written.
 _MAX_THREAD_FILE_BYTES = 2 * MAX_READ_BYTES
+# Worker code can replace index.json, and decoded JSON can take forty times its size in memory, so the drift check
+# reads at most this much and rebuilds a larger index; thousands of indexed threads take far less.
+_MAX_ROOM_INDEX_JSON_BYTES = 8 << 20
 # Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
 # so one rebuild reads at most this much; four files at the read cap is far beyond an ordinary room.
 _MAX_ROOM_INDEX_BYTES = 256 << 20
@@ -634,12 +637,13 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
 
 def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
     """Return the thread filename set the current room index indexed or left out for its read budget."""
-    data = _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=MAX_READ_BYTES)
+    data = _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=_MAX_ROOM_INDEX_JSON_BYTES)
     if data is None:
         return None
     try:
         payload = json.loads(data)
-    except ValueError:
+    except (RecursionError, ValueError):
+        # Invalid JSON or UTF-8 raises ValueError, and lists nested past the recursion limit raise RecursionError.
         return None
     if (
         not isinstance(payload, dict)
@@ -699,7 +703,8 @@ def write_room_index(
             return
         payload = _room_index_payload(room_fd, output_dir, room)
         data = f"{json.dumps(payload, indent=2)}\n".encode()
-        if _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=MAX_READ_BYTES) != data:
+        # Only an index of the same size can be unchanged, so a larger one is replaced without being read.
+        if _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=len(data)) != data:
             _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, data)
     finally:
         os.close(room_fd)

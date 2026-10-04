@@ -762,6 +762,34 @@ def test_room_index_rebuild_reads_its_newest_threads_within_a_budget(
         assert indexed() == (["$thread-1:localhost", "$thread-2:localhost"], [])
 
 
+@pytest.mark.parametrize("planted", ["oversized", "deeply-nested"])
+def test_planted_room_index_too_costly_to_decode_is_rebuilt(tmp_path: Path, planted: str) -> None:
+    """Worker code can replace index.json, so one too large or too deep to decode cheaply is rebuilt instead of trusted."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    payload = {"version": 1, "thread": {"id": "$thread:localhost", "source": "matrix"}, "messages": []}
+    write_thread_payload(output_dir, room, "$thread:localhost", payload)
+    write_room_index(output_dir, room)
+    index = output_dir / "lobby" / "index.json"
+    rebuilt = index.read_bytes()
+    if planted == "oversized":
+        # Its filename set still matches, so only its size keeps an unchanged pass from trusting it.
+        index.write_bytes(rebuilt + b" " * thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES)
+    else:
+        index.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+
+    tracemalloc.start()
+    try:
+        write_room_index(output_dir, room, thread_files_changed=False)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert index.read_bytes() == rebuilt
+    # Neither the drift check nor the rewrite reads the oversized file.
+    assert peak < thread_export_storage._MAX_ROOM_INDEX_JSON_BYTES
+
+
 @pytest.mark.parametrize("filename", ["marker", "index"])
 def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: str) -> None:
     """A FIFO agent code plants where an export file belongs is refused instead of blocking the primary."""
