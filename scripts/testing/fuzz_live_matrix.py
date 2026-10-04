@@ -6057,7 +6057,7 @@ class FinalStateAuditor:
                 redacted_source_event_ids=redacted_sources,
                 redacted_targets=redacted,
             )
-            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records))
+            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records, redacted_targets=redacted))
         else:
             self._assert_direct_reply_model_sources(events, replies)
         return {
@@ -6070,10 +6070,12 @@ class FinalStateAuditor:
             **ledger_metrics,
         }
 
-    def _assert_redaction_cleanup_probes(
+    def _assert_redaction_cleanup_probes(  # noqa: C901
         self,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, TurnRecord],
+        *,
+        redacted_targets: Mapping[str, str] | None = None,
     ) -> dict[str, int]:
         """Dedicated probes owe responses; ordinary sources retain their own terminal contract."""
         uncovered = 0
@@ -6102,6 +6104,10 @@ class FinalStateAuditor:
             if call_id is not None:
                 calls.add(call_id)
             for source_id in source_ids:
+                redaction_event_id = (redacted_targets or {}).get(source_id)
+                # A source MindRoom only ever saw deleted started no turn, so there is nothing to clean up.
+                if redaction_event_id and self.oracle.saw_only_deleted(source_id, redaction_event_id):
+                    continue
                 tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
                 is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
                 # Edit acknowledgement is monotonic before model admission.

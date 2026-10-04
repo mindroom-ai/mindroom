@@ -1897,6 +1897,42 @@ def test_saved_trace_loading_never_adds_cleanup_operations(tmp_path: Path) -> No
     assert trace.read_bytes() == saved
 
 
+@pytest.mark.parametrize("seen_only_deleted", [True, False])
+def test_cleanup_probe_owes_no_tombstone_for_a_source_mindroom_only_saw_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    seen_only_deleted: bool,
+) -> None:
+    """A source redacted before MindRoom read it never started a turn, so the probe has nothing to clean up."""
+    probe = live_fuzz._source_marker("op:1", live_fuzz.ORIGINAL_REVISION)
+    oracle = Mock(spec=live_fuzz.ExactReplyOracle)
+    oracle.expected_sources = {"$old": "root:0", "$probe": "op:1"}
+    oracle.saw_only_deleted.return_value = seen_only_deleted
+    monkeypatch.setattr(live_fuzz._ModelHandler, "observations_snapshot", lambda: {2: [probe]})
+    auditor = live_fuzz.FinalStateAuditor(
+        Mock(spec=live_fuzz.LiveMatrixClient),
+        oracle,
+        agent_id="@agent:test",
+        expected_body_for=lambda _: "unused",
+        cleanup_probes={"$probe": ("$old",)},
+        full_request_markers_for=lambda _call: frozenset({probe}),
+    )
+    records = {"$probe": live_fuzz.TurnRecord.create(source_event_ids=("$probe",), response_event_id="$reply")}
+    events = {
+        "$reply": {
+            "event_id": "$reply",
+            "sender": "@agent:test",
+            "type": "m.room.message",
+            "content": {"body": "LIVE-FUZZ call=2 END call=2"},
+        },
+    }
+    if seen_only_deleted:
+        auditor._assert_redaction_cleanup_probes(events, records, redacted_targets={"$old": "$redaction"})
+        oracle.saw_only_deleted.assert_called_with("$old", "$redaction")
+    else:
+        with pytest.raises(AssertionError, match="missing tombstone cleanup for \\$old"):
+            auditor._assert_redaction_cleanup_probes(events, records, redacted_targets={"$old": "$redaction"})
+
+
 def test_cleanup_probe_rejects_contaminated_attempt_before_clean_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first request leaking removed history cannot hide behind a clean retry."""
     old = live_fuzz._source_marker("root:0", live_fuzz.ORIGINAL_REVISION)
