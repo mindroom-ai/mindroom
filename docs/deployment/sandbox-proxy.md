@@ -175,7 +175,6 @@ It never receives the credentials-encryption key.
 The primary leases each proxied tool's saved settings to the sidecar per call, as described in [Credential leases](#credential-leases).
 A `prepare-sandbox-runner-storage` init container creates the three storage directories as the runtime user before the containers start.
 The runtime chart rejects a file-sourced config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
-A file-sourced config directly in the storage root is mounted as a single read-only file, so it must exist before the pod starts; otherwise kubelet creates a directory in its place.
 
 Upgrading an existing release keeps agent data in place because the sidecar mounts the same PVC directories.
 Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker virtualenvs under `workers/` and caches in the storage root used as `HOME`, remain on disk but are no longer visible to the sidecar, which recreates worker virtualenvs on first use.
@@ -183,6 +182,7 @@ Files that earlier sidecar versions wrote elsewhere on the PVC, such as worker v
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
+> Records the primary acts on as authority, such as invited-room ledgers, personal-room records, conversation modes, and the copies of private-instance owner records that decide whose conversations are exported into each instance, live below the storage root's `tracking/` directory, which the sidecar does not mount.
 > The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY` so tool code cannot use the API over `localhost`.
 > Header-only trusted-upstream authentication is still forgeable from the sidecar.
@@ -195,7 +195,9 @@ Each worker pod runs the sandbox-runner app and is addressed through an internal
 Each dedicated worker needs access to its agent's storage directory.
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+Dedicated workers never receive the credential encryption key, matching dedicated Docker workers.
+With encrypted credential storage enabled, the worker credential stores and the `.shared_credentials` mirror the primary writes are encrypted with that key, so worker code cannot read them and tool settings reach the worker only through [credential leases](#credential-leases).
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 The hosted instance chart refuses this mode, because its tenants share the `mindroom-instances` namespace and a worker manager's Role there would reach every tenant's Deployments and Services.
 
@@ -306,6 +308,7 @@ MindRoom also masks config-adjacent `.env` inside the worker container, so the r
 Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
 Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
+Worker code keeps network access to the host, so `mindroom run` adds a generated `MINDROOM_API_KEY` to `.env` when a dedicated worker backend is configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
 If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
@@ -523,6 +526,7 @@ Workers still need Agent Vault API access (`apiUrl`, usually port `14321`) so th
 When the chart also manages the Agent Vault server, the worker NetworkPolicy includes that API egress automatically.
 For an externally managed Agent Vault server, add an egress rule for the API endpoint only.
 Do not add worker egress directly to the Agent Vault MITM proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants; that bypasses the Squid-first policy path.
+The chart-managed Agent Vault server has its own NetworkPolicy that by default admits only in-chart vault clients and limits vault egress; see `workers.kubernetes.agentVault.server.networkPolicy` in `cluster/k8s/runtime/README.md`.
 
 For non-Kubernetes deployments, point worker egress at a shared proxy you run yourself by setting the worker proxy env directly (see the shared egress proxy option above).
 
@@ -565,6 +569,14 @@ Use `check_shell_command(handle)` to poll and `kill_shell_command(handle)` to st
 Handles are owned by a small worker-local shell supervisor process that the runner spawns on first shell use: they survive multiple requests to the same runner, but not runner or worker restarts.
 Shell requests run in per-request subprocesses like every other execution tool; the request process computes the shell env and cwd, then relays run/check/kill to the supervisor over a unix socket advertised via `MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`.
 When the supervisor exits (runner shutdown, worker restart, or orphaning), it kills any still-running supervised process groups, so handles are invalidated without leaking processes.
+
+Stopping a response stops its worker calls too, such as `run_shell_command` and `run_python_code`.
+Each worker call from an async run carries a `request_id`, and when the primary stops waiting for the call it posts that ID to `/api/sandbox-runner/execute/cancel`.
+The runner then stops the request's process (killing a spawned child, or hanging up on a forked one, which then exits) or cancels its in-process task, and the shell supervisor kills the command's process group once its relay is gone.
+A cancel that arrives before its request stops that request on arrival, and a cancelled call never counts as a worker failure.
+Synchronous tool functions get the same asynchronous proxy, so a stop reaches them as well.
+In the runner's `inprocess` execution mode, a synchronous tool that runs inside the runner itself, such as `file`, finishes before the stop takes effect.
+Persistent browser actions also finish on their own: they are short, and interrupting one would close the worker's shared browser and its tabs.
 
 ## Workspace home contract
 
@@ -630,8 +642,9 @@ Selected services follow the call's scoped credential policy and, where applicab
 Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
 The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 With the `static_runner` backend, the primary also leases the called tool's own saved settings on every call because a containerized shared runner has no access to the credential store.
-Scoped calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, except for model-provider tools, because the primary owns scoped tool settings; values in the worker's own credential store apply only where the lease sets nothing.
-Unscoped dedicated workers keep reading tool settings from their own worker credential stores.
+Calls to dedicated Docker and Kubernetes workers lease the called tool's saved settings the same way, because the primary owns tool settings; values in the worker's own credential store apply only where the lease sets nothing.
+Scoped calls lease the settings saved for their scope, and unscoped calls lease the settings saved in the primary credential store, so neither needs the credential encryption key in the worker.
+The `defaults.worker_grantable_credentials` allowlist controls which shared credentials are mirrored into dedicated workers and which shared settings scoped calls may lease, but it does not limit unscoped calls: as with the `static_runner` backend, unscoped calls still lease the called tool's saved settings from the primary credential store, including the `openai` and `groq` provider keys, because those tools share their service names with the model providers.
 Settings saved in a worker credential store before the primary owned them stay there and still apply where a lease sets nothing, so clear worker credential stores after upgrading if those values should stop applying.
 Services selected by the policy override those values.
 
@@ -678,6 +691,7 @@ All requests require the runner's `MINDROOM_SANDBOX_PROXY_TOKEN` in the `x-mindr
 |--------|----------|-------------|
 | POST | `/api/sandbox-runner/leases` | Create a one-time credential lease for an upcoming tool call |
 | POST | `/api/sandbox-runner/execute` | Execute a tool call with optional credential override via lease |
+| POST | `/api/sandbox-runner/execute/cancel` | Stop the execute request with the given `request_id` |
 | GET | `/api/sandbox-runner/workers` | List known workers with lifecycle metadata |
 | POST | `/api/sandbox-runner/workers/cleanup` | Mark idle workers for cleanup without deleting persisted state |
 
@@ -757,7 +771,7 @@ Run matching MindRoom revisions in the primary and workers so both use the same 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
 Credential-backed tools that declare `requires_primary_runtime=True` always stay local regardless of `worker_tools`.
-Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
+These include `spotify` and `homeassistant`, which are also shared-only integrations that require `worker_scope` unset or `shared`.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 You can set `worker_scope` per agent or in `defaults`:

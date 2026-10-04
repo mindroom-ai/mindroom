@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import stat
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NoReturn
@@ -29,6 +31,9 @@ from mindroom.desktop.native_config import (
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
+    load_native_config,
+    native_config_path,
+    save_native_config,
 )
 from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.provider import DesktopProviderError
@@ -352,6 +357,57 @@ def test_desktop_setup_logs_in_only_when_needed(
     assert pair.call_args.kwargs["code"] == "short-code"
 
 
+@pytest.mark.parametrize(("content", "mode", "saved_revision"), [("{", 0o600, 0), (None, 0o644, 1)])
+def test_desktop_setup_repairs_malformed_or_exposed_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    content: str | None,
+    mode: int,
+    saved_revision: int,
+) -> None:
+    """Setup saves fresh settings over a file the load error says saving can repair."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    path = native_config_path(tmp_path)
+    if content is None:
+        save_native_config(path, replace(_run_config(roots=()), revision=0), expected_revision=0)
+    else:
+        path.write_text(content, encoding="utf-8")
+    path.chmod(mode)
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock())
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--allow-agent",
+            "computer",
+            "--user-id",
+            "@alice:example.org",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "short-code",
+            "--controller-user-id",
+            "@computer:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "cloud-fingerprint",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = load_native_config(path)
+    assert saved.revision == saved_revision + 1
+    assert saved.controller == PinnedMatrixDevice("@computer:example.org", "CLOUD", "cloud-fingerprint")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 @pytest.mark.parametrize(
     ("saved_homeserver", "saved_user_id"),
     [
@@ -670,6 +726,45 @@ def test_run_command_preserves_unexpected_environment_errors(
     )
 
     assert isinstance(result.exception, PermissionError)
+
+
+@pytest.mark.parametrize("app_id", ["chat.mindroom.menubar", "chat.mindroom.desktophelper"])
+def test_run_refuses_mindroom_itself_as_a_one_run_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    app_id: str,
+) -> None:
+    """MindRoom's windows grant shell auto-approval and control, so `--allow-app` cannot name them for a run."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    bridge = AsyncMock()
+    monkeypatch.setattr("mindroom.cli.config.activate_cli_runtime", lambda *_args, **_kwargs: runtime_paths)
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+
+    result = runner.invoke(
+        desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            "@cloud:example.org",
+            "--controller-device-id",
+            "CLOUD",
+            "--controller-ed25519",
+            "fingerprint",
+            "--allow-requester",
+            "@alice:example.org",
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.example.Editor",
+            "--allow-app",
+            app_id,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert f"control MindRoom itself ({app_id})" in " ".join(result.output.split())
+    bridge.assert_not_awaited()
 
 
 @pytest.mark.asyncio

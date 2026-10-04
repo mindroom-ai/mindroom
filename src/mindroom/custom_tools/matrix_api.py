@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 import nio
 from agno.tools import Toolkit
 
+from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -21,7 +22,11 @@ from mindroom.matrix.thread_mutation_impact import (
     resolve_event_thread_impact_for_client,
     resolve_redaction_thread_impact_for_client,
 )
-from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_access_checked_requester_id,
+    is_human_requester_id,
+)
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)
@@ -827,6 +832,21 @@ class MatrixApiTools(Toolkit):
 
         return None
 
+    @staticmethod
+    def _with_acting_requester(
+        context: ToolRuntimeContext,
+        event_type: str,
+        content: dict[str, object],
+    ) -> dict[str, object]:
+        """Name a human or bot-account requester on a room message, so entities it mentions act for it as on replies."""
+        if event_type != "m.room.message" or not is_access_checked_requester_id(
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        ):
+            return content
+        return {**content, ACTING_REQUESTER_KEY: context.requester_id}
+
     async def _send_event(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
@@ -912,6 +932,7 @@ class MatrixApiTools(Toolkit):
                 message=limit_error,
             )
 
+        normalized_content = self._with_acting_requester(context, normalized_event_type, normalized_content)
         try:
             response = await send_room_event_result(
                 context.client,

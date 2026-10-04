@@ -73,6 +73,11 @@ def checkpoint_resolver(resolve: Callable[[], tuple[ProviderBatchCheckpoint, Fun
         _RESOLVER.reset(token)
 
 
+def cli_dispatch_active() -> bool:
+    """Return whether a CLI-dispatched tool call is executing in this context."""
+    return _INNER.get()
+
+
 @contextmanager
 def inner_cli_dispatch() -> Iterator[None]:
     """Prevent nested prepared calls from replacing real provider history."""

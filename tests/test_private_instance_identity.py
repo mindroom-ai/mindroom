@@ -450,6 +450,34 @@ def test_private_instances_for_agent_lists_owned_roots_and_flags_the_rest(tmp_pa
     )
 
 
+def test_private_instances_for_agent_ignores_a_record_the_primary_never_wrote(tmp_path: Path) -> None:
+    """A self-consistent owner record that sandbox runner code plants in a scope names no owner until the primary materializes it."""
+    requester_id = "@secret:example.test"
+    worker_key = f"v1:tenant-a:user:~{requester_id}"
+    scope_root = _scope_root(tmp_path, worker_key)
+    (scope_root / "secret").mkdir(parents=True)
+    (scope_root / ".mindroom-private-instance.json").write_text(
+        json.dumps(
+            {
+                "format": "mindroom-private-instance",
+                "version": 1,
+                "worker_key": worker_key,
+                "requester_id": requester_id,
+            },
+        ),
+        encoding="utf-8",
+    )
+    assert load_private_instance_identity(tmp_path, scope_root) == PrivateInstanceIdentity(worker_key, requester_id)
+
+    assert private_instances_for_agent(tmp_path, "secret", "user") == (PrivateInstance(scope_root / "secret", None),)
+
+    # A scope from an earlier release gains its owner at the requester's next turn.
+    ensure_private_instance_identity(tmp_path, worker_key=worker_key, requester_id=requester_id)
+    assert private_instances_for_agent(tmp_path, "secret", "user") == (
+        PrivateInstance(scope_root / "secret", requester_id),
+    )
+
+
 def test_private_instances_for_agent_without_instances_root(tmp_path: Path) -> None:
     """A storage root that never materialized a private instance has nothing to report."""
     assert private_instances_for_agent(tmp_path, "secret", "user") == ()

@@ -745,38 +745,31 @@ async def get_pending_schedule_thread_ids_for_room(
     )
 
 
-async def _scheduled_task_event_source(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    event_id: str,
-) -> dict[str, typing.Any]:
-    """Return the server-built task event a state read named, from current room state when that event is refused.
+async def _homeserver_returns_full_state_events(client: nio.AsyncClient, room_id: str) -> bool:
+    """Return whether the homeserver honours ``format=event``, proven on the room's never-changing create event.
 
-    An empty source means current room state holds no such task.
+    A server that ignores ``format=event`` answers both reads with the same content, which cannot hold itself
+    under ``content``.
     """
     try:
-        event_response = await client.room_get_event(room_id, event_id)
-        if isinstance(event_response, nio.RoomGetEventResponse):
-            return event_response.event.source
-        # History visibility can hide an event sent before this reader joined, but current room state still holds it.
-        state_response = await client.room_get_state(room_id)
+        full, bare = [
+            await client._send(
+                nio.RoomGetStateEventResponse,
+                "GET",
+                nio.Api._build_path(["rooms", room_id, "state", "m.room.create", ""], query),
+                response_data=("m.room.create", "", room_id),
+            )
+            for query in ({"format": "event"}, None)
+        ]
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        msg = f"Failed to get scheduled task {task_id!r} event {event_id!r} from room {room_id!r}"
+        msg = f"Failed to read the create event of room {room_id!r}"
         raise _ScheduledTaskStateReadError(msg) from exc
-    if not isinstance(state_response, nio.RoomGetStateResponse):
-        msg = f"Failed to get scheduled task {task_id!r} from the state of room {room_id!r}: {state_response}"
+    if not isinstance(full, nio.RoomGetStateEventResponse) or not isinstance(bare, nio.RoomGetStateEventResponse):
+        msg = f"Failed to read the create event of room {room_id!r}: {full} {bare}"
         raise _ScheduledTaskStateReadError(msg)
-    return next(
-        (
-            state_event
-            for state_event in state_response.events
-            if state_event.get("type") == _SCHEDULED_TASK_EVENT_TYPE and state_event.get("state_key") == task_id
-        ),
-        {},
-    )
+    return full.content.get("content") == bare.content
 
 
 async def _read_scheduled_task_state(
@@ -805,23 +798,17 @@ async def _read_scheduled_task_state(
         msg = f"Failed to get scheduled task {task_id!r} from room {room_id!r}: {response}"
         raise _ScheduledTaskStateReadError(msg)
     event = response.content
-    event_id = event.get("event_id")
-    if not isinstance(event_id, str) or not isinstance(event.get("content"), dict):
+    if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
         transport = response.transport_response
         error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
         msg = f"Scheduled task {task_id!r} in room {room_id!r} was not returned as a full state event ({error})"
         raise _ScheduledTaskStateReadError(msg)
-    # A server that ignores format=event returns the state content itself, whose author can shape it like an event,
-    # so the sender comes from a server-built event that state content cannot forge.
-    source = await _scheduled_task_event_source(client, room_id, task_id, event_id)
-    if (
-        source.get("type") != _SCHEDULED_TASK_EVENT_TYPE
-        or source.get("state_key") != task_id
-        or source.get("content") != event["content"]
-    ):
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} did not match its event {event_id!r}"
+    # A server that ignores format=event returns the state content itself, whose author can shape it like a
+    # bot-written event, so only a server proven to return whole events names the sender.
+    if not await _homeserver_returns_full_state_events(client, room_id):
+        msg = f"Scheduled task {task_id!r} in room {room_id!r} was read from a homeserver that ignores format=event"
         raise _ScheduledTaskStateReadError(msg)
-    return _runtime_authored_task_content(room_id, source, persisted_bot_user_ids(runtime_paths))
+    return _runtime_authored_task_content(room_id, event, persisted_bot_user_ids(runtime_paths))
 
 
 async def get_scheduled_task(

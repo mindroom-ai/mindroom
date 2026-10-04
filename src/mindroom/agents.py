@@ -17,9 +17,10 @@ from agno.run.team import TeamRunOutput
 import mindroom.tools  # noqa: F401
 from mindroom import agent_storage, constants, model_loading
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
-from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
+from mindroom.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, standard_cli_eligible, wrap_native_shell_window
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.job import JobTools
 from mindroom.entity_resolution import entity_identity_registry
@@ -1483,7 +1484,8 @@ def _initialize_agent_instance(**agent_kwargs: Any) -> Agent:  # noqa: ANN401
     )
     tool_hook_bridge = cast("Callable[..., Any] | None", agent_kwargs.pop("tool_hook_bridge", None))
     install_message_builder_patch()
-    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else Agent
+    cli_shell = agent_kwargs.pop("cli_shell")
+    agent_class = MinimalAgent if agent_kwargs.pop("agent_mode") == "minimal" else CliShellAgent if cli_shell else Agent
     agent = agent_class(**agent_kwargs)
     agent.knowledge_sources = knowledge_sources
     agent.tool_function_filter = tool_function_filter
@@ -1684,7 +1686,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - loaded and deferred tools
         except _MatrixRoomRuntimeToolCollisionError:
             raise
         except Exception as exc:
-            # One toolkit must never stop the agent, even when worker code broke the store it reads.
+            # One toolkit's construction failure must never stop the agent.
             if minimal_mode:
                 raise MinimalModeUnavailableError(
                     minimal_mode_failure_message(str(exc), agent_name, subagent=delegation_depth > 0),
@@ -1928,6 +1930,7 @@ def create_agent(
     eager_deferred_tools: bool = False,
     required_tool_names: tuple[str, ...] = (),
     agent_mode: AgentMode = "standard",
+    agent_cli_in_shell: bool = False,
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1971,6 +1974,8 @@ def create_agent(
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
         agent_mode: Operating mode frozen by the response owner; standard by default.
+        agent_cli_in_shell: Offer `mindroom-agent` inside standard shell commands when the shell can
+            reach MindRoom; only callers that bind the response turn to the agent pass True.
         required_tool_names: Authored toolkits needed by a saved approval. These
             augment this instance without changing the session's tool selection.
 
@@ -2103,12 +2108,17 @@ def create_agent(
             ),
         )
     )
+    # Approval rules hide generated functions, so prompts must not advertise skills whose functions are all hidden.
+    skill_functions_hidden = skills is not None and all(
+        tool_may_require_approval(config, function.name) for function in skills.get_tools()
+    )
+    prompt_skills = None if skill_functions_hidden else skills
     instructions = _build_agent_instructions(
         agent_name,
         agent_config,
         config,
         agent_runtime,
-        skills=skills,
+        skills=prompt_skills,
         session_id=session_id,
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,
@@ -2119,9 +2129,23 @@ def create_agent(
     )
 
     _log_toolkits_without_unique_model_functions(tool_assembly.tools, agent_name=agent_name)
+    # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
+    cli_shell = (
+        agent_cli_in_shell
+        and agent_mode == "standard"
+        and not disable_runtime_capabilities
+        and standard_cli_eligible(config, runtime_paths, agent_name, execution_identity)
+        and wrap_native_shell_window(tool_assembly.tools)
+    )
+    if cli_shell:
+        instructions = [*instructions, STANDARD_CLI_NOTE]
 
     entity_view = config.resolve_entity(agent_name)
-    knowledge_enabled = not disable_runtime_capabilities and knowledge is not None
+    knowledge_enabled = (
+        not disable_runtime_capabilities
+        and knowledge is not None
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+    )
     knowledge_sources = (
         knowledge_source_descriptions(knowledge) if knowledge_enabled and isinstance(knowledge, Knowledge) else ()
     )
@@ -2138,12 +2162,14 @@ def create_agent(
 
     agent = _initialize_agent_instance(
         agent_mode=agent_mode,
+        cli_shell=cli_shell,
         name=agent_config.display_name,
         id=agent_name,
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,
-        skills=skills,
+        # Minimal mode presents skill contents as context documents instead of through skill functions.
+        skills=skills if agent_mode == "minimal" else prompt_skills,
         instructions=instructions,
         additional_context=render_session_context(
             render_date_context(
@@ -2195,6 +2221,14 @@ def create_agent(
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
         )
+    if isinstance(agent, CliShellAgent):
+        agent.output_file_policy = _agent_tool_output_file_policy(
+            agent_runtime,
+            runtime_paths,
+            config.defaults.tool_output_auto_save_threshold_bytes,
+        )
+        agent.delegation_depth = delegation_depth
+        agent.refresh_scheduler = refresh_scheduler
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
     if background_tool_jobs_enabled(config, runtime_paths):

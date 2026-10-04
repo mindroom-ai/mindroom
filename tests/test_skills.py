@@ -7,7 +7,7 @@ import os
 import platform
 import threading
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -735,6 +735,20 @@ def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path
     assert listing.description == "alpha"
 
 
+def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path: Path) -> None:
+    """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
+    skill_dir = tmp_path / "aliased"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
+        encoding="utf-8",
+    )
+
+    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path])] == ["aliased"]
+    assert skills_module.resolve_skill_listing("aliased", [tmp_path]) is not None
+    assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
+
+
 def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp_path: Path) -> None:
     """Skills without YAML frontmatter should still resolve consistently."""
     skill_dir = tmp_path / "mindroom-dev"
@@ -956,6 +970,34 @@ def test_workspace_skills_stay_within_a_file_cap_and_a_total_budget(tmp_path: Pa
     assert any("budget" in entry["event"] for entry in warnings)
 
 
+def test_workspace_skills_that_fail_to_load_still_spend_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each SKILL.md is charged before it is parsed, so planted files cannot make one build parse without bound."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    for index in range(20):
+        broken = workspace_skills / f"broken-{index:02d}"
+        broken.mkdir()
+        (broken / "SKILL.md").write_text("---\n- not a mapping\n---\n" + "x" * (900 << 10), encoding="utf-8")
+    _write_skill(workspace_skills, "valid", "Sorted after every broken skill")
+    parse = skills_module._parse_skill_frontmatter
+    parsed_paths: set[str] = set()
+
+    def recording_parse(content: str, *, path: str, allow_missing: bool) -> tuple[dict[str, Any], str] | None:
+        parsed_paths.add(path)
+        return parse(content, path=path, allow_missing=allow_missing)
+
+    monkeypatch.setattr(skills_module, "_parse_skill_frontmatter", recording_parse)
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == []
+    assert len(parsed_paths) < 10
+    assert any("budget" in entry["event"] for entry in logs if entry["log_level"] == "warning")
+
+
 def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp_path: Path) -> None:
     """Descriptions reach every system prompt, so they are capped and counted with the rest of each skill."""
     storage, workspace_skills = _workspace_skills(tmp_path)
@@ -990,6 +1032,24 @@ def test_workspace_skill_frontmatter_with_yaml_aliases_is_refused(tmp_path: Path
 
     assert _skill_names(skills) == ["plain"]
     assert any("aliases" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
+
+
+def test_workspace_skill_frontmatter_nested_too_deep_is_refused(tmp_path: Path) -> None:
+    """The C composer recurses once per nesting level, so deep frontmatter is refused before it overflows the stack."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    _write_skill(workspace_skills, "plain", "Plain skill")
+    nested_dir = workspace_skills / "nested"
+    nested_dir.mkdir()
+    (nested_dir / "SKILL.md").write_text(
+        f"---\nname: nested\ndescription: Nested skill\nmetadata: {'[' * 100_000}{']' * 100_000}\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    with capture_logs() as logs:
+        skills = _load_workspace_only(tmp_path, storage)
+
+    assert _skill_names(skills) == ["plain"]
+    assert any("nest" in str(entry.get("error", "")) for entry in logs if entry["log_level"] == "warning")
 
 
 @pytest.mark.parametrize("oversized", ["names", "scripts"])

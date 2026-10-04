@@ -122,7 +122,8 @@ if TYPE_CHECKING:
 
 # Keep synchronized with todo_poke._SAFE_ASSIGNEE_PATTERN without importing runtime tools into config.
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
-_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user"})
+# "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
+_RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
     {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
 )
@@ -1994,21 +1995,18 @@ class Config(BaseModel):
     ) -> ResolvedRuntimeModel:
         """Resolve the active runtime model plus its configured context window.
 
-        Precedence: explicit `active_model_name`, persisted thread override,
-        persisted room override, configured room override, then authored entity model.
+        Precedence: explicit `active_model_name`, persisted thread override for
+        the entities its setter may address, persisted room override,
+        configured room override, then authored entity model.
         """
         resolved_model_name = active_model_name
         if resolved_model_name is None and thread_id is not None:
             if runtime_paths is None:
                 msg = "runtime_paths are required to resolve a thread-specific runtime model"
                 raise ValueError(msg)
-            thread_override = resolve_thread_model_override(
-                runtime_paths,
-                thread_id,
-                configured_models=self.models,
-            ).active
-            if thread_override is not None:
-                resolved_model_name = thread_override
+            thread_overrides = resolve_thread_model_override(runtime_paths, thread_id, config=self).active
+            if entity_name is not None:
+                resolved_model_name = thread_overrides.get(entity_name)
         if resolved_model_name is None:
             if entity_name is None:
                 resolved_model_name = default_model_name

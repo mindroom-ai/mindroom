@@ -18,7 +18,7 @@ Existing deployments moving from the previous Nio integration must follow the [N
 | [Approved Egress](approved-egress.md) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
 | Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
 | [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
-| [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
+| [Kubernetes](kubernetes.md) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
 | [Trusted upstream browser auth](trusted-upstream-auth.md) | Hosted private agents behind an authenticated access layer |
 | Direct | Development, simple setups |
 

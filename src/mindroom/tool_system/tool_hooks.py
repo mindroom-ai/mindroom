@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterator
+    from concurrent.futures import Executor
 
     from agno.tools import Toolkit
     from agno.tools.function import Function
@@ -93,8 +94,14 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class SyncToolCompletionTracker:
-    """Expose one context-bound synchronous leaf task to its resource owner."""
+    """Expose one context-bound synchronous leaf task to its resource owner.
 
+    ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
+    An owner that supplies an executor also runs and retains the blocking call an async
+    entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
+    """
+
+    executor: Executor | None = None
     task: asyncio.Task[_ToolHookResult] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
@@ -420,10 +427,11 @@ def _resolve_deferred_sync_result(result: _ToolHookResult) -> _ToolHookResult:
     return result
 
 
-async def _run_sync_tool_entrypoint(
+async def run_sync_tool_entrypoint(
     entrypoint: Callable[..., _ToolHookResult],
     arguments: dict[str, Any],
 ) -> _ToolHookResult:
+    """Run one synchronous tool entrypoint off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
 
     def invoke() -> _ToolHookResult:
@@ -431,10 +439,11 @@ async def _run_sync_tool_entrypoint(
             raise asyncio.CancelledError
         return entrypoint(**arguments)
 
-    task = asyncio.create_task(
-        asyncio.to_thread(invoke),
-        name="sync-tool-entrypoint",
-    )
+    async def offload() -> _ToolHookResult:
+        executor = tracker.executor if tracker is not None else None
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, invoke)
+
+    task = asyncio.create_task(offload(), name="sync-tool-entrypoint")
     if tracker is None:
         return await task
     tracker.track(task)
@@ -446,10 +455,26 @@ async def _run_sync_tool_entrypoint(
         raise
 
 
+async def run_async_entrypoint_blocking_call(
+    call: Callable[[], _ToolHookResult],
+    *,
+    executor: Executor,
+) -> _ToolHookResult:
+    """Run one blocking call that an async entrypoint offloads to ``executor``.
+
+    A completion owner with its own executor runs and retains the call there like a synchronous
+    entrypoint; other callers keep prompt cancellation and leave the thread to finish alone.
+    """
+    tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    if tracker is None or tracker.executor is None:
+        return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, call)
+    return await run_sync_tool_entrypoint(call, {})
+
+
 agno_compat_tool_hooks.install_patch(
     resolve_sync_result=_resolve_deferred_sync_result,
     resolve_async_result=_resolve_async_tool_hook_result,
-    run_sync_entrypoint=_run_sync_tool_entrypoint,
+    run_sync_entrypoint=run_sync_tool_entrypoint,
     has_completion_tracker=lambda: _SYNC_TOOL_COMPLETION_TRACKER.get() is not None,
 )
 
@@ -472,7 +497,7 @@ async def _call_tool(
     if async_entrypoint:
         result = await func(**args)
     else:
-        result = await _run_sync_tool_entrypoint(func, args)
+        result = await run_sync_tool_entrypoint(func, args)
     if inspect.isawaitable(result):
         return await result
     return result

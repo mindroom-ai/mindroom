@@ -14,6 +14,7 @@ import pytest_asyncio
 
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest, DesktopShellResult
 from mindroom.desktop.shell_prompt import (
+    _describe_pending_request,
     _escape_terminal_text,
     _parse_shell_approval,
     _ShellApprovalChoice,
@@ -95,7 +96,7 @@ def terminal() -> Iterator[tuple[int, int]]:
 @pytest_asyncio.fixture
 async def shell() -> AsyncIterator[DesktopShell]:
     """Run real, harmless commands only after the approver's decision."""
-    local_shell = DesktopShell(environment={"PATH": os.defpath})
+    local_shell = DesktopShell(environment={"PATH": os.environ["PATH"]})
     try:
         yield local_shell
     finally:
@@ -156,6 +157,34 @@ def test_request_text_escapes_every_space_except_the_ascii_space() -> None:
         _escape_terminal_text("ls #\u034f\u180b\ufe0f\U000e0100\U0001d159x")
         == "ls #\\u034f\\u180b\\ufe0f\\U000e0100\\U0001d159x"
     )
+
+
+def test_request_text_flags_non_ascii_look_alikes_and_shows_each_such_field_escaped() -> None:
+    """Look-alike letters and punctuation read as ASCII, so non-ASCII request text adds a warning and escaped copies."""
+
+    def describe(command: str, agent: str = "assistant", cwd: str = "/Users/test") -> str:
+        pending = {
+            "request_id": "request-1",
+            "requester_id": "@person:example.org",
+            "agent_name": agent,
+            "cwd": cwd,
+            "command": command,
+            "expires_at_ms": 0,
+        }
+        return _describe_pending_request(pending, now=0)
+
+    spoofed = describe("curl https://\u0430\u0440\u0440\u04cf\u0435.com/x")
+    assert "  Command: curl https://\u0430\u0440\u0440\u04cf\u0435.com/x\n" in spoofed
+    assert "non-ASCII characters that can look like ASCII" in spoofed
+    assert "  Command: curl https://\\u0430\\u0440\\u0440\\u04cf\\u0435.com/x\n" in spoofed
+    assert "look like ASCII" in describe("curl https://apple\u2024com/x")
+    assert "look like ASCII" not in describe("curl https://apple.com/x")
+    # The escaped copy shows the field that holds the non-ASCII text, not an unchanged ASCII command.
+    look_alike_agent = describe("ls", agent="\u0430ssistant")
+    assert "  Agent: \\u0430ssistant\n" in look_alike_agent
+    assert "  Command: ls\n" in look_alike_agent
+    assert "  ls\n" not in look_alike_agent
+    assert "  Working directory: /Users/test/Caf\\xe9\n" in describe("ls", cwd="/Users/test/Caf\u00e9")
 
 
 @pytest.mark.asyncio

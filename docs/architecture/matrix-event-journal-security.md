@@ -121,6 +121,21 @@ A file that cannot be read settles the debt as a plain text message holding the 
 
 Keeping the debt instead would let anyone who can post make every strict read of that conversation download the file and fail.
 
+Because anyone who can post can make every message in a thread name one large file, a conversation read loads at most 16 MiB of stored content, newest messages first.
+
+Decoding stored JSON can take about 10 times its size in memory for a list of short strings or numbers, and about 45 times for nested empty containers.
+So a page also stops once its estimated decoded size passes 64 MiB, counting its bytes plus 96 bytes per JSON array, 192 per JSON object and 56 per comma or colon.
+
+A page that reaches that budget ends early with a cursor, so readers treat the messages behind it as history the page does not hold, as they do past the row limit.
+Such a thread loses what needs its complete history, as one past the row limit does: untagged continuation in rooms with several responders, thread summaries, and mid-turn judgment.
+
+A page always keeps at least one message, even when that message alone is over the budget.
+
+A message still waiting for its file costs that budget nothing, so a strict read refetches the waiting messages newest first and stops once what it stored passes 16 MiB.
+Without that stop, one read would download and store every file the waiting messages name, even when they all name one large file.
+The page then ends at or before the last message refetched, and the waiting messages behind it are refetched only when a reader asks for that history.
+This stop bounds stored content, not downloads: a file that cannot be read settles its message to the preview and a notice, so each waiting message that names such a file still costs one download.
+
 ## Edits
 
 An edit is applied only when its sender matches the sender already recorded on the visible row, compared through that row's inline `sender` column.
@@ -151,9 +166,18 @@ A point refetch is refused if the revision it chose has since been tombstoned, w
 
 A refetch is also refused if the content it returns still holds a sidecar preview, because installing it would satisfy the debt with the very text the debt was raised about.
 
+A refetch ignores relations it cannot read unless their cleartext relation makes them the original sender's edit of the message, because no other relation can replace what is on screen.
+
+When such an edit cannot be read and is newer than every readable revision, the refetch installs the newest readable revision with a notice that a later edit could not be read.
+
+Keeping the debt instead would let the edit's sender make every strict read of that conversation fail for as long as the edit stays unreadable.
+
+When the screen held an edit and the relation walk stops at its event ceiling before finding any edit by the original sender, the refetch installs the original with the same notice, because other members' relations can push the sender's surviving edits past the ceiling.
+
 Membership fencing deliberately does not sweep up pending redactions along with unanswerable turns, because a redaction still owes real cleanup in durable turn and session state, and settling it silently would let redacted content survive in later context.
 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
+An event for which no turn has recorded a room is tombstoned in the turn ledger only when the journal admitted it in the redaction's room, so a redaction cannot mark another room's event as handled, even before the bot sees it there.
 
 ## Membership
 

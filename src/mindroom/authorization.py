@@ -9,7 +9,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any
 
 from mindroom.access_policy import resolve_responder_access
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.dispatch_source import source_kind_allows_trusted_original_sender, source_kind_from_content
 from mindroom.entity_resolution import (
     MissingManagedEntityAccountError,
@@ -24,7 +24,11 @@ from mindroom.matrix.room_membership import (
     ensure_room_membership_synced,
     room_membership_is_complete,
 )
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -333,6 +337,21 @@ def filter_responders_by_sender_permissions(
     return result
 
 
+def addressable_responder_names(
+    sender_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+) -> tuple[str, ...]:
+    """Return every configured agent, team, and the router that *sender_id* may converse with in *room_id*."""
+    return tuple(
+        entity_name
+        for entity_name in (*config.agents, *config.teams, ROUTER_AGENT_NAME)
+        if is_sender_allowed_for_responder(sender_id, entity_name, room_id, config, runtime_paths, membership_index)
+    )
+
+
 def _available_responders_from_member_ids(
     member_ids: Iterable[str],
     config: Config,
@@ -393,6 +412,22 @@ async def _get_available_responders_for_sender_authoritative(
     """
     await ensure_room_membership_synced(client, room, sender_id=sender_id)
     return _get_available_responders_for_sender(room, sender_id, config, runtime_paths, membership_index)
+
+
+async def is_requester_joined_to_room(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether a requester, under any of its bridge aliases, is a joined member of the room.
+
+    Invited members do not count, and membership that cannot be refreshed counts as absent.
+    """
+    if not await ensure_room_membership_synced(client, room, sender_id=requester_id):
+        return False
+    return not cached_joined_member_ids(room).isdisjoint(equivalent_requester_ids(requester_id, config, runtime_paths))
 
 
 @dataclass(frozen=True)

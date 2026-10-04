@@ -25,7 +25,7 @@ from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.message_target import MessageTarget
@@ -310,7 +310,16 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
-        calls=(ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),),
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
         request_body=prompt,
         show_tool_calls=show_tool_calls,
         continuation_count=2 if outcome == "immediate_pause" else 0,
@@ -391,7 +400,16 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
             continuation_count=result.continuation_count,
             response_text=result.response_text,
             response_tool_trace=serialize_tool_trace(result.tool_trace, include_internal=True),
-            calls=(ApprovalCall("sleeper", "sleep", "general", 2**62, toolkit_name="sleep"),),
+            calls=(
+                ApprovalCall(
+                    "sleeper",
+                    "sleep",
+                    "general",
+                    2**62,
+                    toolkit_name="sleep",
+                    arguments_digest=approval_arguments_digest({"seconds": 0}),
+                ),
+            ),
         )
         result = await resume()
     if outcome == "pause_limit":
@@ -688,7 +706,16 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         response_event_id="$waiting",
         sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
-        calls=(ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),),
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
         request_body="Add, then keep going.",
         response_text=saved.response_text,
         response_tool_trace=serialize_tool_trace(saved.tool_trace, include_internal=True),

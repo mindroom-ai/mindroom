@@ -7,10 +7,14 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from pydantic.json_schema import GenerateJsonSchema, JsonDict
 from pydantic_core import core_schema
 
-from mindroom.redaction import REDACTED, redact_sensitive_data, redact_sensitive_text
+from mindroom.redaction import REDACTED, redact_config_text, redact_sensitive_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# Display redaction shows a URL password as ``user:***@host`` instead of the marker.
+# The username may itself contain ``@``, so match anywhere in the authority.
+_MASKED_URL_USERINFO = re.compile(r"://[^/?#\s]*\*\*\*@")
 
 # The dashboard's configSchema.ts mirrors these kinds and the hint key.
 type _ReferenceKind = Literal["model", "agent", "room", "tool"]
@@ -162,18 +166,18 @@ def _redact_value_for_display(
             return [_redact_for_display(item, items, defs) for item in value]
         return redact_sensitive_data(value)
     if isinstance(value, str):
-        return redact_sensitive_text(value)
+        return redact_config_text(value)
     return value
 
 
 def redaction_marker_location(value: object) -> tuple[str, ...] | None:
-    """Return the key path to the first string holding the display redaction marker, or None.
+    """Return the key path to the first string holding the redaction marker or a masked URL password, or None.
 
     Writers reject such values: they are copies of redacted output, and saving
-    them would replace the hidden real value with the marker.
+    them would replace the hidden real value with the mask.
     """
     if isinstance(value, str):
-        return () if REDACTED in value else None
+        return () if REDACTED in value or _MASKED_URL_USERINFO.search(value) else None
     if isinstance(value, Mapping):
         entries = [(str(key), item) for key, item in value.items()]
     elif isinstance(value, list):

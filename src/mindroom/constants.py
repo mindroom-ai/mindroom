@@ -686,8 +686,7 @@ def trusted_tool_runtime_env_values(
 
 def _execution_tool_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the stricter env visible to sandbox-proxied execution tools."""
-    process_env = runtime_env_policy.execution_tool_runtime_env(runtime_paths.process_env)
-    env_file_values = runtime_env_policy.execution_tool_runtime_env(runtime_paths.env_file_values)
+    process_env, env_file_values = _isolated_runtime_env_layers(runtime_paths)
     merged_env = dict(env_file_values)
     merged_env.update(process_env)
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
@@ -936,6 +935,15 @@ def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "tracking"
 
 
+def primary_records_dir(state_root: Path, runtime_paths: RuntimePaths) -> Path:
+    """Map a canonical state root to the primary-only directory for the records the primary trusts about it.
+
+    The Kubernetes sandbox runner sidecar mounts `agents` and `private_instances` read-write,
+    so these records keep the state root's storage-relative path below the tracking directory, which no worker mounts.
+    """
+    return tracking_dir(runtime_paths) / state_root.relative_to(runtime_paths.storage_root.expanduser().resolve())
+
+
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
@@ -1066,7 +1074,7 @@ def _find_config(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
-# The human an entity's reply was written for; entities it mentions act for that human.
+# The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
 ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
@@ -1106,6 +1114,7 @@ DURABLE_FINAL_OUTCOME_VERSION = 2
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
+EARLIER_TOOL_TRACE_CONTENT_KEY = "io.mindroom.earlier_tool_trace"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
 STREAM_STATUS_APPROVAL_PENDING = "approval_pending"

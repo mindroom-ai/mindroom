@@ -73,7 +73,7 @@ def test_synapse_instructions_restart_selected_instance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Copying the restart hint must keep the bridge owner's instance selected."""
+    """Copying the restart hint must keep the bridge owner's instance selected, and Synapse must load the bridge's directory."""
     synapse_dir = tmp_path / "synapse"
     synapse_dir.mkdir()
     (synapse_dir / "homeserver.yaml").write_text("server_name: m-alpha.example.com\n")
@@ -89,6 +89,8 @@ def test_synapse_instructions_restart_selected_instance(
 
     output = bridge_manager.console.export_text()
     assert "./deploy.py restart alpha --only-matrix" in output
+    homeserver = yaml.safe_load((synapse_dir / "homeserver.yaml").read_text())
+    assert homeserver["app_service_config_files"] == ["/data/bridges/telegram/registration.yaml"]
 
 
 @pytest.mark.parametrize("operation", ["write", "protect", "register"])
@@ -210,6 +212,31 @@ def test_added_bridge_grants_admin_only_to_the_designated_operator(
     assert config_file.stat().st_mode & 0o777 == 0o600
     registry = (tmp_path / "bridge_instances.json").read_text()
     assert all(value not in registry for value in credential_args[1::2])
+
+
+def test_added_bridge_register_hint_parses_for_selected_instance(
+    bridge_manager: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The copied next-step command must use a valid bridge type and the selected instance."""
+    result = _add_bridge(
+        bridge_manager,
+        tmp_path,
+        monkeypatch,
+        "telegram",
+        *_BRIDGE_CREDENTIAL_ARGS["telegram"],
+        "--admin",
+        _BRIDGE_ADMIN,
+    )
+
+    assert result.exit_code == 0, result.output
+    output = bridge_manager.console.export_text()
+    hint = next(line.strip() for line in output.splitlines() if line.strip().startswith("./bridge.py register "))
+    command = get_command(bridge_manager.app).commands["register"]
+    with command.make_context("register", shlex.split(hint)[2:]) as context:
+        assert context.params["bridge_type"] == bridge_manager.BridgeType.TELEGRAM
+        assert context.params["instance"] == "alpha"
 
 
 def test_bridge_add_rejects_an_admin_that_is_not_a_matrix_user_id(

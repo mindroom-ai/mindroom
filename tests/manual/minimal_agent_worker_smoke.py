@@ -32,7 +32,6 @@ import yaml
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agent_cli.worker_protocol import CLI_PRIVATE_ROOT_PATH
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_storage import create_session_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry
@@ -45,6 +44,7 @@ from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import shutdown_primary_worker_manager
@@ -169,7 +169,8 @@ def cleanup_containers(client, prefix, audit) -> bool:
         if not container.name.startswith(prefix):
             continue
         try:
-            audit.capture("cleanup-container", container.id + ":" + container.name, container.logs())
+            # Ordinary workers outlive their responses, so their logs are captured here.
+            audit.capture("worker", container.id + ":" + container.name, container.logs())
         except Exception as exc:
             audit.errors.append(exc)
         finally:
@@ -243,26 +244,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             },
         )
         primary_url = f"http://{_ip(primary)}:8080"
-        gateway_conf = data / "gateway.conf"
-        gateway_conf.write_text(
-            "events {}\nhttp { access_log off; server { listen 8080;\n"
-            "location = /api/agent-cli/operations { if ($request_method != POST) { return 405; } proxy_pass "
-            + primary_url
-            + "; }\n"
-            "location ~ ^/api/agent-cli/calls/[a-zA-Z0-9_-]+$ { if ($request_method != GET) { return 405; } proxy_pass "
-            + primary_url
-            + "; }\n"
-            "location / { return 404; } } }\n",
-        )
-        gateway = client.containers.run(
-            "nginx:1.28-alpine",
-            name=f"{prefix}-gateway",
-            detach=True,
-            volumes={
-                str(gateway_conf): {"bind": "/etc/nginx/nginx.conf", "mode": "ro"},
-            },
-        )
-        gateway_url = f"http://{_ip(gateway)}:8080"
+        # Like `mindroom run`, record where the API is served; workers reach it there.
+        set_api_server_address(_ip(primary), 8080)
         plugin_dir = data / "plugin"
         plugin_dir.mkdir()
         (plugin_dir / "mindroom.plugin.json").write_text(
@@ -283,7 +266,6 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             storage_path=data / "state",
             process_env={
                 "MINDROOM_API_KEY": admin,
-                "MINDROOM_AGENT_CLI_GATEWAY_URL": gateway_url,
                 "MINDROOM_AGENT_CLI_PRIMARY_URL": primary_url,
                 "MINDROOM_WORKER_BACKEND": "docker",
                 "MINDROOM_SANDBOX_PROXY_TOKEN": control,
@@ -320,16 +302,15 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             assert paused.cli_call["function"] == "approved"
             assert paused.cli_call["arguments"] == {"value": "exact value"}
             approvals.append(paused.cli_call["call_id"])
-            owner = registry._owners[0]
-            lease = owner._worker
-            worker = client.containers.get(lease.handle.debug_metadata["container_id"])
-            audit.expected_workers.add(worker.id)
-            worker.reload()
-            assert all(secret not in json.dumps(worker.attrs) for secret in secret_values)
-            assert all(
-                not Path(CLI_PRIVATE_ROOT_PATH).is_relative_to(Path(mount["Destination"]))
-                for mount in worker.attrs["Mounts"]
+            token = registry._owners[0].shell_env.token
+            # Minimal Bash runs in the agent's ordinary worker, the only one running yet.
+            (worker,) = (
+                container
+                for container in client.containers.list(filters={"name": prefix})
+                if container.name != f"{prefix}-primary"
             )
+            audit.expected_workers.add(worker.id)
+            assert all(secret not in json.dumps(worker.attrs) for secret in secret_values)
             scan = await asyncio.to_thread(
                 worker.exec_run,
                 [
@@ -339,10 +320,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 ],
             )
             assert not any(secret.encode() in scan.output for secret in secret_values)
-            token_result = await asyncio.to_thread(worker.exec_run, ["cat", f"{CLI_PRIVATE_ROOT_PATH}/capability"])
-            assert token_result.exit_code == 0
-            token = token_result.output.decode().strip()
-            assert token
+            # The grant travels with each command, never in the worker's own environment or files.
             assert token.encode() not in scan.output
             tokens.append(token)
             secret_values.append(token)
@@ -357,7 +335,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 missing = await probe.get(f"/api/agent-cli/calls/{uuid4()}", headers=headers)
                 assert missing.status_code == 401
             results["steps"].append(
-                "real worker mount/env credential scan; private token mount; forged selector and wrong call ID rejected",
+                "ordinary worker env/file credential scan; grant only in commands; forged selector and wrong call ID rejected",
             )
             return tuple(
                 apply_exact_approval_decisions(
@@ -414,7 +392,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         }
 
         async def respond(prompt):
-            mode = resolve_agent_mode(state_root, "helper", runtime.session_id)
+            mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
                 return await ai.ai_response(
                     replace(_turn_context(), session_id=runtime.session_id, agent_mode=mode, run_id=None),
@@ -436,8 +414,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                 "set -e",
                 "mindroom-agent tools list",
                 "mindroom-agent tools describe parity integration",
-                'test -r "$MINDROOM_AGENT_CLI_TOKEN_PATH"',
-                f'case "$MINDROOM_AGENT_CLI_TOKEN_PATH" in {CLI_PRIVATE_ROOT_PATH}/*) ;; *) exit 31;; esac',
+                'test -n "$MINDROOM_AGENT_CLI_TOKEN"',
+                f'test "$MINDROOM_AGENT_CLI_URL" = "{primary_url}"',
                 'test -z "${OPENAI_API_KEY:-}${MINDROOM_API_KEY:-}${MINDROOM_SANDBOX_PROXY_TOKEN:-}"',
                 _call("parity", "integration", {"digest": hashlib.sha256(provider_key.encode()).hexdigest()}),
                 _call("parity", "approved", {"value": "exact value"}),
@@ -492,7 +470,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         assert any(tool["function"]["name"] == "read_file" for tool in final_request["tools"])
         assert len(storage.get_session(runtime.session_id).runs) == 3
         results["steps"].append("standard mode reads identical workspace note and prior history")
-        # The standard parent runs a minimal copy of itself, which uses the real CLI in its own worker.
+        # The standard parent runs a minimal copy of itself, which uses the real CLI in the same ordinary worker.
         provider.steps = [
             [("run_subagent", {"agent_name": "helper", "task": "List your tools", "minimal": True})],
             [("bash", {"command": "mindroom-agent tools list"})],
@@ -516,7 +494,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         assert "approved" not in listing, listing
         assert "minimal child done" in str(parent_final["messages"])
         results["steps"].append(
-            "minimal subagent: Bash-only child lists tools through its own worker without gated ones",
+            "minimal subagent: Bash-only child lists tools through the agent's worker without gated ones",
         )
         audit.capture("provider", "all-sdk-requests", json.dumps(provider.requests, indent=2, default=str))
         audit.capture(
@@ -532,6 +510,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             storage.close if "storage" in locals() else lambda: None,
             shutdown_primary_worker_manager,
             patch.undo,
+            clear_api_server_address,
         ):
             try:
                 operation()

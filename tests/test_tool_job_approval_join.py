@@ -25,7 +25,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -151,7 +151,16 @@ async def test_native_approval_leaves_running_work_for_its_message_to_hold(  # n
         actor = Team(id="leader", model=model, members=[member], db=storage, telemetry=False)
     else:
         actor = member
-    approval_calls = (ApprovalCall("approved-call", "add", "leader", 2**62, toolkit_name="calculator"),)
+    approval_calls = (
+        ApprovalCall(
+            "approved-call",
+            "add",
+            "leader",
+            2**62,
+            toolkit_name="calculator",
+            arguments_digest=approval_arguments_digest({"wait_timeout": wait_timeout}),
+        ),
+    )
     pending = None
     try:
         with tool_runtime_context(context), reply_boundary_report(report):

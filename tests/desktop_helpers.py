@@ -239,7 +239,7 @@ def selected_root(tmp_path: Path) -> Path:
 
 
 def _local_shell() -> DesktopShell:
-    return DesktopShell(environment={"PATH": os.defpath}, clock=lambda: NOW_SECONDS)
+    return DesktopShell(environment={"PATH": os.environ["PATH"]}, clock=lambda: NOW_SECONDS)
 
 
 def _root_id(filesystem: DesktopFilesystem) -> str:

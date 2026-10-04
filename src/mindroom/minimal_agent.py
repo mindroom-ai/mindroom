@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from agno.tools.function import Function
@@ -12,17 +10,13 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
-from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
-from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_cli.worker import open_configured_cli_worker
-from mindroom.agent_cli.worker_protocol import SHELL_OPERATION_NAMES, CliShellSettings
+from mindroom.agent_cli.response_owner import bind_response_owner
+from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
-from mindroom.approval_tools import authorize_prepared_tool_call
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tools.shell import ShellRuntimeSettings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,7 +28,6 @@ if TYPE_CHECKING:
 
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
 
 
@@ -114,7 +107,7 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
         session: AgentSession,  # noqa: ARG002 - pure SDK inspection
         user_id: str | None = None,  # noqa: ARG002 - pure SDK inspection
     ) -> list[Any]:
-        """Pure presentation for synchronous prompt inspection; never bind a worker."""
+        """Pure presentation for synchronous prompt inspection; never issue a grant."""
         return [MinimalBashTools()]
 
     @staticmethod
@@ -254,60 +247,18 @@ class MinimalAgent(KnowledgeToolDescribingAgent):
             if self.output_file_policy is None:
                 msg = "Minimal Bash requires a canonical agent workspace"
                 raise RuntimeError(msg)  # noqa: TRY301 - shared failed-preparation cleanup
-            shell_toolkits = (
-                [tool for tool in self.tools if isinstance(tool, ShellRuntimeSettings)]
-                if isinstance(self.tools, list)
-                else []
+            owner = bind_response_owner(
+                catalog,
+                runtime=runtime,
+                lifetime=lifetime,
+                response_context=self.response_context,
+                run_id=run_context.run_id,
+                context_documents=self.context_documents,
+                output_file_policy=self.output_file_policy,
+                delegation_depth=self.delegation_depth,
+                refresh_scheduler=self.refresh_scheduler,
+                failure_message=self._failure_message,
             )
-            if len(shell_toolkits) != 1:
-                msg = "Canonical shell is missing its effective runtime settings"
-                raise TypeError(msg)  # noqa: TRY301 - shared failed-preparation cleanup
-            shell_settings = CliShellSettings(
-                workspace=str(self.output_file_policy.workspace_root),
-                shell_path_prepend=shell_toolkits[0].shell_path_prepend,
-                output_max_bytes=self.output_file_policy.max_bytes,
-                output_auto_save_threshold_bytes=self.output_file_policy.auto_save_threshold_bytes,
-            )
-            expected_target = runtime.resolve_worker_target()
-            bindings: dict[tuple[int, ToolKey], PreparedAgentToolBinding] = {}
-
-            async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
-                assert owner is not None
-                current = owner.catalog
-                if current.runtime_context.current_config != current.runtime_context.config:
-                    msg = self._failure_message("Current configuration no longer permits this CLI catalog")
-                    raise PermissionError(msg)  # noqa: TRY301 - callback runs after preparation
-                cache_key = (id(current), key)
-                binding = bindings.get(cache_key)
-                if binding is None:
-                    binding = await current.bind(key)
-                    bindings[cache_key] = binding
-                await authorize_prepared_tool_call(binding, expected_worker_target=expected_target)
-
-            owner = lifetime.owner
-            if owner is None:
-                worker = await lifetime.enter_worker(open_configured_cli_worker(runtime))
-                owner = LiveTurnTools(
-                    cli_turn_owner(
-                        runtime,
-                        replace(self.response_context, run_id=run_context.run_id),
-                        worker_id=worker.handle.worker_id,
-                    ),
-                    catalog=catalog,
-                    worker=worker,
-                    authorize=authorize,
-                    context=self.context_documents,
-                    output_file_policy=self.output_file_policy,
-                    delegation_depth=self.delegation_depth,
-                    refresh_scheduler=self.refresh_scheduler,
-                )
-                lifetime.register(owner, runtime.orchestrator.agent_cli_registry)
-                now = time.time_ns()
-                lifetime.grant_expires_at_ns = now + MAX_CLI_GRANT_LIFETIME_NS
-                grant = owner.issue(now_ns=now, expires_at_ns=lifetime.grant_expires_at_ns)
-                await worker.install_grant(owner, grant, shell=shell_settings)
-            else:
-                owner.bind_catalog(catalog, context=self.context_documents)
 
             def prepared(function: Function) -> None:
                 lifetime.bind_provider(owner.checkpoint, function)

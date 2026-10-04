@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
+from agno.tools.function import Function
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
@@ -120,6 +121,13 @@ class DelegateTools(Toolkit):
         )
         delegate_function = self.async_functions["run_subagent"]
         delegate_function.description = self._build_run_subagent_description()
+        if not self._minimal_targets:
+            # Offer no option that no allowed subagent can honor. Agno keeps explicitly set
+            # parameters when it later processes the entrypoint, so derive them once here.
+            derived = Function(name="run_subagent", entrypoint=self.run_subagent)
+            derived.process_entrypoint()
+            properties = {name: value for name, value in derived.parameters["properties"].items() if name != "minimal"}
+            delegate_function.parameters = {**derived.parameters, "properties": properties}
         for function in self.async_functions.values():
             function.pre_hook = _capture_direct_delegation_provenance
             function.post_hook = _clear_direct_delegation_provenance

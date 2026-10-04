@@ -226,7 +226,7 @@ Private agents store the choice separately for each requester.
 Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
 
 You must be authorized to use the named agent.
-Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and a supported dedicated Docker worker deployment.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and MindRoom's API server, reachable from wherever the agent's shell runs.
 When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
 See [deployment requirements](tools/agent-cli.md#deployment-requirements).
 If shell permissions or deployment settings later change, minimal responses fail closed.
@@ -234,7 +234,7 @@ Run `!mode helper standard` or `!mode helper reset` in the same conversation to 
 
 ### `!model`
 
-Show or switch the model that every agent, team, and the router uses in the current thread.
+Show or switch the model that the agents, teams, and router you may address use in the current thread.
 
 ```
 !model
@@ -243,7 +243,11 @@ Show or switch the model that every agent, team, and the router uses in the curr
 !model reset
 ```
 
-`!model` and `!model list` show the current override and the available model names.
+The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
+`!model reset` likewise removes the override only for the entities you may address.
+
+`!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
 Model names come from the `models:` section of `config.yaml`.
 The override applies from the next message in the thread and survives restarts.
 Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.
@@ -333,6 +337,7 @@ Changes are validated against the Pydantic config schema before applying.
 Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
 Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
 Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 
 **Modify configuration:**
 
@@ -361,9 +366,9 @@ When you use `!config set`, MindRoom:
 Only the user who requested the change can confirm or cancel it.
 Pending changes are persisted in Matrix room state and survive restarts.
 Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
-It stores the new value only when redaction leaves that value unchanged.
-`!config set` refuses a value containing the `***redacted***` marker, which only appears in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
-A new value that redaction masks is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
+It stores the new value only when redaction leaves that value unchanged and room state can carry it, which rules out decimal numbers and integers beyond 2^53 - 1.
+Any other new value is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
+`!config set` refuses a value containing the `***redacted***` marker or a URL password masked as `user:***@host`, which only appear in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
 Unconfirmed changes expire after 24 hours.
 
 Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.

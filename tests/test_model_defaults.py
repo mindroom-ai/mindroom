@@ -252,9 +252,29 @@ def test_openai_presets_use_current_models() -> None:
     )
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["codex"] == model_defaults.ModelPreset(
         "codex",
-        "gpt-6-astra",
+        "gpt-6.1-sol",
         258_000,
+        reasoning_effort="medium",
+        display_name="Sol",
     )
+    assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"]) == {
+        "astra": model_defaults.ModelPreset(
+            "codex",
+            "gpt-6-astra",
+            258_000,
+            reasoning_effort="medium",
+            display_name="Astra",
+        ),
+        "luna": model_defaults.ModelPreset("codex", "gpt-6-luna", 258_000, reasoning_effort="low", display_name="Luna"),
+    }
+    assert model_defaults.CONFIG_INIT_HELPER_MODELS["codex"] == "luna"
+    assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"])["luna"].to_config_dict() == {
+        "provider": "codex",
+        "id": "gpt-6-luna",
+        "display_name": "Luna",
+        "context_window": 258_000,
+        "extra_kwargs": {"reasoning_effort": "low"},
+    }
     assert openai_alternatives == {
         "openai_sol": model_defaults.ModelPreset("openai", "gpt-6-sol", 1_050_000),
         "openai_luna": model_defaults.ModelPreset("openai", "gpt-6-luna", 1_050_000),

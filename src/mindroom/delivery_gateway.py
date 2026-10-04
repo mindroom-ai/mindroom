@@ -79,7 +79,7 @@ from mindroom.matrix_delivery import (
     SendDelivery,
     TurnHandoff,
 )
-from mindroom.requester_identity import is_human_requester_id
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
@@ -1716,6 +1716,8 @@ class DeliveryGateway:
             }
 
         if request.existing_event_id is not None:
+            # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
+            delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
             edited = await self.edit_text(
                 EditTextRequest(
                     target=request.target,
@@ -2054,9 +2056,9 @@ class DeliveryGateway:
             return await self._deliver_stream(request)
 
     def _acting_requester_content(self, identity: ResponseIdentity) -> dict[str, str]:
-        """Name a human requester on the reply, so entities it mentions act for that human."""
+        """Name a human or bot-account requester on the reply, so entities it mentions act for that requester."""
         requester_id = identity.response_envelope.requester_id
-        if not is_human_requester_id(requester_id, self.deps.runtime.config, self.deps.runtime_paths):
+        if not is_access_checked_requester_id(requester_id, self.deps.runtime.config, self.deps.runtime_paths):
             return {}
         return {ACTING_REQUESTER_KEY: requester_id}
 

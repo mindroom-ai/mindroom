@@ -156,6 +156,10 @@ def test_large_tool_trace_does_not_disable_visible_markdown() -> None:
                     for _ in range(100)
                 ],
             },
+            "io.mindroom.earlier_tool_trace": [
+                {"type": "tool_call_completed", "tool_name": "synthetic_tool", "result_preview": "x" * 500}
+                for _ in range(100)
+            ],
         },
     )
 
@@ -166,6 +170,7 @@ def test_large_tool_trace_does_not_disable_visible_markdown() -> None:
     parts = [first, *segmented.continuations]
     assert "".join(part["body"] for part in parts) == body
     assert "io.mindroom.tool_trace" not in first
+    assert not any("io.mindroom.earlier_tool_trace" in part for part in (segmented.first, *parts))
     assert first["format"] == "org.matrix.custom.html"
     assert first["formatted_body"]
 

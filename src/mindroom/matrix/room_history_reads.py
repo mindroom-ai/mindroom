@@ -41,7 +41,6 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import (
     VisibleRoomMessage,
     extract_and_resolve_message,
-    resolve_event_source_content,
 )
 from mindroom.matrix.thread_membership import ThreadRoomScanRootNotFoundError
 from mindroom.matrix.thread_projection import (
@@ -63,12 +62,17 @@ _MAX_EXACT_DELIVERY_SCAN_PAGES = 10
 _MAX_ENUMERATED_THREAD_ROOTS = 2000
 _MAX_THREAD_ENUMERATION_PAGES = 100
 # Reading a thread from source walks room history back to its root, and anyone
-# who can post in the room decides how old that root is.
-_MAX_THREAD_ROOM_SCAN_PAGES = 100
+# who can post in the room decides how old that root is. Every message event in
+# the room counts, including each streaming edit of every other reply, so the
+# bound leaves room for a busy room's ordinary long-running threads.
+_MAX_THREAD_ROOM_SCAN_PAGES = 1000
+# The walk keeps every non-edit message and one edit per original and sender until it ends,
+# so the kept count gets its own bound to cap the walk's memory.
+_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES = 10_000
 
 
 class _ThreadRoomScanBoundError(RuntimeError):
-    """Raised when a thread room scan reaches its page bound before seeing every requested root.
+    """Raised when a thread room scan reaches its page or kept-event bound before seeing every requested root.
 
     Unlike ``ThreadRoomScanRootNotFoundError`` this proves nothing about the
     root, so callers treat it as an unavailable read and fail closed.
@@ -565,13 +569,17 @@ async def bulk_scan_thread_event_sources(
     homeserver_scan_parse_cpu_ms = 0.0
 
     while remaining_root_ids:
-        if page_count >= _MAX_THREAD_ROOM_SCAN_PAGES:
+        if (
+            page_count >= _MAX_THREAD_ROOM_SCAN_PAGES
+            or len(scanned_message_sources) + len(edit_candidates) >= _MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES
+        ):
             msg = (
-                f"thread room scan in {room_id} reached its {_MAX_THREAD_ROOM_SCAN_PAGES}-page bound "
-                "with history left, so the requested roots are unproven"
+                f"thread room scan in {room_id} reached its bound of {_MAX_THREAD_ROOM_SCAN_PAGES} pages "
+                f"or {_MAX_THREAD_ROOM_SCAN_RETAINED_SOURCES} kept events with history left, "
+                "so the requested roots are unproven"
             )
             logger.warning(
-                "Thread room scan reached its page bound before finding every root",
+                "Thread room scan reached its bound before finding every root",
                 room_id=room_id,
                 user_id=client.user_id,
                 missing_root_ids=sorted(remaining_root_ids),
@@ -831,10 +839,12 @@ async def fetch_thread_messages_from_source(
     yet -- and "has it reached anyone else" is the only question worth paying a
     homeserver round trip for.
 
-    No local store is consulted or written, deliberately. Sidecar bodies are
-    fetched from their media URL rather than from a text cache: the caller is
-    already paying for a room scan, and a cache read here would reintroduce the
-    staleness the scan exists to avoid.
+    No local store is consulted or written, deliberately.
+
+    Long-text sidecars are left as their previews. Both callers read only
+    senders, relations, and MindRoom metadata, which a preview carries itself,
+    and resolving every message would let anyone who can post make each read
+    download and hold one file per message in the thread.
     """
     scan_result = await fetch_thread_event_sources_via_room_messages(client, room_id, thread_id)
     parsed_events = [
@@ -863,11 +873,10 @@ async def fetch_thread_messages_from_source(
             continue
         messages_by_event_id[event.event_id] = await _resolve_message_from_source(
             event,
-            client,
             trusted_sender_ids=trusted_sender_ids,
         )
     await apply_latest_edits_to_messages(
-        client,
+        None,
         messages_by_event_id=messages_by_event_id,
         edit_candidates=edit_candidates,
         synthesize_unseen_originals=False,
@@ -880,29 +889,25 @@ async def fetch_thread_messages_from_source(
 
 async def _resolve_message_from_source(
     event: nio.Event,
-    client: nio.AsyncClient,
     *,
     trusted_sender_ids: Collection[str],
 ) -> ResolvedVisibleMessage:
-    """Resolve one scanned event into the normalized thread-history shape."""
+    """Normalize one scanned event into the thread-history shape, leaving sidecars unresolved."""
     if is_visible_room_message(event):
-        message_data = await extract_and_resolve_message(event, client, trusted_sender_ids=trusted_sender_ids)
+        message_data = await extract_and_resolve_message(event, None, trusted_sender_ids=trusted_sender_ids)
         return ResolvedVisibleMessage.from_message_data(
             message_data,
             thread_id=EventInfo.from_event(event.source).thread_id,
             latest_event_id=event.event_id,
         )
 
-    resolved_event_source = await resolve_event_source_content(
-        event.source if isinstance(event.source, dict) else {},
-        client,
-    )
-    content = resolved_event_source.get("content", {})
-    event_info = EventInfo.from_event(resolved_event_source)
+    event_source = event.source if isinstance(event.source, dict) else {}
+    content = event_source.get("content", {})
+    event_info = EventInfo.from_event(event_source)
     message = ResolvedVisibleMessage.synthetic(
         sender=event.sender,
         body=visible_body_from_event_source(
-            resolved_event_source,
+            event_source,
             room_message_fallback_body(event),
             trusted_sender_ids=trusted_sender_ids,
         ),

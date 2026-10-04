@@ -1,4 +1,4 @@
-"""Bounded conversation mode choices in canonical agent state storage."""
+"""Bounded conversation mode choices in primary-only storage for each agent state root."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast
 
+from mindroom.constants import primary_records_dir
 from mindroom.durable_write import load_cached_override_records, write_bounded_override_records
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 AgentMode = Literal["standard", "minimal"]
 
@@ -27,16 +30,28 @@ def _valid(key: str, record: dict[object, object]) -> bool:
     )
 
 
-def resolve_agent_mode(state_root: Path, agent_name: str, session_id: str) -> AgentMode:
+def _path(runtime_paths: RuntimePaths, state_root: Path) -> Path:
+    # Workers can write state roots, so the choices and their lock live where only the primary writes.
+    return primary_records_dir(state_root, runtime_paths) / "agent_modes.json"
+
+
+def resolve_agent_mode(runtime_paths: RuntimePaths, state_root: Path, agent_name: str, session_id: str) -> AgentMode:
     """Resolve only this agent/conversation, defaulting safely to standard."""
-    path = state_root / "agent_modes.json"
+    path = _path(runtime_paths, state_root)
     record = load_cached_override_records(path, _valid).get(_key(agent_name, session_id))
     return cast("AgentMode", record["mode"]) if record is not None else "standard"
 
 
-def set_agent_mode(state_root: Path, agent_name: str, session_id: str, mode: AgentMode, set_by: str) -> None:
+def set_agent_mode(
+    runtime_paths: RuntimePaths,
+    state_root: Path,
+    agent_name: str,
+    session_id: str,
+    mode: AgentMode,
+    set_by: str,
+) -> None:
     """Audit and atomically replace a choice without losing concurrent updates."""
-    path = state_root / "agent_modes.json"
+    path = _path(runtime_paths, state_root)
     with advisory_file_lock(path.with_suffix(".lock")):
         records = load_cached_override_records(path, _valid)
         records[_key(agent_name, session_id)] = {
@@ -49,9 +64,9 @@ def set_agent_mode(state_root: Path, agent_name: str, session_id: str, mode: Age
         write_bounded_override_records(path, records, max_records=1000)
 
 
-def clear_agent_mode(state_root: Path, agent_name: str, session_id: str) -> bool:
+def clear_agent_mode(runtime_paths: RuntimePaths, state_root: Path, agent_name: str, session_id: str) -> bool:
     """Reset one choice, retaining every other agent and conversation."""
-    path = state_root / "agent_modes.json"
+    path = _path(runtime_paths, state_root)
     with advisory_file_lock(path.with_suffix(".lock")):
         records = load_cached_override_records(path, _valid)
         if records.pop(_key(agent_name, session_id), None) is None:

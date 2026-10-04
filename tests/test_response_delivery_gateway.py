@@ -70,6 +70,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_turn_store import _store
 
@@ -669,6 +670,18 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     async def test_final_reply_names_its_human_requester(self, tmp_path: Path) -> None:
         """Entities the reply mentions act for the human the reply was written for."""
         gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            await gateway.deliver_final(self._final_request("answer"))
+
+        assert send.await_args.args[2][ACTING_REQUESTER_KEY] == "@user:localhost"
+
+    async def test_final_reply_names_its_bot_account_requester(self, tmp_path: Path) -> None:
+        """Entities the reply mentions apply their access to a configured bot account, as they would to a human."""
+        gateway = _gateway(tmp_path, FakeOutbox())
+        gateway.deps.runtime.config.bot_accounts = ["@user:localhost"]
         gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
 
@@ -4696,6 +4709,7 @@ class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
         """
         turn_store = await _store(journal_store, agent_name="agent")
         await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
+        await admit_room_event(alice, _ROOM_ID, "$source")
         gateway = _gateway(
             tmp_path,
             alice,

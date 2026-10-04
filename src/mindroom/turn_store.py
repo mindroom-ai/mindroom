@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
+    from mindroom.event_journal import RelationView
     from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -78,6 +79,7 @@ class TurnStoreDeps:
     # lost it would answer every outstanding message a second time.
     turn_records: TurnRecordStore
     redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
+    relations: RelationView
     # The JSON ledger this agent used before its records moved into the
     # database, imported once on first load. An installation that has been
     # answering messages keeps all of its terminal truth there, and a runtime
@@ -716,21 +718,48 @@ class TurnStore:
 
         A redaction names its target by event ID alone, and a homeserver can
         deliver one it did not apply, including one naming another room's
-        event. Returns None, changing nothing, when a turn that owns or consumed
-        the event is recorded in a different room.
+        event. The tombstone is written only when the turns that own or
+        consumed the event are recorded in this room, or, when none records a
+        room yet, the journal admitted the event in this room. Otherwise this
+        returns None and changes nothing.
         """
-        own_record = self._ledger.get_turn_record(source_event_id)
-        if not all(
-            _recorded_in_room(record, room_id)
-            for record in (own_record, *self._revision_owners(source_event_id))
-            if record is not None
-        ):
-            logger.warning(
-                "Ignoring redaction of an event recorded in another room",
+        # LEGACY_COMPAT: Room-less ledger tombstones of events not known in the redaction's room.
+        # Legacy format: A turn record without a conversation_target whose redacted_source_event_ids
+        # names an event tombstoned by a redaction delivered in a room where the journal never admitted
+        # that event, written because no turn had recorded a room for it.
+        # Last legacy release: v2026.10.30; replacement: v2026.10.31 writes a tombstone without a room
+        # only when the journal admitted the event in the redaction's room.
+        # Handling: Such a tombstone carries no room, so the ledger cannot tell it apart from one written
+        # after the journal admitted its event in the redaction's room, and it is not migrated. It stays
+        # in effect until ordinary ledger retention drops it: its event counts as handled, and preparing
+        # a reply in a thread that contains it raises RevisionSnapshotChangedError.
+        # Coverage: tests/test_turn_store.py::test_room_less_tombstone_from_an_earlier_release_stays_in_effect.
+        recorded_rooms = {
+            record.conversation_target.room_id
+            for record in (self._ledger.get_turn_record(source_event_id), *self._revision_owners(source_event_id))
+            if record is not None and record.conversation_target is not None
+        }
+        if recorded_rooms:
+            if recorded_rooms != {room_id}:
+                logger.warning(
+                    "Ignoring redaction of an event recorded in another room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
+        else:
+            known_in_room, _thread_id = await self.deps.relations.admitted_thread_id(
                 room_id=room_id,
-                redacted_event_id=source_event_id,
+                event_id=source_event_id,
             )
-            return None
+            if not known_in_room:
+                # Routine for stickers, polls, undecryptable messages, and history from before the journal.
+                logger.debug(
+                    "Ignoring redaction of an event never admitted in this room",
+                    room_id=room_id,
+                    redacted_event_id=source_event_id,
+                )
+                return None
 
         def redacted_record(existing_records: Mapping[str, TurnRecord]) -> TurnRecord:
             existing_record = existing_records.get(source_event_id)
@@ -1350,12 +1379,6 @@ def _merged_redaction_markers(
         event_id for event_id in merged_record.indexed_event_ids if event_id in pending_cleanup_event_ids
     )
     return merged_redacted_event_ids, merged_pending_event_ids
-
-
-def _recorded_in_room(turn_record: TurnRecord, room_id: str) -> bool:
-    """Return whether a turn's recorded conversation, if it has one yet, is in this room."""
-    target = turn_record.conversation_target
-    return target is None or target.room_id == room_id
 
 
 def _has_redaction_cleanup_context(turn_record: TurnRecord) -> bool:

@@ -374,6 +374,22 @@ def test_custom_api_tool_strips_configured_credentials_from_hops_off_the_base_ur
     assert followed.headers["X-Request-Id"] == "req-1"
 
 
+def test_custom_api_tool_sends_dashboard_json_headers_to_the_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Headers saved in the dashboard arrive as JSON text and are sent as default headers to base_url."""
+    sent = _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={"ok": True}))
+    tool = custom_api_tools()(base_url="https://api.example.com", headers='{"X-Api-Key": "operator-secret"}')
+
+    assert json.loads(tool.make_request("data"))["data"] == {"ok": True}
+    assert sent[0].headers["X-Api-Key"] == "operator-secret"
+
+
+@pytest.mark.parametrize("headers", ['["X-Api-Key"]', '{"X-Retries": 3}', "X-Api-Key: abc"])
+def test_custom_api_tool_rejects_headers_that_are_not_a_json_object_of_strings(headers: str) -> None:
+    """A malformed headers value fails when the tool is built instead of on every request."""
+    with pytest.raises(ValueError, match="headers must be a JSON object with string keys and values"):
+        custom_api_tools()(base_url="https://api.example.com", headers=headers)
+
+
 def test_custom_api_tool_strips_basic_auth_from_hops_off_the_base_url_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     """The Basic auth pair reaches the base_url origin but not a presigned download on another host."""
 
@@ -1930,21 +1946,15 @@ def test_code_execution_tools_declare_unconfined_file_access() -> None:
 
 
 _UNCONFINED_LOCAL_FILE_TOOLS = (
-    "airflow",
     "browserbase",
     "composio",
     "csv",
     "duckdb",
-    "groq",
-    "moviepy_video_tools",
-    "openai",
     "pandas",
     "postgres",
     "redshift",
     "slack",
     "sql",
-    "visualization",
-    "web_browser_tools",
 )
 
 
@@ -1969,7 +1979,20 @@ def test_only_code_execution_tools_execute_code() -> None:
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
-    for name in ("file", "coding", "attachments", "matrix_message", "gmail", "google_drive", "browser", "e2b"):
+    for name in (
+        "file",
+        "coding",
+        "attachments",
+        "matrix_message",
+        "gmail",
+        "google_drive",
+        "browser",
+        "e2b",
+        "airflow",
+        "groq",
+        "moviepy_video_tools",
+        "openai",
+    ):
         metadata = TOOL_METADATA[name]
         assert metadata.file_access is ToolFileAccess.AGENT, name
         assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name

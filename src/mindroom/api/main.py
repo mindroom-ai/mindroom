@@ -58,6 +58,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
+from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.logging_config import get_logger
@@ -511,10 +512,11 @@ async def _watch_config(
 
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     await migrate_private_storage(runtime_paths)
+    await migrate_state_root_records(runtime_paths)
     await migrate_usage_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)

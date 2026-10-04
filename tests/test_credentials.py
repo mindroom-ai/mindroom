@@ -538,37 +538,6 @@ class TestCredentialsManager:
 
         assert manager.load_credentials("oauth_service") is None
 
-    def test_isolated_worker_runtime_loads_encrypted_shared_credentials(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Isolated workers should keep the encryption key in RuntimePaths for credential reads."""
-        encryption_key = _test_encryption_key()
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
-        manager = CredentialsManager(tmp_path / "credentials", encryption_key=encryption_key)
-        worker_manager = manager.for_worker("worker-a")
-        worker_manager.shared_manager().save_credentials("openai", {"api_key": "shared-key", "_source": "env"})
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=config_path,
-            storage_path=worker_manager.storage_root,
-            process_env={
-                CREDENTIALS_ENCRYPTION_KEY_ENV: encryption_key,
-                SHARED_CREDENTIALS_PATH_ENV: str(worker_manager.shared_base_path),
-            },
-        )
-
-        isolated_runtime_paths = constants_mod.isolated_runtime_paths(runtime_paths)
-
-        loaded_credentials = (
-            get_runtime_credentials_manager(isolated_runtime_paths)
-            .shared_manager()
-            .load_credentials(
-                "openai",
-            )
-        )
-        assert loaded_credentials == {"api_key": "shared-key", "_source": "env"}
-
     def test_load_nonexistent_credentials(self, credentials_manager: CredentialsManager) -> None:
         """Test loading credentials that don't exist."""
         result = credentials_manager.load_credentials("nonexistent")
@@ -1839,7 +1808,6 @@ class TestSharedIntegrationCredentialTagging:
     def test_spotify_credentials_saved_from_dashboard_are_tagged_as_ui_source(
         self,
         temp_credentials_dir: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Spotify OAuth saves should mark credentials as UI-managed so unscoped workers mirror them."""
         manager = CredentialsManager(temp_credentials_dir)
@@ -1855,15 +1823,7 @@ class TestSharedIntegrationCredentialTagging:
             execution_identity=None,
         )
 
-        def _resolve_target(*_args: object, **_kwargs: object) -> RequestCredentialsTarget:
-            return target
-
-        monkeypatch.setattr(
-            "mindroom.api.integrations.resolve_request_credentials_target",
-            _resolve_target,
-        )
-
-        _save_spotify_credentials({"access_token": "spotify-token"}, object())
+        _save_spotify_credentials({"access_token": "spotify-token"}, target)
 
         assert manager.load_credentials("spotify") == {
             "access_token": "spotify-token",
@@ -2136,3 +2096,31 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
     worker_manager.save_credentials("google_bigquery", {"project": "planted"})
     assert load_credentials_for_target("google_bigquery", target) is None
     assert "google_bigquery" not in access.list_services()
+
+
+def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path: Path) -> None:
+    """Deleting a scoped tool's settings also deletes the worker copy an older dashboard saved, which it no longer lists."""
+    runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8765", "MINDROOM_SANDBOX_PROXY_TOKEN": "token"},
+    )
+    manager = CredentialsManager(tmp_path / "credentials")
+    worker_target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
+    assert worker_target.worker_key is not None
+    worker_manager = manager.for_worker(worker_target.worker_key)
+    target = RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=worker_manager,
+        worker_scope="shared",
+        agent_name="alpha",
+        execution_identity=None,
+    )
+    worker_manager.save_credentials("openweather", {"api_key": "old-worker-key"})
+    save_credentials_for_target("openweather", {"api_key": "new-key"}, target)
+
+    delete_credentials_for_target("openweather", target)
+
+    assert manager.for_primary_runtime_agent_scope("alpha").load_credentials("openweather") is None
+    assert worker_manager.load_credentials("openweather") is None

@@ -40,10 +40,12 @@ After each fix, use fresh read-only reviewers with neutral prompts.
    Verify each finding against current code before editing.
    Fix only real, in-scope issues in the main thread.
    Classify stale, incorrect, overreaching, or duplicate findings instead of patching blindly.
+   Decline edge cases, as `pr-review` defines them, with a one-line reason.
+   Record out-of-scope findings as `pr-review` describes and do not fix them in this PR.
 6. Repeat after any fix.
    Commit and push the main-thread fix, close old reviewers, then launch fresh reviewers against the new head.
    After every third review round that still finds many issues or a new major bug class, stop patching and reconsider the design before another patch round.
-7. Stop only when both fresh reviewers approve the same head.
+7. Stop only when both fresh reviewers approve the same head, or when every remaining finding on that head is declined with a recorded reason.
    Confirm the worktree is clean and the remote branch matches the local head.
 
 ## Bias Firewall
@@ -80,9 +82,10 @@ Do not edit files, commit, push, or inspect CI.
 
 Output only:
 - Verdict: APPROVE or CHANGES REQUIRED
-- Findings with exact file/line and required fix
+- Findings with exact file/line, the realistic scenario for bug or security findings, and required fix
+- Edge cases (not blocking) and Out of scope, if any
 
-If no blockers, say APPROVE and no findings.
+If there are no blocking findings, say APPROVE; the non-blocking lists may still follow.
 ```
 
 ## Handling Reviewer Results
@@ -90,7 +93,7 @@ If no blockers, say APPROVE and no findings.
 - Wait for both reviewers before declaring the loop clean.
 - One approval is not enough if the other reviewer is still running.
 - If any reviewer says `CHANGES REQUIRED`, verify the claim before editing.
-- If the claim is real, fix it in the main thread, run focused verification, commit, push, and start a new review loop.
+- If the claim is a realistic, in-scope issue, fix it in the main thread, run focused verification, commit, push, and start a new review loop.
 - If the claim is stale or wrong, record the reason and continue evaluating the other findings.
 - Close completed subagents after their results are no longer needed.
 
@@ -101,5 +104,6 @@ Report only current facts:
 - Branch and pushed head SHA.
 - Commits made.
 - Verification run.
-- Review loop outcome.
+- Review loop outcome, including each declined finding and its one-line reason.
+- Out-of-scope findings and where they were recorded.
 - Any skipped verification and why.

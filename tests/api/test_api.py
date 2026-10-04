@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 import yaml
@@ -31,6 +32,7 @@ from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integra
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
+from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.main import Config, dashboard_config_schema
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
@@ -2479,6 +2481,48 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
     assert toolkit._load_config() is None
 
 
+def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: TestClient) -> None:
+    """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
+    oauth_config = {
+        "instance_url": "http://93.184.216.34:8123",
+        "client_id": "http://dashboard.test",
+        "access_token": "expired-token",
+        "refresh_token": "ha-refresh",
+        "allow_private_url": False,
+        "_source": "ui",
+    }
+    shared_manager.save_credentials("homeassistant", oauth_config)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/token":
+            assert parse_qs(request.content.decode()) == {
+                "grant_type": ["refresh_token"],
+                "refresh_token": ["ha-refresh"],
+                "client_id": ["http://dashboard.test"],
+            }
+            return httpx.Response(200, json={"access_token": "renewed-token", "expires_in": 1800})
+        if request.headers["authorization"] != "Bearer renewed-token":
+            return httpx.Response(401)
+        responses = {"/api/": {"message": "API running"}, "/api/config": {"version": "2026.10"}, "/api/states": []}
+        return httpx.Response(200, json=responses[request.url.path])
+
+    with patch(
+        "mindroom.api.homeassistant_integration.ServerFetchAsyncHTTPTransport",
+        lambda **_kwargs: httpx.MockTransport(handler),
+    ):
+        status_response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+
+    assert status_response.json()["connected"] is True
+    assert status_response.json()["version"] == "2026.10"
+    assert shared_manager.load_credentials("homeassistant") == {**oauth_config, "access_token": "renewed-token"}
+
+
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup should not probe private URLs unless the user opts in."""
     config = _config_with_worker_scope("shared")
@@ -2545,7 +2589,11 @@ def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_clie
         )
 
     assert response.status_code == 200
-    test_connection.assert_awaited_once_with("http://127.0.0.1:8123", "ha-token", allow_private_url=True)
+    assert test_connection.await_args.args[0] == {
+        "instance_url": "http://127.0.0.1:8123",
+        "long_lived_token": "ha-token",
+        "allow_private_url": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -2556,13 +2604,16 @@ async def test_homeassistant_connection_failure_does_not_return_response_body() 
     api_response = MagicMock()
     api_response.status_code = 500
     api_response.text = provider_body
-    async_client.__aenter__.return_value.get.return_value = api_response
+    async_client.__aenter__.return_value.request.return_value = api_response
 
     with (
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
         pytest.raises(HTTPException) as exc_info,
     ):
-        await homeassistant_integration._test_connection("http://93.184.216.34:8123", "ha-token")
+        await homeassistant_integration._test_connection(
+            {"instance_url": "http://93.184.216.34:8123", "long_lived_token": "ha-token"},
+            MagicMock(spec=RequestCredentialsTarget),
+        )
 
     assert exc_info.value.status_code == 500
     assert provider_body not in str(exc_info.value.detail)
@@ -2778,6 +2829,27 @@ def test_spotify_callback_preserves_runtime_validation_error(
     assert callback_response.json()["detail"] == invalid_detail
 
 
+def _publish_spotify_shared_runtime(
+    api_app: FastAPI,
+    *,
+    worker_grantable_credentials: list[str] | None = None,
+) -> constants.RuntimePaths:
+    """Publish a shared-scope config whose runtime has Spotify OAuth client settings."""
+    current_paths = main._app_runtime_paths(api_app)
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=current_paths.config_path,
+        storage_path=current_paths.storage_root,
+        process_env={
+            **dict(current_paths.process_env),
+            "SPOTIFY_CLIENT_ID": "client-id",
+            "SPOTIFY_CLIENT_SECRET": "client-secret",
+        },
+    )
+    config = _config_with_worker_scope("shared", worker_grantable_credentials=worker_grantable_credentials)
+    _publish_committed_runtime_config(api_app, runtime_paths, config.model_dump())
+    return runtime_paths
+
+
 def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestClient) -> None:
     """Shared-scope Spotify tokens must stay out of the worker store, where only worker code would see them."""
 
@@ -2798,21 +2870,7 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
         def current_user(self) -> dict[str, str]:
             return {"display_name": "Spotify User"}
 
-    current_paths = main._app_runtime_paths(test_client.app)
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=current_paths.config_path,
-        storage_path=current_paths.storage_root,
-        process_env={
-            **dict(current_paths.process_env),
-            "SPOTIFY_CLIENT_ID": "client-id",
-            "SPOTIFY_CLIENT_SECRET": "client-secret",
-        },
-    )
-    _publish_committed_runtime_config(
-        test_client.app,
-        runtime_paths,
-        _config_with_worker_scope("shared").model_dump(),
-    )
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app)
 
     with patch(
         "mindroom.api.integrations._ensure_spotify_packages",
@@ -2833,6 +2891,155 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
     assert connected_status.json()["connected"] is True
     assert disconnect_response.status_code == 200
     assert disconnected_status.json()["connected"] is False
+
+
+def test_spotify_status_renews_an_expiring_token(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Status renews a token that expires within a minute and saves it with Spotify's rotated refresh token."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app)
+    agent_store = get_runtime_credentials_manager(runtime_paths).for_primary_runtime_agent_scope("general")
+    agent_store.save_credentials(
+        "spotify",
+        {
+            "access_token": "expired-token",
+            "refresh_token": "old-refresh",
+            "expires_at": int(time.time()),
+            "_source": "ui",
+        },
+    )
+    renewals: list[dict[str, object]] = []
+
+    def _post(url: str, **kwargs: object) -> httpx.Response:
+        renewals.append({"url": url, **kwargs})
+        token = {"access_token": "renewed-token", "refresh_token": "new-refresh", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            assert self.auth == "renewed-token"
+            return {"display_name": "Listener"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener"
+    assert renewals == [
+        {
+            "url": "https://accounts.spotify.com/api/token",
+            "data": {"grant_type": "refresh_token", "refresh_token": "old-refresh"},
+            "auth": ("client-id", "client-secret"),
+            "timeout": 30.0,
+        },
+    ]
+    saved = agent_store.load_credentials("spotify")
+    assert saved is not None
+    assert (saved["access_token"], saved["refresh_token"]) == ("renewed-token", "new-refresh")
+    assert saved["expires_at"] >= int(time.time()) + 3500
+
+
+def test_spotify_status_does_not_renew_a_connection_shared_through_the_worker_grant(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted installation-wide connection is shown but not renewed, so it is never copied into the agent's store."""
+    runtime_paths = _publish_spotify_shared_runtime(test_client.app, worker_grantable_credentials=["spotify"])
+    manager = get_runtime_credentials_manager(runtime_paths)
+    shared_connection = {
+        "access_token": "shared-token",
+        "refresh_token": "shared-refresh",
+        "expires_at": int(time.time()),
+        "_source": "ui",
+    }
+    manager.save_credentials("spotify", shared_connection)
+    renewals: list[str] = []
+
+    def _post(url: str, **_kwargs: object) -> httpx.Response:
+        renewals.append(url)
+        token = {"access_token": "renewed-token", "expires_in": 3600}
+        return httpx.Response(200, json=token, request=httpx.Request("POST", url))
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"Listener with {self.auth}"}
+
+    monkeypatch.setattr("mindroom.spotify_tokens.httpx.post", _post)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(_FakeSpotify, object)):
+        status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert status.json()["details"]["username"] == "Listener with shared-token"
+    assert renewals == []
+    assert manager.for_primary_runtime_agent_scope("general").load_credentials("spotify") is None
+    assert manager.load_credentials("spotify") == shared_connection
+
+
+def test_spotify_reconnect_saves_the_newly_authorized_account(
+    test_client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Spotify callback must exchange its own code instead of reusing a token spotipy cached on disk."""
+    exchanged_codes: list[str] = []
+
+    class _TokenResponse:
+        def __init__(self, code: str) -> None:
+            self._code = code
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"access_token": f"token-{self._code}", "refresh_token": "refresh", "expires_in": 3600}
+
+    def _post(_session: object, _url: str, *, data: dict[str, str], **_kwargs: object) -> _TokenResponse:
+        exchanged_codes.append(data["code"])
+        return _TokenResponse(data["code"])
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            return {"display_name": f"user-{self.auth}"}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("requests.Session.post", _post)
+    monkeypatch.setattr("spotipy.Spotify", _FakeSpotify)
+    _publish_spotify_shared_runtime(test_client.app)
+
+    for code in ("account-a", "account-b"):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code={code}&state={state}",
+            follow_redirects=False,
+        )
+        assert callback_response.status_code in {302, 307}
+    status = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert exchanged_codes == ["account-a", "account-b"]
+    assert status.json()["details"]["username"] == "user-token-account-b"
+    assert not (tmp_path / ".cache").exists()
+
+
+def test_spotify_connect_requests_playlist_and_playback_scopes(test_client: TestClient) -> None:
+    """The dashboard connect flow must request the scopes the toolkit's playlist and playback functions need."""
+    _publish_spotify_shared_runtime(test_client.app)
+
+    response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+
+    scopes = set(parse_qs(urlparse(response.json()["auth_url"]).query)["scope"][0].split())
+    assert {
+        "playlist-read-private",
+        "playlist-modify-public",
+        "playlist-modify-private",
+        "user-modify-playback-state",
+    } <= scopes
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:

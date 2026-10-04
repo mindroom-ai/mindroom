@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agno_compat_approval import append_denied_tool_result, before_tool_lookup
+from mindroom.agno_compat_approval import append_denied_tool_result, before_tool_lookup, continuation_executes
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.job import JobTools
@@ -98,12 +98,44 @@ def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[Ap
         yield
 
 
+def _refuse_unapproved_executions(run: RunOutput, calls: Sequence[ApprovalCall]) -> None:
+    """Reject a continuation that would run anything except each approved call once with its saved arguments."""
+    approved = {call.tool_call_id: call for call in calls}
+    # One entry may appear in both lists, but stored copies within either list would each run.
+    for tools in (run.tools or (), [r.tool_execution for r in run.requirements or () if r.tool_execution]):
+        matched: set[str] = set()
+        for tool in tools:
+            if not continuation_executes(tool):
+                continue
+            call = approved.get(tool.tool_call_id or "")
+            if (
+                call is None
+                or call.tool_call_id in matched
+                or tool.tool_name != call.tool_name
+                or not call.binds_arguments(tool.tool_args)
+            ):
+                msg = "Paused run would execute a call its saved approval does not cover; retry the request"
+                raise RuntimeError(msg)
+            matched.add(call.tool_call_id)
+
+
+@contextmanager
+def approved_executions_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
+    """Check every run Agno continues on this actor before it executes any stored call."""
+
+    def refuse_unapproved(run: RunOutput) -> None:
+        _refuse_unapproved_executions(run, calls_by_run.get(run.run_id or "", ()))
+
+    with before_tool_lookup(actor, refuse_unapproved):
+        yield
+
+
 def validate_approval_tool_owners(
     agents: Sequence[Agent],
     calls: Sequence[ApprovalCall],
     requirements: Sequence[RunRequirement],
 ) -> None:
-    """Reject an approved call unless its final executable has the recorded owner."""
+    """Reject an approved call unless its final executable has the recorded owner and arguments."""
     owners = toolkit_owners_for_agents(agents)
     pending = {
         requirement.tool_execution.tool_call_id: requirement
@@ -119,9 +151,10 @@ def validate_approval_tool_owners(
         if (
             tool is None
             or tool.tool_name != call.tool_name
+            or not call.binds_arguments(tool.tool_args)
             or (requirement.member_agent_id is not None and requirement.member_agent_id != call.invoking_agent)
         ):
-            msg = "Saved approval function or member no longer matches the pending call; retry the request"
+            msg = "Saved approval function, arguments, or member no longer match the pending call; retry the request"
             raise RuntimeError(msg)
         if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
             msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"

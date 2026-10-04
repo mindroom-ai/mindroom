@@ -5,12 +5,16 @@ from __future__ import annotations
 import plistlib
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from mindroom.api.auth import dashboard_requires_credential
 from mindroom.cli.main import app
+from mindroom.cli.service import require_login_service, start_login_service
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, resolve_primary_runtime_paths
 from mindroom.services.config import (
     InstallResult,
     ServiceActionResult,
@@ -18,6 +22,7 @@ from mindroom.services.config import (
     ServiceStatus,
     build_service_command,
     find_uv,
+    install_service_runtime,
     install_uv,
 )
 from mindroom.services.launchd import _generate_plist
@@ -36,6 +41,7 @@ from mindroom.services.systemd import _install_service as _install_systemd_servi
 from mindroom.services.systemd import _restart_service as _restart_systemd_service
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
+from tests.conftest import normalize_console_output
 
 runner = CliRunner()
 
@@ -103,15 +109,53 @@ def test_install_uv_success(mock_run: MagicMock) -> None:
     assert shell_call.kwargs["text"] is True
 
 
+@pytest.mark.parametrize("error", [subprocess.CalledProcessError(1, "curl"), FileNotFoundError("curl")])
 @patch("subprocess.run")
-def test_install_uv_failure(mock_run: MagicMock) -> None:
-    """install_uv returns a user-facing failure message on subprocess errors."""
-    mock_run.side_effect = subprocess.CalledProcessError(1, "curl")
+def test_install_uv_failure(mock_run: MagicMock, error: Exception) -> None:
+    """install_uv returns a user-facing failure message on subprocess errors and on a machine without curl."""
+    mock_run.side_effect = error
 
     success, message = install_uv()
 
     assert success is False
     assert "Failed to install uv" in message
+
+
+@pytest.mark.parametrize(
+    ("list_returncode", "installed_tools", "install_returncode", "installs", "expected"),
+    [
+        (0, "", 0, True, True),
+        (0, "mindroom v2026.7.9\n- mindroom\n", 0, True, True),
+        (0, "mindroom v2026.8.1\n- mindroom\n", 0, False, True),
+        (0, "", 1, True, False),
+        (2, "", 0, False, False),
+    ],
+    ids=["absent", "other-version", "same-version", "install-fails", "list-fails"],
+)
+def test_install_service_runtime_installs_the_pinned_version_as_a_uv_tool(
+    list_returncode: int,
+    installed_tools: str,
+    install_returncode: int,
+    installs: bool,
+    expected: bool,
+) -> None:
+    """The pinned version becomes a persistent uv tool; an installed one, or one that cannot be listed, is left alone."""
+    uv_path = Path("/usr/bin/uv")
+    run = MagicMock(
+        side_effect=[
+            subprocess.CompletedProcess(["uv"], list_returncode, stdout=installed_tools),
+            subprocess.CompletedProcess(["uv"], install_returncode),
+        ],
+    )
+
+    with patch("mindroom.services.config.subprocess.run", run):
+        assert install_service_runtime(uv_path, package_version="2026.8.1") is expected
+
+    assert run.call_args_list[0].args[0] == [str(uv_path), "tool", "list"]
+    if installs:
+        assert run.call_args_list[1].args[0] == [str(uv_path), "tool", "install", "mindroom==2026.8.1"]
+    else:
+        assert run.call_count == 1
 
 
 @patch("mindroom.services.manager.platform.system", return_value="Darwin")
@@ -674,13 +718,23 @@ def test_launchd_service_environment_reads_the_installed_plist(tmp_path: Path) -
         assert _get_launchd_service_environment() == {}
 
 
+@pytest.mark.parametrize("runtime_installed", [True, False])
 @patch("mindroom.cli.service._get_service_manager")
-def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
-    """Service install -y installs without interactive prompts."""
+def test_service_install_no_confirm(
+    mock_get_manager: MagicMock,
+    runtime_installed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Service install -y installs the pinned version as a uv tool, then the service, without interactive prompts."""
+    # Installing saves exported keys next to the active config, which must not be the developer's own.
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(tmp_path / "config.yaml"))
     mock_manager = MagicMock(spec=ServiceManager)
     mock_manager.check_uv_installed.return_value = (True, Path("/usr/bin/uv"))
+    mock_manager.install_runtime.return_value = runtime_installed
     mock_manager.install_service.return_value = InstallResult(success=True, message="Installed and started")
     mock_manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+    mock_manager.get_service_environment.return_value = {}
     mock_get_manager.return_value = mock_manager
 
     result = runner.invoke(app, ["service", "install", "-y"])
@@ -688,7 +742,14 @@ def test_service_install_no_confirm(mock_get_manager: MagicMock) -> None:
     assert result.exit_code == 0
     assert "Installed and started" in result.output
     assert "After upgrading, rerun mindroom service install" in result.output
-    mock_manager.install_service.assert_called_once_with()
+    # A failed uv tool install only warns: the service still runs, from uv's cache.
+    assert ("Could not install this MindRoom version as a uv tool" in result.output) is not runtime_installed
+    assert mock_manager.method_calls[-4:] == [
+        call.install_runtime(Path("/usr/bin/uv")),
+        call.install_service(),
+        call.get_log_command(),
+        call.get_service_environment(),
+    ]
 
 
 @patch("mindroom.cli.service._get_service_manager")
@@ -872,3 +933,297 @@ def test_service_restart_failure_exits_with_message(mock_get_manager: MagicMock)
     assert result.exit_code == 1
     assert "restart failed" in result.output
     mock_manager.restart_service.assert_called_once_with()
+
+
+def _login_service_manager(
+    *,
+    available: bool = True,
+    installed: bool = False,
+    uv_installed: bool = True,
+    install_result: InstallResult | None = None,
+) -> MagicMock:
+    manager = MagicMock(spec=ServiceManager)
+    manager.description = "systemd user service"
+    manager.is_available.return_value = available
+    manager.get_service_status.return_value = ServiceStatus(installed=installed, running=installed)
+    manager.check_uv_installed.return_value = (uv_installed, Path("/usr/bin/uv") if uv_installed else None)
+    manager.install_service.return_value = install_result or InstallResult(
+        success=True,
+        message="Installed and started",
+    )
+    manager.get_log_command.return_value = "journalctl --user -u mindroom -f"
+    manager.get_service_environment.return_value = {}
+    return manager
+
+
+def _shell_runtime(tmp_path: Path, **process_env: str) -> RuntimePaths:
+    # `mindroom run` offers the service only once it has loaded a config.
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    return resolve_primary_runtime_paths(config_path=config_path, process_env=process_env)
+
+
+@pytest.mark.parametrize(
+    ("answers", "uv_installed", "install_result"),
+    [
+        ([False], True, None),
+        ([True, False], False, None),
+        ([True], True, InstallResult(success=False, message="Failed to start service: no bus")),
+    ],
+    ids=["declined", "uv-declined", "install-failed"],
+)
+def test_login_service_question_falls_back_to_the_terminal(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    answers: list[bool],
+    uv_installed: bool,
+    install_result: InstallResult | None,
+) -> None:
+    """Declining the service or uv, or a failed install, leaves MindRoom to start here and no service behind."""
+    manager = _login_service_manager(uv_installed=uv_installed, install_result=install_result)
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", return_value=manager),
+        patch("mindroom.cli.service._confirm_action", side_effect=answers),
+    ):
+        assert start_login_service(_shell_runtime(tmp_path, OPENAI_API_KEY="sk-shell"), None) is False
+
+    output = capsys.readouterr()
+    if install_result is None:
+        manager.uninstall_service.assert_not_called()
+        # Shell keys are saved only once a service is about to be installed.
+        assert not (tmp_path / ".env").exists()
+    else:
+        assert "Failed to start service: no bus" in output.err
+        assert "Starting MindRoom in this terminal instead." in output.out
+        # A half-installed service would otherwise start a second runtime at the next login.
+        manager.uninstall_service.assert_called_once_with()
+    if not uv_installed:
+        manager.install_service.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["unsupported", "unavailable", "installed"])
+def test_login_service_question_is_skipped_where_it_cannot_help(tmp_path: Path, reason: str) -> None:
+    """An unsupported platform, a machine without systemd, or an existing service is never asked about."""
+    manager = _login_service_manager(available=reason != "unavailable", installed=reason == "installed")
+    get_manager = MagicMock(return_value=manager)
+    if reason == "unsupported":
+        get_manager.side_effect = RuntimeError("Unsupported platform")
+    confirm = MagicMock()
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", get_manager),
+        patch("mindroom.cli.service._confirm_action", confirm),
+    ):
+        assert start_login_service(_shell_runtime(tmp_path), None) is False
+
+    confirm.assert_not_called()
+    manager.install_service.assert_not_called()
+
+
+def test_requested_login_service_saves_usable_shell_provider_keys(tmp_path: Path) -> None:
+    """`--service` hands exported provider keys and key files to the service, but never a blank or placeholder value."""
+    manager = _login_service_manager()
+    runtime_paths = _shell_runtime(
+        tmp_path,
+        OPENAI_API_KEY="sk-shell",
+        GOOGLE_API_KEY_FILE="/run/secrets/google",
+        ANTHROPIC_API_KEY="your-anthropic-key-here",
+        GROQ_API_KEY="",
+    )
+
+    assert start_login_service(runtime_paths, manager) is True
+
+    env_content = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY=sk-shell\n" in env_content
+    assert "GOOGLE_API_KEY_FILE=/run/secrets/google\n" in env_content
+    assert "ANTHROPIC_API_KEY" not in env_content
+    assert "GROQ_API_KEY" not in env_content
+    manager.install_runtime.assert_called_once_with(Path("/usr/bin/uv"))
+    manager.install_service.assert_called_once_with()
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
+    "env_line",
+    ["MATRIX_HOMESERVER=https://mindroom.chat", "MINDROOM_API_KEY=${MINDROOM_API_KEY}"],
+    ids=["other-keys", "shell-reference"],
+)
+def test_service_install_keeps_the_shell_dashboard_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_point: str,
+    env_line: str,
+) -> None:
+    """A dashboard key only exported in the shell is saved to `.env`, so the service never listens without it.
+
+    A `.env` line that reads the key from the shell does not hold it for the service, which runs without this shell.
+    """
+    # Quotes, ` #` and a trailing space would change or vanish in an unquoted `.env` line, and `$` must stay literal.
+    key = 'shell$key \'dash"board" #key '
+    # python-dotenv expands `${NAME}` from this process's environment, which stands in for the installing shell.
+    monkeypatch.setenv("MINDROOM_API_KEY", key)
+    (tmp_path / ".env").write_text(f"{env_line}\n", encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+
+    manager.install_service.assert_called_once_with()
+    # The service sees only its unit's paths and `.env`, never this shell.
+    monkeypatch.delenv("MINDROOM_API_KEY")
+    service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
+    assert service_runtime.env_value("MINDROOM_API_KEY") == key
+    assert dashboard_requires_credential(service_runtime)
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
+    ("env_content", "warned"),
+    [
+        ("MATRIX_HOMESERVER=https://mindroom.chat\n", True),
+        ("MINDROOM_API_KEY=dash-key\n", False),
+        # The service's own `mindroom run` generates a key when dedicated workers could reach its dashboard.
+        ("MINDROOM_WORKER_BACKEND=docker\n", False),
+    ],
+    ids=["keyless", "keyed", "dedicated-workers"],
+)
+def test_service_install_warns_when_the_service_dashboard_has_no_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+    env_content: str,
+    warned: bool,
+) -> None:
+    """The service listens on every interface and warns only in its logs, so installing it warns where someone reads it."""
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path)
+    manager = _login_service_manager()
+    # The service sees only its unit's paths and `.env`, never this shell.
+    manager.get_service_environment.return_value = {
+        "MINDROOM_CONFIG_PATH": str(runtime_paths.config_path),
+        "MINDROOM_STORAGE_PATH": str(runtime_paths.storage_root),
+    }
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+        output = capsys.readouterr().out
+    else:
+        monkeypatch.delenv("MINDROOM_API_KEY", raising=False)
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+        output = result.output
+
+    output = normalize_console_output(output)
+    assert ("listens on 0.0.0.0:8765 without MINDROOM_API_KEY" in output) is warned
+    if warned:
+        assert f"Set MINDROOM_API_KEY in {runtime_paths.env_path}, then run mindroom service restart." in output
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_leaves_env_alone_when_it_already_holds_the_shell_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """Keys `.env` already holds are not saved again, so a symlinked `.env` installs and keeps its own lines."""
+    dotfiles_env = tmp_path / "dotfiles" / "mindroom.env"
+    dotfiles_env.parent.mkdir()
+    env_content = 'export OPENAI_API_KEY="sk-same"  # from dotfiles\nMINDROOM_API_KEY=dash-key\n'
+    dotfiles_env.write_text(env_content, encoding="utf-8")
+    (tmp_path / ".env").symlink_to(dotfiles_env)
+    shell_keys = {"OPENAI_API_KEY": "sk-same", "MINDROOM_API_KEY": "dash-key"}
+    runtime_paths = _shell_runtime(tmp_path, **shell_keys)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        assert start_login_service(runtime_paths, manager) is True
+        output = capsys.readouterr().out
+    else:
+        for env_key in PROVIDER_ENV_KEYS.values():
+            monkeypatch.delenv(env_key, raising=False)
+            monkeypatch.delenv(f"{env_key}_FILE", raising=False)
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        for name, value in shell_keys.items():
+            monkeypatch.setenv(name, value)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 0, result.output
+        output = result.output
+
+    assert "from your shell" not in output
+    assert dotfiles_env.read_text(encoding="utf-8") == env_content
+    manager.install_service.assert_called_once_with()
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+def test_service_install_refuses_a_shell_key_env_cannot_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+) -> None:
+    """A key that `.env` would expand on reading exits with an error, before anything is saved or installed."""
+    key = "shell-${HOME}-key"
+    runtime_paths = _shell_runtime(tmp_path, MINDROOM_API_KEY=key)
+    env_content = "MATRIX_HOMESERVER=https://mindroom.chat\n"
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        assert exit_info.value.exit_code == 1
+        output = capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        monkeypatch.setenv("MINDROOM_API_KEY", key)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        assert result.exit_code == 1
+        output = result.output
+
+    assert "Refusing to write MINDROOM_API_KEY to the env file" in output
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == env_content
+    manager.install_runtime.assert_not_called()
+    manager.install_service.assert_not_called()
+    manager.uninstall_service.assert_not_called()
+
+
+@pytest.mark.parametrize("installed", [False, True], ids=["new", "replacing"])
+def test_requested_login_service_failure_exits(tmp_path: Path, installed: bool) -> None:
+    """A failed `--service` install exits instead of running here, and only removes a service it created."""
+    manager = _login_service_manager(
+        installed=installed,
+        install_result=InstallResult(success=False, message="Failed to start service: no bus"),
+    )
+
+    with pytest.raises(typer.Exit) as exit_info:
+        start_login_service(_shell_runtime(tmp_path), manager)
+
+    assert exit_info.value.exit_code == 1
+    assert manager.uninstall_service.call_count == (0 if installed else 1)
+
+
+def test_require_login_service_refuses_a_machine_that_cannot_run_it(capsys: pytest.CaptureFixture[str]) -> None:
+    """`--service` on a machine without systemd exits with a clear error."""
+    manager = _login_service_manager(available=False)
+
+    with (
+        patch("mindroom.cli.service._get_service_manager", return_value=manager),
+        pytest.raises(typer.Exit) as exit_info,
+    ):
+        require_login_service()
+
+    assert exit_info.value.exit_code == 1
+    assert "This machine cannot run a systemd user service." in capsys.readouterr().err

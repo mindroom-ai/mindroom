@@ -22,7 +22,7 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import _ChildOutcome, drive_delegations
 from mindroom.delegation.hooks import before_delegation
 from mindroom.delegation.recovery import _cancel_delegations
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationHookState, DelegationState
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -32,6 +32,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.delegation_helpers import (
     DelegationModel,
     _call,
@@ -200,5 +201,88 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
             assert _only_run(tmp_path)["status"] == "cancelled"
             if outcome in {"cancel", "recovery_cancel", "live_cancel"}:
                 assert isinstance(observed.error, asyncio.CancelledError)
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hook record written into the paused parent run cannot stand in for the plugin gate after approval."""
+    calls: list[str] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL, agents=["leader"])
+    async def before(context: ToolBeforeCallContext) -> None:
+        if context.tool_name == "run_subagent":
+            calls.append("before")
+            context.decline("Subagents disabled by plugin")
+
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child"),
+        },
+        defaults=DefaultsConfig(tools=[], learning=False),
+        memory={"backend": "none"},
+        tool_approval={"default": "require_approval"},
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    registry = HookRegistry.from_plugins([_plugin("subagent-policy", [before])])
+    context = replace(_delegate_runtime_context(config, paths, execution_identity=identity), hook_registry=registry)
+    child_model = DelegationModel(id="test-child", responses=[ModelResponse(content="Child done")])
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: child_model)
+    toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    storage = create_session_storage("leader", config, paths, identity)
+    parent = Agent(
+        name="leader",
+        db=storage,
+        tools=[toolkit],
+        model=DelegationModel(
+            id="test-parent",
+            responses=[
+                ModelResponse(tool_calls=[_call("run_subagent", "delegate", agent_name="child", task="Do task")]),
+                ModelResponse(content="Parent done"),
+            ],
+        ),
+    )
+    options = {"agent_name": "leader", "config": config, "runtime_paths": paths, "execution_identity": identity}
+    try:
+        with tool_runtime_context(context):
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+            assert paused.status == RunStatus.paused
+            assert calls == []
+            stored = storage.get_run(paused.run_id)
+            assert isinstance(stored, RunOutput)
+            state = DelegationState.from_metadata(stored.metadata)
+            planted = DelegationState.from_metadata(stored.metadata)
+            planted.hooks[stored.requirements[0].id] = DelegationHookState(
+                execution_identity=serialize_tool_execution_identity(identity),
+                arguments={"agent_name": "child", "task": "Do task"},
+                started_at=0.0,
+                after_called=True,
+            )
+            stored.metadata = {**(stored.metadata or {}), DELEGATION_STATE_KEY: planted.to_dict()}
+            storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
+            stored = storage.get_run(paused.run_id)
+            decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
+            completed = await drive_delegations(
+                parent,
+                stored,
+                run_child=run_delegated_child_response,
+                **options,
+                decisions=decisions,
+                approval_calls=_saved_approval_calls(state),
+                denial_reasons=dict.fromkeys(decisions),
+            )
+
+        assert calls == ["before"]
+        assert DelegationState.from_metadata(completed.metadata).children == []
+        assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
     finally:
         storage.close()

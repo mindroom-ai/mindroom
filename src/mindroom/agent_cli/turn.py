@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import asynccontextmanager
 from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import ToolResult
@@ -34,6 +36,7 @@ from mindroom.agent_cli.session import (
     CliOperationError,
     TurnToolBridge,
 )
+from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -43,7 +46,7 @@ from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_ag
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
-from mindroom.tool_system.tool_access import ToolKey, search_tool_metadata
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -54,6 +57,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.agent_cli.session import CliTurnOwner
+    from mindroom.agent_cli.shell_contract import AgentCliShellEnv
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.agent_tool_calls import (
@@ -71,10 +75,6 @@ _MAX_ACTIVE_OPERATIONS = 64
 
 class _StaleAttemptError(ValueError):
     """Admitted work cannot execute after a control boundary."""
-
-
-class _ShellWorker(Protocol):
-    async def invoke_shell(self, function_name: str, arguments: dict[str, object]) -> object: ...
 
 
 @dataclass
@@ -115,12 +115,25 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
     return {"items": selected, "next_cursor": str(end) if end < len(items) else None}
 
 
+def _with_media(content: object, media_results: list[ModelResponse]) -> str | ToolResult:
+    """Attach media that CLI calls returned during one shell command to its text result."""
+    if not media_results:
+        return str(content)
+    return ToolResult(
+        content=str(content),
+        images=[item for media in media_results for item in media.images or []],
+        audios=[item for media in media_results for item in media.audios or []],
+        videos=[item for media in media_results for item in media.videos or []],
+        files=[item for media in media_results for item in media.files or []],
+    )
+
+
 class LiveTurnTools(TurnToolBridge):
     """Own call receipts separately from admitted operation lifetimes.
 
-    The outer mutex spans canonical hooks. Admission opens only inside the
-    dedicated worker leaf; tool calls and describes arriving outside an active
-    Bash call are rejected. Each admitted lifetime gets its own task so a nested
+    The outer mutex spans canonical hooks. Admission opens only around a shell
+    command (minimal Bash's shell leaf or a standard native shell call); tool
+    calls and describes arriving outside their own open Bash window are rejected. Each admitted lifetime gets its own task so a nested
     shell can wait on another CLI call without blocking its parent window.
     """
 
@@ -129,7 +142,6 @@ class LiveTurnTools(TurnToolBridge):
         owner: CliTurnOwner,
         *,
         catalog: PreparedAgentToolCatalog,
-        worker: _ShellWorker | None,
         authorize: Callable[[ToolKey, dict[str, object]], Awaitable[None]],
         context: Mapping[str, str] | None = None,
         output_file_policy: ToolOutputFilePolicy | None = None,
@@ -143,11 +155,13 @@ class LiveTurnTools(TurnToolBridge):
         super().__init__(owner)
         self.catalog = catalog
         self.checkpoint = ProviderBatchCheckpoint(catalog)
-        self._worker = worker
+        # Set once the response's grant exists, before any Bash call.
+        self.shell_env: AgentCliShellEnv | None = None
         self._authorize = authorize
         self._context = dict(context or {})
         self._output_file_policy = output_file_policy
-        self._media: list[ModelResponse] = []
+        # Media from admitted calls, kept per owning Bash window until that window's result is built.
+        self._media: dict[str, list[ModelResponse]] = {}
         self._run_child = run_child
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
@@ -156,9 +170,10 @@ class LiveTurnTools(TurnToolBridge):
         self._admission = asyncio.Lock()
         self._calls: dict[str, _Call] = {}
         self._schema_documents: dict[ToolKey, str] = {}
-        self._active: set[asyncio.Task[None]] = set()
-        self._parent: str | None = None
-        self._window_context: Context | None = None
+        # Each admitted task belongs to the Bash window whose command made the call.
+        self._active: dict[asyncio.Task[None], str] = {}
+        # Open Bash windows, which may overlap, and the context their admitted calls run in.
+        self._windows: dict[str, Context] = {}
         self._closed = False
         self._binding_retired = False
         self.control_executions: list[ToolExecution] = []
@@ -182,8 +197,8 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Agent CLI authority is unavailable"
             raise CliAuthenticationError(msg)
 
-    async def operation(self, operation: AgentCliOperation) -> dict[str, object]:
-        """Metadata reads are pure; describes and calls run only inside an active Bash window."""
+    async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
+        """Metadata reads are pure; describes and calls run only inside the caller's open Bash window."""
         self._check_live()
         if self._binding_retired and isinstance(operation, ToolListOperation | ToolSearchOperation):
             msg = "Agent tool catalog is being rebuilt; retry shortly"
@@ -211,14 +226,14 @@ class LiveTurnTools(TurnToolBridge):
         async with self._admission:
             self._check_live()
             if isinstance(operation, ToolCallOperation):
-                return self._submit_call(operation)
-            self._require_bash_window()
+                return self._submit_call(operation, window)
+            window = self._require_bash_window(window)
             self._require_capacity()
             future = asyncio.get_running_loop().create_future()
-            self._admit(_Queued(operation, future))
+            self._admit(_Queued(operation, future), window)
         return await future
 
-    def _submit_call(self, operation: ToolCallOperation) -> dict[str, object]:
+    def _submit_call(self, operation: ToolCallOperation, window: str | None) -> dict[str, object]:
         """Return an existing receipt for a repeated call ID, or admit a new call."""
         call_id = str(operation.call_id)
         arguments = operation.canonical_arguments_json
@@ -232,7 +247,7 @@ class LiveTurnTools(TurnToolBridge):
                 msg = "Call ID already belongs to a different operation"
                 raise CliCallConflictError(msg)
             return call.receipt.model_dump(mode="json")
-        self._require_bash_window()
+        window = self._require_bash_window(window)
         if len(self._calls) >= _MAX_CALL_RECEIPTS:
             msg = f"This response already holds {_MAX_CALL_RECEIPTS} CLI call receipts"
             raise CliOperationError(msg)
@@ -247,13 +262,25 @@ class LiveTurnTools(TurnToolBridge):
             ),
         )
         self._calls[call_id] = call
-        self._admit(_Queued(operation.model_copy(deep=True)))
+        self._admit(_Queued(operation.model_copy(deep=True)), window)
         return call.receipt.model_dump(mode="json")
 
-    def _require_bash_window(self) -> None:
-        if self._parent is None:
-            msg = "Agent CLI tool commands require an active Bash call"
+    def _require_bash_window(self, window: str | None) -> str:
+        if window is None:
+            # A mindroom-agent from another release, or a command that dropped the variable, sends none.
+            msg = (
+                "mindroom-agent sent no window; run this MindRoom release's mindroom-agent "
+                "with its Bash command's MINDROOM_AGENT_CLI_WINDOW"
+            )
             raise CliBashWindowRequiredError(msg)
+        if self.control_executions:
+            # The control fence rejects every window, including ones whose command still runs.
+            msg = "Call cancelled before dispatch: continuation requires a rebuilt tool catalog"
+            raise CliBashWindowRequiredError(msg)
+        if window not in self._windows:
+            msg = "This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running"
+            raise CliBashWindowRequiredError(msg)
+        return window
 
     def _require_capacity(self) -> None:
         # Finished tasks stay in the set until the window drains and reports their failures.
@@ -291,25 +318,23 @@ class LiveTurnTools(TurnToolBridge):
             raise CliAuthenticationError(msg)
         return call.receipt.model_dump(mode="json")
 
-    def _admit(self, queued: _Queued) -> None:
+    def _admit(self, queued: _Queued, window: str) -> None:
         call = self._calls[str(queued.operation.call_id)] if isinstance(queued.operation, ToolCallOperation) else None
         if call is not None:
-            call.receipt = call.receipt.model_copy(update={"parent_bash_call_id": self._parent})
-        assert self._window_context is not None
+            call.receipt = call.receipt.model_copy(update={"parent_bash_call_id": window})
         task = asyncio.create_task(
             self._dispatch(queued),
             name="agent-cli-admitted",
-            context=self._window_context.copy(),
+            context=self._windows[window].copy(),
         )
         task.add_done_callback(queued.settle_waiter)
-        self._active.add(task)
+        self._active[task] = window
 
     @asynccontextmanager
-    async def _window(self, parent: str) -> AsyncIterator[None]:
+    async def _window(self, window: str) -> AsyncIterator[None]:
         async with self._admission:
             self._check_live()
-            self._parent = parent
-            self._window_context = copy_context()
+            self._windows[window] = copy_context()
         try:
             yield
         except asyncio.CancelledError:
@@ -317,7 +342,7 @@ class LiveTurnTools(TurnToolBridge):
             raise
         finally:
             await wait_for_future_until_complete(
-                asyncio.create_task(self._drain_window(), name="agent-cli-window-drain"),
+                asyncio.create_task(self._drain_window(window), name="agent-cli-window-drain"),
                 on_cancel=self._cancel_active,
             )
 
@@ -327,19 +352,19 @@ class LiveTurnTools(TurnToolBridge):
         for task in self._active:
             request_task_cancel(task, process_shutdown=self.close_for_shutdown)
 
-    async def _drain_window(self) -> None:
+    async def _drain_window(self, window: str) -> None:
         failures: list[Exception] = []
         while True:
             async with self._admission:
-                tasks = tuple(self._active)
+                tasks = tuple(task for task, owner in self._active.items() if owner == window)
                 if not tasks:
-                    # Recursive children may join while their admitted shell
-                    # settles. Only quiescence closes admission for this Bash.
-                    self._parent = None
-                    self._window_context = None
+                    # Recursive children may join while their admitted shell settles.
+                    # Only quiescence closes this window's admission.
+                    self._windows.pop(window, None)
                     break
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            self._active.difference_update(tasks)
+            for task in tasks:
+                self._active.pop(task, None)
             failures.extend(result for result in results if isinstance(result, Exception))
         if failures:
             msg = "Agent CLI admitted operation failed"
@@ -357,7 +382,7 @@ class LiveTurnTools(TurnToolBridge):
         return await wait_for_future_until_complete(task, on_cancel=cancel)
 
     async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], fc: FunctionCall) -> str | ToolResult:
-        """Checkpoint exact provider history before any binding, hook or worker IO."""
+        """Checkpoint exact provider history before any binding, hook or shell IO."""
         async with self._outer:
             self._check_live()
             if self.control_executions:
@@ -395,15 +420,7 @@ class LiveTurnTools(TurnToolBridge):
             result = str(terminal.result or "")
             if self.control_executions:
                 stop_function_call(fc)
-            result_with_media: str | ToolResult = result
-            if media_results:
-                result_with_media = ToolResult(
-                    content=result,
-                    images=[item for media in media_results for item in media.images or []],
-                    audios=[item for media in media_results for item in media.audios or []],
-                    videos=[item for media in media_results for item in media.videos or []],
-                    files=[item for media in media_results for item in media.files or []],
-                )
+            result_with_media = _with_media(result, media_results)
             self.checkpoint.complete(fc, result_with_media)
             return result_with_media
 
@@ -418,11 +435,11 @@ class LiveTurnTools(TurnToolBridge):
         requirement: RunRequirement | None = None,
     ) -> AsyncIterator[AgentToolCallEvent]:
         """Drain shell work and nested media for both live Bash and exact recovery."""
-        self._media = []
+        self._media.pop(parent, None)
 
-        async def leaf(values: dict[str, object]) -> str:
+        async def leaf(values: dict[str, object]) -> object:
             async with self._window(parent):
-                return await self._invoke_worker(binding.key, values)
+                return await self._invoke_shell(binding, values, window=parent)
 
         events = self._execute(
             binding,
@@ -430,26 +447,51 @@ class LiveTurnTools(TurnToolBridge):
             arguments,
             parent=parent,
             authorize=authorize,
-            worker_leaf=leaf,
+            shell_leaf=leaf,
             requirement=requirement,
         )
         async with closing_async_stream(events):
             async for event in events:
                 self._check_control(event)
                 yield event
-        for media in self._media:
+        for media in self._media.pop(parent, []):
             yield AgentToolCallEvent("media", call_id, binding.key, media=media)
 
-    async def _invoke_worker(self, key: ToolKey, arguments: dict[str, object]) -> str:
+    async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
+        """Run one standard-mode native shell call inside its own CLI window and environment."""
         self._check_live()
-        if self._worker is None:
-            msg = "Dedicated CLI shell worker is unavailable"
+        if self.shell_env is None:
+            msg = "Native shell has no CLI environment"
             raise RuntimeError(msg)
-        result = await self._worker.invoke_shell(key.function, arguments)
-        if not isinstance(result, str):
-            msg = "Dedicated shell worker returned a non-text result"
-            raise TypeError(msg)
-        return result
+        parent = f"native-{uuid4().hex}"
+        try:
+            async with self._window(parent):
+                with bound_agent_cli_shell_env(self.shell_env, window=parent):
+                    result = await run()
+        finally:
+            media = self._media.pop(parent, [])
+        # Media returned by its CLI calls reaches the model with the shell result, as in minimal Bash.
+        return _with_media(result, media) if media else result
+
+    async def _invoke_shell(
+        self,
+        binding: PreparedAgentToolBinding,
+        arguments: dict[str, object],
+        *,
+        window: str,
+    ) -> object:
+        """Run the agent's own shell function, wherever it runs, with the CLI environment of ``window``."""
+        self._check_live()
+        if self.shell_env is None:
+            msg = "Minimal Bash has no CLI environment"
+            raise RuntimeError(msg)
+        entrypoint = binding.function.entrypoint
+        assert entrypoint is not None
+        with bound_agent_cli_shell_env(self.shell_env, window=window):
+            if inspect.iscoroutinefunction(entrypoint):
+                return await entrypoint(**arguments)
+            # Sync calls must finish before the owning operation's lifetime ends.
+            return await wait_for_future_until_complete(asyncio.create_task(asyncio.to_thread(entrypoint, **arguments)))
 
     async def _execute(
         self,
@@ -459,18 +501,18 @@ class LiveTurnTools(TurnToolBridge):
         *,
         parent: str | None,
         authorize: Callable[[], Awaitable[None]],
-        worker_leaf: Callable[[dict[str, object]], Awaitable[str]] | None = None,
+        shell_leaf: Callable[[dict[str, object]], Awaitable[object]] | None = None,
         requirement: RunRequirement | None = None,
     ) -> AsyncIterator[AgentToolCallEvent]:
         while True:
             events = (
                 execute_agent_tool_call(binding, call_id, arguments, authorize=authorize, requirement=requirement)
-                if worker_leaf is None
+                if shell_leaf is None
                 else execute_agent_shell_call(
                     binding,
                     call_id,
                     arguments,
-                    worker_leaf=worker_leaf,
+                    shell_leaf=shell_leaf,
                     authorize=authorize,
                     requirement=requirement,
                 )
@@ -613,10 +655,9 @@ class LiveTurnTools(TurnToolBridge):
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if event.kind == "continuation_required" and event.execution is not None:
+            # Synchronous fencing happens while the executing call owns the catalog lock:
+            # new calls are rejected, executing lifetimes drain, waiting calls fail at dispatch.
             self.control_executions.append(deepcopy(event.execution))
-            # Synchronous fencing happens while the executing call owns the catalog
-            # lock. Already executing lifetimes drain; waiting calls fail at dispatch.
-            self._parent = None
 
     def _check_dispatch(self) -> None:
         self._check_live()
@@ -629,10 +670,13 @@ class LiveTurnTools(TurnToolBridge):
             self._check_dispatch()
             try:
                 await self._authorize(key, {})
+                descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
             except PermissionError as exc:
                 msg = "Tool is unavailable"
                 raise CliOperationError(msg) from exc
-            descriptor = await self.catalog.describe(key, check_current=self._check_dispatch)
+            except UnknownToolError as exc:
+                # Production authorization binds the key, so an unknown name can surface from either call.
+                raise CliOperationError(str(exc)) from exc
             self._check_dispatch()
             result: dict[str, object] = {
                 "toolkit": key.toolkit,
@@ -666,6 +710,8 @@ class LiveTurnTools(TurnToolBridge):
         call = self._calls[call_id]
         if call.receipt.status != "queued":
             return
+        window = call.receipt.parent_bash_call_id
+        assert window is not None
         arguments = cast("dict[str, object]", read_json(call.arguments_json))
         call.receipt = call.receipt.model_copy(update={"status": "running"})
         started = False
@@ -688,15 +734,15 @@ class LiveTurnTools(TurnToolBridge):
                 binding,
                 call_id,
                 arguments,
-                parent=call.receipt.parent_bash_call_id,
-                worker_leaf=partial(self._invoke_worker, key) if key.toolkit == "shell" else None,
+                parent=window,
+                shell_leaf=partial(self._invoke_shell, binding, window=window) if key.toolkit == "shell" else None,
                 authorize=authorize,
             )
             async with closing_async_stream(events):
                 async for event in events:
                     self._check_control(event)
                     if event.media is not None:
-                        self._media.append(event.media)
+                        self._media.setdefault(window, []).append(event.media)
                         media_results.append(event.media)
                     if event.kind == "started":
                         started = True
@@ -708,6 +754,8 @@ class LiveTurnTools(TurnToolBridge):
                         result = event.execution.result
         except _StaleAttemptError as exc:
             status = "cancelled"
+            result = str(exc)
+        except UnknownToolError as exc:
             result = str(exc)
         except (ValueError, PermissionError):
             result = "Tool is unavailable or arguments are invalid"
@@ -743,7 +791,7 @@ class LiveTurnTools(TurnToolBridge):
                 )
 
     async def retire_binding(self) -> None:
-        """Retire this attempt while retaining receipts and worker authority."""
+        """Retire this attempt while retaining receipts and the response grant."""
         async with self._outer:
             self._binding_retired = True
             await self.catalog.close()
@@ -774,7 +822,6 @@ class LiveTurnTools(TurnToolBridge):
 
     async def _close(self) -> None:
         async with self._admission:
-            self._parent = None
             for task in self._active:
                 request_task_cancel(task, process_shutdown=self.close_for_shutdown)
             tasks = tuple(self._active)

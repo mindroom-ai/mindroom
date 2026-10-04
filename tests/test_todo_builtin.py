@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ from agno.team.team import Team as AgnoTeam
 
 import mindroom.custom_tools.todo as todo_module
 import mindroom.custom_tools.todo_template_render as todo_template_render_module
+import mindroom.tool_system.skills as skills_module
 import mindroom.tools  # noqa: F401
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -408,6 +410,27 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     assert any(item["depends_on"] for item in items)
 
 
+def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) -> None:
+    """Quotes, backslashes, and emoji in free-text params should reach the todo titles as typed."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    issue_ref = 'Fix "quoted" C:\\temp 🐛'
+    branch = 'fix/"quoted"'
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(
+            agent=_agent(),
+            name="mindroom-dev",
+            params={"ISSUE_REF": issue_ref, "BRANCH": branch, "REPO": "mindroom"},
+        )
+
+    titles = [item["title"] for item in _read_todos(config)["items"]]
+    assert titles[0] == f"Create living report for {issue_ref} in the repo notes or task file"
+    assert titles[1] == f"Create implementation plan for {issue_ref} on {branch}"
+    assert titles[3] == f"Run focused automated tests for {issue_ref}"
+    assert titles[-1] == f"Push {branch} and open PR if IS_PR is true"
+
+
 def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
     """The review-loop template should not force a rerun after first-round approval."""
     config = _config(tmp_path)
@@ -470,6 +493,29 @@ todos:
         tool.apply_template(agent=_agent(), name="bad-dependency-index", params={})
 
     assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path: Path) -> None:
+    """Jinja in priority and depends_on values should be validated after rendering, like every other value."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    _write_workspace_template(
+        config,
+        "templated-fields",
+        _template_text(
+            "templated-fields",
+            '  - title: One\n  - title: Two\n    priority: "{{ PRIORITY }}"\n    depends_on: ["{{ DEP }}"]\n',
+        ),
+    )
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "high", "DEP": 1})
+        with pytest.raises(ValueError, match=r"document validation failed: todos\.1\.priority"):
+            tool.apply_template(agent=_agent(), name="templated-fields", params={"PRIORITY": "urgent", "DEP": 1})
+
+    first, second = _read_todos(config)["items"]
+    assert second["priority"] == "high"
+    assert second["depends_on"] == [first["id"]]
 
 
 def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:
@@ -673,6 +719,26 @@ def test_template_renderer_only_substitutes_where_memory_cannot_be_capped() -> N
     assert rendered == {"rendered": "Fix X-1"}
 
 
+def test_workspace_template_render_waits_for_another_render_within_its_deadline() -> None:
+    """A render that overlaps another waits for the single slot instead of failing, but never past its time limit."""
+    slots = todo_template_render_module._render_slots
+    render = todo_template_render_module.render_workspace_template
+    slots.acquire()
+    release = threading.Timer(0.2, slots.release)
+    release.start()
+    try:
+        assert render("Fix {{ X }}", {"X": 1}, max_chars=100, timeout_seconds=5) == "Fix 1"
+    finally:
+        release.join()
+
+    slots.acquire()
+    try:
+        with pytest.raises(ValueError, match="time limit"):
+            render("Fix {{ X }}", {"X": 2}, max_chars=100, timeout_seconds=0.1)
+    finally:
+        slots.release()
+
+
 @_NEEDS_MEMORY_CAP
 def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
     tmp_path: Path,
@@ -702,6 +768,81 @@ def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path
 
     assert "`mindroom-dev`" in listing
     assert "`oversized`" not in listing
+
+
+def test_list_templates_stops_reading_workspace_templates_after_its_budget(tmp_path: Path) -> None:
+    """However many templates worker code plants, one listing reads and returns a bounded amount of their text."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(20):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n", description="d" * 60 * 1024))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`planted-00`" in listing
+    assert "`planted-19`" not in listing
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_examines_only_the_first_workspace_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """However many entries worker code plants, one listing examines a bounded number of them."""
+    monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 4)
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    for index in range(10):
+        name = f"planted-{index:02}"
+        _write_workspace_template(config, name, _template_text(name, "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert listing.count("| `workspace` |") == 4
+    assert "`mindroom-dev`" in listing
+
+
+def test_list_templates_charges_unreadable_workspace_templates_against_its_budget(tmp_path: Path) -> None:
+    """Templates that fail to decode still count, and the unread ones still shadow built-ins of the same name."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    template_dir = _workspace_template_dir(config)
+    template_dir.mkdir(parents=True)
+    for index in range(20):
+        (template_dir / f"invalid-{index:02}.yaml.j2").write_bytes(b"\xff" * 60 * 1024)
+    _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: One\n"))
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
+
+
+@pytest.mark.parametrize("unlisted", ["unscanned", "unparseable"])
+def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted: str,
+) -> None:
+    """A workspace template the listing leaves out still hides the built-in of its name, because apply_template uses it."""
+    config = _config(tmp_path)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    if unlisted == "unscanned":
+        # The entry scan stops before reaching the template, as when worker code fills the window with other entries.
+        monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 0)
+        _write_workspace_template(config, "mindroom-dev", _template_text("mindroom-dev", "  - title: Workspace todo\n"))
+    else:
+        _write_workspace_template(config, "mindroom-dev", 'name: mindroom-dev\nversion: "1"\ntodos: [\n')
+
+    with tool_runtime_context(_tool_context(config)):
+        listing = tool.list_templates(agent=_agent())
+
+    assert "`mindroom-dev`" not in listing
+    assert "`parallel-review-loop`" in listing
 
 
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:

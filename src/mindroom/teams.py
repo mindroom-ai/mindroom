@@ -127,6 +127,7 @@ from mindroom.team_exact_members import (
     resolve_team_materializable_agent_names,
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
+from mindroom.thread_models import resolve_thread_model_override
 from mindroom.timing import emit_timing_event
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -258,6 +259,10 @@ class _TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
+_TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
+_TEAM_HEADER_END = "):\n\n"
+
+
 def _format_team_header(agent_names: list[str]) -> str:
     """Format the team response header.
 
@@ -268,7 +273,15 @@ def _format_team_header(agent_names: list[str]) -> str:
         Formatted header string
 
     """
-    return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+    return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
+
+
+def strip_team_display(text: str) -> str:
+    """Remove the display-only header and no-consensus note from a visible team reply."""
+    if text.startswith(_TEAM_HEADER_PREFIX):
+        _header, separator, body = text.partition(_TEAM_HEADER_END)
+        text = body if separator else text
+    return text.removesuffix(_format_no_consensus_note()).rstrip()
 
 
 def _prefix_team_stream_chunk(
@@ -2443,6 +2456,9 @@ def resolve_team_turn_models(
     active_model_name: str | None = None,
 ) -> TeamTurnModelSelection:
     """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    # A configured team's access reaches its members, so its thread override governs them during its turns.
+    if active_model_name is None and thread_id is not None and team_name in config.teams:
+        active_model_name = resolve_thread_model_override(runtime_paths, thread_id, config=config).active.get(team_name)
     if active_model_name is not None:
         return TeamTurnModelSelection(
             team_model_name=active_model_name,
@@ -4279,6 +4295,7 @@ __all__ = [
     "resolve_team_turn_models",
     "select_ad_hoc_team_mode",
     "select_model_for_team",
+    "strip_team_display",
     "team_response",
     "team_response_stream",
 ]

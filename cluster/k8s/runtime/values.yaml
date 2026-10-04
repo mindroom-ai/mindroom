@@ -40,7 +40,10 @@ podSecurityContext:
   fsGroup: 1000
   fsGroupChangePolicy: OnRootMismatch
 
+# Applies to every chart container that runs the runtime image: the runtime, the static runner and its storage init container, and the access-grants Job.
+# The image runs as uid 1000; runAsNonRoot makes the kubelet enforce that.
 securityContext:
+  runAsNonRoot: true
   allowPrivilegeEscalation: false
   capabilities:
     drop:
@@ -84,16 +87,29 @@ runtime:
   timezone: ""
   timing: false
 
+# Optional listener serving only /api/script-gateway to background scripts on dedicated Kubernetes workers.
+# Requires workers.backend=kubernetes and the chart's worker egress NetworkPolicy; see "Background Script Gateway" in the README.
+scriptGateway:
+  enabled: false
+  port: 8767
+
 config:
   # configMap keeps the existing chart-managed or externally managed ConfigMap behavior.
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
-  # Optional source directory for native initialize-only installation before run.
+  # Optional native initialize-only installation before run, sourced from one contentBundles entry.
   # Requires source: file and path inside its own directory below storage.mountPath.
-  # contentBundles can transport files here; initialization runs in the runtime image.
+  # The source and revision derive from the bundle's targetPath, subPath, and image digest; see "Content Bundles" in the README.
+  bootstrapContentBundle:
+    # contentBundles[].name to bootstrap from.
+    name: ""
+    # Directory inside the bundle root holding the config tree; empty means the bundle root.
+    subPath: ""
+  # Optional explicit source directory for a bootstrap tree that contentBundles does not transport.
+  # Cannot be combined with bootstrapContentBundle; initialization runs in the runtime image.
   bootstrapBundlePath: ""
-  # Optional opaque revision; a new value validates and installs the bootstrap bundle.
+  # Optional opaque revision for bootstrapBundlePath; a new value validates and installs the bootstrap bundle.
   bootstrapBundleRevision: ""
   create: true
   existingConfigMap: ""
@@ -198,6 +214,9 @@ stateStorage:
     enabled: true
     mountPath: /app/agent_data/sync_continuity
     subPath: sync_continuity
+  # More state PVC subpaths ({name, mountPath, subPath}) mounted into the runtime container and
+  # prepared like the built-in ones; subPath defaults to name. See "Runtime State Storage" in the README.
+  extraSubPaths: []
   initPermissions:
     enabled: true
     image: busybox:1.36
@@ -210,6 +229,29 @@ stateStorage:
     runAsUser: 1000
     fsGroup: 1000
     chmod: "2775"
+
+sessionStorage:
+  # Optional dedicated volume for agent and team session databases.
+  # Mounted at mountPath, which the chart passes to MindRoom as MINDROOM_SESSION_STORAGE_PATH.
+  # The chart creates a PVC unless existingClaim is set.
+  enabled: false
+  existingClaim: ""
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 10Gi
+  mountPath: /app/session_state
+
+knowledgeStorage:
+  # Optional dedicated volume for shared knowledge-base indexes.
+  # Mounted at <storage.mountPath>/knowledge_db, where MindRoom stores them.
+  # The chart creates a PVC unless existingClaim is set.
+  enabled: false
+  existingClaim: ""
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: 10Gi
 
 # Immutable content bundles copied into runtime storage before MindRoom starts.
 # Bundle images should be pinned by digest and contain files under sourcePath.
@@ -246,11 +288,15 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
+# The env lists, Agent Vault server env lists, extraVolumes, and extraVolumeMounts accept
+# either a list or a map keyed by entry; see "Layering Values Files" in the README.
+# They default to null so Helm accepts either form without table/non-table warnings.
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
-  extra: []
+  # String values are rendered with tpl, for example "{{ .Release.Namespace }}".
+  extra: null
   # Raw Kubernetes EnvFromSource entries appended to the MindRoom container.
-  envFrom: []
+  envFrom: null
 
 apiAuth:
   # Worker tool code can reach the primary API, on localhost from the static_runner sidecar or over the
@@ -322,7 +368,7 @@ workers:
       key: MINDROOM_SANDBOX_PROXY_TOKEN
       value: ""
     credentialsEncryptionKey:
-      # Optional Secret reference used by the primary runtime; the static runner sidecar never receives it.
+      # Optional Secret reference used by the primary runtime; the static runner sidecar and dedicated workers never receive it.
       existingSecret: ""
       key: MINDROOM_CREDENTIALS_ENCRYPTION_KEY
   staticRunner:
@@ -369,6 +415,7 @@ workers:
     ownerDeploymentName: ""
     nodeName: ""
     colocateWithControlPlaneNode: false
+    # Worker env vars as NAME: value; string values are rendered with tpl.
     extraEnv: {}
     extraLabels: {}
     extraAnnotations: {}
@@ -458,9 +505,9 @@ workers:
         masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
         # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
         # Cannot override the chart-managed master password or enabled SMTP settings.
-        extraEnv: []
+        extraEnv: null
         # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
-        envFrom: []
+        envFrom: null
         persistence:
           enabled: true
           size: 1Gi
@@ -481,12 +528,30 @@ workers:
         podSecurityContext:
           fsGroup: 101
           fsGroupChangePolicy: OnRootMismatch
+        # The infisical/agent-vault image sets USER to the name agentvault (uid 65532, gid 101).
+        # The kubelet can only enforce runAsNonRoot for a numeric user, so runAsUser repeats the uid.
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
           allowPrivilegeEscalation: false
           capabilities:
             drop:
               - ALL
         resources: {}
+        # NetworkPolicy admitting only in-chart vault clients and limiting egress to DNS, TCP 80/443, and
+        # enabled SMTP; see "Agent Vault Server NetworkPolicy" in the README.
+        networkPolicy:
+          create: true
+          # Leave empty to reuse the server name.
+          name: ""
+          # Raw Kubernetes NetworkPolicyIngressRule entries, for example a deployer-managed UI proxy in front of the API port.
+          extraIngress: []
+          # Raw Kubernetes NetworkPolicyEgressRule entries, for example upstream ports beyond 80/443 or an external database.
+          extraEgress: []
+      # How the bootstrap and accessGrants Jobs are named and re-run: fixed keeps stable names and a
+      # Helm hook for accessGrants; contentHash appends an input hash so plain `kubectl apply` reruns
+      # changed Jobs. See "Agent Vault Access Grants" in the README.
+      jobNaming: fixed
       # Optional one-shot bootstrap Job: create/log in the instance owner, set
       # instance policy (invite-only, allowed signup domains), and publish the
       # root CA into workerCaConfigMapName so worker pods trust the vault's TLS
@@ -581,6 +646,7 @@ egressProxy:
     namespace: ""
     port: 3128
     scheme: http
+  # Entries are rendered with tpl, for example "api.{{ .Release.Namespace }}.svc.cluster.local".
   noProxy:
     - localhost
     - 127.0.0.1
@@ -633,6 +699,8 @@ approvedEgress:
     existingSecret: ""
     key: MINDROOM_SANDBOX_PROXY_TOKEN
   allowlist:
+    # Inline domain changes roll the proxy; after editing an existingConfigMap, restart the proxy
+    # or set a content hash in podAnnotations. See "Worker Egress Proxy" in the README.
     domains: []
     existingConfigMap: ""
     key: allowed-domains.txt
@@ -688,5 +756,5 @@ approvedEgress:
 
 initContainers: []
 extraContainers: []
-extraVolumes: []
-extraVolumeMounts: []
+extraVolumes: null
+extraVolumeMounts: null

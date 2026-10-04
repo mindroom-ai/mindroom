@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
+import secrets
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -12,8 +16,8 @@ from typing import TYPE_CHECKING, Literal, Protocol
 import httpx
 
 from mindroom.credentials import load_scoped_credentials
+from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 if TYPE_CHECKING:
@@ -26,6 +30,9 @@ _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
 SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
 SANDBOX_PROXY_VIEW_FILE_PATH = "/api/sandbox-runner/view-file"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
+_EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+
+logger = get_logger(__name__)
 
 
 class _WorkerProxyResponse(Protocol):
@@ -60,7 +67,7 @@ class WorkerProxyClientConfig:
     credential_lease_ttl_seconds: int
     credential_policy: Mapping[str, tuple[str, ...]]
     # The shared static runner has no credential store, so every call leases the tool's own saved settings.
-    # Scoped calls always lease them too, because the primary owns scoped tool settings.
+    # Dedicated-worker calls lease registered tools' settings too, because the primary owns tool settings.
     lease_tool_credentials: bool
 
 
@@ -217,6 +224,46 @@ def post_worker_proxy_json(
         raise
 
 
+class WorkerCallCancellation:
+    """Stop a worker call its caller stopped waiting for, or keep it from being dispatched."""
+
+    def __init__(self) -> None:
+        self.request_id = secrets.token_hex(16)
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._stop: Callable[[], None] | None = None
+
+    def _arm(self, stop: Callable[[], None]) -> None:
+        """Keep the runner stop request until it is needed; refuse to dispatch an abandoned call."""
+        with self._lock:
+            if self._cancelled:
+                raise asyncio.CancelledError
+            self._stop = stop
+
+    def cancel(self) -> None:
+        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
+        with self._lock:
+            self._cancelled = True
+            stop = self._stop
+        if stop is not None:
+            threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
+
+
+def _post_execute_cancel(
+    client_factory: _WorkerProxyClientFactory,
+    url: str,
+    headers: dict[str, str],
+    request_id: str,
+) -> None:
+    """Ask the runner to stop one execute request the primary no longer waits for."""
+    try:
+        with client_factory(timeout=_EXECUTE_CANCEL_TIMEOUT_SECONDS) as client:
+            client.post(url, json={"request_id": request_id}, headers=headers).raise_for_status()
+    except Exception:
+        # Best effort: the call was already abandoned, and the runner's own timeouts still apply.
+        logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
+
+
 def execute_worker_proxy_request(
     *,
     config: WorkerProxyClientConfig,
@@ -229,10 +276,14 @@ def execute_worker_proxy_request(
     worker_manager: WorkerBackend,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
     primary_built_service: Callable[[str], bool] | None = None,
+    worker_grantable_credentials: frozenset[str] | None = None,
+    cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
     ``primary_built_service`` names leased services whose settings live in primary stores.
+    ``worker_grantable_credentials`` names shared services a scoped call may lease.
+    ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
     """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
@@ -251,6 +302,23 @@ def execute_worker_proxy_request(
             else f"{config.proxy_url}{_SANDBOX_PROXY_LEASE_PATH}"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
+            if cancellation is not None:
+                payload["request_id"] = cancellation.request_id
+                cancel_url = (
+                    worker_api_endpoint(worker_handle, "execute-cancel")
+                    if worker_handle is not None
+                    else f"{config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}/cancel"
+                )
+                # Arm before leasing credentials, so an abandoned call leases none.
+                cancellation._arm(
+                    functools.partial(
+                        _post_execute_cancel,
+                        client_factory,
+                        cancel_url,
+                        headers,
+                        cancellation.request_id,
+                    ),
+                )
             lease_id = _create_credential_lease(
                 client,
                 config=config,
@@ -261,6 +329,7 @@ def execute_worker_proxy_request(
                 function_name=function_name,
                 worker_target=worker_target,
                 primary_built_service=primary_built_service,
+                worker_grantable_credentials=worker_grantable_credentials,
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
@@ -315,7 +384,8 @@ def _create_credential_lease(
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
-    primary_built_service: Callable[[str], bool] | None = None,
+    primary_built_service: Callable[[str], bool] | None,
+    worker_grantable_credentials: frozenset[str] | None,
 ) -> str | None:
     credential_overrides = _collect_credential_overrides(
         tool_name,
@@ -324,6 +394,7 @@ def _create_credential_lease(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         primary_built_service=primary_built_service,
+        worker_grantable_credentials=worker_grantable_credentials,
     )
     if not credential_overrides:
         return None
@@ -352,17 +423,14 @@ def _collect_credential_overrides(
     config: WorkerProxyClientConfig,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
-    primary_built_service: Callable[[str], bool] | None = None,
+    primary_built_service: Callable[[str], bool] | None,
+    worker_grantable_credentials: frozenset[str] | None,
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
-    # Scoped calls lease the settings the primary owns; provider-key tools keep the worker's own store.
-    lease_tool_settings = (
-        worker_target is not None
-        and worker_target.worker_scope is not None
-        and primary_built_service is not None
-        and primary_built_service(tool_name)
-    )
+    # Scoped and unscoped calls lease the called tool's settings, which the primary owns,
+    # so dedicated workers never need the credential encryption key to read them.
+    lease_tool_settings = primary_built_service is not None and primary_built_service(tool_name)
     services = _credential_services_for_call(
         tool_name,
         function_name,
@@ -371,12 +439,6 @@ def _collect_credential_overrides(
     )
     if not services:
         return {}
-    allowed_shared_services: frozenset[str] | None = None
-    if worker_target is not None and worker_target.worker_scope is not None:
-        context = get_tool_runtime_context()
-        allowed_shared_services = (
-            context.config.get_worker_grantable_credentials() if context is not None else frozenset()
-        )
 
     merged_overrides: dict[str, object] = {}
     for service in services:
@@ -384,7 +446,7 @@ def _collect_credential_overrides(
             service,
             credentials_manager=credentials_manager,
             worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
+            allowed_shared_services=worker_grantable_credentials,
             primary_built_tool=primary_built_service is not None and primary_built_service(service),
         )
         if isinstance(credentials, Mapping):

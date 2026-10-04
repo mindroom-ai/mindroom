@@ -1486,6 +1486,33 @@ def test_created_synapse_instance_refuses_self_registration(tmp_path: Path, monk
     assert address_limit["burst_count"] >= 1000000
 
 
+@pytest.mark.parametrize(("domain", "public"), [("mindroom.example.com", True), ("prod.localhost", False)])
+def test_created_synapse_instance_federates_to_private_addresses_only_on_localhost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    domain: str,
+    public: bool,
+) -> None:
+    """A public instance keeps Synapse's private-address blocklist and allows only the host gateway its peers map to."""
+    monkeypatch.setattr(deploy, "ENV_DIR", tmp_path / "envs")
+    monkeypatch.setattr(deploy, "ENV_TEMPLATE", tmp_path / "missing.env.template")
+    instance = _instance("prod", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+    instance.domain = domain
+
+    deploy._create_environment_file(instance, "prod", deploy.MatrixType.SYNAPSE)
+    deploy._setup_synapse_config(instance)
+
+    homeserver = yaml.safe_load((Path(instance.data_dir) / "synapse" / "homeserver.yaml").read_text())
+    if public:
+        # Leaving both blocklists unset applies Synapse's default private-address blocklist to federation requests.
+        assert "federation_ip_range_blacklist" not in homeserver
+        assert "ip_range_blacklist" not in homeserver
+        assert homeserver["ip_range_whitelist"] == ["172.17.0.1"]
+    else:
+        assert homeserver["federation_ip_range_blacklist"] == []
+        assert "ip_range_whitelist" not in homeserver
+
+
 def test_synapse_registration_secret_round_trips_yaml_metacharacters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1801,6 +1828,27 @@ def test_copied_credentials_are_owner_only(tmp_path: Path, monkeypatch: pytest.M
     }
 
 
+def test_root_start_without_source_credentials_hands_over_earlier_copies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root start repairs credentials a non-root start copied but could not give to the container user."""
+    monkeypatch.setattr(deploy.Path, "home", lambda: tmp_path / "root-home")
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+    target_dir.mkdir(parents=True)
+    copied = target_dir / "openai.json"
+    copied.write_text('{"api_key": "secret"}')
+    copied.chmod(0o644)
+    monkeypatch.setattr(deploy, "CONTAINER_UID", os.getuid() + 1)
+    calls = _operator_in_group_100(monkeypatch)
+
+    deploy._copy_credentials_to_instance(instance)
+
+    assert calls == [(copied.stat().st_ino, os.getuid() + 1, -1)]
+    assert _mode(copied) == 0o600
+
+
 def test_copied_config_stays_readable_when_ownership_transfer_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1930,7 +1978,7 @@ def test_secret_file_already_owned_by_the_container_uid_is_not_chowned(
     assert console.export_text() == ""
 
 
-def test_unrestrictable_secret_file_asks_for_a_root_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unrestrictable_secret_file_asks_for_a_root_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When deploy.py cannot hand a secret file to the container user, it still makes it owner-only and says how.
 
     It never prints a sudo command naming the path, because the container could swap that path for a link first.
@@ -1951,7 +1999,7 @@ def test_unrestrictable_secret_file_asks_for_a_root_rerun(tmp_path: Path, monkey
     deploy._protect_synapse_config(homeserver)
 
     output = normalize_console_output(console.export_text())
-    assert "Rerun this deploy.py command as root" in output
+    assert "Run deploy.py start for this instance as root" in output
     assert "sudo" not in output
     assert _mode(homeserver) == 0o600
 
@@ -1971,7 +2019,7 @@ def test_unreadable_container_secret_keeps_permission_guidance(tmp_path: Path, m
     deploy._protect_synapse_config(homeserver)
 
     output = normalize_console_output(console.export_text())
-    assert "Rerun this deploy.py command as root" in output
+    assert "Run deploy.py start for this instance as root" in output
     assert "sudo" not in output
     assert homeserver.read_text() == "unchanged"
     assert _mode(homeserver) == 0o600

@@ -51,7 +51,14 @@ def _extract_large_message_v2_content(payload_json: str) -> dict[str, Any] | Non
     """Extract canonical content dict from a v2 large-message sidecar JSON payload."""
     try:
         payload = json.loads(payload_json)
-    except json.JSONDecodeError:
+        # A ``\ud800`` escape parses into an unpaired surrogate, which no model request can encode.
+        json.dumps(payload, ensure_ascii=False).encode()
+    except (RecursionError, ValueError):
+        # Whoever posted the message chose these bytes. Besides malformed JSON
+        # (a ``ValueError``), well-formed JSON nested past the recursion limit,
+        # holding an integer over the digit limit, or holding an unpaired
+        # surrogate (a ``UnicodeEncodeError``) raises too, and must leave the
+        # sidecar unresolved rather than fail the read.
         return None
     if not isinstance(payload, dict):
         return None
@@ -113,20 +120,7 @@ async def _resolve_event_content(
     return _with_event_relation(resolved_content, preview_content), True
 
 
-def _mxc_bytes_exceed_limit(mxc_url: str, payload: bytes, *, stage: str) -> bool:
-    if len(payload) <= _MXC_TEXT_MAX_BYTES:
-        return False
-    logger.warning(
-        "mxc_text_payload_exceeds_byte_limit",
-        mxc_url=mxc_url,
-        stage=stage,
-        size_bytes=len(payload),
-        limit_bytes=_MXC_TEXT_MAX_BYTES,
-    )
-    return True
-
-
-async def _download_mxc_text(  # noqa: PLR0911
+async def _download_mxc_text(
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -159,11 +153,6 @@ async def _download_mxc_text(  # noqa: PLR0911
                 )
             except Exception:
                 logger.exception("Failed to decrypt attachment")
-                return None
-            if not isinstance(text_bytes, bytes):
-                logger.error("mxc_decrypt_returned_non_bytes_payload", mxc_url=mxc_url)
-                return None
-            if _mxc_bytes_exceed_limit(mxc_url, text_bytes, stage="decrypt"):
                 return None
         else:
             text_bytes = body

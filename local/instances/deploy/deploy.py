@@ -270,7 +270,7 @@ def _restrict_to_container_user(path: Path) -> None:
     if not restricted:
         console.print(f"[yellow]Warning:[/yellow] Could not make {path} owner-only for UID {CONTAINER_UID}.")
         # A sudo chown or chmod of this path would follow a link the container swaps in before it runs.
-        console.print("  Rerun this deploy.py command as root, which changes the file without following links.")
+        console.print("  Run deploy.py start for this instance as root; it changes the file without following links.")
 
 
 def _protect_synapse_config(config_path: Path) -> None:
@@ -310,6 +310,7 @@ def _prepare_matrix_config(
                 redis_password=env_values["REDIS_PASSWORD"],
                 registration_shared_secret=env_values["MATRIX_REGISTRATION_SHARED_SECRET"],
                 macaroon_secret_key=secrets.token_hex(32),
+                local_development=instance.domain.rsplit(".", 1)[-1] == "localhost",
             )
         else:
             # For Tuwunel or other matrix types
@@ -321,7 +322,7 @@ def _prepare_matrix_config(
         _write_private_file(config_path, content)
         _protect_synapse_config(config_path)
 
-    # Copy other files (like signing.key, log.config, etc.)
+    # Copy other files (like log.config)
     for file in template_dir.glob("*"):
         if not file.is_file() or file.suffix == ".j2":
             continue
@@ -330,27 +331,14 @@ def _prepare_matrix_config(
             # Skip - already handled by template
             continue
 
-        if file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
-            # Generate a unique signing key for Synapse
-            key_bytes = secrets.token_bytes(32)
-            key_b64 = base64.b64encode(key_bytes).decode("ascii")
-            key_id = f"{instance.name}_{secrets.token_hex(3)}"
-            signing_key_content = f"ed25519 {key_id} {key_b64}\n"
-
-            fd = os.open(target_dir / file.name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
-            with os.fdopen(fd, "w") as f:
-                f.write(signing_key_content)
-            console.print("  [dim]Generated unique signing key for instance[/dim]")
-
-        else:
-            fd = os.open(
-                target_dir / file.name,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o666,
-            )
-            with os.fdopen(fd, "wb") as target, file.open("rb") as source:
-                shutil.copyfileobj(source, target)
-                os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
+        fd = os.open(
+            target_dir / file.name,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o666,
+        )
+        with os.fdopen(fd, "wb") as target, file.open("rb") as source:
+            shutil.copyfileobj(source, target)
+            os.fchmod(target.fileno(), stat.S_IMODE(file.stat().st_mode))
 
 
 def _ensure_env_dir() -> None:
@@ -982,16 +970,16 @@ def _set_directory_permissions(path: Path, mode: int) -> None:
 def _copy_credentials_to_instance(instance: Instance) -> None:
     """Copy credentials from ~/.mindroom/credentials to instance data directory."""
     source_dir = Path.home() / ".mindroom" / "credentials"
-    if not source_dir.exists():
-        return
-
     target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
 
-    # Copy all credential files; the container user owns them, and nobody else may read them.
     for cred_file in source_dir.glob("*.json"):
         target_file = target_dir / cred_file.name
         if not os.path.lexists(target_file):
             _write_private_file(target_file, cred_file.read_text())
+
+    # The container user owns every copy and nobody else may read it, including copies an earlier
+    # non-root run could not hand over, even when this user has no credentials of their own to copy.
+    for target_file in target_dir.glob("*.json"):
         _restrict_to_container_user(target_file)
 
 

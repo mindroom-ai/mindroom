@@ -65,7 +65,8 @@ For applications, the local bridge starts in observe-only mode unless a person a
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
 Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
-MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and a bridge whose allowlist names either refuses to start.
+MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and saving either or naming it with `--allow-app` is refused.
+A setup saved by an earlier release that allowed either loads without it.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
 
@@ -186,6 +187,7 @@ Enable them locally with **Allow shell command requests** in the macOS app's **A
 
 Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
 The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
+When any of them contains a non-ASCII character, both surfaces warn that it can look like ASCII and repeat each such field, labeled, with every non-ASCII character escaped, so a look-alike host such as one spelled with Cyrillic letters stands out.
 The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
@@ -285,10 +287,12 @@ macOS supports native semantic state through AXUIElement and requires Accessibil
 macOS screenshots require macOS 14 or newer and Screen Recording permission.
 When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
 ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
+On macOS, right before each pointer event from `click`, `double_click`, `drag`, `hover`, `scroll`, or `scroll_element`, including every drag step and the release, the topmost visible window at that point must belong to the allowed app; if another app's window covers it, such as a notification banner, floating panel, or Picture in Picture, the action fails without sending anything when that happens before its first event, and otherwise input stops, any held button is released, and the outcome is reported as unknown.
 Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 On Windows, the terminal commands `mindroom desktop login`, `pair`, `setup`, `access`, and `run` target screenshot-only observation through the explicit `primary-screen` app ID, which has not yet been verified on a real Windows computer.
 Coordinate input during a control lease uses the same PyAutoGUI path and is also unverified on Windows.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
+On Linux and Windows, coordinate input is best-effort: it is not bound to the app's window, so a window covering the point receives it.
 A headless or locked graphical session is not a supported target.
 Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.
 They require macOS or Linux.
@@ -458,6 +462,7 @@ An open app refreshes externally saved settings while stopped and preserves unsa
 Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
 Repeating setup for the same controller preserves existing browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 Setup for a different controller starts without saved folders or shell access.
+Setup also replaces a malformed local configuration, or one readable by group or other users, with fresh private settings; choose apps, folders, shell, and browser access again afterward.
 If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
 Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.

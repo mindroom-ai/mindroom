@@ -107,13 +107,10 @@ def _discovery_retry_delay_seconds(consecutive_failures: int) -> float:
 
 
 def _refresh_wait_seconds(state: MCPServerState, retry_delay_seconds: float) -> float:
-    """Return a retry's backoff, or reserve the next spaced slot for a stale-catalog refresh."""
+    """Return a retry's backoff, or the wait until the minimum interval after the last refresh ended."""
     if retry_delay_seconds > 0:
         return retry_delay_seconds
-    now = monotonic()
-    starts_at = max(now, state.stale_refresh_not_before)
-    state.stale_refresh_not_before = starts_at + _STALE_REFRESH_MIN_INTERVAL_SECONDS
-    return starts_at - now
+    return max(0.0, state.stale_refresh_not_before - monotonic())
 
 
 def _fresh_recorded_error(error: MCPError) -> MCPError:
@@ -1614,6 +1611,9 @@ class MCPServerManager:
                     error=str(exc),
                 )
             finally:
+                # Waiting for running calls can delay a refresh long after it was scheduled, so space the next
+                # one from this end.
+                state.stale_refresh_not_before = monotonic() + _STALE_REFRESH_MIN_INTERVAL_SECONDS
                 # A failed refresh schedules its own backoff retry from within this
                 # task, so only clear or reschedule when no replacement exists.
                 if state.refresh_task is current_task:

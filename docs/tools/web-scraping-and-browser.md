@@ -205,7 +205,7 @@ extract_metadata_only("https://matrix.org/blog/")
 - `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
 - Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
 - `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
-- For news-article specific extraction with titles, authors, and summaries, `newspaper` can be a better fit.
+- For news-article specific extraction with titles, authors, and publish dates, `newspaper` can be a better fit.
 
 ### [`newspaper`]
 
@@ -214,7 +214,7 @@ extract_metadata_only("https://matrix.org/blog/")
 #### What It Does
 
 `newspaper` exposes `read_article(url)`.
-It returns JSON with whichever article fields were extracted successfully, including title, authors, text, publish date, and optional summary.
+It returns JSON with whichever article fields were extracted successfully, including title, authors, text, and publish date.
 `article_length` truncates article text after extraction.
 The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`.
 That means old references to `newspaper4k` are stale for current MindRoom config.
@@ -223,7 +223,6 @@ That means old references to `newspaper4k` are stale for current MindRoom config
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `include_summary` | `boolean` | `no` | `false` | Include article summary when available. |
 | `article_length` | `number` | `no` | `null` | Truncate article text to this many characters. |
 | `enable_read_article` | `boolean` | `no` | `true` | Enable `read_article()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -235,7 +234,6 @@ agents:
   newsdesk:
     tools:
       - newspaper:
-          include_summary: true
           article_length: 6000
 ```
 
@@ -774,6 +772,7 @@ browser_control(action="screenshot", target="desktop", fullPage=True, returnAtta
 
 `web_browser_tools` exposes `open_page(url, new_window=False)`.
 It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system.
+It opens only `http` and `https` URLs and refuses `file:` paths, other URI schemes, and scheme-less strings, so the host never hands local files or application links to their operating-system handlers.
 It does not return page content, DOM state, screenshots, or automation handles.
 This makes it useful for human handoff or local desktop workflows, but not for scraping.
 

@@ -107,6 +107,15 @@ apiKeys:
   google: ""
   deepseek: ""
 
+# Peers whose X-Real-IP header names the client for backend rate limits and the auth-failure lockout; any other caller is
+# keyed by its own address. Instance pods cannot reach the backend port, so the private ranges cover an in-cluster
+# controller without trusting tenants, provided it sets X-Real-IP from the client connection, as the reference Terraform
+# configures ingress-nginx. Narrow the ranges to the controller's pod network.
+trustedProxyCidrs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
 # Ingress options
 ingress:
   # NGINX blocks configuration-snippet by default in many setups (incl. kind example)

@@ -411,6 +411,9 @@ When the complete redacted arguments cannot be delivered, the card sets `approva
 This happens when the arguments exceed the 2MB completeness cap, when they nest deeper than the 32 levels redaction inspects, or when the sidecar upload fails.
 Clients should disable or hide the approve action when `approvable` is `false`.
 Approval cards are keyed to a durable Agno continuation that stores the exact paused tool calls and arguments.
+MindRoom's approval record keeps a digest of each paused call's arguments, and the continuation fails without running an approved call whose saved arguments no longer match it.
+Before a saved agent run continues, including a delegated agent's run, MindRoom also checks that the run would execute only calls approved on the card with the arguments it showed, and otherwise fails without running any of that run's calls.
+Saved team runs are kept in storage no worker can write, so they get only the argument check.
 While approval is pending, MindRoom releases the response coroutine, typing indicator, and per-conversation lock.
 Current-format pending cards and recorded decisions recover after restart or configuration reload, and an accepted decision resumes the exact paused run through the normal stoppable response lifecycle.
 Legacy, malformed, and orphan approval rows never authorize tool execution.
@@ -421,6 +424,8 @@ Agent-authored, system-authored, and configured bridge-bot-authored tool calls a
 An agent that acts for the human whose request another agent's reply relayed to it asks that human for approval, as if the human had asked it directly.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval, so on every channel they are hidden when a required-approval rule or `default: require_approval` applies to them; add an `auto_approve` rule for one to keep it available.
+When this hides `search_knowledge_base`, or all of `get_skill_instructions`, `get_skill_reference`, and `get_skill_script`, the agent's prompt also stops describing knowledge search or, for a standard agent, its skill functions, so the model is not told to call functions it cannot see.
+Minimal mode still includes skill contents as context documents.
 
 This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
 It does not gate every Slack operation, and the same function names in other toolkits also match.
@@ -465,7 +470,7 @@ Container `env_file`/`--env-file` injection supplies process variables and can t
 |----------|-------------|---------|
 | `MATRIX_HOMESERVER` | Matrix homeserver URL | `http://localhost:8008` |
 | `MATRIX_SERVER_NAME` | Server name for federation | _(derived from homeserver)_ |
-| `MATRIX_SSL_VERIFY` | Verify the homeserver's TLS certificate; provisioning service requests are always verified | `true` |
+| `MATRIX_SSL_VERIFY` | Verify the TLS certificate of `MATRIX_HOMESERVER`; provisioning service requests and other homeservers are always verified | `true` |
 | `MINDROOM_DESKTOP_MATRIX_HOMESERVER` | Public Matrix URL printed by `!desktop setup` when it differs from the runtime's internal homeserver URL | `MATRIX_HOMESERVER` |
 | `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS` | Include `--cloudflare-access` in the Desktop login and pairing commands printed by `!desktop setup` | `false` |
 
@@ -522,6 +527,7 @@ Set `CODEX_HOME` only if your Codex CLI state lives outside `~/.codex`.
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Finite positive seconds the sync watchdog and `/api/health` may defer while durable ingestion progress keeps advancing | `600` |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Complete worker-reachable background-script gateway base URL, including `/api/script-gateway`; required for Kubernetes and for Docker unless a reachable `MINDROOM_PUBLIC_URL` is configured | _(none)_ |
+| `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second primary listener that serves only `/api/script-gateway`, so Kubernetes script workers can be given a network path to the gateway without the general API; binds the `--api-host` address and is off when unset | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | Operator attestation that the Kubernetes worker's configured script-gateway listener exposes only `/api/script-gateway`; required to admit Kubernetes background scripts and does not create network isolation itself | `false` |
 | `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining exact CPU and memory requests and limits for the fixed `small`, `standard`, and `large` background-script profiles | Built-in bounded profiles |
@@ -661,6 +667,7 @@ models:
     api_key: null                  # Optional: Model-specific API key used instead of the provider's shared key
     extra_kwargs: null             # Optional: Provider-specific parameters
     context_window: null           # Optional: Needed on the active runtime model for replay safety; explicit compaction.model also needs its own window for summary generation
+    stream_idle_timeout_seconds: null  # Optional: Seconds without a provider event before a stream counts as stalled; unset = 300 on a provider's built-in endpoint, none for ollama, llama_cpp, or a configured endpoint; 0 disables
 
 # Team configurations (optional)
 teams:
@@ -704,6 +711,7 @@ defaults:
   max_tool_calls_per_turn: 1000    # Default: 1000 (tool calls one agent or team turn may execute; later calls return a tool error, and the turn ends with its text so far after this many plus two model requests)
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  max_consecutive_agent_replies: 50 # Default: 50 (agent or team messages in a row before agents stop waking each other; global only)
   auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
@@ -987,6 +995,15 @@ Changes to the effective store apply after restarting MindRoom.
 Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
 See the [journal binding and migration commands](https://docs.mindroom.chat/cli/#journal) before moving, restoring, or adopting a journal.
 
+## Agents Mentioning Agents
+
+An agent or team that mentions another agent or team in its reply wakes it.
+When the reply was written for a person, the mentioned entity answers for that person, who must still be a joined member of the room; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
+`defaults.max_consecutive_agent_replies` defaults to `50` and accepts any positive integer.
+Once a conversation has that many consecutive agent or team messages since a person last wrote there, counting the message itself, mentions in agent messages wake nobody, so `1` stops agents from waking each other.
+The next message from a person in that conversation starts the count again.
+For a room-level conversation the count covers the room's messages outside threads.
+
 ## Automatic Restart Resumption
 
 `defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
@@ -1061,6 +1078,7 @@ OAuth credentials are read only from their authoritative SQLite stores and use t
 Legacy OAuth JSON files and sidecars are ignored and left unchanged, and changing the encryption setting never imports them.
 An OAuth connection that exists only in JSON must be reconnected with the intended encryption setting.
 Current encrypted SQLite credentials become readable again when their correct key is restored.
+Dedicated Docker and Kubernetes workers never receive the key, so with encryption enabled they cannot read the worker credential stores and `.shared_credentials` mirrors the primary encrypts, and saved tool settings reach them only through [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 
 ## Debug Logging
 
@@ -1260,7 +1278,7 @@ No tools or workspace reset behavior are added.
 Operators can preserve an existing room ID and history by writing a trusted `PersonalRoomRecord` before enabling onboarding.
 Stop the runtime before importing records.
 Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_personal_room(path, record)` from `mindroom.matrix.personal_room_store` to atomically persist validated current-format records.
-The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
+The storage location is `tracking/agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root, outside every directory a worker mounts.
 These files are trusted operator state, never user-submitted input.
 
 For a private room with shared history and one already permitted guest, a seed looks like this:

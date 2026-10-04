@@ -65,7 +65,7 @@ def write_thread_export_matrix_state(
 
 def write_invited_rooms(runtime_paths: RuntimePaths, entity_name: str, room_ids: list[str]) -> None:
     """Persist invited-room IDs for one managed entity."""
-    path = invited_rooms_path(runtime_paths.storage_root, entity_name)
+    path = invited_rooms_path(runtime_paths, entity_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(room_ids), encoding="utf-8")
 

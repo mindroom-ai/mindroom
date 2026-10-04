@@ -1,0 +1,18 @@
+MindRoom MatrixRTC chart rendered.
+
+Services:
+  LiveKit signaling: {{ include "mindroom-matrixrtc.livekitName" . }}:{{ .Values.livekit.port }}
+  LiveKit media:     {{ include "mindroom-matrixrtc.mediaServiceName" . }} ({{ .Values.livekit.media.loadBalancerIP }} TCP {{ .Values.livekit.media.ports.tcp }}, UDP {{ .Values.livekit.media.ports.udp }})
+  Authorization:     {{ include "mindroom-matrixrtc.authName" . }}:{{ .Values.auth.port }}
+
+Point the mindroom-client chart at these Services:
+  matrixRTC:
+    enabled: true
+    livekitServiceUrl: https://<public host>/livekit/jwt
+    proxy:
+      enabled: true
+      jwtServiceUpstream: http://{{ include "mindroom-matrixrtc.authName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auth.port }}
+      sfuUpstream: http://{{ include "mindroom-matrixrtc.livekitName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.livekit.port }}
+
+auth.livekitUrl ({{ .Values.auth.livekitUrl }}) must be the public WebSocket form of the /livekit/sfu route.
+Allow TCP {{ .Values.livekit.media.ports.tcp }} and UDP {{ .Values.livekit.media.ports.udp }} to {{ .Values.livekit.media.loadBalancerIP }} in any firewall your provider does not configure automatically.

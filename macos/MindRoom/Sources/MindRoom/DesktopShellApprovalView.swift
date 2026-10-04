@@ -54,9 +54,13 @@ struct DesktopShellApprovalView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
             Text("The command is \(request.commandSizeLabel).").font(.callout).foregroundStyle(.secondary)
-            if request.hasEscapedCharacters {
-                Label("This request contains control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}.", systemImage: "exclamationmark.triangle.fill")
+            if let warning = request.escapeWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
+            }
+            if request.hasNonASCIICharacters {
+                DesktopLeftToRightText(text: request.asciiEscapedFields, textStyle: .callout)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Working folder").font(.callout)

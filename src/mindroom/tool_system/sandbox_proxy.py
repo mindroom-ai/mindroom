@@ -13,15 +13,15 @@ import os
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import httpx
 
+from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, PROVIDER_ENV_KEYS, build_execution_tool_env
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -35,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
+    WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_json,
@@ -917,13 +918,8 @@ def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -
 
     The primary builds every tool, including tools whose calls run in a worker, so a worker-writable store never
     configures it; routed calls receive the settings through a per-call lease instead.
-    Model provider services double as provider keys that workers read, so they keep their existing placement.
     """
-    return (
-        tool_name in TOOL_METADATA
-        and tool_name not in PROVIDER_ENV_KEYS
-        and not sandbox_proxy_config(runtime_paths).runner_mode
-    )
+    return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
 def _call_proxy_sync(
@@ -941,6 +937,7 @@ def _call_proxy_sync(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
 
@@ -988,6 +985,9 @@ def _call_proxy_sync(
         )
         payload.update(worker_payload)
         payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
+        if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
+            # A minimal response's grant travels with each command to the agent's own worker.
+            execution_env = {**(execution_env or {}), **cli_env.env()}
         if execution_env:
             payload["execution_env"] = execution_env
         if extra_env_passthrough is not None:
@@ -1014,6 +1014,8 @@ def _call_proxy_sync(
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
+            worker_grantable_credentials=manager_context.worker_grantable_credentials,
+            cancellation=cancellation,
         )
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
         from mindroom.tool_system.media_transport import (  # noqa: PLC0415
@@ -1026,11 +1028,20 @@ def _call_proxy_sync(
         return result
 
 
+async def _run_sync_tool_call(call: Callable[[], object]) -> object:
+    """Run one call of a synchronous tool function exactly as its sync entrypoint would run, completion owners included."""
+    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint  # noqa: PLC0415
+
+    return await run_sync_tool_entrypoint(call, {})
+
+
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     """Run one blocking worker proxy call outside asyncio's default executor."""
-    context = copy_context()
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_WORKER_PROXY_EXECUTOR, context.run, call)
+    # Deferred: the tool hook bridge loads Agno, which the slim tool registry must not import.
+    from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call  # noqa: PLC0415
+
+    return await run_async_entrypoint_blocking_call(call, executor=_WORKER_PROXY_EXECUTOR)
 
 
 def _wrap_sync_function(
@@ -1080,7 +1091,7 @@ def _wrap_sync_function(
     return wrapped
 
 
-def _wrap_async_function(
+def _wrap_async_proxy(
     function: Function,
     tool_name: str,
     function_name: str,
@@ -1098,6 +1109,9 @@ def _wrap_async_function(
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
     assert entrypoint is not None
+    entrypoint_is_async = inspect.iscoroutinefunction(entrypoint)
+    # A sync function keeps the completion ownership its sync entrypoint had; an async one keeps prompt cancellation.
+    run_blocking = _run_in_worker_proxy_executor if entrypoint_is_async else _run_sync_tool_call
 
     @functools.wraps(entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
@@ -1105,7 +1119,10 @@ def _wrap_async_function(
             function_name,
             inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
         ):
-            return await entrypoint(*args, **kwargs)
+            if entrypoint_is_async:
+                return await entrypoint(*args, **kwargs)
+            return await _run_sync_tool_call(functools.partial(entrypoint, *args, **kwargs))
+        cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
             function_entrypoint=entrypoint,
@@ -1121,8 +1138,14 @@ def _wrap_async_function(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            cancellation=cancellation,
         )
-        return await _run_in_worker_proxy_executor(call)
+        try:
+            return await run_blocking(call)
+        except asyncio.CancelledError:
+            # The blocking request keeps running after this await is cancelled; stop it at the worker too.
+            cancellation.cancel()
+            raise
 
     declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint
@@ -1180,7 +1203,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         for function_name, function in original_functions.items()
     }
     toolkit.async_functions = {
-        function_name: _wrap_async_function(
+        function_name: _wrap_async_proxy(
             function,
             tool_name,
             function_name,
@@ -1194,6 +1217,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             worker_target=worker_target,
             primary_placement=primary_placement,
         )
-        for function_name, function in original_async_functions.items()
+        # Sync functions get an async proxy too, so stopping an async run stops their worker call.
+        for function_name, function in {**original_functions, **original_async_functions}.items()
     }
     return toolkit

@@ -63,6 +63,7 @@ Earlier attachments stay in chronological position through inline annotations, b
 ```
 
 Agents can use the annotation's attachment ID with tools when they need to inspect historical media again.
+When a message with a file, image, or video is edited, later turns register its current revision under a new attachment ID, so a replaced file is used instead of the old one.
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
@@ -138,12 +139,15 @@ MindRoom automatically prunes attachment metadata and eligible managed `incoming
 Pruning runs opportunistically during new attachment registration, with a one-hour cleanup throttle.
 Managed files with active attachment references are retained, and filesystem failures can delay deletion.
 This is not an exact deletion deadline and does not delete unmanaged source or workspace files or Matrix homeserver copies.
+Downloaded Matrix media is stored once per content and file type, so events that share one file keep their own attachment records but a single copy of its bytes.
 
 ## Limitations
 
-- **Incoming media size** -- downloaded and decrypted payloads must each be at most 64 MiB (67,108,864 bytes).
-  MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
-  This is a post-download check, so use a smaller file when it is rejected.
+- **Incoming media size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted media decrypts to the same size.
+  MindRoom stops a download as soon as it passes that limit, so use a smaller file when it is rejected.
   Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
+- **Earlier media that fails** -- a file, image, or video earlier in the conversation that cannot be downloaded, decrypted, or stored is not tried again for an hour, so later turns do not fetch it each time.
+- **Earlier media per turn** -- one turn downloads at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
+  The thread's opening message is not counted toward this limit or held back after a failure: each turn downloads it until it is stored.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.

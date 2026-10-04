@@ -39,7 +39,6 @@ from mindroom.runtime_env_policy import (
     SHARED_CREDENTIALS_PATH_ENV,
     VENDOR_TELEMETRY_ENV_VALUES,
     WORKER_EGRESS_PROXY_ENV_BY_KEY,
-    credentials_encryption_key_value,
     worker_extra_env,
 )
 from mindroom.tool_system.worker_routing import (
@@ -59,7 +58,6 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
 from mindroom.workers.backends.kubernetes_config import (
-    credentials_encryption_key_hash,
     is_kubernetes_worker_backend_config_env_name,
     resolve_kubeconfig_paths,
 )
@@ -98,7 +96,6 @@ ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
 _ANNOTATION_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
 _ANNOTATION_RUNNER_TOKEN_HASH = "mindroom.ai/runner-token-hash"  # noqa: S105
-_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH = "mindroom.ai/credentials-encryption-key-hash"
 _ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
@@ -1002,6 +999,7 @@ class KubernetesResourceManager:
                     {
                         "data": {
                             secret_name: None,
+                            # Nulls the legacy key entry described above _worker_auth_secret_data.
                             _worker_credentials_encryption_key_secret_key(secret_name): None,
                         },
                     },
@@ -1261,16 +1259,12 @@ class KubernetesResourceManager:
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
             metadata["ownerReferences"] = [owner_reference]
-        credentials_encryption_key = self._credentials_encryption_key()
         return {
             "apiVersion": "v1",
             "kind": "Secret",
             "metadata": metadata,
             "type": "Opaque",
-            "stringData": self._worker_auth_secret_string_data(
-                worker_token=worker_token,
-                credentials_encryption_key=credentials_encryption_key,
-            ),
+            "stringData": {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token},
         }
 
     def _auth_secret_patch(self, *, worker_key: str, worker_id: str) -> dict[str, object]:
@@ -1286,39 +1280,28 @@ class KubernetesResourceManager:
             "data": self._worker_auth_secret_data(worker_token=worker_token),
         }
 
-    def _worker_auth_secret_string_data(
-        self,
-        *,
-        worker_token: str,
-        credentials_encryption_key: str | None,
-    ) -> dict[str, str]:
-        string_data = {SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: worker_token}
-        if credentials_encryption_key is not None:
-            string_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
-        return string_data
-
+    # LEGACY_COMPAT: Worker auth Secrets that hold the primary's credential encryption key.
+    # Legacy format: a per-worker Secret's MINDROOM_CREDENTIALS_ENCRYPTION_KEY entry, or a shared worker-auth Secret's
+    #   <worker id>.credentials-encryption-key entry, written whenever the primary had credential encryption enabled.
+    # Last legacy release: v2026.10.39; replacement: v2026.10.40 gives workers no key and writes neither entry.
+    # Handling: every Secret apply and the worker cleanup that deletes a Secret entry patch the entry to null, so the
+    #   key leaves each worker's Secret the next time the primary ensures or cleans up that worker.
+    # Coverage: tests/test_kubernetes_worker_backend.py::test_kubernetes_worker_never_receives_credentials_encryption_key;
+    #   tests/test_kubernetes_worker_backend.py::test_kubernetes_backend_reapply_removes_worker_secret_key;
+    #   tests/test_kubernetes_worker_backend.py::test_kubernetes_backend_reapply_removes_shared_secret_key;
+    #   tests/test_kubernetes_worker_backend.py::test_kubernetes_backend_cleanup_removes_only_own_key_from_tenant_auth_secret.
     def _worker_auth_secret_data(self, *, worker_token: str) -> dict[str, str | None]:
-        credentials_encryption_key = self._credentials_encryption_key()
-        secret_data: dict[str, str | None] = {
-            name: _secret_data_value(value)
-            for name, value in self._worker_auth_secret_string_data(
-                worker_token=worker_token,
-                credentials_encryption_key=credentials_encryption_key,
-            ).items()
+        return {
+            SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"]: _secret_data_value(worker_token),
+            CREDENTIALS_ENCRYPTION_KEY_ENV: None,
         }
-        if credentials_encryption_key is None:
-            secret_data[CREDENTIALS_ENCRYPTION_KEY_ENV] = None
-        return secret_data
 
     def _shared_auth_secret_data(self, *, worker_id: str, worker_token: str) -> dict[str, str | None]:
-        secret_data: dict[str, str | None] = {worker_id: _secret_data_value(worker_token)}
-        credentials_encryption_key = self._credentials_encryption_key()
-        encryption_key_secret_key = _worker_credentials_encryption_key_secret_key(worker_id)
-        if credentials_encryption_key is not None:
-            secret_data[encryption_key_secret_key] = _secret_data_value(credentials_encryption_key)
-        else:
-            secret_data[encryption_key_secret_key] = None
-        return secret_data
+        # Nulls the legacy key entry described above _worker_auth_secret_data.
+        return {
+            worker_id: _secret_data_value(worker_token),
+            _worker_credentials_encryption_key_secret_key(worker_id): None,
+        }
 
     def deployment_template_drifted(
         self,
@@ -1383,9 +1366,6 @@ class KubernetesResourceManager:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
-        credentials_key_hash = credentials_encryption_key_hash(self._credentials_encryption_key())
-        if credentials_key_hash is not None:
-            template_annotations[_ANNOTATION_CREDENTIALS_ENCRYPTION_KEY_HASH] = credentials_key_hash
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -1579,9 +1559,6 @@ class KubernetesResourceManager:
             {"name": "HOME", "value": dedicated_root},
             self._worker_token_env(worker_id=worker_id),
         ]
-        credentials_encryption_key_env = self._worker_credentials_encryption_key_env(worker_id=worker_id)
-        if credentials_encryption_key_env is not None:
-            env.append(credentials_encryption_key_env)
 
         if include_agent_vault:
             env.extend(self._agent_vault_main_env(worker_key=worker_key))
@@ -1604,26 +1581,6 @@ class KubernetesResourceManager:
                 },
             },
         }
-
-    def _worker_credentials_encryption_key_env(self, *, worker_id: str) -> dict[str, object] | None:
-        if self._credentials_encryption_key() is None:
-            return None
-        return {
-            "name": CREDENTIALS_ENCRYPTION_KEY_ENV,
-            "valueFrom": {
-                "secretKeyRef": {
-                    "name": self.config.auth_secret_name or worker_id,
-                    "key": (
-                        _worker_credentials_encryption_key_secret_key(worker_id)
-                        if self.config.auth_secret_name is not None
-                        else CREDENTIALS_ENCRYPTION_KEY_ENV
-                    ),
-                },
-            },
-        }
-
-    def _credentials_encryption_key(self) -> str | None:
-        return credentials_encryption_key_value(self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV))
 
     def _worker_auth_token(self, worker_key: str) -> str:
         worker_token = worker_auth_token(self.auth_token, worker_key)

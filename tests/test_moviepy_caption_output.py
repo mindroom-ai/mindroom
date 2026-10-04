@@ -42,6 +42,7 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
     audio = AudioClip(lambda _time: 0.0, duration=1, fps=8000)
     video = ColorClip((32, 24), color=(0, 0, 0), duration=1).with_fps(1).with_audio(audio)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
+    monkeypatch.setattr(adapter, "_require_plain_media", lambda _path: None)
     audio_paths: list[Path] = []
     video_paths: list[Path] = []
 
@@ -76,7 +77,7 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
             message = "video encoder failed"
             raise OSError(message)
 
-    def reject_publication(_source: object, _destination: object) -> None:
+    def reject_publication(*_args: object, **_kwargs: object) -> None:
         message = "destination locked"
         raise OSError(message)
 
@@ -86,7 +87,8 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
     if failure == "publish":
         monkeypatch.setattr(os, "replace", reject_publication)
 
-    result = adapter.MindRoomMoviePyVideoTools().embed_captions(str(source), str(captions), str(output))
+    toolkit = adapter.MindRoomMoviePyVideoTools(tool_output_workspace_root=tmp_path)
+    result = toolkit.embed_captions(str(source), str(captions), str(output))
 
     if failure is None:
         assert result == str(output)
@@ -97,10 +99,11 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
         assert output.read_bytes() == b"existing output"
     assert len(audio_paths) == 1
     assert len(video_paths) == (0 if failure == "audio" else 1)
+    staging = audio_paths[0].parent
+    assert staging not in {tmp_path, output_dir, working}
+    assert not staging.exists()
     for path in [*audio_paths, *video_paths]:
-        assert path.parent == output_dir
-        assert path not in {source, output, user_audio, working_audio}
-        assert not path.exists()
+        assert path.parent == staging
     assert source.read_bytes() == b"user input video"
     assert user_audio.read_bytes() == b"user audio"
     assert working_audio.read_bytes() == b"unrelated working audio"

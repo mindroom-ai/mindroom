@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import mimetypes
 from contextlib import contextmanager
@@ -20,6 +19,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
 from mindroom.atomic_file import atomic_write_file_at
+from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
@@ -43,6 +43,7 @@ from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from typing import BinaryIO
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -67,13 +68,38 @@ _WRITE_FUNCTION_NAMES = ("upload_file", "update_file", "create_folder", "move_fi
 _WRITE_RESULT_FIELDS = "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink"
 _FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 _GOOGLE_WORKSPACE_MIME_PREFIX = "application/vnd.google-apps."
+# Downloads land on the primary's storage volume, so one file must not fill it.
+_DEFAULT_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
 
-def _max_read_size_finite_error(value: object) -> TypeError | ValueError:
-    msg = "Google Drive max_read_size must be a finite number"
+def _size_limit_finite_error(field_name: str, value: object) -> TypeError | ValueError:
+    msg = f"Google Drive {field_name} must be a finite number"
     if isinstance(value, str):
         return ValueError(msg)
     return TypeError(msg)
+
+
+class _BoundedDownloadWriter:
+    """Refuse a download chunk before writing it past the download size limit."""
+
+    def __init__(self, output: BinaryIO, max_bytes: float) -> None:
+        self._output = output
+        self._max_bytes = max_bytes
+        self._remaining = max_bytes
+
+    def write(self, chunk: bytes) -> int:
+        if len(chunk) > self._remaining:
+            msg = f"Google Drive download exceeds max_download_size ({self._max_bytes} bytes)"
+            raise ByteLimitExceededError(msg)
+        self._remaining -= len(chunk)
+        return self._output.write(chunk)
+
+
+def _download_media(output: _BoundedDownloadWriter, request: object) -> None:
+    downloader = MediaIoBaseDownload(output, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
 
 
 def _unsafe_drive_filename_error(filename: object) -> str | None:
@@ -92,6 +118,17 @@ def _unsafe_drive_filename_error(filename: object) -> str | None:
     return None
 
 
+def _download_metadata_error(metadata: dict[str, Any], max_download_size: float) -> str | None:
+    """Refuse a download whose filename is unsafe or whose Drive size exceeds the limit."""
+    unsafe_filename_error = _unsafe_drive_filename_error(metadata.get("name"))
+    if unsafe_filename_error:
+        return unsafe_filename_error
+    file_size = int(metadata.get("size", 0))
+    if file_size > max_download_size:
+        return f"File is {file_size} bytes, exceeds max_download_size ({max_download_size})."
+    return None
+
+
 def _download_target_path(workspace_root: Path, filename: str, extension: str) -> Path | None:
     target_path = workspace_root.absolute() / "google-drive-downloads" / filename
     if extension and not target_path.suffix:
@@ -106,9 +143,12 @@ def _download_target_path(workspace_root: Path, filename: str, extension: str) -
 
 @contextmanager
 def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[MediaIoBaseUpload]:
-    """Stream the authorized file as an upload body, opened without following links swapped in after the check."""
+    """Stream the authorized file in resumable chunks, opened without following links swapped in after the check.
+
+    Non-resumable uploads would read the whole file into memory to build the request body.
+    """
     with authorized.open() as file:
-        yield MediaIoBaseUpload(file, mimetype=mime_type)
+        yield MediaIoBaseUpload(file, mimetype=mime_type, resumable=True)
 
 
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
@@ -134,11 +174,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             msg = "GoogleDriveTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
         if "max_read_size" in kwargs:
-            max_read_size = self._coerce_max_read_size(kwargs["max_read_size"])
+            max_read_size = self._coerce_size_limit("max_read_size", kwargs["max_read_size"])
             if max_read_size is None:
                 kwargs.pop("max_read_size")
             else:
                 kwargs["max_read_size"] = max_read_size
+        max_download_size = self._coerce_size_limit("max_download_size", kwargs.pop("max_download_size", None))
+        self.max_download_size = _DEFAULT_MAX_DOWNLOAD_SIZE if max_download_size is None else max_download_size
         if kwargs.get("download_file"):
             if tool_output_workspace_root is None:
                 logger.warning("Google Drive downloads are disabled because this agent has no workspace")
@@ -173,6 +215,9 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             quota_project_id=quota_project_id,
         )
         super().__init__(creds=creds, **kwargs)
+        # Agno's async variants run Drive calls on the event loop's default executor, which the
+        # gateway cannot track; synchronous bodies run on the caller's tool executor instead.
+        self.async_functions.clear()
         if write:
             self._register_write_tools()
         self._set_original_auth(AgnoGoogleDriveTools._resolve_creds)
@@ -197,25 +242,15 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         return build("drive", "v3", http=self._google_authorized_http(credentials))
 
     def _register_write_tools(self) -> None:
-        sync_tools = (
+        write_tools = (
             (self._upload_file, "upload_file"),
             (self.update_file, "update_file"),
             (self.create_folder, "create_folder"),
             (self.move_file, "move_file"),
             (self.trash_file, "trash_file"),
         )
-        async_tools = (
-            (self._aupload_file, "upload_file"),
-            (self.aupdate_file, "update_file"),
-            (self.acreate_folder, "create_folder"),
-            (self.amove_file, "move_file"),
-            (self.atrash_file, "trash_file"),
-        )
-        self.tools = (*self.tools, *(tool for tool, _name in sync_tools))
-        self._async_tools = (*self._async_tools, *async_tools)
-        for tool, name in sync_tools:
-            self.register(tool, name=name)
-        for tool, name in async_tools:
+        self.tools = (*self.tools, *(tool for tool, _name in write_tools))
+        for tool, name in write_tools:
             self.register(tool, name=name)
 
     def _stored_credentials_have_required_scopes(self, token_data: dict[str, Any]) -> bool:
@@ -258,16 +293,16 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             function.entrypoint = write_scope_entrypoint
             setattr(self, function_name, write_scope_entrypoint)
 
-    def _coerce_max_read_size(self, value: object) -> int | float | None:
+    def _coerce_size_limit(self, field_name: str, value: object) -> int | float | None:
         try:
             return coerce_optional_finite_number(value)
         except OverflowError as exc:
-            raise _max_read_size_finite_error(value) from exc
+            raise _size_limit_finite_error(field_name, value) from exc
         except TypeError as exc:
-            msg = "Google Drive max_read_size must be a number"
+            msg = f"Google Drive {field_name} must be a number"
             raise TypeError(msg) from exc
         except ValueError as exc:
-            msg = "Google Drive max_read_size must be a number"
+            msg = f"Google Drive {field_name} must be a number"
             raise ValueError(msg) from exc
 
     def _resolve_upload_file(self, local_path: str) -> AuthorizedFile:
@@ -321,22 +356,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not upload file '{authorized.display_path}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def _aupload_file(
-        self,
-        local_path: str,
-        folder_id: str | None = None,
-        name: str | None = None,
-        mime_type: str | None = None,
-    ) -> str:
-        """Upload one local file without blocking the async agent loop."""
-        return await asyncio.to_thread(
-            self.upload_file,
-            local_path,
-            folder_id=folder_id,
-            name=name,
-            mime_type=mime_type,
-        )
-
     @authenticate
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
         """Replace the contents of one binary Drive file from the agent workspace."""
@@ -377,10 +396,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not update Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def aupdate_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
-        """Replace one binary Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.update_file, file_id, local_path, mime_type=mime_type)
-
     @authenticate
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
         """Create a Google Drive folder, optionally under one parent folder."""
@@ -398,10 +413,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except Exception as exc:
             log_error(f"Could not create Google Drive folder '{name}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    async def acreate_folder(self, name: str, parent_id: str | None = None) -> str:
-        """Create a Google Drive folder without blocking the async agent loop."""
-        return await asyncio.to_thread(self.create_folder, name, parent_id=parent_id)
 
     @authenticate
     def move_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
@@ -433,10 +444,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             log_error(f"Could not move Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
-    async def amove_file(self, file_id: str, new_parent_id: str, name: str | None = None) -> str:
-        """Move one Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.move_file, file_id, new_parent_id, name=name)
-
     @authenticate
     def trash_file(self, file_id: str) -> str:
         """Move one Drive file to trash without permanently deleting it."""
@@ -458,10 +465,6 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         except Exception as exc:
             log_error(f"Could not trash Google Drive file '{file_id}': {exc}")
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
-
-    async def atrash_file(self, file_id: str) -> str:
-        """Trash one Drive file without blocking the async agent loop."""
-        return await asyncio.to_thread(self.trash_file, file_id)
 
     @authenticate
     def read_file(self, file_id: str) -> str:
@@ -521,12 +524,12 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             if self._workspace_root is None:
                 return json.dumps({"error": "Google Drive downloads require an agent workspace"})
             service = cast("Any", self.service)
-            metadata = self._get_file_metadata(file_id, "id,name,mimeType")
+            metadata = self._get_file_metadata(file_id, "id,name,mimeType,size")
             mime_type = metadata.get("mimeType", "")
             filename = metadata.get("name")
-            unsafe_filename_error = _unsafe_drive_filename_error(filename)
-            if unsafe_filename_error:
-                return json.dumps({"error": unsafe_filename_error, "file": metadata})
+            metadata_error = _download_metadata_error(metadata, self.max_download_size)
+            if metadata_error:
+                return json.dumps({"error": metadata_error, "file": metadata})
 
             target_mime, ext = self.DOWNLOAD_EXPORT_TYPES.get(mime_type, (None, ""))
             if export_format:
@@ -544,9 +547,10 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                 open_directory_within_root(self._workspace_root, "google-drive-downloads", create=True) as directory_fd,
                 atomic_write_file_at(directory_fd, path.name) as file_handle,
             ):
+                # Exports carry no size in their metadata, so the limit also holds while bytes arrive.
+                output = _BoundedDownloadWriter(file_handle, self.max_download_size)
                 if target_mime:
-                    request = service.files().export_media(fileId=file_id, mimeType=target_mime)
-                    file_handle.write(self._download_bytes(request))
+                    _download_media(output, service.files().export_media(fileId=file_id, mimeType=target_mime))
                     result = {
                         "fileId": file_id,
                         "path": str(path),
@@ -555,15 +559,13 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
                         "originalMimeType": mime_type,
                     }
                 else:
-                    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-                    downloader = MediaIoBaseDownload(file_handle, request)
-                    done = False
-                    while not done:
-                        _, done = downloader.next_chunk()
+                    _download_media(output, service.files().get_media(fileId=file_id, supportsAllDrives=True))
                     result = {"fileId": file_id, "path": str(path), "status": "downloaded"}
             return json.dumps(result)
         except HttpError as exc:
             error = f"Google Drive API error: {exc}"
+        except ByteLimitExceededError as exc:
+            error = str(exc)
         except Exception as exc:
             log_error(f"Could not download file '{file_id}': {exc}")
             error = f"Unexpected error: {type(exc).__name__}: {exc}"

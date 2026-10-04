@@ -27,7 +27,7 @@ One shared boundary helper encodes `None` to the empty string and decodes it bac
 ### Durable sync batch boundary
 
 The Matrix client uses `nio.durable.open_durable_sync` with Classic or Simplified Sliding Sync.
-The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.2`; `uv.lock` resolves version `1.1.2` from the package registry, with no Git source override.
+The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.3`; `uv.lock` resolves version `1.1.3` from the package registry, with no Git source override.
 Account, device, consumer and stream ownership bind once when opening the session.
 Soft-logout renewal requests the existing device; it preserves the bound stream, membership positions, and attempted-delivery sending identity.
 Hard logout, missing device storage, or changed identity stops startup instead of attempting a stream replacement.
@@ -165,6 +165,8 @@ The room-history-loss repair in contract 7 instead follows request and raw-event
 
 Thread hydration adapts the room bounds rather than copying them: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` bounds the raw relation tree that streaming makes an order of magnitude larger than the message count.
 The thread root is kept over and above the window, because a thread starting at its first reply is missing the message it is about.
+A walk that is not complete and saw no edit of the root by its sender then fetches the root's direct edits on their own, because an early root edit sorts behind every newer reply.
+If that fetch also stops at the event ceiling without such an edit, the root is installed with the unreadable-edit notice rather than as unedited.
 
 **Why early truncation is safe.** The walk asks for `direction=back` explicitly rather than inheriting nio's default.
 Under MSC3981 the server returns relations in the topological order `/messages` would give, and an edit is sent after the message it revises, so every edit arrives *before* its original.

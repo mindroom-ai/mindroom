@@ -411,12 +411,6 @@ class AdminInstanceLifecycleResponse(BaseModel):
     stuck: list[LifecycleInstanceOut]
 
 
-class AdminLogoutResponse(BaseModel):
-    """Admin logout response model."""
-
-    success: bool
-
-
 # Webhook Models
 class WebhookResponse(BaseModel):
     """Webhook processing response model."""

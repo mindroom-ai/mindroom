@@ -39,6 +39,11 @@ _BEDROCK_CLAUDE_PROVIDER = "bedrock_claude"
 # 10 minutes unless the client has an explicit timeout; 3600s is the SDK's own
 # ceiling for non-streaming operations.
 _CLAUDE_REQUEST_TIMEOUT_SECONDS = 3600.0
+# A hosted API that sends no stream event for this long has stalled.
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
+# Local servers can stay silent for minutes while a request queues or a model
+# loads, so they and custom endpoints get an idle limit only when configured.
+_LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 
 
 def canonical_provider(provider: str) -> str:
@@ -264,12 +269,13 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 extra_kwargs["api_key"] = env_api_key
             else:
                 logger.warning("No Z.ai API key found in environment or CredentialsManager")
-        extra_kwargs.setdefault("base_url", ZAI_BASE_URL_DEFAULT)
         extra_kwargs.setdefault("name", "ZAI")
         extra_kwargs.setdefault("provider", "ZAI")
         from mindroom.openai_models import MindRoomOpenAILike  # noqa: PLC0415
 
-        return MindRoomOpenAILike(id=model_id, **extra_kwargs)
+        # The built-in endpoint stays out of extra_kwargs, which only carry configured endpoints.
+        zai_kwargs: dict[str, Any] = {"base_url": ZAI_BASE_URL_DEFAULT, **extra_kwargs}
+        return MindRoomOpenAILike(id=model_id, **zai_kwargs)
 
     if canonical_provider_key in {"codex", "openai_codex"}:
         from mindroom.codex_model import (  # noqa: PLC0415
@@ -370,6 +376,26 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
+
+
+def _sets_base_url(kwargs: object) -> bool:
+    """Return whether provider kwargs, at any depth, point the client at an explicit endpoint."""
+    return isinstance(kwargs, dict) and any(
+        (key == "base_url" and bool(value)) or _sets_base_url(value) for key, value in kwargs.items()
+    )
+
+
+def _stream_idle_timeout_seconds(model_config: ModelConfig, model_kwargs: dict[str, Any]) -> float | None:
+    """Return the silence limit for streamed provider requests, or None for no limit.
+
+    ``model_kwargs`` are the kwargs the model was built with, so endpoints resolved
+    from the runtime env, such as ``OPENAI_BASE_URL``, count as configured too.
+    """
+    if model_config.stream_idle_timeout_seconds is not None:
+        return model_config.stream_idle_timeout_seconds or None
+    if canonical_provider(model_config.provider) in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_kwargs):
+        return None
+    return _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
 
 
 def _model_credential_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
@@ -484,7 +510,10 @@ def get_model_instance(
         configured_provider=provider,
     )
     install_claude_prompt_cache_hook(model)
-    install_provider_stream_retry_hook(model)
+    install_provider_stream_retry_hook(
+        model,
+        idle_timeout_seconds=_stream_idle_timeout_seconds(model_config, extra_kwargs),
+    )
     install_provider_media_fallback(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),

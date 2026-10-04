@@ -17,7 +17,12 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_source import VOICE_SOURCE_KIND, is_voice_event
+from mindroom.dispatch_source import (
+    SCHEDULED_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+    VOICE_SOURCE_KIND,
+    is_voice_event,
+)
 from mindroom.matrix.media import is_audio_message_event, is_matrix_media_dispatch_event
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
@@ -231,7 +236,12 @@ def _parsed_command_for_event(
 ) -> Command | None:
     if media_events:
         return None
-    if ingress_metadata is not None and ingress_metadata.source_kind == VOICE_SOURCE_KIND:
+    # Scheduled fires carry their creator as requester, but an agent can write their text.
+    if ingress_metadata is not None and ingress_metadata.source_kind in {
+        VOICE_SOURCE_KIND,
+        SCHEDULED_SOURCE_KIND,
+        SILENT_SCHEDULE_SOURCE_KIND,
+    }:
         return None
     if is_audio_message_event(event) or is_voice_event(
         event,

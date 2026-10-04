@@ -25,7 +25,6 @@ from mindroom.desktop.command_parameters import (
 from mindroom.desktop.file_actions import execute_file
 from mindroom.desktop.filesystem import DesktopFilesystem, DesktopFilesystemError
 from mindroom.desktop.gui_actions import execute_fallback_control, execute_semantic_control
-from mindroom.desktop.input import MINDROOM_APP_IDS
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
 from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
@@ -139,14 +138,6 @@ class DesktopBridgePolicy:
             raise ValueError(msg)
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
-            raise ValueError(msg)
-        # Saved configuration already refuses these; this also covers one-run --allow-app overrides. Every policy
-        # change goes through replace(), which runs this check again, so admission needs no second one.
-        if reserved := sorted(self.allowed_app_ids & MINDROOM_APP_IDS):
-            msg = (
-                f"MindRoom cannot allow agents to control MindRoom itself ({', '.join(reserved)}); "
-                "remove it from the allowed applications."
-            )
             raise ValueError(msg)
         if self.allow_control and self.control_lease_expires_at_ms is None:
             msg = "Control-enabled desktop bridge requires a lease expiry."
@@ -633,16 +624,14 @@ class DesktopBridge:
             return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
         return success_response(command, result=execution.result, screenshot=screenshot)
 
-    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:  # noqa: PLR0911
+    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
         try:
             return await self._execute(command)
         except DesktopEmergencyStopError as exc:
             self._control_revoked = True
             return self._error_response(command, str(exc))
-        except AccessibilityActionOutcomeUnknownError:
-            return self._unknown_control_response(command)
-        except PlaywrightActionOutcomeUnknownError:
-            return self._unknown_control_response(command)
+        except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
+            return self._unknown_control_response(command, reason=str(exc))
         except (
             AccessibilityError,
             DesktopProviderError,
@@ -973,7 +962,7 @@ class DesktopBridge:
             result={**result, "warning": warning, "follow_up_screenshot": "failed"},
         )
 
-    def _unknown_control_response(self, command: DesktopCommand) -> DesktopResponse:
+    def _unknown_control_response(self, command: DesktopCommand, *, reason: str | None = None) -> DesktopResponse:
         if command.action in DESKTOP_SHELL_ACTIONS:
             warning = (
                 "The shell command outcome is unknown and it may have completed; do not repeat it automatically. "
@@ -990,12 +979,15 @@ class DesktopBridge:
                 "do not repeat the action automatically. "
                 f"Request {recovery_action} before deciding the next step."
             )
+        if reason is not None:
+            warning = f"{reason} {warning}"
         logger.warning(
             "desktop_control_outcome_unknown",
             request_id=command.request_id,
             action=command.action,
             requester_id=command.requester_id,
             agent_name=command.agent_name,
+            error=reason,
         )
         return success_response(
             command,

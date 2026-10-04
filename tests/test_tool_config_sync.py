@@ -31,8 +31,6 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
-    # Trusted live worker binding is never authored or serialized as user configuration.
-    "shell": {"worker_binding"},
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
@@ -46,6 +44,8 @@ IGNORED_AGNO_PARAMS = {
     "youtube": {"proxies"},
     # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
+    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
+    "newspaper": {"include_summary"},
 }
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.

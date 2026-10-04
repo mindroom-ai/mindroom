@@ -4,6 +4,7 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 
 By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
+A fire's text never runs as a chat command, even when it starts with `!`; it reaches the agents as an ordinary scheduled message.
 
 Schedules with a recorded creator are automatically canceled once live membership checks confirm that neither the creator nor any permitted human alias is joined to the room.
 Configured bot accounts and managed identities do not count as human aliases.
@@ -181,7 +182,7 @@ MindRoom only lists, edits, cancels, restores, or runs schedule state whose Matr
 Schedule state written by any other account, including a room admin or the internal `mindroom_user`, is ignored and logged, because a schedule's recorded creator is the requester its triggers run as.
 Ignored state is never canceled or overwritten automatically.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
-When it reads one task, MindRoom takes the author from the event fetched by its ID, or from the task in current room state when history visibility hides that event, so a sender written inside state content is never trusted, even on a homeserver that ignores `format=event`.
+Each read of one task compares the room's create event with and without `format=event`, so on a homeserver that ignores it, task reads fail instead of trusting a sender or an older bot-written version of the task that state content names.
 
 New schedules use the live runtime to start their in-memory runners immediately.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,11 +19,11 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
+from mindroom.spotify_tokens import current_spotify_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -72,9 +73,13 @@ def _ensure_spotify_packages(
     ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
     spotipy_module = importlib.import_module("spotipy")
 
+    def spotify_oauth(**kwargs: str) -> _SpotifyOAuthClientProtocol:
+        # MindRoom stores the tokens itself; spotipy's default file cache would return its first token for every code.
+        return spotipy_module.SpotifyOAuth(cache_handler=spotipy_module.MemoryCacheHandler(), **kwargs)
+
     return (
         cast("_SpotifyClientFactoryProtocol", spotipy_module.Spotify),
-        cast("_SpotifyOAuthFactoryProtocol", spotipy_module.SpotifyOAuth),
+        spotify_oauth,
     )
 
 
@@ -86,30 +91,16 @@ class SpotifyStatus(BaseModel):
     error: str | None = None
 
 
-def _save_spotify_credentials(
-    credentials: dict[str, Any],
-    request: Request,
-    agent_name: str | None = None,
-    *,
-    target: RequestCredentialsTarget | None = None,
-    execution_scope_override_provided: bool | None = None,
-    execution_scope_override: WorkerScope | None = None,
-) -> None:
+def _save_spotify_credentials(credentials: dict[str, Any], target: RequestCredentialsTarget) -> None:
     """Save Spotify credentials."""
-    resolved_target = target or resolve_request_credentials_target(
-        request,
-        agent_name=agent_name,
-        service_names=("spotify",),
-        execution_scope_override_provided=execution_scope_override_provided,
-        execution_scope_override=execution_scope_override,
-    )
     credentials_to_save = dict(credentials)
     credentials_to_save.setdefault("_source", "ui")
-    save_credentials_for_target("spotify", credentials_to_save, resolved_target)
+    save_credentials_for_target("spotify", credentials_to_save, target)
 
 
+# A plain function, so FastAPI runs the blocking token renewal and Spotify request in its threadpool.
 @router.get("/spotify/status")
-async def get_spotify_status(
+def get_spotify_status(
     request: Request,
     agent_name: str | None = None,
 ) -> SpotifyStatus:
@@ -122,6 +113,15 @@ async def get_spotify_status(
 
     status.connected = True
     try:
+        # Renew only a token held in the target's own store, which the renewal saves back to.
+        # A connection shared through worker_grantable_credentials is left as is, so it is never copied there.
+        own_creds = load_credentials_for_target("spotify", replace(target, allowed_shared_services=None))
+        if own_creds and "access_token" in own_creds:
+            creds = current_spotify_credentials(
+                own_creds,
+                target.runtime_paths,
+                lambda renewed: _save_spotify_credentials(renewed, target),
+            )
         spotify_cls, _ = _ensure_spotify_packages(target.runtime_paths)
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
@@ -158,7 +158,10 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=_get_spotify_redirect_uri(request, runtime_paths),
-        scope="user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read",
+        scope=(
+            "user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read "
+            "playlist-read-private playlist-modify-public playlist-modify-private user-modify-playback-state"
+        ),
     )
 
     auth_url = sp_oauth.get_authorize_url(state=state)
@@ -211,14 +214,7 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
             "expires_at": token_info.get("expires_at"),
             "username": user["display_name"],
         }
-        _save_spotify_credentials(
-            credentials,
-            request,
-            agent_name,
-            target=target,
-            execution_scope_override_provided=pending.execution_scope_override_provided,
-            execution_scope_override=pending.execution_scope_override,
-        )
+        _save_spotify_credentials(credentials, target)
 
         return RedirectResponse(url=f"{get_dashboard_url(request)}/?spotify=connected")
     except HTTPException:

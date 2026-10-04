@@ -88,4 +88,5 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Sandbox Proxy | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
 | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
+| Operational Log Events | `deployment/operational-log-events.md` | `deployment/operational-log-events/index.md` | `page__deployment__operational-log-events__index.md` |
 | CLI Reference | `cli.md` | `cli/index.md` | `page__cli__index.md` |

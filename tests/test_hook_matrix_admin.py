@@ -450,8 +450,8 @@ async def test_hook_matrix_admin_invite_user_with_config_delegates_to_raw_invite
     assert invited is False
     client.joined_members.assert_not_awaited()
     mock_invite.assert_awaited_once_with(client, "!created:localhost", "@user:localhost")
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, "general")) == set()
 
 
 @pytest.mark.asyncio
@@ -471,10 +471,10 @@ async def test_hook_matrix_admin_create_room_persists_room_for_managed_creator(t
 
     assert room_id == "!private:localhost"
     assert "!private:localhost" in load_invited_rooms(
-        invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME),
+        invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME),
     )
     # Only the creator records the room; invited bots rely on the invite-accept lifecycle instead.
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, "general")) == set()
 
 
 @pytest.mark.asyncio
@@ -492,8 +492,8 @@ async def test_hook_matrix_admin_create_room_does_not_persist_for_unmanaged_crea
         room_id = await admin.create_room(name="Private Room", alias_localpart="private-user")
 
     assert room_id == "!private:localhost"
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, "general")) == set()
 
 
 @pytest.mark.asyncio
@@ -576,11 +576,11 @@ def test_hook_matrix_admin_retention_preserves_other_rooms(tmp_path: Path) -> No
     for room_id in ("!first:localhost", "!second:localhost", "!first:localhost"):
         admin.retain_room(room_id)
 
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == {
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == {
         "!first:localhost",
         "!second:localhost",
     }
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, "general")) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, "general")) == set()
 
 
 def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) -> None:
@@ -598,7 +598,7 @@ def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) ->
     ):
         admin.retain_room("!private:localhost")
 
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
 
 
 @pytest.mark.parametrize(("managed", "accept_invites"), [(False, True), (True, False)])
@@ -618,7 +618,7 @@ def test_hook_matrix_admin_retention_respects_entity_policy(
 
     admin.retain_room("!private:localhost")
 
-    assert load_invited_rooms(invited_rooms_path(runtime_paths.storage_root, ROUTER_AGENT_NAME)) == set()
+    assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
 
 
 def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path: Path) -> None:

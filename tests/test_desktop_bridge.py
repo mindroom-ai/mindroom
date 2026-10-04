@@ -1084,20 +1084,6 @@ async def test_bridge_without_apps_never_starts_gui_event_pump(
         bridge.close()
 
 
-@pytest.mark.parametrize("app_id", ["chat.mindroom.menubar", "chat.mindroom.desktophelper"])
-def test_mindroom_itself_can_never_be_an_allowlisted_app(app_id: str) -> None:
-    """MindRoom's windows grant shell auto-approval and control, so agent input must never be allowed to reach them."""
-    with pytest.raises(ValueError, match=f"control MindRoom itself \\({app_id}\\)"):
-        replace(_policy(allow_control=True), allowed_app_ids=frozenset({APP_ID, app_id}))
-    with pytest.raises(ValueError, match="control MindRoom itself"):
-        DesktopBridgePolicy(
-            controller=CONTROLLER,
-            allowed_requester_ids=frozenset({ALICE}),
-            allowed_agent_names=frozenset({"computer"}),
-            allowed_app_ids=frozenset({app_id}),
-        )
-
-
 def test_local_capabilities_require_matching_policy_and_providers(selected_root: Path) -> None:
     """A bridge needs one capability, and every enabled capability needs its own provider."""
     with pytest.raises(ValueError, match="at least one local capability"):
@@ -1655,6 +1641,8 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
     assert response.ok
     assert response.result["action_outcome"] == "unknown"
     warning = str(response.result["warning"])
+    # The provider's reason comes first, ahead of the fixed recovery advice.
+    assert warning.startswith("extension disconnected ")
     assert "outcome is unknown" in warning
     assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
 

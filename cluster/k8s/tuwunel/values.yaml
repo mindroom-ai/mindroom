@@ -5,6 +5,11 @@
 nameOverride: ""
 fullnameOverride: ""
 
+# Rollout progress deadline and post-SIGTERM grace period in seconds; null keeps the Kubernetes default.
+# The long grace period lets a database migration step finish; see "Upgrades and Database Migrations" in the README.
+progressDeadlineSeconds: null
+terminationGracePeriodSeconds: 1800
+
 image:
   repository: ghcr.io/mindroom-ai/mindroom-tuwunel
   # Pin a release tag or digest for reproducible production deployments.
@@ -91,6 +96,11 @@ tuwunel:
     scope: []
     # Raw TOML appended inside the [[global.identity_provider]] block, for example userid_claims or trusted.
     extraConfig: ""
+  # Tuwunel options rendered into the [global] section of tuwunel.toml, for example
+  # login_with_password: false or auto_join_rooms: ["#lobby:{{ .Values.tuwunel.serverName }}"].
+  # Nested maps become [global.<key>] tables, null omits an option, and strings are rendered with tpl.
+  # Unlike extraConfig, these maps merge key by key across values files.
+  settings: {}
   # Raw TOML appended to the [global] section of the rendered tuwunel.toml.
   extraConfig: ""
 

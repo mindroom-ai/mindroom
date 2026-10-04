@@ -291,7 +291,7 @@ Active MCP calls have three independently configurable concurrency limits:
 | Environment variable | Default | Scope |
 | --- | --- | --- |
 | `MINDROOM_MCP_GATEWAY_MAX_ACTIVE_CALLS` | `128` | All active calls in the API process |
-| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `32` | One user across all client grants |
+| `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` | `16` | One user across all client grants |
 | `MINDROOM_MCP_GATEWAY_MAX_GRANT_CALLS` | `16` | One authorized client connection |
 
 Each setting accepts a positive integer and takes effect after restarting the API process.
@@ -300,6 +300,8 @@ All three limits apply to `search_tools`, `get_tool`, and `invoke_tool`; the fir
 Excess calls do not queue or retry automatically.
 Cancelled or timed-out calls retain their allowances until background work and cleanup finish.
 These defaults are conservative starting values, not measured capacity; tune them against available resources, tool latency, and upstream quotas.
+Toolkit construction, connect, and close, synchronous tool bodies, and the worker requests of async worker-routed tools run on a dedicated pool of 32 threads, separate from the threads that authentication, OAuth storage, the Matrix runtime, and chat worker tool calls use, and admitted calls beyond that pool wait for a free thread within their timeout.
+Keep `MINDROOM_MCP_GATEWAY_MAX_USER_CALLS` below 32 so that one user cannot occupy every gateway tool thread.
 
 Public registration and authorization starts share an aggregate admission limit of 60 requests per minute per API process and a per-source limit of 10 requests per minute.
 Set the positive integers `MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT` and `MINDROOM_MCP_GATEWAY_ONBOARDING_SOURCE_RATE_LIMIT` to adjust these limits.
@@ -410,7 +412,7 @@ They describe inbound `/mcp` traffic, separately from outbound MCP integration l
   This includes Matrix messaging, scheduling, conversation attachments, and other tools that require the live Matrix room runtime.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
-- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 32 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.
+- HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 16 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.
 - Explicit MCP cancellation applies only to a matching request ID within the same client grant. Cancellation and timeout stop waiting, but a synchronous or remote action may already have taken effect. Do not automatically retry a potentially mutating call.
 
 Synchronous native tool work shares the API process and cannot be forcibly stopped by request cancellation.
@@ -423,5 +425,5 @@ Existing tool-specific authorization, provider scopes, worker isolation, and fil
 
 ## Agent CLI
 
-The [minimal-mode agent CLI](../tools/agent-cli.md) belongs to an active agent response and uses a separate restricted gateway.
+The [minimal-mode agent CLI](../tools/agent-cli.md) belongs to an active agent response and calls MindRoom's own CLI routes with that response's grant.
 It does not change external MCP authentication, saved selections, or compatible-tool restrictions.

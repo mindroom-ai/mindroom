@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from contextlib import suppress
 from glob import has_magic
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.path_confinement import (
     open_directory_within_root,
     read_regular_file_within_root,
     resolve_path_within_root,
 )
+
+if TYPE_CHECKING:
+    from typing import BinaryIO
+
+    from mindroom.config.models import FileAccess
 
 _BASE_DIR_ESCAPE_HINT = "Set the agent's file_access to 'unrestricted' to allow paths outside the workspace."
 
@@ -144,15 +151,26 @@ def read_resolved_file(base_dir: Path, resolved: Path) -> bytes:
     return read_regular_file_within_root(base_dir, relative)
 
 
-def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
-    """Publish one resolved file by atomic replacement, keeping its permission bits (not setuid/setgid) and owner where permitted.
+def _write_payload(output: BinaryIO, payload: bytes | BinaryIO) -> None:
+    """Write bytes, or copy a readable stream in chunks so it is never buffered whole."""
+    if isinstance(payload, bytes):
+        output.write(payload)
+    else:
+        shutil.copyfileobj(payload, output)
 
-    Replacing the entry never writes a hard-linked inode or leaves a partial file.
+
+def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes | BinaryIO) -> None:
+    """Publish one resolved file, by atomic replacement below ``base_dir``, keeping its permission bits (not setuid/setgid) and owner where permitted.
+
+    Below ``base_dir``, replacing the entry never writes a hard-linked inode or leaves a partial file;
+    an unrestricted path outside it is written in place by path.
+    A stream payload is copied in chunks rather than read into memory.
     """
     relative = _relative_below(base_dir, resolved)
     if relative is None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_bytes(payload)
+        with resolved.open("wb") as output:
+            _write_payload(output, payload)
         return
     with open_directory_within_root(base_dir, relative.parent, create=True) as directory_fd:
         try:
@@ -160,7 +178,8 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
         except FileNotFoundError:
             existing = None
         if existing is None or not stat.S_ISREG(existing.st_mode):
-            atomic_write_bytes_at(directory_fd, relative.name, payload, file_mode=0o644)
+            with atomic_write_file_at(directory_fd, relative.name, file_mode=0o644) as output:
+                _write_payload(output, payload)
             return
         with atomic_write_file_at(directory_fd, relative.name) as output:
             os.fchmod(output.fileno(), stat.S_IMODE(existing.st_mode))
@@ -169,7 +188,28 @@ def write_resolved_file(base_dir: Path, resolved: Path, payload: bytes) -> None:
                 with suppress(OSError):
                     os.fchown(output.fileno(), uid, existing.st_gid)
                     break
-            output.write(payload)
+            _write_payload(output, payload)
+
+
+def write_agent_file(
+    raw_path: str,
+    payload: bytes | BinaryIO,
+    *,
+    workspace_root: Path | None,
+    file_access: FileAccess,
+) -> Path:
+    """Publish one model-supplied path where the agent's ``file_access`` allows and return the resolved path.
+
+    Relative paths resolve from the workspace; ``workspace`` mode refuses paths outside it and agents without one.
+    """
+    restrict = file_access == "workspace"
+    if restrict and workspace_root is None:
+        msg = f"Path '{raw_path}' requires an agent workspace; file_access is 'workspace'."
+        raise ValueError(msg)
+    base_dir = resolve_tool_base_dir(workspace_root)
+    resolved = resolve_base_dir_path(base_dir, raw_path, restrict)
+    write_resolved_file(base_dir, resolved, payload)
+    return resolved
 
 
 def remove_resolved_path(base_dir: Path, resolved: Path) -> None:

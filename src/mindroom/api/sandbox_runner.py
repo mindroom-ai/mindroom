@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -23,7 +23,14 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, shell_supervisor, yaml_io
-from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
+from mindroom.api import (
+    sandbox_env_assembly,
+    sandbox_exec,
+    sandbox_forkserver,
+    sandbox_protocol,
+    sandbox_request_cancellation,
+    sandbox_worker_prep,
+)
 from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
@@ -84,11 +91,10 @@ from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.api.sandbox_runner_cli import CliWorkerRuntime
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.catalog import ToolValidationInfo
@@ -138,11 +144,10 @@ def _startup_runtime_payload_from_env() -> tuple[RuntimePaths, dict[str, ToolVal
 
 def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> RuntimePaths:
     """Commit the startup runtime payload together with this runner's own startup env."""
-    credentials_encryption_key = _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
+    # Runners never use the credential encryption key, so scrub one passed against the docs before tool code runs.
+    _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
     process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
-    if credentials_encryption_key is not None:
-        process_env[CREDENTIALS_ENCRYPTION_KEY_ENV] = credentials_encryption_key
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return constants.RuntimePaths(
             config_path=startup_runtime_paths.config_path,
@@ -334,26 +339,14 @@ def initialize_sandbox_runner_app(
         config=committed_config,
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
-    _ensure_request_tool_registry(context, committed_config)
+    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
     api_app.state.sandbox_runner_context = context
 
 
-def _ensure_request_tool_registry(context: _SandboxRunnerContext, config: Config) -> None:
-    """Register one request config's plugin tools, reloading only when its plugin entries change.
-
-    Snapshots carry no MCP servers, and MCP tools never run on a runner, so only plugin entries key the reload.
-    """
-    plugins = tuple((entry.path, entry.enabled) for entry in config.plugins)
-    if context.tool_registry.loaded_plugins == plugins:
-        return
-    _ensure_registry_loaded_with_config(context.runtime_paths, config)
-    context.tool_registry.loaded_plugins = plugins
-
-
 def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
-    """Load config from env and ensure the tool registry is populated.
+    """Ensure the tool registry holds the given config's plugin tools.
 
-    Used by both the FastAPI startup and the subprocess worker so that
+    Used at startup, for each request, and by the subprocess worker so that
     plugin tools are registered even in fresh processes.
     """
     ensure_tool_registry_loaded(runtime_paths, config)
@@ -480,6 +473,20 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution_env: dict[str, str] = Field(default_factory=dict)
     extra_env_passthrough: str | None = None
     config_snapshot: dict[str, Any] | None = None
+    # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
+    request_id: str | None = Field(default=None, max_length=64)
+
+
+class SandboxRunnerCancelRequest(BaseModel):
+    """Stop one execute request the primary no longer waits for."""
+
+    request_id: str = Field(max_length=64)
+
+
+class SandboxRunnerCancelResponse(BaseModel):
+    """Whether the request was running when its cancel arrived."""
+
+    cancelled: bool
 
 
 class PreparedSandboxRunnerExecuteRequest(BaseModel):
@@ -579,28 +586,11 @@ class SandboxRunnerViewFileResponse(BaseModel):
     failure_kind: Literal["tool", "worker"] | None = None
 
 
-@dataclass
-class _SandboxRunnerCliState:
-    """Single-turn CLI slot: fenced before installation, then holding the installed runtime."""
-
-    install_started: bool = False
-    runtime: CliWorkerRuntime | None = None
-
-
-@dataclass
-class _SandboxRunnerToolRegistryState:
-    """Plugin entries this runner process last loaded, so repeated snapshots do not reload plugins."""
-
-    loaded_plugins: tuple[tuple[str, bool], ...] | None = None
-
-
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     config: Config
     runner_token: str | None
-    cli: _SandboxRunnerCliState = field(default_factory=_SandboxRunnerCliState)
-    tool_registry: _SandboxRunnerToolRegistryState = field(default_factory=_SandboxRunnerToolRegistryState)
 
 
 @dataclass(frozen=True)
@@ -656,11 +646,6 @@ def request_runtime_config(app: FastAPI, config_snapshot: dict[str, Any] | None)
         return _primary_validated_config(config_snapshot, context.runtime_paths, log_skipped_plugins=False)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid config_snapshot: {exc}") from exc
-
-
-def app_cli_state(app: FastAPI) -> _SandboxRunnerCliState:
-    """Return the sandbox runner's single-turn CLI slot stored on the FastAPI app."""
-    return _app_context(app).cli
 
 
 def resolve_script_state_workspace(
@@ -1110,7 +1095,6 @@ def _prepare_execute_request(
         runtime_paths,
         execution_env,
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
-        include_credentials_encryption_key=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         trusted_env_overlay=trusted_env_overlay,
     )
     execution_identity = _request_execution_identity(request)
@@ -1309,11 +1293,18 @@ def _request_preparation_failure_response(
     )
 
 
+def _cancelled_response() -> SandboxRunnerExecuteResponse:
+    return SandboxRunnerExecuteResponse(ok=False, error="Tool call was cancelled.", failure_kind="tool")
+
+
 def _subprocess_failure_response(
     request: SandboxRunnerExecuteRequest | PreparedSandboxRunnerExecuteRequest,
     error: str,
     runtime_paths: RuntimePaths,
 ) -> SandboxRunnerExecuteResponse:
+    if sandbox_request_cancellation.request_cancelled():
+        # The primary stopped this call, so its killed process says nothing about worker health.
+        return _cancelled_response()
     sandbox_worker_prep.record_worker_failure(request.worker_key, error, runtime_paths)
     return SandboxRunnerExecuteResponse(ok=False, error=error, failure_kind="worker")
 
@@ -1359,6 +1350,7 @@ def _execute_request_forkserver(
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
+            bind_stop=sandbox_request_cancellation.bind_request_stop,
         )
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
@@ -1462,6 +1454,9 @@ def _execute_request_subprocess_sync(
         except shell_supervisor.ShellSupervisorStartupError as exc:
             return _subprocess_failure_response(request, str(exc), runtime_paths)
 
+    if sandbox_request_cancellation.request_cancelled():
+        # Cancelled while the worker was being prepared; never start the tool.
+        return _cancelled_response()
     if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
         forkserver_response = _execute_request_forkserver(
             request,
@@ -1472,18 +1467,32 @@ def _execute_request_subprocess_sync(
         )
         if forkserver_response is not None:
             return forkserver_response
+    return _execute_request_spawn(
+        request,
+        runtime_paths,
+        subprocess_context=subprocess_context,
+        envelope=envelope,
+        timeout_seconds=timeout_seconds,
+    )
 
+
+def _execute_request_spawn(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    *,
+    subprocess_context: _PreparedSandboxSubprocessContext,
+    envelope: str,
+    timeout_seconds: float,
+) -> SandboxRunnerExecuteResponse:
+    """Dispatch one prepared request to a freshly spawned child process."""
     try:
-        completed = subprocess.run(
+        completed = _run_request_subprocess(
             sandbox_exec.subprocess_worker_command(
                 _SUBPROCESS_WORKER_ARG,
                 python_executable=subprocess_context.python_executable,
             ),
             input=envelope,
-            capture_output=True,
-            text=True,
             timeout=timeout_seconds,
-            check=False,
             env=subprocess_context.subprocess_env,
             cwd=subprocess_context.subprocess_cwd,
         )
@@ -1491,8 +1500,39 @@ def _execute_request_subprocess_sync(
         return _subprocess_failure_response(request, "Sandbox subprocess timed out.", runtime_paths)
     except OSError as exc:
         return _subprocess_failure_response(request, f"Failed to start sandbox subprocess: {exc}", runtime_paths)
-
     return _parse_subprocess_response(request, runtime_paths, completed)
+
+
+def _run_request_subprocess(
+    args: list[str],
+    *,
+    input: str,  # noqa: A002 - mirrors subprocess.run
+    timeout: float,
+    env: dict[str, str] | None,
+    cwd: str | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one request child like ``subprocess.run``, killable by the primary's cancel."""
+    with subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=cwd,
+    ) as process:
+        sandbox_request_cancellation.bind_request_stop(process.kill)
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Like subprocess.run: a grandchild may hold the pipes open, so wait for the child, not for EOF.
+            process.kill()
+            process.wait()
+            raise
+        except BaseException:
+            process.kill()
+            raise
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 async def _execute_request_subprocess(
@@ -1976,17 +2016,31 @@ async def _execute_worker_browser(
     return SandboxRunnerExecuteResponse(ok=True, result=serialized_result)
 
 
+@router.post("/execute/cancel", response_model=SandboxRunnerCancelResponse)
+async def cancel_tool_call(payload: SandboxRunnerCancelRequest) -> SandboxRunnerCancelResponse:
+    """Stop one execute request; a cancel that arrives first stops that request on arrival."""
+    return SandboxRunnerCancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
+
+
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branches
+async def execute_tool_call(request: Request, payload: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+    """Execute a tool function locally and return the serialized result, unless the primary cancels it."""
+    with sandbox_request_cancellation.track_request(payload.request_id):
+        if sandbox_request_cancellation.request_cancelled():
+            return _cancelled_response()
+        return await _execute_tool_call(request, payload)
+
+
+async def _execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branches
     request: Request,
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
-    """Execute a tool function locally and return the serialized result."""
     context = _app_context(request.app)
     runtime_paths = context.runtime_paths
     config = request_runtime_config(request.app, payload.config_snapshot)
     # Plugin tools come from the request's config, not from a startup config runners never receive.
-    _ensure_request_tool_registry(context, config)
+    # The loader re-runs only plugin modules edited since their last load.
+    _ensure_registry_loaded_with_config(runtime_paths, config)
     runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=TOOL_METADATA)
@@ -2032,6 +2086,8 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
             except AttributeError:
                 computer = None
         if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
+            # Not cancellable: the browser runtime treats cancellation as closing the shared
+            # browser, and on computer workers its display, while its actions are short.
             return await _execute_worker_browser(
                 computer,
                 payload,
@@ -2071,13 +2127,33 @@ async def execute_tool_call(  # noqa: C901, PLR0912 - validated dispatch branche
             config=config,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess(
-        payload,
-        runtime_paths,
-        config,
-        prepared_worker,
-        runner_token=runner_token,
+    return await _run_cancellable(
+        _execute_request_inprocess(
+            payload,
+            runtime_paths,
+            config,
+            prepared_worker,
+            runner_token=runner_token,
+        ),
     )
+
+
+async def _run_cancellable(
+    execution: Coroutine[object, object, SandboxRunnerExecuteResponse],
+) -> SandboxRunnerExecuteResponse:
+    """Run one request inside this process as a task the primary's cancel can stop."""
+    call = asyncio.create_task(execution)
+    loop = asyncio.get_running_loop()
+    sandbox_request_cancellation.bind_request_stop(lambda: loop.call_soon_threadsafe(call.cancel))
+    try:
+        return await call
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        assert current is not None
+        if current.cancelling() or not sandbox_request_cancellation.request_cancelled():
+            call.cancel()
+            raise
+        return _cancelled_response()
 
 
 if __name__ == "__main__":

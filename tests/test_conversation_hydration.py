@@ -28,6 +28,7 @@ from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
+    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     _HydrationError,
@@ -48,6 +49,8 @@ from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_dow
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
     from pathlib import Path
+
+    from nio.api import RelationshipType
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore, RefreshRequest
 
@@ -108,7 +111,13 @@ def redaction(event_id: str, redacts: str, *, ts: int = 1_000, sender: str = ALI
     }
 
 
-def encrypted(event_id: str, *, sender: str = ALICE, ts: int = 1_000) -> dict[str, Any]:
+def encrypted(
+    event_id: str,
+    *,
+    sender: str = ALICE,
+    ts: int = 1_000,
+    relates_to: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return one raw Matrix event the way it sits on the wire in an encrypted room.
 
     nio parses this into a ``MegolmEvent``, whose ``source`` type is
@@ -116,19 +125,24 @@ def encrypted(event_id: str, *, sender: str = ALICE, ts: int = 1_000) -> dict[st
     nothing until something decrypts it. That is what every relation in an
     encrypted room looks like to a hydrator, because nio's ``receive_response``
     has no branch for a relations response and so never decrypts one.
+
+    ``relates_to`` is the relation an encrypted event carries in cleartext.
     """
+    content: dict[str, Any] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": f"ciphertext-of-{event_id}",
+        "sender_key": "sender-key",
+        "session_id": "session",
+        "device_id": "DEVICE",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
     return {
         "event_id": event_id,
         "sender": sender,
         "origin_server_ts": ts,
         "type": "m.room.encrypted",
-        "content": {
-            "algorithm": "m.megolm.v1.aes-sha2",
-            "ciphertext": f"ciphertext-of-{event_id}",
-            "sender_key": "sender-key",
-            "session_id": "session",
-            "device_id": "DEVICE",
-        },
+        "content": content,
     }
 
 
@@ -233,14 +247,32 @@ class FakeClient:
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
     ) -> AsyncIterator[nio.Event]:
-        """Yield stored relations in server order, enforcing depth the way nio does."""
+        """Yield stored relations in server order, enforcing depth the way nio does.
+
+        A relation type asks for the event's direct relations of that type only.
+        """
         del room_id, recurse
         self.relation_calls += 1
-        sources = self._ordered_relations(event_id, direction)
+        if rel_type is None:
+            sources = self._ordered_relations(event_id, direction)
+        else:
+            direct = {"rel_type": rel_type.value, "event_id": event_id}
+            sources = iter(
+                sorted(
+                    (
+                        source
+                        for source in self.relations.get(event_id, [])
+                        if source["content"].get("m.relates_to") == direct
+                    ),
+                    key=lambda source: (source["origin_server_ts"], source["event_id"]),
+                    reverse=direction is not nio.MessageDirection.front,
+                ),
+            )
         first = next(sources, None)
         # Mirrors nio: an empty page has no depth to report and nothing that
         # could have been truncated, so it is never rejected.
@@ -412,6 +444,7 @@ class HeldFirstWalk(FakeClient):
         *,
         room_id: str,
         event_id: str,
+        rel_type: RelationshipType | None = None,
         direction: nio.MessageDirection = nio.MessageDirection.back,
         recurse: bool = False,
         minimum_recursion_depth: int | None = None,
@@ -423,6 +456,7 @@ class HeldFirstWalk(FakeClient):
         async for event in super().room_get_event_relations(
             room_id=room_id,
             event_id=event_id,
+            rel_type=rel_type,
             direction=direction,
             recurse=recurse,
             minimum_recursion_depth=minimum_recursion_depth,
@@ -833,6 +867,66 @@ class TestThreadHydrationBounds:
         assert await bodies(alice, "$root") == ["root", "answer 2 v2", "answer 3 v2"]
         assert await revisions(alice, "$root") == ["$root", "$answer2-edit2", "$answer3-edit2"]
 
+    @pytest.mark.parametrize(
+        ("bounds", "edit_ts", "relation_calls"),
+        [
+            ({"prompt_window_messages": 2}, 600, 2),
+            ({"max_fetched_events": 3}, 600, 2),
+            ({"prompt_window_messages": 2}, 5_000, 1),
+        ],
+    )
+    async def test_the_root_keeps_its_newest_edit_when_the_walk_stops_short(
+        self,
+        alice: PrincipalStore,
+        bounds: dict[str, int],
+        edit_ts: int,
+        relation_calls: int,
+    ) -> None:
+        """The root is kept outside the window, and so is its edit.
+
+        An edit made early in a long thread sorts behind every newer reply, so
+        a walk that stops at a bound never reached it, and the root was shown
+        at its original text as if it had never been edited. An edit the walk
+        already read costs no further request.
+        """
+        client = edited_thread(answers=4, edits=1)
+        client.relations["$root"].append(raw("$root-edit", "root edited", ts=edit_ts, replaces="$root"))
+
+        await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert (await bodies(alice, "$root"))[0] == "root edited"
+        assert (await revisions(alice, "$root"))[0] == "$root-edit"
+        assert client.relation_calls == relation_calls
+
+    @pytest.mark.parametrize(
+        ("ceiling", "expected"),
+        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        ids=["edits_past_ceiling", "edit_before_ceiling"],
+    )
+    async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
+        self,
+        alice: PrincipalStore,
+        ceiling: int,
+        expected: str,
+    ) -> None:
+        """A root-edit fetch stopped before any of the sender's edits cannot vouch for the root.
+
+        Edits arrive newest first, so enough edits of the root by someone else
+        end the edits-only fetch before the sender's own. Installing the root
+        as though it had never been edited would let any room member roll it
+        back. An edit by the sender found before the ceiling needs no notice.
+        """
+        client = edited_thread(answers=4, edits=1)
+        client.relations["$root"].append(raw("$root-edit", "root edited", ts=600, replaces="$root"))
+        client.relations["$root"].extend(
+            raw(f"$forged{index}", "forged", sender=BOB, ts=700 + index, replaces="$root") for index in range(3)
+        )
+
+        await hydrator(alice, client, max_fetched_events=ceiling).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert (await bodies(alice, "$root"))[0] == expected
+        assert client.relation_calls == 2
+
     async def test_the_event_ceiling_stops_a_thread_the_window_never_would(
         self,
         alice: PrincipalStore,
@@ -1124,7 +1218,8 @@ class TestCompletenessRequirement:
 
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
 
-        assert client.relation_calls == 1
+        # The truncated walk, then the root's own edits it stopped short of.
+        assert client.relation_calls == 2
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
@@ -1133,7 +1228,7 @@ class TestCompletenessRequirement:
             thread_id="$root",
         )
 
-        assert client.relation_calls == 1
+        assert client.relation_calls == 2
         # Still refused, which is the other half: not re-walking must not
         # become quietly calling a truncated thread whole.
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
@@ -1680,6 +1775,64 @@ class TestSidecarResolution:
 
         assert client.downloads == ["mxc://s/long"]
 
+    async def test_a_strict_read_refetches_no_more_than_its_page_holds(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A message waiting for its attachment costs a page nothing, so the refetch stops at the page's budget.
+
+        Anyone who can post can make every message in a thread name one large
+        attachment. Refetching all of them would download and store it once per
+        message, however few of them the page can hold.
+        """
+        monkeypatch.setattr("mindroom.event_journal.reads.PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        monkeypatch.setattr("mindroom.matrix.conversation_hydration.PAGE_CONTENT_BUDGET_BYTES", 2_500)
+        sources = [
+            self._sidecar_source(f"$long{index}", "preview [continues]", "mxc://s/shared", ts=1_000 + index)
+            for index in range(10)
+        ]
+        await admit_all(alice, sources)
+        client = FakeClient(
+            events={source["event_id"]: source for source in sources},
+            sidecars={"mxc://s/shared": self._payload("x" * 1_000)},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=50)
+
+        assert len(client.downloads) == 3
+        assert [message.logical_event_id for message in page.messages] == ["$long8", "$long9"]
+        assert page.next_cursor is not None
+        older = await reader.read_strict(room_id=ROOM, thread_id=None, limit=50, before=page.next_cursor)
+        assert [message.logical_event_id for message in older.messages] == ["$long6", "$long7"]
+        assert len(client.downloads) == 6
+
+    async def test_an_unedited_message_whose_relations_fill_the_walk_reads_whole(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only falling back from an edit that was on screen is unproven, so a long thread root needs no notice."""
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        reaction = {
+            "event_id": "$reaction",
+            "sender": BOB,
+            "origin_server_ts": 2_000,
+            "type": "m.reaction",
+            "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$long", "key": "x"}},
+        }
+        client = FakeClient(
+            events={"$long": source},
+            relations={"$long": [reaction]},
+            sidecars={"mxc://s/long": self._payload("whole")},
+        )
+
+        assert await hydrator(alice, client, max_fetched_events=1).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["whole"]
+
     async def test_a_streamed_answer_downloads_only_the_revision_that_won(
         self,
         alice: PrincipalStore,
@@ -1709,20 +1862,32 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    @pytest.mark.parametrize(
+        "sidecar",
+        [
+            None,
+            '{"body": "x", "a": ' + "[" * 100_000 + "]" * 100_000 + "}",
+            '{"body": "x", "a": ' + "1" * 5_000 + "}",
+            r'{"body": "x \ud800"}',
+        ],
+        ids=["missing", "nested_past_recursion_limit", "integer_over_digit_limit", "unpaired_surrogate"],
+    )
     async def test_an_unreadable_attachment_is_marked_incomplete_and_never_fetched_again(
         self,
         alice: PrincipalStore,
+        sidecar: str | None,
     ) -> None:
-        """A failed fetch settles the message as a preview that says it is incomplete.
+        """A failed fetch or parse settles the message as a preview that says it is incomplete.
 
-        Anyone who can post can attach a sidecar that never resolves. Keeping
-        the debt would download it again on every strict read and fail every
-        one of them, so the conversation could never be read again. The notice
-        keeps the truncated body from passing for the whole message.
+        Anyone who can post can attach a sidecar that never resolves, including
+        well-formed JSON that the parser still refuses. Keeping the debt would
+        download it again on every strict read and fail every one of them, so
+        the conversation could never be read again. The notice keeps the
+        truncated body from passing for the whole message.
         """
         source = self._sidecar_source("$long", "The answer beg [continues]", "mxc://s/gone")
         await admit_all(alice, [source])
-        client = FakeClient(events={"$long": source})
+        client = FakeClient(events={"$long": source}, sidecars={} if sidecar is None else {"mxc://s/gone": sidecar})
         reader = await self._reader(alice, client)
 
         first = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
@@ -1907,6 +2072,65 @@ class TestPointRefetch:
         )
         assert await bodies(alice) == ["second"]
 
+    @pytest.mark.parametrize(
+        ("ceiling", "expected"),
+        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        ids=["edits_past_ceiling", "edit_before_ceiling"],
+    )
+    async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
+        self,
+        alice: PrincipalStore,
+        ceiling: int,
+        expected: str,
+    ) -> None:
+        """A walk stopped before any of the sender's edits cannot vouch for the original.
+
+        Relations arrive newest first, so enough reactions sent after the
+        surviving edit end the walk before it. Installing the original as
+        though it had never been edited would let any room member roll the
+        message back. An edit by the sender found before the ceiling is still
+        their newest and needs no notice.
+        """
+        await admit_all(
+            alice,
+            [
+                raw("$m", "first"),
+                raw("$e1", "second", ts=2_000, replaces="$m"),
+                raw("$e2", "third", ts=3_000, replaces="$m"),
+            ],
+        )
+        deletion = parse(redaction("$r", "$e2", ts=4_000))
+        await alice.admit(
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
+        )
+        reactions = [
+            {
+                "event_id": f"$reaction{index}",
+                "sender": BOB,
+                "origin_server_ts": 5_000 + index,
+                "type": "m.reaction",
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$m", "key": str(index)}},
+            }
+            for index in range(3)
+        ]
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    raw("$e1", "second", ts=2_000, replaces="$m"),
+                    raw("$e2", "third", ts=3_000, replaces="$m", redacted=True),
+                    *reactions,
+                ],
+            },
+        )
+
+        assert await hydrator(alice, client, max_fetched_events=ceiling).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == [expected]
+        assert await refreshes(alice) == ()
+
     async def test_the_original_is_restored_once_superseded_edits_are_purged(
         self,
         alice: PrincipalStore,
@@ -1929,8 +2153,11 @@ class TestPointRefetch:
         await self._redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
-        assert await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            == 0
         )
         page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=10)
         assert page.messages == ()
@@ -1944,8 +2171,11 @@ class TestPointRefetch:
         await self._redact_current_edit(alice)
         client = FakeClient(events={}, relations={})
 
-        assert not await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            is None
         )
         assert await bodies(alice) == []
         assert len(await refreshes(alice)) == 1
@@ -2144,30 +2374,88 @@ class TestEncryptedRelations:
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
-    async def test_a_refresh_does_not_reinstall_a_body_whose_edits_it_could_not_read(
+    async def test_a_refresh_past_an_edit_it_could_not_read_says_so(
         self,
         alice: PrincipalStore,
     ) -> None:
-        """An unread relation tree is not an empty one.
+        """An unread edit is not an absent one, and it must not block the conversation either.
 
-        An empty relation list is a real answer -- it is how a server that
-        already reclaimed the superseded edits says the original is current --
-        so reducing over relations that were dropped unread silently reinstalls
-        the pre-edit body under the same shape, and clears the refresh token
-        that would have brought anyone back to fix it.
+        Reducing over an edit dropped unread would reinstall the pre-edit body
+        as though the server had said it was current. Keeping the debt instead
+        let the edit's sender fail every strict read of the conversation for as
+        long as the edit stayed unreadable, so the body says what is missing.
         """
         await TestPointRefetch._redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
-            relations={"$m": [encrypted("$e2", ts=4_000)]},
+            relations={"$m": [encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"})]},
             olm=object(),
         )
 
-        assert not await hydrator(alice, client).refresh(
+        assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == []
-        assert len(await refreshes(alice)) == 1
+        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await refreshes(alice) == ()
+
+    async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """An unreadable edit that a newer readable edit supersedes changes nothing on screen."""
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    raw("$e3", "third", ts=5_000, replaces="$m"),
+                    encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"}),
+                ],
+            },
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["third"]
+        assert await refreshes(alice) == ()
+
+    async def test_unreadable_relations_that_cannot_be_its_edit_do_not_hold_a_refresh(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """Only the sender's own edit can replace a message, so nothing else decides its refetch.
+
+        Anyone in the room can relate an unreadable event to any message, and
+        keeping the debt for it failed every strict read of the conversation.
+        """
+        await TestPointRefetch._redact_current_edit(alice)
+        client = FakeClient(
+            events={"$m": raw("$m", "first")},
+            relations={
+                "$m": [
+                    encrypted(
+                        "$foreign-edit",
+                        sender=BOB,
+                        ts=4_000,
+                        relates_to={"rel_type": "m.replace", "event_id": "$m"},
+                    ),
+                    encrypted(
+                        "$reaction",
+                        ts=5_000,
+                        relates_to={"rel_type": "m.annotation", "event_id": "$m", "key": "x"},
+                    ),
+                ],
+            },
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh(
+            (await refreshes(alice))[0],
+        )
+        assert await bodies(alice) == ["first"]
+        assert await refreshes(alice) == ()
 
     async def test_a_message_that_could_not_be_decrypted_is_not_treated_as_deleted(
         self,
@@ -2182,8 +2470,11 @@ class TestEncryptedRelations:
         await TestPointRefetch._redact_current_edit(alice)
         client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
 
-        assert not await hydrator(alice, client).refresh(
-            (await refreshes(alice))[0],
+        assert (
+            await hydrator(alice, client).refresh(
+                (await refreshes(alice))[0],
+            )
+            is None
         )
         assert len(await refreshes(alice)) == 1
 

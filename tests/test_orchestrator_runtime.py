@@ -7,11 +7,12 @@ import builtins
 import ipaddress
 import os
 import signal
+import socket
 import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,6 +60,7 @@ from mindroom.hooks import (
 )
 from mindroom.matrix import client_session
 from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.orchestration import config_lifecycle as config_lifecycle_module
@@ -89,12 +91,12 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
+from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -648,6 +650,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -715,6 +718,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -777,6 +781,7 @@ class TestAgentBot(AgentBotTestBase):
             bind_api=MagicMock(),
             unbind_api=AsyncMock(),
             touch_live_workers=MagicMock(),
+            active_runs=AsyncMock(return_value=[]),
         )
 
         with (
@@ -851,9 +856,85 @@ class TestAgentBot(AgentBotTestBase):
                     bind_api=MagicMock(),
                     unbind_api=AsyncMock(),
                     touch_live_workers=MagicMock(),
+                    active_runs=AsyncMock(return_value=[]),
                 ),
                 shutdown_requested=asyncio.Event(),
             )
+
+    @pytest.mark.asyncio
+    async def test_run_api_server_serves_script_gateway_listener_beside_primary_api(self, tmp_path: Path) -> None:
+        """A configured gateway port serves only the bound gateway while the unchanged primary API runs."""
+        with closing(socket.create_server(("127.0.0.1", 0))) as probe:
+            gateway_port = int(probe.getsockname()[1])
+        observed: dict[str, object] = {}
+
+        class ProbingServer:
+            should_exit = True
+            force_exit = False
+
+            def __init__(
+                self,
+                config: uvicorn.Config,
+                _shutdown_requested: asyncio.Event | None,
+                *,
+                on_started: Callable[[str, int], Awaitable[None]] | None = None,
+            ) -> None:
+                del on_started
+                self.config = config
+
+            async def serve(self) -> None:
+                observed["primary_app"] = self.config.app
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{gateway_port}") as client:
+                    observed["health"] = (await client.get("/api/health")).status_code
+                    observed["receipt"] = (await client.get("/api/script-gateway/runs/run-1/calls/call-1")).json()
+
+        broker = SimpleNamespace(
+            get_authenticated=AsyncMock(
+                return_value=ScriptCallRecord(
+                    run_id="run-1",
+                    call_id="call-1",
+                    grant=ScriptToolGrant("calculator", "add"),
+                    arguments_digest="digest",
+                    state=ScriptCallState.COMPLETED,
+                    created_at="2026-01-01T00:00:00Z",
+                    result=3,
+                ),
+            ),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={"MINDROOM_SCRIPT_GATEWAY_PORT": str(gateway_port)},
+        )
+        shutdown_requested = asyncio.Event()
+        shutdown_requested.set()
+
+        with (
+            patch("mindroom.orchestrator._SignalAwareUvicornServer", ProbingServer),
+            patch("mindroom.api.main.initialize_api_app"),
+            patch("mindroom.api.main.bind_script_runtime"),
+            patch("mindroom.api.main.unbind_script_runtime"),
+        ):
+            await _run_api_server(
+                "127.0.0.1",
+                8765,
+                "INFO",
+                runtime_paths,
+                script_runtime=SimpleNamespace(
+                    broker=broker,
+                    bind_api=MagicMock(),
+                    unbind_api=AsyncMock(),
+                    touch_live_workers=MagicMock(),
+                    active_runs=AsyncMock(return_value=[]),
+                ),
+                shutdown_requested=shutdown_requested,
+            )
+
+        assert observed["primary_app"] is api_main.app
+        assert observed["health"] == 404
+        assert cast("dict[str, object]", observed["receipt"])["result"] == 3
+        broker.get_authenticated.assert_awaited_once_with("run-1", "call-1", None)
+        with pytest.raises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", gateway_port), timeout=1).close()
 
     @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
@@ -1062,6 +1143,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1070,6 +1152,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
@@ -1121,7 +1204,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(
+    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(  # noqa: PLR0915
         self,
         tmp_path: Path,
     ) -> None:
@@ -1151,6 +1234,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1159,6 +1243,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
@@ -1230,6 +1315,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_export_runner: object,
             leave_matrix_room: object,
             response_admission_gate: object,
+            active_calls: object,
             agent_reply_memberships: AgentReplyMembershipIndex,
             config_reload_status: Callable[[], object],
             agent_cli_registry: object,
@@ -1238,6 +1324,7 @@ class TestAgentBot(AgentBotTestBase):
             assert thread_export_runner is mock_orchestrator._thread_export_runner
             assert leave_matrix_room == mock_orchestrator.leave_matrix_room
             assert response_admission_gate is mock_orchestrator._response_admission_gate
+            assert active_calls == mock_orchestrator.active_call_identities
             assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
             assert config_reload_status() is mock_orchestrator.config_reload.status
             assert shutdown_requested is not None
@@ -2228,9 +2315,9 @@ class TestMultiAgentOrchestrator:
             tmp_path,
         )
         runtime_paths = runtime_paths_for(config)
-        invited_rooms_path = agent_state_root_path(runtime_paths.storage_root, "general") / "invited_rooms.json"
-        invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-        invited_rooms_path.write_text('[\n  "!ad-hoc:localhost"\n]\n', encoding="utf-8")
+        ledger_path = invited_rooms_path(runtime_paths, "general")
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text('[\n  "!ad-hoc:localhost"\n]\n', encoding="utf-8")
 
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
         orchestrator.config = config

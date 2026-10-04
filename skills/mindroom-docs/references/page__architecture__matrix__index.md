@@ -19,7 +19,7 @@ MindRoom uses `mindroom-nio` for Matrix communication with SSL context handling 
 |----------|---------|-------------|
 | `MATRIX_HOMESERVER` | `http://localhost:8008` | Matrix homeserver URL |
 | `MATRIX_SERVER_NAME` | (from homeserver) | Federation server name |
-| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it applies only to the homeserver, not to the provisioning service |
+| `MATRIX_SSL_VERIFY` | `true` | Set to `false` for a dev or self-signed homeserver; it covers `MATRIX_HOMESERVER` and the MatrixRTC discovery and authorization requests made for it, but not the provisioning service or any other homeserver, such as the desktop bridge's |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` | Authentication for accounts created and operated by MindRoom: `password` or `appservice` |
 | `MATRIX_APPSERVICE_TOKEN` | -- | Application-service token used when managed account auth is `appservice` |
 | `MATRIX_APPSERVICE_TOKEN_FILE` | -- | File alternative to `MATRIX_APPSERVICE_TOKEN` |
@@ -86,7 +86,8 @@ When deriving context for an incoming event, MindRoom:
 3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
 4. May start a new thread under a room-root event when agent thread mode requires it.
 
-A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 100 pages of 100 events; a root older than that is reported as unproven, so those callers fail closed.
+A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 events from that walk, counting each non-edit message and one edit per original and sender; a root older than either bound is reported as unproven, so those callers fail closed.
+Every message event in the room counts toward the page bound, including each streaming edit of every other reply on a homeserver that keeps them.
 
 ```
 ├── User: @assistant help with this code
@@ -114,7 +115,7 @@ This provenance remains attached across recovery, restart, and decryption indepe
 `matrix/durable_ingestion.py` converts one trusted Nio batch and atomically commits its receipt, ordered membership effects, semantic events, and conversation projection in the MindRoom journal before acknowledging that batch to Nio.
 An admission failure leaves the batch unsettled for retry, and replay after a committed admission returns the original receipt without duplicating semantic work.
 Typing, presence and read receipts are excluded from durable admission.
-MindRoom requires `mindroom-nio[e2e]==1.0.6`, and `uv.lock` pins the same published release.
+MindRoom requires `mindroom-nio[e2e]==1.1.3`, and `uv.lock` pins the same published release.
 Nio 1.0.2 avoids rereading queued payloads for byte accounting on SQLite 3.43 and newer, preserving exact accounting on older drivers.
 Nio 1.0.3 returns typed membership errors for refused durable joined-member queries and preserves Matrix error codes after retry exhaustion.
 Nio 1.0.4 avoids repeated pending-queue size scans during durable sync preparation while preserving queue limits and rollback.
@@ -373,6 +374,7 @@ The private reply type is `io.mindroom.models.response`:
 
 The response omits `thread_id` when the request did.
 `selection.override` is always present and is `null` for absent or deleted model overrides.
+It names a thread override only when every requester-visible responding entity uses that override, and is `null` when those entities have different thread overrides or some have none.
 `inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
 This explains what resetting the thread will use, including different defaults across agents and teams.
 

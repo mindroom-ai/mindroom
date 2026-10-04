@@ -65,6 +65,25 @@ def scheduled_task_state_event(
     }
 
 
+def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGetStateEventResponse:
+    """Answer the scheduler's homeserver check on a room's create event as a server honouring ``format=event``."""
+    content = {"room_version": "11"}
+    body = (
+        {
+            "type": "m.room.create",
+            "state_key": "",
+            "content": content,
+            "sender": SCHEDULE_WRITER_ID,
+            "event_id": "$create",
+            "origin_server_ts": 1,
+            "room_id": room_id,
+        }
+        if full_event
+        else content
+    )
+    return nio.RoomGetStateEventResponse(body, "m.room.create", "", room_id)
+
+
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
     """Report every requested member as joined, for runners that check creator membership."""
     assert event_type == "m.room.member"
@@ -78,16 +97,18 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
     This wraps each mocked state content in that envelope with ``sender``, so the existing
     ``room_get_state_event`` mock stays the single source of room state and its call count
     still measures state-event requests.
-    ``room_get_event`` returns each served envelope by its event ID, as the scheduler's sender check reads it.
-    Other private sends and event reads fall through to the previous mocks.
+    The scheduler's check of the room's create event is answered as a homeserver honouring ``format=event``.
+    Other private sends fall through to the previous mock.
     """
     fallback = client._send
-    get_event_fallback = client.room_get_event
-    served_events: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def send(response_class: type, method: str, path: str, *args: object, **kwargs: object) -> object:
         url = urlsplit(path)
-        if parse_qs(url.query) != {"format": ["event"]} or not url.path.startswith(_STATE_EVENT_PATH_PREFIX):
+        full_event = parse_qs(url.query) == {"format": ["event"]}
+        parts = [unquote(part) for part in url.path.removeprefix(_STATE_EVENT_PATH_PREFIX).split("/")]
+        if url.path.startswith(_STATE_EVENT_PATH_PREFIX) and parts[1:] == ["state", "m.room.create"]:
+            return room_create_state_response(parts[0], full_event=full_event)
+        if not full_event or not url.path.startswith(_STATE_EVENT_PATH_PREFIX):
             return await fallback(response_class, method, path, *args, **kwargs)
         assert response_class is nio.RoomGetStateEventResponse
         assert method == "GET"
@@ -99,15 +120,7 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
         if not isinstance(response, nio.RoomGetStateEventResponse):
             return response
         event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=sender)
-        served_events[room_id, event["event_id"]] = event
         return nio.RoomGetStateEventResponse(event, event_type, state_key, room_id)
 
-    async def get_event(room_id: str, event_id: str) -> object:
-        event = served_events.get((room_id, event_id))
-        if event is None:
-            return await get_event_fallback(room_id, event_id)
-        return nio.RoomGetEventResponse.from_dict(event)
-
     client._send = AsyncMock(side_effect=send)
-    client.room_get_event = AsyncMock(side_effect=get_event)
     return client._send

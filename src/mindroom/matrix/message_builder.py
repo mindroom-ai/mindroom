@@ -117,9 +117,8 @@ _ALLOWED_STYLE_PROPERTIES = frozenset(
     },
 )
 _SAFE_STYLE_VALUE_PATTERN = re.compile(r"[#(),.%\s0-9A-Za-z-]+")
-_UNTERMINATED_HTML_FRAGMENT_PATTERN = re.compile(
-    r"<(?:(?:!--)|(?:\?)|(?:![A-Za-z])|(?:/?[A-Za-z]))[^>\r\n]*(?=$|[\r\n])",
-)
+_HTML_FRAGMENT_OPENER_PATTERN = re.compile(r"<(?:!--|\?|![A-Za-z]|/?[A-Za-z])")
+_HTML_LINE_PATTERN = re.compile(r"[^\r\n]+")
 _RAW_HTML_TAG_LINE_START_PATTERN = re.compile(
     r"^([ ]{0,3})(</?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*)?/?>)",
 )
@@ -298,9 +297,19 @@ def _normalize_supported_block_html_boundaries(text: str) -> str:
     return _transform_markdown_outside_fenced_code(text, _normalize_supported_block_html_boundaries_in_text)
 
 
+def _escape_unterminated_html_fragment(line_match: re.Match[str]) -> str:
+    """Escape a line from its first tag opener that no later ``>`` closes."""
+    line = line_match.group(0)
+    # Openers before the line's last ``>`` are closed by it, so search only after it.
+    opener = _HTML_FRAGMENT_OPENER_PATTERN.search(line, line.rfind(">") + 1)
+    if opener is None:
+        return line
+    return line[: opener.start()] + escape(line[opener.start() :])
+
+
 def _escape_unterminated_html_fragments(html_text: str) -> str:
     """Escape malformed tag-like fragments so HTMLParser preserves them as text."""
-    return _UNTERMINATED_HTML_FRAGMENT_PATTERN.sub(lambda match: escape(match.group(0)), html_text)
+    return _HTML_LINE_PATTERN.sub(_escape_unterminated_html_fragment, html_text)
 
 
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:

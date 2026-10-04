@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
@@ -14,12 +14,9 @@ import pytest
 from mindroom.agent_cli.client import AgentCliClient, AgentCliUnavailableError
 from mindroom.agent_cli.main import main
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 @pytest.mark.parametrize("redirect", [False, True])
-def test_real_http_client_and_redirect_fence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redirect: bool) -> None:
+def test_real_http_client_and_redirect_fence(monkeypatch: pytest.MonkeyPatch, redirect: bool) -> None:
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -43,10 +40,12 @@ def test_real_http_client_and_redirect_fence(tmp_path: Path, monkeypatch: pytest
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    token = tmp_path / "token"
-    token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    # Shells inherit proxy settings, but the grant must go straight to MindRoom, never to a proxy.
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
     payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
     try:
         if redirect:
@@ -64,7 +63,6 @@ def test_real_http_client_and_redirect_fence(tmp_path: Path, monkeypatch: pytest
 
 @pytest.mark.parametrize("timeout", [0, 1])
 def test_wait_timeout_returns_pending_receipt(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     timeout: int,
@@ -93,10 +91,8 @@ def test_wait_timeout_returns_pending_receipt(
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    token = tmp_path / "token"
-    token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
     try:
         assert main(["calls", "wait", call_id, "--timeout", str(timeout)]) == 3
         assert json.loads(capsys.readouterr().out) == {"call_id": call_id, "status": "waiting"}
@@ -112,14 +108,13 @@ def test_wait_timeout_returns_pending_receipt(
     ("body", "expected"),
     [
         (
-            b'{"detail":"Agent CLI tool commands require an active Bash call"}',
-            "Agent CLI request was rejected: Agent CLI tool commands require an active Bash call",
+            b'{"detail":"This shell command\'s Bash call has ended; call mindroom-agent from a Bash call that is still running"}',
+            "Agent CLI request was rejected: This shell command's Bash call has ended; call mindroom-agent from a Bash call that is still running",
         ),
         (b"<html>conflict</html>", "Agent CLI request was rejected"),
     ],
 )
 def test_rejection_relays_server_detail(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     body: bytes,
     expected: str,
@@ -138,10 +133,8 @@ def test_rejection_relays_server_detail(
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    token = tmp_path / "token"
-    token.write_text("private-capability")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_GATEWAY_URL", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN_PATH", str(token))
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
     payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
     try:
         with pytest.raises(ValueError, match="rejected") as error:
@@ -151,3 +144,25 @@ def test_rejection_relays_server_detail(
         server.server_close()
         thread.join()
     assert str(error.value) == expected
+
+
+@pytest.mark.parametrize("token", ["", "private capability", "private-capabilité", "x" * 4097])
+def test_malformed_grant_is_unavailable_without_echo(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", token)
+    with pytest.raises(AgentCliUnavailableError, match="authority is unavailable") as error:
+        AgentCliClient()
+    assert "capabilit" not in str(error.value)
+
+
+def test_unreachable_api_names_the_address_but_not_the_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", url)
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    payload = {"operation": "tools.call", "call_id": str(uuid4()), "toolkit": "a", "function": "b", "arguments": {}}
+    with pytest.raises(AgentCliUnavailableError, match="outcome is unknown") as error:
+        AgentCliClient().operation(payload)
+    assert url in str(error.value)
+    assert "private-capability" not in str(error.value)

@@ -24,14 +24,14 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.model_defaults import (
+    CONFIG_INIT_ADDITIONAL_MODELS,
+    CONFIG_INIT_HELPER_MODELS,
     CONFIG_INIT_MODEL_ALTERNATIVES,
     CONFIG_INIT_MODEL_PRESETS,
     LLAMA_CPP_BASE_URL_DEFAULT,
     LLAMA_CPP_GEMMA,
     LLAMA_CPP_QWEN,
     LOCAL_OPENAI_API_KEY_DEFAULT,
-    LOCAL_QWEN_CONTEXT_WINDOW,
-    LOCAL_QWEN_PRESET_NAME,
     OLLAMA_GEMMA,
     OLLAMA_HOST_DEFAULT,
     OLLAMA_QWEN,
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.model_defaults import ModelPreset
 
 console = Console()
 # Warnings go to stderr so `config init --print` output stays valid YAML.
@@ -238,8 +239,9 @@ def _write_env_file(
         if changed:
             console.print(f"[green]Env file updated:[/green] {env_path}")
         # `mindroom run` serves the dashboard on every interface by default, so a kept
-        # .env without a dashboard key gets one; an explicitly empty key stays empty.
-        if _append_missing_env_defaults(
+        # .env without a dashboard key gets one; an explicitly empty key stays empty,
+        # and an exported key takes precedence over .env, so it gets none.
+        if "MINDROOM_API_KEY" not in os.environ and _append_missing_env_defaults(
             env_path,
             (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
             title="Dashboard API key protecting /api/*; the dashboard login page asks for it",
@@ -540,17 +542,30 @@ def config_init(
     )
 
 
-def create_first_run_config(runtime_paths: RuntimePaths) -> None:
-    """Ask for a provider and its key, then write the hosted starter config that `mindroom run` found missing."""
+def create_first_run_config(
+    runtime_paths: RuntimePaths,
+    *,
+    provider: str | None,
+    interactive: bool,
+) -> None:
+    """Write the hosted starter config that `mindroom run` found missing, asking a terminal for what is still open.
+
+    Without a terminal nothing is asked, so `provider` is required and a missing key is skipped.
+    """
     config_path = runtime_paths.config_path
     env_path = runtime_paths.env_path
+    if provider is None:
+        selected_preset = None
+    elif (selected_preset := _normalize_provider_preset(provider)) is None:
+        msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
+        raise ValueError(msg)
     console.print(f"[yellow]No MindRoom config found at {config_path}.[/yellow]")
     console.print(
         "Let's create one for MindRoom Chat (mindroom.chat). "
         "For your own Matrix server, press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.",
     )
-    selected_preset = _prompt_provider_preset()
-    provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path)
+    selected_preset = selected_preset or _prompt_provider_preset()
+    provider_api_key = _prompt_provider_key(selected_preset, runtime_paths, env_path, interactive=interactive)
     _write_starter_setup(
         config_path,
         env_path,
@@ -572,8 +587,10 @@ def _prompt_provider_key(
     selected_preset: _ProviderPreset,
     runtime_paths: RuntimePaths,
     env_path: Path,
+    *,
+    interactive: bool,
 ) -> str | None:
-    """Ask for the preset's API key with hidden input; return None when none was typed or none is needed."""
+    """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
     from mindroom.credentials_sync import get_secret_from_env  # noqa: PLC0415
 
     label = _API_KEY_PRESET_LABELS.get(selected_preset)
@@ -583,12 +600,16 @@ def _prompt_provider_key(
     if get_secret_from_env(env_key, runtime_paths):
         console.print(f"Using {env_key} from your environment.")
         return None
-    value = typer.prompt(
-        f"{label} API key (input hidden, press Enter to skip)",
-        default="",
-        show_default=False,
-        hide_input=True,
-    ).strip()
+    value = (
+        typer.prompt(
+            f"{label} API key (input hidden, press Enter to skip)",
+            default="",
+            show_default=False,
+            hide_input=True,
+        ).strip()
+        if interactive
+        else ""
+    )
     if not value:
         console.print(
             f"Skipped. Connect your provider in the dashboard once MindRoom is running, "
@@ -1034,57 +1055,40 @@ def _prompt_provider_preset() -> _ProviderPreset:
         console.print(f"[red]Invalid choice.[/red] Enter {_PROVIDER_CHOICES_TEXT}.")
 
 
-def _model_template_block(provider_preset: _ProviderPreset) -> str:
-    """Render the provider-specific YAML fragment for models.default."""
-    model_preset = CONFIG_INIT_MODEL_PRESETS[provider_preset]
+def _model_settings_block(model_preset: ModelPreset) -> str:
+    """Render the YAML settings of one generated model config."""
     lines = [
         f"provider: {model_preset.provider}",
         f"id: {model_preset.id}",
     ]
+    if model_preset.display_name is not None:
+        lines.append(f"display_name: {model_preset.display_name}")
     if model_preset.context_window is not None:
         lines.append(f"context_window: {model_preset.context_window}")
-    if provider_preset == "codex":
-        lines.extend(
-            [
-                "# Prompt caching is enabled automatically per active agent session.",
-                "extra_kwargs:",
-                "  reasoning_effort: medium",
-            ],
-        )
-    if provider_preset == "ollama":
+    if model_preset.provider == "ollama":
         lines.append(f"host: {_OLLAMA_HOST}")
-    if provider_preset == "llama_cpp":
-        lines.extend(
-            [
-                "extra_kwargs:",
-                f"  api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}",
-                f"  base_url: {_LLAMA_CPP_BASE_URL}",
-            ],
-        )
+    extra_kwargs: list[str] = []
+    if model_preset.provider == "llama_cpp":
+        extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {_LLAMA_CPP_BASE_URL}"])
+    if model_preset.reasoning_effort is not None:
+        extra_kwargs.append(f"reasoning_effort: {model_preset.reasoning_effort}")
+    if extra_kwargs:
+        lines.append("extra_kwargs:")
+        lines.extend(f"  {line}" for line in extra_kwargs)
     return textwrap.indent("\n".join(lines), "    ")
+
+
+def _model_template_block(provider_preset: _ProviderPreset) -> str:
+    """Render the provider-specific YAML fragment for models.default."""
+    return _model_settings_block(CONFIG_INIT_MODEL_PRESETS[provider_preset])
 
 
 def _additional_models_template_block(provider_preset: _ProviderPreset) -> str:
     """Render optional additional named model presets under `models:`."""
-    if provider_preset == "ollama":
-        return (
-            f"\n  {LOCAL_QWEN_PRESET_NAME}:\n"
-            "    provider: ollama\n"
-            f"    id: {OLLAMA_QWEN}\n"
-            f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
-            f"    host: {_OLLAMA_HOST}"
-        )
-    if provider_preset == "llama_cpp":
-        return (
-            f"\n  {LOCAL_QWEN_PRESET_NAME}:\n"
-            "    provider: llama_cpp\n"
-            f"    id: {LLAMA_CPP_QWEN}\n"
-            f"    context_window: {LOCAL_QWEN_CONTEXT_WINDOW}\n"
-            "    extra_kwargs:\n"
-            f"      api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}\n"
-            f"      base_url: {_LLAMA_CPP_BASE_URL}"
-        )
-    return ""
+    return "".join(
+        f"\n  {name}:\n{_model_settings_block(model_preset)}"
+        for name, model_preset in CONFIG_INIT_ADDITIONAL_MODELS.get(provider_preset, ())
+    )
 
 
 def _commented_model_options_template_block(provider_preset: _ProviderPreset) -> str:
@@ -1123,6 +1127,9 @@ def _full_template(
     model_block = _model_template_block(provider_preset)
     additional_models_block = _additional_models_template_block(provider_preset)
     commented_model_options_block = _commented_model_options_template_block(provider_preset)
+    helper_model = CONFIG_INIT_HELPER_MODELS.get(provider_preset)
+    router_model = helper_model or "default"
+    thread_summary_model_block = f"\n  thread_summary_model: {helper_model}" if helper_model else ""
 
     if matrix_server == "mindroom.chat":
         mindroom_user_block = ""
@@ -1197,7 +1204,7 @@ agents:
       - Meet the user at their technical level. If they ask you to configure something, do it; skip YAML or shell details unless they ask.
 
 router:
-  model: default
+  model: {router_model}
   accept_invites: true
 {mindroom_user_block}
 administrators:
@@ -1245,7 +1252,7 @@ defaults:
   tools:
     - scheduler
     - update_awareness
-  markdown: true
+  markdown: true{thread_summary_model_block}
   compaction:
     enabled: true
 """
@@ -1308,6 +1315,58 @@ MINDROOM_API_KEY={api_key}
 # MindRoom port (default 8765)
 # MINDROOM_PORT=8765
 """
+
+
+# Where `mindroom run`, and so the login service, serves the dashboard API unless told otherwise.
+DEFAULT_API_HOST = "0.0.0.0"  # noqa: S104
+DEFAULT_API_PORT = 8765
+
+
+def warn_dashboard_without_key(address: str, remedy: str) -> None:
+    """Warn that anyone who can reach the dashboard API at ``address`` can administer MindRoom."""
+    console.print(
+        f"[yellow]Warning:[/yellow] The dashboard API listens on {address} without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom.",
+    )
+    console.print(f"  {remedy}")
+
+
+def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bool:
+    """Return whether dedicated workers could reach the dashboard API while `MINDROOM_API_KEY` is unset.
+
+    Worker shells keep network access to the primary, so an open API would hand them
+    MindRoom's configuration. An explicitly empty key keeps open access.
+    """
+    from mindroom.workers.runtime import primary_worker_backend_is_dedicated  # noqa: PLC0415
+
+    return runtime_paths.env_value("MINDROOM_API_KEY") is None and primary_worker_backend_is_dedicated(runtime_paths)
+
+
+def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:
+    """Give the dashboard API a key when dedicated workers could otherwise call it without one."""
+    if dashboard_has_credential or not worker_dashboard_api_key_needed(runtime_paths):
+        return False
+    env_path = runtime_paths.env_path
+    try:
+        if not env_path.exists():
+            write_private_env_text(env_path, "")
+        _append_missing_env_defaults(
+            env_path,
+            (("MINDROOM_API_KEY", _new_dashboard_api_key()),),
+            title="Dashboard API key protecting /api/* from dedicated workers; the dashboard login page asks for it",
+        )
+    except OSError as exc:
+        # Read-only configuration mounts keep the open API; minimal mode then names the missing key.
+        console.print(
+            f"[yellow]Warning:[/yellow] Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+            f"and {env_path} could not be updated: {escape(str(exc))}",
+        )
+        return False
+    console.print(
+        f"[green]Generated MINDROOM_API_KEY in {env_path}[/green] because dedicated workers can reach the "
+        "dashboard API; the dashboard login page asks for this key.",
+    )
+    return True
 
 
 def _new_dashboard_api_key() -> str:

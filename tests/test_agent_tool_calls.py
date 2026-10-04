@@ -29,7 +29,7 @@ from mindroom.config.main import Config
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
@@ -41,7 +41,13 @@ if TYPE_CHECKING:
     from agno.learn.stores.protocol import LearningStore
 
 
-async def _catalog(tmp_path: Path, tools: list, **kwargs: Any) -> agent_tool_calls.PreparedAgentToolCatalog:  # noqa: ANN401
+async def _catalog(
+    tmp_path: Path,
+    tools: list,
+    *,
+    include: Callable[[Function], bool] | None = None,
+    **kwargs: Any,  # noqa: ANN401
+) -> agent_tool_calls.PreparedAgentToolCatalog:
     agent = KnowledgeToolDescribingAgent(id="helper", model=OpenAIChat(), tools=tools, **kwargs)
     context = RunContext(run_id="run", session_id="session", session_state={})
     output = RunOutput(run_id="run", session_id="session", messages=[])
@@ -58,8 +64,29 @@ async def _catalog(tmp_path: Path, tools: list, **kwargs: Any) -> agent_tool_cal
     )
     catalog = agent_tool_calls.PreparedAgentToolCatalog(agent, context, output, session, runtime)
     processed = await agent.aget_tools(output, context, session)
-    await catalog.prepare(processed)
+    await catalog.prepare(processed, include=include)
     return catalog
+
+
+@pytest.mark.asyncio
+async def test_catalog_prepares_only_included_functions(tmp_path: Path) -> None:
+    """Excluded functions are neither listed nor callable through the catalog."""
+
+    async def keep() -> str:
+        return "kept"
+
+    async def drop() -> str:
+        return "dropped"
+
+    catalog = await _catalog(
+        tmp_path,
+        [Toolkit(name="mixed", tools=[keep, drop])],
+        include=lambda function: function.name != "drop",
+    )
+
+    assert [(item["toolkit"], item["function"]) for item in catalog.metadata()] == [("mixed", "keep")]
+    with pytest.raises(UnknownToolError, match="no function 'drop'; its functions: keep"):
+        await catalog.bind(ToolKey("mixed", "drop"))
 
 
 async def _events(
@@ -478,13 +505,13 @@ async def test_failed_deferred_preparation_retains_agent_cleanup_owner(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_canonical_shell_releases_only_worker_leaf_and_retains_hooks(tmp_path: Path) -> None:
-    """A nested worker request progresses while canonical hooks stay serialized."""
+async def test_canonical_shell_releases_only_shell_leaf_and_retains_hooks(tmp_path: Path) -> None:
+    """A nested CLI request progresses while canonical hooks stay serialized."""
     seen: list[str] = []
 
     async def run_shell_command(args: str) -> str:
         del args
-        pytest.fail("ordinary shell worker must never execute")
+        pytest.fail("only the owner's shell leaf runs the command")
 
     async def mutate(run_context: RunContext) -> str:
         seen.append("mutate")
@@ -515,7 +542,7 @@ async def test_canonical_shell_releases_only_worker_leaf_and_retains_hooks(tmp_p
             binding,
             "shell-inner",
             {"args": "nested"},
-            worker_leaf=leaf,
+            shell_leaf=leaf,
         )
     ]
     assert events[-1].execution.result == "shell done"

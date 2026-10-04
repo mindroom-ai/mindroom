@@ -20,12 +20,8 @@ final class DesktopControlStore: ObservableObject {
     @Published private(set) var setupImported = false
     @Published private(set) var leaseRemainingSeconds = 0
 
-    @Published var homeserver = "https://mindroom.chat" {
-        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
-    }
-    @Published var matrixUserID = "" {
-        didSet { if observedSession == nil { hasInitialSessionEdits = true } }
-    }
+    @Published var homeserver = "https://mindroom.chat" { didSet { sessionFieldChanged() } }
+    @Published var matrixUserID = "" { didSet { sessionFieldChanged() } }
     @Published var matrixPassword = ""
     @Published var pairingCode = ""
     @Published var setupDescriptor = ""
@@ -92,6 +88,15 @@ final class DesktopControlStore: ObservableObject {
     var identityConfirmed: Bool {
         get { confirmedIdentity == currentIdentity }
         set { confirmedIdentity = newValue ? currentIdentity : nil }
+    }
+
+    var identityConfirmationLabel: String {
+        "My chat account is \(matrixUserID) on \(homeserver), and these identities and the fingerprint match my agent chat"
+    }
+
+    var replaceSessionMessage: String {
+        let saved = status.pairing.homeserver.map { " on \($0)" } ?? ""
+        return "This replaces the saved login\(saved) with a new device on \(homeserver). You will need to connect the new device again."
     }
 
     var canEditBrowserConfiguration: Bool {
@@ -185,7 +190,7 @@ final class DesktopControlStore: ObservableObject {
 
     func saveAndConnect() {
         guard identityConfirmed else {
-            errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            errorMessage = "Confirm the displayed homeserver, account, controller, requester, and agent before saving."
             recovery = nil
             return
         }
@@ -440,6 +445,12 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func login(replace: Bool = false, usePassword: Bool = false) {
+        // Pasted setup data names the homeserver, so a forged one must not receive the password or SSO token.
+        guard identityConfirmed else {
+            errorMessage = "Confirm the displayed homeserver and account before signing in."
+            recovery = nil
+            return
+        }
         var parameters: [String: Any] = [
             "homeserver": homeserver,
             "method": "password",
@@ -624,8 +635,15 @@ final class DesktopControlStore: ObservableObject {
     }
 
     private var currentIdentity: String {
-        [controllerUserID, controllerDeviceID, controllerFingerprint, requesterIDs, agentNames]
+        [homeserver, matrixUserID, controllerUserID, controllerDeviceID, controllerFingerprint, requesterIDs, agentNames]
             .joined(separator: "\u{1F}")
+    }
+
+    private func sessionFieldChanged() {
+        if observedSession == nil { hasInitialSessionEdits = true }
+        if confirmedIdentity != nil, confirmedIdentity != currentIdentity {
+            confirmedIdentity = nil
+        }
     }
 
     private func configurationFieldChanged(_ field: PartialKeyPath<DesktopControlStore>) {

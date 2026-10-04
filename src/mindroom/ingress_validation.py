@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.authorization import get_effective_sender_id_for_reply_permissions
 from mindroom.commands.parsing import command_parser
-from mindroom.constants import ACTING_REQUESTER_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    ACTING_REQUESTER_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+)
 from mindroom.dispatch_handoff import PreparedIngress, is_text_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -25,9 +32,13 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.handled_turns import TurnRecord
-from mindroom.matrix.event_info import reply_to_event_id_from_content
+from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.matrix.media import is_audio_message_event
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    is_access_checked_requester_id,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 
 if TYPE_CHECKING:
@@ -127,11 +138,11 @@ class IngressValidator:
         )
 
     def acting_requester_for_event(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
-        """Return the human requester an agent's or team's own reply was written for, when trusted.
+        """Return the human or bot-account requester an agent's or team's own reply was written for, when trusted.
 
-        Entities that this reply mentions act for that human: they apply their
-        access policy to that human and run with that human as requester, while
-        the sender stays the message's author for every sender-based mechanic.
+        Entities that this reply mentions act for that requester: they apply their
+        access policy to it and run with it as requester, while the sender stays
+        the message's author for every sender-based mechanic.
         """
         content = event.source.get("content") if isinstance(event.source, dict) else None
         if not isinstance(content, dict):
@@ -141,10 +152,40 @@ class IngressValidator:
             not isinstance(acting_requester, str)
             or self.managed_entity_name_for_sender(event.sender) in {None, ROUTER_AGENT_NAME}
             or source_kind_from_content(content) not in {None, MESSAGE_SOURCE_KIND}
-            or not is_human_requester_id(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
+            or not is_access_checked_requester_id(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
         ):
             return None
         return resolve_human_requester_alias(acting_requester, self.deps.runtime.config, self.deps.runtime_paths)
+
+    def entity_final_reply_original_event_id(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
+        """Return the reply a managed entity's completed edit finalizes, or None for any other event."""
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if (
+            not isinstance(content, dict)
+            or content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED
+            or self.managed_entity_name_for_sender(event.sender) in {None, ROUTER_AGENT_NAME}
+        ):
+            return None
+        return EventInfo.from_event(event.source).original_event_id
+
+    def entity_final_reply(self, event: nio.RoomMessageFormatted) -> nio.RoomMessageFormatted | None:
+        """Return a managed entity's completed edit as the reply message it finalizes.
+
+        An entity posts a placeholder and delivers its final text as an edit of it, so other
+        entities read the replacement content; the edit keeps its own event ID and relation.
+        """
+        content = event.source.get("content") if isinstance(event.source, dict) else None
+        if not isinstance(content, dict) or not isinstance(new_content := content.get("m.new_content"), dict):
+            return None
+        reply = copy(event)
+        reply.source = {**event.source, "content": {**new_content, "m.relates_to": content.get("m.relates_to")}}
+        body = new_content.get("body")
+        reply.body = body if isinstance(body, str) else event.body
+        return reply if self.entity_final_reply_original_event_id(reply) is not None else None
+
+    def discovery_event_id(self, event: DispatchEvent) -> str | None:
+        """Return the earlier event a turn for this event also owns: a routed human message or a finalized reply."""
+        return self.router_relay_original_event_id(event) or self.entity_final_reply_original_event_id(event)
 
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata overrides."""

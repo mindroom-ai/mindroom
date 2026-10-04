@@ -76,6 +76,7 @@ __all__ = [
     "list_worker_grantable_shared_services",
     "load_scoped_credentials",
     "load_worker_grantable_shared_credentials",
+    "remove_worker_service_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
     "scoped_credentials_path",
@@ -355,25 +356,40 @@ def _drop_planted_entry(path: Path) -> None:
         raise WorkerCredentialPathError(msg) from exc
 
 
-def _existing_worker_credential_paths(storage_root: Path) -> tuple[Path, ...]:
-    """Return real credential directories belonging to existing workers."""
+@dataclass(frozen=True, slots=True)
+class _WorkerCredentialPaths:
+    """Credential directories of existing workers, and those that could not be inspected."""
+
+    existing: tuple[Path, ...]
+    uninspectable: tuple[Path, ...]
+
+
+def _worker_credential_paths(storage_root: Path) -> _WorkerCredentialPaths:
+    """Return real credential directories belonging to existing workers, and those that could not be inspected."""
     workers_root = storage_root / "workers"
     if workers_root.is_symlink() or not workers_root.is_dir():
-        return ()
+        return _WorkerCredentialPaths(existing=(), uninspectable=())
 
-    paths: list[Path] = []
+    existing: list[Path] = []
+    uninspectable: list[Path] = []
     for worker_root in workers_root.iterdir():
         if worker_root.is_symlink() or not worker_root.is_dir():
             continue
         for directory_name in (WORKER_CREDENTIALS_DIRNAME, WORKER_SHARED_CREDENTIALS_DIRNAME):
             credential_path = worker_root / directory_name
             try:
-                if not credential_path.is_symlink() and credential_path.is_dir():
-                    paths.append(credential_path)
+                # Path.is_dir() and is_symlink() hide permission errors on newer Pythons.
+                mode = credential_path.lstat().st_mode
+            except FileNotFoundError:
+                continue
             except OSError:
                 # Worker code may make its own root unsearchable, which hides only that worker's store.
                 logger.warning("Skipping an uninspectable worker credential path", path=str(credential_path))
-    return tuple(paths)
+                uninspectable.append(credential_path)
+                continue
+            if stat.S_ISDIR(mode):
+                existing.append(credential_path)
+    return _WorkerCredentialPaths(existing=tuple(existing), uninspectable=tuple(uninspectable))
 
 
 def _atomic_write_private_file(path: Path, payload: bytes) -> None:
@@ -429,7 +445,7 @@ class CredentialsManager:
         worker_credential_paths: tuple[Path, ...] = ()
         if self.current_worker_key is None and self.base_path.name == "credentials":
             _reject_linked_primary_credential_directories(credential_paths)
-            worker_credential_paths = _existing_worker_credential_paths(self.storage_root)
+            worker_credential_paths = _worker_credential_paths(self.storage_root).existing
         for credential_path in (*credential_paths, *worker_credential_paths):
             try:
                 _ensure_private_directory(credential_path, harden_existing=True)
@@ -465,6 +481,7 @@ class CredentialsManager:
     def for_primary_runtime_scope(self, requester_id: str, agent_name: str | None) -> CredentialsManager:
         """Return a primary-runtime-only scoped credentials manager."""
         requester_dir = _scoped_credentials_dir_part(requester_id)
+        # Config reserves "_shared" as an entity name, so no agent's store collides with the requester-wide one.
         agent_dir = _scoped_credentials_dir_part(agent_name or "_shared")
         scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
         return CredentialsManager(
@@ -783,7 +800,7 @@ def update_stored_service_credentials(
     normalized_service = validate_service_name(service)
     rewritten = 0
     unreadable = 0
-    for directory in (manager.base_path, *_existing_worker_credential_paths(manager.storage_root)):
+    for directory in (manager.base_path, *_worker_credential_paths(manager.storage_root).existing):
         credentials_path = directory / f"{normalized_service}{_CREDENTIALS_FILE_SUFFIX}"
         try:
             payload = _read_credentials_payload(credentials_path)
@@ -804,6 +821,52 @@ def update_stored_service_credentials(
             manager._save_credentials_file(normalized_service, credentials_path, updated)
             rewritten += 1
     return StoredCredentialsUpdate(rewritten=rewritten, unreadable=unreadable)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerCredentialsRemoval:
+    """How removing services from every worker's own credential store went."""
+
+    removed: int
+    failed: int
+
+
+def remove_worker_service_credentials(
+    runtime_paths: RuntimePaths,
+    services: frozenset[str],
+) -> _WorkerCredentialsRemoval:
+    """Delete these services' documents from every existing worker's own store without reading them.
+
+    Shared-credential mirrors are left alone, because every worker sync rewrites them from the granted services.
+    A store that cannot be inspected, opened, or cleaned, for example one whose worker root or directory worker code
+    made unsearchable, is counted, not skipped silently.
+    """
+    manager = get_runtime_credentials_manager(runtime_paths)
+    file_names = {f"{validate_service_name(service)}{_CREDENTIALS_FILE_SUFFIX}" for service in services}
+    worker_paths = _worker_credential_paths(manager.storage_root)
+    removed = 0
+    failed = sum(1 for directory in worker_paths.uninspectable if directory.name == WORKER_CREDENTIALS_DIRNAME)
+    for directory in worker_paths.existing:
+        if directory.name != WORKER_CREDENTIALS_DIRNAME:
+            continue
+        try:
+            with open_directory_within_root(directory) as directory_fd:
+                for name in file_names:
+                    try:
+                        entry_mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(entry_mode):
+                        os.unlink(name, dir_fd=directory_fd)
+                        removed += 1
+        except OSError as exc:
+            logger.warning(
+                "A worker credential store could not be cleaned",
+                path=str(directory),
+                error_type=type(exc).__name__,
+            )
+            failed += 1
+    return _WorkerCredentialsRemoval(removed=removed, failed=failed)
 
 
 def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:

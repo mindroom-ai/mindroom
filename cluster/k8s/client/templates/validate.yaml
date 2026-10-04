@@ -36,6 +36,17 @@
 {{- if and (not .Values.config.create) (not .Values.config.existingConfigMap) -}}
 {{- fail "config.existingConfigMap is required when config.create=false" -}}
 {{- end -}}
+{{- if not (or (kindIs "invalid" .Values.config.values) (kindIs "map" .Values.config.values)) -}}
+{{- fail "config.values must be a map" -}}
+{{- end -}}
+{{- if .Values.config.values -}}
+{{- if or (not .Values.config.create) .Values.config.existingConfigMap -}}
+{{- fail "config.values requires the chart-managed client config" -}}
+{{- end -}}
+{{- if .Values.config.data -}}
+{{- fail "config.values cannot be combined with config.data; move the config.data settings into config.values" -}}
+{{- end -}}
+{{- end -}}
 {{- if and (not .Values.nginx.create) (not .Values.nginx.existingConfigMap) -}}
 {{- fail "nginx.existingConfigMap is required when nginx.create=false" -}}
 {{- end -}}

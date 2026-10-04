@@ -29,8 +29,8 @@ That matters especially for `aws_ses`, because the current registry marks it as 
 `e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
 `daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
 `composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `headers`.
-Daytona's `sandbox_env_vars` and `sandbox_labels` instead accept JSON objects that MindRoom validates and converts to upstream mappings.
+Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, and `processors`.
+Daytona's `sandbox_env_vars` and `sandbox_labels`, and `custom_api` `headers`, instead accept JSON objects that MindRoom validates and converts to upstream mappings.
 Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
 
 ## [`aws_lambda`]
@@ -128,7 +128,9 @@ send_email(
 ### What It Does
 
 `airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
-If `dags_dir` is a string, the upstream toolkit resolves it relative to the current working directory at tool initialization time.
+A relative `dags_dir` resolves from the agent workspace, which is also the default DAG directory.
+DAG paths follow the agent's `file_access`: with the default `workspace`, `read_dag_file()` and `save_dag_file()` refuse files outside the agent workspace, so a DAG folder elsewhere needs `file_access: unrestricted`.
+`read_dag_file()` refuses files larger than 64 MiB.
 `save_dag_file()` creates missing parent directories before writing the target DAG file.
 This tool manages DAG source files only.
 It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
@@ -137,7 +139,7 @@ It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state,
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the current working directory when given as a string. |
+| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the agent workspace when relative. |
 | `enable_save_dag_file` | `boolean` | `no` | `true` | Enable `save_dag_file()`. |
 | `enable_read_dag_file` | `boolean` | `no` | `true` | Enable `read_dag_file()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream Airflow toolkit surface. |
@@ -160,7 +162,7 @@ save_dag_file("from airflow import DAG\n", "generated/new_job.py")
 ### Notes
 
 - Use `airflow` when the job is editing DAG source files, not when you need live Airflow control-plane access.
-- `dags_dir` is not a MindRoom-managed workspace root like `base_dir` on some local execution tools.
+- `dags_dir` only sets where relative DAG paths start; the agent's `file_access` decides which files the tool may reach.
 - Keep the configured directory aligned with the filesystem path your Airflow deployment actually watches.
 
 ## [`e2b`]
@@ -174,6 +176,7 @@ The toolkit creates one E2B sandbox at initialization time and reuses it for sub
 It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
 The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads.
 `upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: `workspace` confines local paths to the agent workspace, and `unrestricted` allows any regular file MindRoom can read.
+`upload_file()` refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 Local paths for `download_file_from_sandbox()`, `download_png_result()`, and `download_chart_data()` are always relative to the agent workspace.
 Absolute download paths, `..`, and symlinks that leave the workspace are rejected, and agents without a workspace cannot download local files.
 `timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
@@ -358,7 +361,7 @@ Non-2xx responses still return a structured result object, with an added `"error
 | `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
 | `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
 | `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `password` | `no` | `null` | Advanced raw default-header mapping, stored through the dashboard or credential store because headers can carry credentials. The upstream constructor expects a dict-like object. |
+| `headers` | `password` | `no` | `null` | Default headers as a JSON object of string header names and values, such as `{"X-Api-Key": "value"}`, stored through the dashboard or credential store because headers can carry credentials. |
 | `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
 | `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
 | `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
@@ -386,7 +389,6 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 
 - If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
 - A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
-- `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs
 

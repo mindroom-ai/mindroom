@@ -335,6 +335,9 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user_allo
         )
     else:
         billing = ""
+    # After the billing resume, so a database error here cannot skip it, and before the reconcile, so held instances
+    # whose teardown date passed during the deletion are not uninstalled.
+    instance_lifecycle.restart_teardown_grace(account_id)
     # Instances held for the deletion restart only while their subscription is entitled.
     restart_errors = await instance_lifecycle.reconcile_account_instances(account_id)
     instances = (

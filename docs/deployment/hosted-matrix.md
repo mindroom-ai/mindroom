@@ -29,7 +29,8 @@ Watch the 2-minute setup video:
 - A Matrix account that can sign in to `chat.mindroom.chat`
 - At least one AI provider API key, or a local Codex CLI ChatGPT login
 
-Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, and starts in one command; the steps below are the explicit path.
+Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, offers to install a login service, and otherwise starts in one command; the steps below are the explicit path.
+Without a terminal, `OPENAI_API_KEY=... uvx mindroom run --provider openai --service` answers those questions with flags.
 
 ## 1. Initialize Local Config
 
@@ -66,7 +67,7 @@ Alternatively, enter the displayed code in MindRoom Chat → Settings → Local 
 Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
 
 After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
-In a terminal, it asks `Is this your account? [y/N]`; answering `n`, pressing Enter without an answer, or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
 Under a service or the macOS app, it prints the approving account without asking.
 While it waits for approval, `/api/health` on the API port already reports healthy and `/api/ready` reports `Waiting for local pairing approval`, so container health checks do not restart it with a new code.
 

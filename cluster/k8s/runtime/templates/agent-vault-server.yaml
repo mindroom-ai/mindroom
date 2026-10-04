@@ -98,10 +98,10 @@ spec:
                   name: {{ $server.smtp.existingSecret }}
                   key: AGENT_VAULT_SMTP_FROM
             {{- end }}
-            {{- with $server.extraEnv }}
+            {{- with include "mindroom-runtime.envList" (list $ $server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with $server.envFrom }}
+          {{- with include "mindroom-runtime.keyedList" (dict "value" $server.envFrom "path" "workers.kubernetes.agentVault.server.envFrom") | fromJsonArray }}
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -161,4 +161,102 @@ spec:
       port: {{ $server.mitmPort }}
       targetPort: proxy
       protocol: TCP
+{{- if $server.networkPolicy.create }}
+{{- $np := $server.networkPolicy -}}
+{{- $workerClients := and (eq .Values.workers.backend "kubernetes") $av.enabled -}}
+{{- /* Squid-first workers reach the proxy port only through approved egress; otherwise they use agentVault.proxyUrl directly. */ -}}
+{{- $squidProxyClients := and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
+{{- $workerProxyClients := and $workerClients (not .Values.approvedEgress.enabled) -}}
+{{- $accessGrantsJob := and $av.accessGrants.enabled (gt (len $av.accessGrants.grants) 0) -}}
+{{- $releaseApiClients := or $av.accessTool.enabled $av.bootstrap.enabled $accessGrantsJob }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ default $name $np.name }}
+  labels:
+    {{- include "mindroom-runtime.agentVaultLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mindroom-runtime.agentVaultSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- if not (or $workerClients $releaseApiClients $squidProxyClients $np.extraIngress) }} []{{ end }}
+    {{- if $workerClients }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "mindroom-runtime.workerNamespace" . | quote }}
+          podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.workerPodLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ $server.apiPort }}
+        {{- if $workerProxyClients }}
+        - protocol: TCP
+          port: {{ $server.mitmPort }}
+        {{- end }}
+    {{- end }}
+    {{- if $releaseApiClients }}
+    - from:
+        {{- if $av.accessTool.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "mindroom-runtime.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        {{- if $av.bootstrap.enabled }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultBootstrapName" . | quote }}
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
+              app.kubernetes.io/component: agent-vault-bootstrap
+        {{- end }}
+        {{- if $accessGrantsJob }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultAccessGrantsName" . | quote }}
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
+              app.kubernetes.io/component: agent-vault-access-grants
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $server.apiPort }}
+    {{- end }}
+    {{- if $squidProxyClients }}
+    - from:
+        - podSelector:
+            {{- include "mindroom-runtime.approvedEgressPodSelector" . | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ $server.mitmPort }}
+    {{- end }}
+    {{- with $np.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    # Port-only DNS keeps cluster DNS and node-local DNS caches working; the vault already reaches any host on 80/443.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Upstreams of proxied tool traffic and OAuth providers.
+    - ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- if $server.smtp.enabled }}
+    - ports:
+        - protocol: TCP
+          port: {{ $server.smtp.port }}
+    {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
 {{- end }}

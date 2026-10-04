@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.message_target import MessageTarget
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
@@ -106,6 +106,7 @@ def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
                 invoking_agent=invoking_agent,
                 toolkit_name=toolkit_name,
                 expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool["tool_args"]),
             ),
         )
     return tuple(calls)

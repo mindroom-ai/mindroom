@@ -61,6 +61,8 @@ async def test_subagent_model_selection(
         model_name="default",
         room_id="!room:example.org",
         set_by="@alice:example.org",
+        entity_names=("leader", "worker"),
+        config=config,
     )
     toolkit = DelegateTools("leader", ["leader", "worker"], paths, config, execution_identity=identity)
     models = {

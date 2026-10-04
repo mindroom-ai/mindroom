@@ -13,7 +13,12 @@ import aiohttp
 import certifi
 import nio
 
-from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
+from mindroom.constants import (
+    RuntimePaths,
+    encryption_keys_dir,
+    runtime_matrix_homeserver,
+    runtime_matrix_ssl_verify,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.startup_errors import PermanentStartupError
@@ -164,9 +169,14 @@ def maybe_ssl_context(
     homeserver: str,
     runtime_paths: RuntimePaths,
 ) -> ssl_module.SSLContext | None:
-    """Return the configured Matrix SSL context when HTTPS requires one."""
+    """Return the configured Matrix SSL context when HTTPS requires one.
+
+    MATRIX_SSL_VERIFY=false applies only to the configured MATRIX_HOMESERVER, so any other homeserver,
+    such as one the desktop bridge signs in to, keeps certificate verification.
+    """
     if homeserver.startswith("https://"):
-        if not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
+        configured_homeserver = homeserver.rstrip("/") == runtime_matrix_homeserver(runtime_paths).rstrip("/")
+        if configured_homeserver and not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl_module.CERT_NONE

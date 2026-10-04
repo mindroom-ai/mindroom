@@ -125,6 +125,22 @@ extension DesktopShellRequest {
     var hasEscapedCharacters: Bool {
         [command, cwd, requesterID, agentName].contains(where: desktopPreviewEscapes)
     }
+    /// Look-alike letters and punctuation, such as Cyrillic U+0430 or U+2024, read as an ASCII host or path.
+    var hasNonASCIICharacters: Bool { !asciiEscapedFields.isEmpty }
+    /// One labeled line per field that contains non-ASCII characters, with every one of them escaped.
+    var asciiEscapedFields: String {
+        [("Command", command), ("Working folder", cwd), ("Agent", agentName), ("Requester", requesterID)]
+            .filter { !$0.1.unicodeScalars.allSatisfy(\.isASCII) }
+            .map { "\($0.0): \(desktopSafePreview($0.1, escapingNonASCII: true))" }
+            .joined(separator: "\n")
+    }
+    var escapeWarning: String? {
+        let clauses = [
+            hasEscapedCharacters ? "control, text-direction, invisible, or non-ASCII space characters, shown as \\u{…}" : nil,
+            hasNonASCIICharacters ? "non-ASCII characters that can look like ASCII; the fields with them escaped follow" : nil,
+        ].compactMap { $0 }
+        return clauses.isEmpty ? nil : "This request contains \(clauses.joined(separator: ", and "))."
+    }
 
     /// Counted like the helper and the terminal prompt: Unicode scalars, and lines split at newlines.
     var commandSizeLabel: String {
@@ -136,10 +152,10 @@ extension DesktopShellRequest {
 
 /// Escapes control, format, text-direction, invisible, and non-ASCII space characters so remote text cannot hide what runs.
 /// Ordinary newlines and ASCII spaces stay readable; everything escaped appears as `\u{…}`.
-func desktopSafePreview(_ text: String) -> String {
+func desktopSafePreview(_ text: String, escapingNonASCII: Bool = false) -> String {
     var preview = ""
     for scalar in text.unicodeScalars {
-        if isHiddenPreviewScalar(scalar) {
+        if isHiddenPreviewScalar(scalar) || (escapingNonASCII && !scalar.isASCII) {
             preview += "\\u{\(String(scalar.value, radix: 16, uppercase: true))}"
         } else {
             preview.unicodeScalars.append(scalar)

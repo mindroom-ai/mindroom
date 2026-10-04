@@ -43,7 +43,8 @@ uvx mindroom run
 # First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
 # MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
 # then prints a link and QR code: approve it with your MindRoom Chat account,
-# or enter the code in MindRoom Chat → Settings → Local MindRoom
+# or enter the code in MindRoom Chat → Settings → Local MindRoom.
+# Finally, Enter keeps MindRoom running in the background as a login service (systemd or launchd); n runs it here
 ```
 
 To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
@@ -170,7 +171,7 @@ mindroom run
 | **Authorization** | Fine-grained user and room access control |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
 | **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal requires a dedicated Docker worker), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
+| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal runs Bash where the agent's shell runs), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
 | **Hot Reload** | Config changes are detected and agents restart automatically |
 
 ## Architecture
@@ -211,7 +212,7 @@ mindroom run
 - [Image Messages](https://docs.mindroom.chat/images/) - Image analysis with vision models
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Context-scoped file and video handling
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits with presence-based gating
-- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal requires a dedicated Docker worker), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
+- [Chat Commands](https://docs.mindroom.chat/chat-commands/) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal runs Bash where the agent's shell runs), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Clickable multiple-choice questions via Matrix reactions
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
 - [Matrix Space](https://docs.mindroom.chat/matrix-space/) - Optional root Matrix Space for grouping managed rooms

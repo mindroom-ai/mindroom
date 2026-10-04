@@ -88,9 +88,7 @@ agents:
           output_dir: charts
 ```
 
-In this example, `file_generation` and `visualization` default to the primary runtime, and `exports`/`charts` are relative to that process’s working directory.
-They are not automatically rebased into the agent workspace or made visible to worker-routed `file` and `shell` calls.
-Choose a destination shared with the tools that need the files, or generate worker-local artifacts through workspace-backed `shell` or `python`.
+In this example, `file_generation` saves into `exports` and `visualization` saves into `charts`, both inside the agent workspace.
 
 ## [`file`]
 
@@ -516,20 +514,23 @@ generate_text_file("Plain text export", filename="notes.txt")
 
 ## [`visualization`]
 
-`visualization` creates chart images with matplotlib and writes them to an output directory.
+`visualization` creates chart images with matplotlib and saves them in an output directory inside the agent workspace.
 
 ### What It Does
 
 `visualization` exposes `create_bar_chart()`, `create_line_chart()`, `create_pie_chart()`, `create_scatter_plot()`, and `create_histogram()`.
-The upstream toolkit switches matplotlib to the non-interactive `Agg` backend and auto-creates `output_dir` if it does not exist.
+The upstream toolkit switches matplotlib to the non-interactive `Agg` backend.
 Each chart function accepts dict-like data, list-based data, or JSON strings, normalizes the data, saves a PNG image, and returns a JSON payload with the file path and status.
+A chart's `filename` must be a plain file name; when it is omitted, the chart is named after its type and numbered from the count of files already in `output_dir`, such as `bar_chart_3.png`.
+Charts replace an existing file of the same name without following links, and `output_dir` is created inside the workspace when it is missing.
+Agents without a workspace cannot save charts.
 `visualization` defaults to primary execution.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `no` | `"charts"` | Directory where generated chart images are saved. |
+| `output_dir` | `text` | `no` | `"charts"` | Directory inside the agent workspace where charts are saved; absolute paths and `..` are rejected. |
 | `enable_create_bar_chart` | `boolean` | `no` | `true` | Enable `create_bar_chart()`. |
 | `enable_create_line_chart` | `boolean` | `no` | `true` | Enable `create_line_chart()`. |
 | `enable_create_pie_chart` | `boolean` | `no` | `true` | Enable `create_pie_chart()`. |
@@ -561,9 +562,7 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### Notes
 
-- The toolkit saves PNG files to disk immediately; relative `output_dir` paths resolve from the executing process’s working directory.
-- Later tools can read or send those files only if their runtime can access that destination; primary and worker filesystems can differ.
-- If you explicitly route `visualization` through workers, the chart files will be created in the worker-visible filesystem instead of the primary process filesystem.
+- Charts land in the agent workspace, so `attachments` and `matrix_message` can send them under the default `file_access: workspace`.
 - `matplotlib` must be importable in the runtime that executes the tool.
 
 ## [`sleep`]

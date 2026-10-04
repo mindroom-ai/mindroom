@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.airflow import AirflowTools
+    from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 
 
 @register_tool_with_metadata(
     name="airflow",
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.AGENT,
     display_name="Airflow",
     description="Apache Airflow DAG file management for workflow orchestration",
     category=ToolCategory.DEVELOPMENT,
@@ -51,12 +58,13 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=[],  # No additional dependencies required beyond agno
     docs_url="https://docs.agno.com/tools/toolkits/others/airflow",
     function_names=("read_dag_file", "save_dag_file"),
 )
-def airflow_tools() -> type[AirflowTools]:
-    """Return Airflow tools for DAG file management."""
-    from agno.tools.airflow import AirflowTools
+def airflow_tools() -> type[MindRoomAirflowTools]:
+    """Return Airflow tools whose DAG files follow the agent's file_access."""
+    from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 
-    return AirflowTools
+    return MindRoomAirflowTools

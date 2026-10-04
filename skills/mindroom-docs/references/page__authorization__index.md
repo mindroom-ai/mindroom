@@ -131,9 +131,15 @@ An explicit `members_of_rooms: []` disables inferred room grants.
 
 MindRoom resolves aliases before administrator and static-user matching.
 Internal MindRoom identities bypass responder restrictions because they are system participants.
-An agent's or team's reply does not carry that bypass to the entities it mentions when a human requested the reply.
-A mentioned agent or team then acts for that human: it applies its own `access` to the human and does not respond when that excludes them, and it runs with the human as requester for credentials, requester-private instances, memory, learning, and approvals.
+An agent's or team's reply, including a raw `m.room.message` an agent sends with `matrix_api`, does not carry that bypass to the entities it mentions when a human or a configured bot account requested the reply.
+A mentioned agent or team then acts for that requester: it applies its own `access` to the requester and does not respond when that excludes them, and it runs as that requester for credentials, requester-private instances, memory, learning, and approvals.
+The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise run as that requester, so they reach only the entities the requester may address.
+MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the requester must send those personally.
+A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the requester by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
+A mention counts once the reply is finished, including a streamed reply whose final text replaces its placeholder, and never in a reply that was stopped or failed.
+A mention in an agent's or team's message wakes the mentioned entity only while the person it acts for is a joined member of the room; an invited or departed requester, or membership MindRoom cannot confirm, wakes nobody.
+Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, 50 by default, and continue after the next message from a person.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
@@ -168,6 +174,8 @@ Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted l
 An unauthenticated dashboard only serves its pages and dashboard API to requests addressed to `localhost`, a `*.localhost` name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, so a DNS-rebinding page cannot reach it through the browser.
 It also refuses browser requests whose `Origin` is not the requested host, a loopback page, or an allowed host name, and refuses changes marked `Sec-Fetch-Site: cross-site`.
 Opening an unauthenticated dashboard by any other host name, such as `myserver.local`, requires adding that name to `MINDROOM_DASHBOARD_ALLOWED_HOSTS`.
+These checks read the `Host` header the browser sent, so a reverse proxy in front of an unauthenticated dashboard or `/v1` API must pass it through unchanged, for example with nginx `proxy_set_header Host $host;` or Apache `ProxyPreserveHost On`.
+A proxy that replaces `Host` with its upstream address, as nginx `proxy_pass` and Apache `mod_proxy` do by default, makes every request look addressed to that IP address and disables the DNS-rebinding protection, so configure `MINDROOM_API_KEY`, and `OPENAI_COMPAT_API_KEYS` for `/v1`, when the proxy cannot preserve `Host`.
 Requests authenticated by an API key, a platform session, or trusted upstream auth are not restricted by host or origin, and neither are routes with their own authorization, such as health probes, webhooks, computer sessions, and `/v1` with `OPENAI_COMPAT_API_KEYS`.
 These operator authentication checks are independent of the Matrix `administrators` list.
 

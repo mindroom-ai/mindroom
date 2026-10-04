@@ -27,6 +27,34 @@ _PAGE_COLUMNS = """
     logical_event_id, room_id, thread_id, sender, created_ts,
     revision_event_id, revision_ts, content_json, refresh_token, membership_epoch
 """
+# Order and stored size only, so a page is sized before any content is loaded.
+# Both backends read a text value's byte length without loading the value;
+# SQLite before 3.43 has no ``octet_length``, and the backend supplies one.
+_PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) AS content_bytes"
+
+# How much stored content one page loads, newest message first. A resolved
+# long-text sidecar can be megabytes, and anyone who can post can make every
+# message in a thread name one, so a row limit alone does not bound a read.
+PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
+
+# What the loaded rows of one page may decode to, estimated before decoding.
+# Prose decodes to about its stored size, but every JSON value becomes a Python
+# object: a string or number of a few bytes takes 35 to 55 bytes once decoded,
+# an array about 70 and an object about 190, so a list of short values decodes
+# to about 10 times its size and nested empty containers to over 40. Weighing
+# every structural array, object and separator keeps such shapes near their
+# estimate. Measured worst: a dict just past a hash table resize with
+# one-character non-ASCII keys and values holds about 1.25 times it, and a page
+# of those peaks near 1.35 times this bound; a list of one-character non-ASCII
+# strings holds about 1.05 times it. Meanwhile 16 MiB of prose and tool traces,
+# including spaced JSON text inside their strings as tool previews write it,
+# stays under this bound. Strings holding a character outside the Basic
+# Multilingual Plane decode at 4 bytes per character, so a page of them can
+# reach about twice this bound before the byte budget stops it.
+_PAGE_DECODED_BUDGET_BYTES = 64 * 1024 * 1024
+_DECODED_BYTES_PER_ARRAY = 96
+_DECODED_BYTES_PER_OBJECT = 192
+_DECODED_BYTES_PER_SEPARATOR = 56
 
 # Everything older than one page's last row, spelled as a row value.
 #
@@ -72,18 +100,45 @@ def read_conversation(
     returns it: the row's body was cleared in the same transaction that
     admitted the redaction, so no caller can serve deleted content, whether or
     not it is willing to wait for the refetch.
+
+    A page also ends before ``limit`` once its stored content passes a fixed
+    budget, and then carries a cursor exactly as a full page does. Its rows are
+    sized first and only the ones that fit are loaded.
+
+    On PostgreSQL the size and content queries can see different snapshots,
+    so a write committed between them can carry a page past its budget by the
+    rows that write changed. That overshoot is accepted rather than folding
+    the thread root's separate lookup into one windowed statement.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
         raise ValueError(msg)
-    rows = _page_rows(
+    sizes = _page_rows(
         transaction,
         principal_id,
         room_id=room_id,
         thread_id=thread_id,
         limit=limit,
         before=before,
+        columns=_PAGE_SIZE_COLUMNS,
     )
+    kept = _rows_within_content_budget(sizes)
+    rows = (
+        _page_rows(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            limit=kept,
+            before=before,
+            columns=_PAGE_COLUMNS,
+        )
+        if kept
+        else ()
+    )
+    decoded = _rows_within_decoded_budget(rows)
+    trimmed = decoded < len(rows)
+    rows = rows[:decoded]
     messages: list[VisibleMessage] = []
     refresh_pending: list[RefreshRequest] = []
     for row in rows:
@@ -96,7 +151,7 @@ def read_conversation(
             created_ts=int(rows[-1]["created_ts"]),
             logical_event_id=rows[-1]["logical_event_id"],
         )
-        if len(rows) == limit
+        if rows and (trimmed or kept < len(sizes) or len(sizes) == limit)
         else None
     )
     return ConversationPage(
@@ -114,6 +169,7 @@ def _page_rows(
     thread_id: str | None,
     limit: int,
     before: ConversationCursor | None,
+    columns: str,
 ) -> tuple[Row, ...]:
     """Return one page's rows, newest first.
 
@@ -127,7 +183,7 @@ def _page_rows(
     rows = list(
         transaction.fetchall(
             f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            SELECT {columns} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND thread_id = ?{cursor_clause}
             ORDER BY created_ts DESC, logical_event_id DESC
             LIMIT ?
@@ -138,7 +194,7 @@ def _page_rows(
     if thread_id is not None:
         root = transaction.fetchone(
             f"""
-            SELECT {_PAGE_COLUMNS} FROM visible_messages
+            SELECT {columns} FROM visible_messages
             WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?{cursor_clause}
             """,  # noqa: S608 - a fixed column list and a fixed clause, not input
             (principal_id, room_id, thread_id, *cursor_params),
@@ -148,6 +204,39 @@ def _page_rows(
             rows.sort(key=lambda row: (int(row["created_ts"]), row["logical_event_id"]), reverse=True)
             del rows[limit:]
     return tuple(rows)
+
+
+def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:
+    """Return how many of one page's newest rows fit its content budget, never fewer than one.
+
+    A row owing a refetch holds no content and costs nothing, so resolving it
+    can only shorten the next read of the same page, never lengthen it.
+    """
+    total = 0
+    for index, row in enumerate(rows):
+        total += int(row["content_bytes"] or 0)
+        if total > PAGE_CONTENT_BUDGET_BYTES:
+            return max(index, 1)
+    return len(rows)
+
+
+def _rows_within_decoded_budget(rows: tuple[Row, ...]) -> int:
+    """Return how many of one page's loaded rows fit what it may decode to, never fewer than one."""
+    total = 0
+    for index, row in enumerate(rows):
+        content_json = row["content_json"] or ""
+        total += (
+            len(content_json)
+            # Stored content is compact JSON: a structural object opens with an unescaped quote or closes at
+            # once, and a structural separator is never followed by a space, so JSON text inside strings is free.
+            + _DECODED_BYTES_PER_ARRAY * (content_json.count("[") - content_json.count('[\\"'))
+            + _DECODED_BYTES_PER_OBJECT * (content_json.count('{"') + content_json.count("{}"))
+            + _DECODED_BYTES_PER_SEPARATOR
+            * (content_json.count(",") - content_json.count(", ") + content_json.count(":") - content_json.count(": "))
+        )
+        if total > _PAGE_DECODED_BUDGET_BYTES:
+            return max(index, 1)
+    return len(rows)
 
 
 def latest_visible_event_id(

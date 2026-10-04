@@ -26,7 +26,9 @@ Coding model training data often lags recent releases, so never trust memorized 
 | OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
 | OpenAI | Balanced | GPT-6 Sol | `gpt-6-sol` |
 | OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
+| OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.1 Sol | `gpt-6.1-sol` |
 | OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
+| OpenAI Codex ChatGPT login | Fast / cheap via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
 | DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
 | OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
@@ -40,7 +42,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against provider catalogs on September 28, 2026.
+Model IDs were checked against provider catalogs on September 28, 2026, and the Codex rows against the Codex model catalog on October 1, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
@@ -101,7 +103,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
 | `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
-| `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
+| `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
@@ -177,12 +179,12 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
-| `agent_cli/` | Response-owned CLI grants, call admission, worker leases, discovery, and result projection |
+| `cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
+| `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |
 | `minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
-| `api/sandbox_runner_cli.py` | Worker CLI grant installation, network verification, and pinned shell transport |
 | `cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
 | `cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
 | `tool_system/agent_tool_calls.py` | Prepared live-Agent catalog and serialized native execution of qualified tools |
@@ -257,6 +259,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
@@ -396,7 +399,6 @@ These agent paths describe ordinary shared agents; private agents use their reso
 ### Ecosystem Repositories
 
 MindRoom also maintains related repositories under `github.com/mindroom-ai`:
-- `mindroom-element` - our Element fork for MindRoom message UX: collapsible tool-trace rendering, `!` command autocomplete synced from backend commands, long-text sidecar hydration, AI run metadata tooltip, and MindRoom branding/thread-first defaults. See `README.md` and `FORK_CHANGES.md` in that repo.
 - `synapse` - our Synapse fork for MindRoom streaming workloads: optional compact-edit collapsing for superseded `m.replace` events across `/sync`, Sliding Sync, pagination, and context responses, plus `/versions` advertisement via `org.mindroom.compact_edits` and fork-owned Docker/CI flows. See `README.md` and `FORK_CHANGES.md`.
 - `mindroom-librechat` - our LibreChat fork that parses MindRoom inline `<tool>` / `<tool-group>` tags into native `ToolCall` cards so tool execution stays server-side; also includes fork Docker CI and MindRoom-specific UX additions. See `README.md` and `.mindroom/` docs (`fork-context.md`, `tool-tag-rendering.md`).
 - `mindroom-chat` - our AI-native Matrix client, built on Cinny and optimized for MindRoom agent workflows with MindRoom branding/default homeserver config, subpath deployment support (runtime/build base path for `/mindroom`), and thread/auth/sidebar UX refinements. See `README.md` and `FORK_CHANGES.md`.

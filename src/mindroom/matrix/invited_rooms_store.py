@@ -7,7 +7,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from mindroom.constants import ROUTER_AGENT_NAME, safe_replace
+from mindroom.constants import ROUTER_AGENT_NAME, primary_records_dir, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -22,14 +22,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def invited_rooms_path(storage_root: Path, agent_name: str) -> Path:
-    """Return the storage path for one agent's persisted invited rooms."""
-    return agent_state_root_path(storage_root, agent_name) / "invited_rooms.json"
+def invited_rooms_path(runtime_paths: RuntimePaths, agent_name: str) -> Path:
+    """Return the primary-only storage path for one agent's persisted invited rooms."""
+    return _records_dir(runtime_paths, agent_name) / "invited_rooms.json"
 
 
-def pending_room_invites_path(storage_root: Path, agent_name: str) -> Path:
-    """Return the storage path for one agent's outstanding room invites."""
-    return agent_state_root_path(storage_root, agent_name) / "pending_room_invites.json"
+def pending_room_invites_path(runtime_paths: RuntimePaths, agent_name: str) -> Path:
+    """Return the primary-only storage path for one agent's outstanding room invites."""
+    return _records_dir(runtime_paths, agent_name) / "pending_room_invites.json"
+
+
+def _records_dir(runtime_paths: RuntimePaths, agent_name: str) -> Path:
+    return primary_records_dir(agent_state_root_path(runtime_paths.storage_root, agent_name), runtime_paths)
 
 
 def load_invited_rooms(path: Path) -> set[str]:
@@ -80,8 +84,8 @@ def load_pending_room_invites(path: Path) -> dict[str, str]:
 
 
 def save_pending_room_invites(path: Path, pending_invites: dict[str, str]) -> bool:
-    """Atomically replace one agent's outstanding room invites."""
-    return _save_json(path, dict(sorted(pending_invites.items())))
+    """Atomically replace one agent's outstanding room invites, keeping them oldest first."""
+    return _save_json(path, pending_invites)
 
 
 def _save_json(path: Path, value: object) -> bool:

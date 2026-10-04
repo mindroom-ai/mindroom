@@ -8,7 +8,11 @@ Managed workers must be absent before inspecting or moving any scope contents.
 # Legacy format: requester-derived private directories used keys without the lossless `~` prefix.
 # Last legacy release: v2026.9.32; prefixed lossless encoding introduced in v2026.9.33.
 # Handling: relocate only verified private owners; startup adoption began in v2026.9.36.
-# Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents.
+# Sandbox runners can write `private_instances`, so an entry there whose evidence is invalid stays untouched with a warning instead of stopping startup, including an interrupted move whose session mirror is missing or whose configured roots changed; only unexpected entries in a separate session root and checks across all pending moves, such as a missing volume, still stop startup.
+# Once a start finishes every verified move, it writes a receipt in the primary-only tracking directory, and later starts never scan `private_instances` again, so an entry left untouched is retried only after an operator deletes the receipt.
+# Coverage: tests/test_private_storage_migration.py::test_startup_moves_every_owner_and_preserves_contents,
+# tests/test_private_storage_migration.py::test_first_start_leaves_planted_entries_and_writes_its_receipt,
+# tests/test_private_storage_migration.py::test_entries_planted_after_the_receipt_are_never_read.
 
 # LEGACY_COMPAT: Private scopes without authoritative owner records.
 # Legacy format: private scopes created without authoritative owner records.
@@ -27,6 +31,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, cast
 
+from mindroom.constants import tracking_dir
 from mindroom.durable_write import fsync_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.legacy_private_storage_aliases import (
@@ -51,6 +56,7 @@ if TYPE_CHECKING:
 _RECORD = ".mindroom-private-instance.json"
 _INTENT = ".mindroom-private-storage-migration.json"
 _LOCK = ".mindroom-storage-upgrade.lock"
+_RECEIPT = "private_storage_migrated.json"
 logger = get_logger(__name__)
 
 
@@ -188,11 +194,7 @@ def _scopes(root: Path) -> list[Path]:
     namespace = root / "private_instances"
     if _directory(namespace) is None:
         return []
-    scopes = sorted(namespace.iterdir())
-    for scope in scopes:
-        if not scope.is_symlink():
-            _directory(scope)
-    return scopes
+    return sorted(namespace.iterdir())
 
 
 def _fresh_intent(scope: Path, owner: PrivateInstanceIdentity, roots: tuple[Path, Path]) -> _Intent:
@@ -225,37 +227,54 @@ def _discover(roots: tuple[Path, Path]) -> list[_Intent]:
     for scope in scopes:
         if scope.is_symlink():
             continue
-        payload = load_private_instance_record_payload(scope / _INTENT)
-        if payload is not None or (scope / _INTENT).exists():
-            intent = _read_intent(payload, roots, scope)
+        try:
+            intent = _discover_scope(roots, scope)
+        except ValueError as error:
+            _leave_invalid_entry(scope, error)
+            intent = None
+        # Retain the session mirror of every primary entry, without claiming either directory.
+        known_names.add(scope.name)
+        if intent is not None:
             pending.append(intent)
             known_names.update(path.name for path in _locations(primary, intent))
-            continue
-        record = scope / _RECORD
-        payload = load_private_instance_record_payload(record)
-        if payload is None and not record.exists():
-            logger.warning("Preserving private scope without an owner record; not migrating", scope=str(scope))
-            # Retain its session mirror too, without claiming either directory.
-            known_names.add(scope.name)
-            continue
-        owner = parse_private_instance_identity_payload(payload)
-        _old, new = _keys(owner)
-        if private_instance_scope_root_path(primary, owner.worker_key) != scope:
-            _reject("owner record does not match its directory hash")
-        known_names.add(scope.name)
-        if owner.worker_key == new:
-            continue
-        intent = _fresh_intent(scope, owner, roots)
-        pending.append(intent)
-        known_names.add(_locations(primary, intent)[1].name)
     pending_aliases = {_locations(primary, intent)[0] for intent in pending}
     for alias in scopes:
         if not alias.is_symlink() or alias in pending_aliases:
             continue
-        _validate_completed_alias(primary, alias)
+        try:
+            _validate_completed_alias(primary, alias)
+        except ValueError as error:
+            _leave_invalid_entry(alias, error)
         known_names.add(alias.name)
     _validate_batch(roots, pending, known_names)
     return pending
+
+
+def _leave_invalid_entry(entry: Path, error: ValueError) -> None:
+    # Sandbox runners can write private_instances, so one invalid entry must not stop every start.
+    logger.warning(
+        "Leaving an invalid private storage entry untouched; not migrating",
+        entry=str(entry),
+        error=str(error),
+    )
+
+
+def _discover_scope(roots: tuple[Path, Path], scope: Path) -> _Intent | None:
+    """Return the move one primary scope still needs, raising ``ValueError`` when its evidence is invalid."""
+    _directory(scope)
+    payload = load_private_instance_record_payload(scope / _INTENT)
+    if payload is not None or (scope / _INTENT).exists():
+        return _read_intent(payload, roots, scope)
+    record = scope / _RECORD
+    payload = load_private_instance_record_payload(record)
+    if payload is None and not record.exists():
+        logger.warning("Preserving private scope without an owner record; not migrating", scope=str(scope))
+        return None
+    owner = parse_private_instance_identity_payload(payload)
+    _old, new = _keys(owner)
+    if private_instance_scope_root_path(roots[0], owner.worker_key) != scope:
+        _reject("owner record does not match its directory hash")
+    return None if owner.worker_key == new else _fresh_intent(scope, owner, roots)
 
 
 def _validate_completed_alias(primary: Path, alias: Path) -> None:
@@ -296,6 +315,7 @@ def _validate_session_scopes(roots: tuple[Path, Path], pending: list[_Intent], k
             ):
                 _reject("session alias does not match its verified primary alias")
             continue
+        _directory(scope)
         if (scope / _INTENT).exists() or (scope / _INTENT).is_symlink():
             _reject("session mirror contains an unrelated migration intent")
         if scope.name not in known_names and any(scope.iterdir()):
@@ -426,6 +446,14 @@ def _apply(roots: tuple[Path, Path], intent: _Intent) -> None:
 
 
 def _migrate(runtime_paths: RuntimePaths) -> None:
+    receipt = tracking_dir(runtime_paths) / _RECEIPT
+    if receipt.exists():
+        return
+    _migrate_pending(runtime_paths)
+    write_json_file_durable(receipt, {"version": 1}, strict_atomic_replace=True)
+
+
+def _migrate_pending(runtime_paths: RuntimePaths) -> None:
     roots = _roots(runtime_paths)
     if not _discover(roots):
         return

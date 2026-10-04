@@ -18,6 +18,8 @@ __all__ = (
     "CODEX_GPT",
     "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
+    "CONFIG_INIT_ADDITIONAL_MODELS",
+    "CONFIG_INIT_HELPER_MODELS",
     "CONFIG_INIT_MODEL_ALTERNATIVES",
     "CONFIG_INIT_MODEL_PRESETS",
     "DEEPSEEK_V4_PRO",
@@ -76,12 +78,18 @@ class ModelPreset:
     provider: str
     id: str
     context_window: int | None = None
+    reasoning_effort: str | None = None
+    display_name: str | None = None
 
-    def to_config_dict(self) -> dict[str, int | str]:
+    def to_config_dict(self) -> dict[str, int | str | dict[str, str]]:
         """Return the minimal YAML-safe model config mapping."""
-        config: dict[str, int | str] = {"provider": self.provider, "id": self.id}
+        config: dict[str, int | str | dict[str, str]] = {"provider": self.provider, "id": self.id}
+        if self.display_name is not None:
+            config["display_name"] = self.display_name
         if self.context_window is not None:
             config["context_window"] = self.context_window
+        if self.reasoning_effort is not None:
+            config["extra_kwargs"] = {"reasoning_effort": self.reasoning_effort}
         return config
 
 
@@ -120,9 +128,11 @@ _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
 AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-4-5"
-CODEX_GPT = "gpt-6-astra"
+CODEX_GPT = "gpt-6.1-sol"
 CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
+# Just under the Codex catalog's 95% effective budget (258,400) of its 272k context window.
+_CODEX_CONTEXT_WINDOW = 258_000
 KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_GPT_SOL = "gpt-6-sol"
@@ -233,7 +243,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", AZURE_OPENAI_DEFAULT_DEPLOYMENT),
-        "codex": ModelPreset("codex", CODEX_GPT, 258_000),
+        "codex": ModelPreset("codex", CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", KIMI_K3, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
         "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
@@ -281,6 +291,39 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
         ),
     },
 )
+
+# Extra named models that config init writes next to `models.default`.
+CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
+    {
+        "codex": (
+            (
+                "astra",
+                ModelPreset(
+                    "codex",
+                    _OPENAI_GPT,
+                    _CODEX_CONTEXT_WINDOW,
+                    reasoning_effort="medium",
+                    display_name="Astra",
+                ),
+            ),
+            (
+                "luna",
+                ModelPreset(
+                    "codex",
+                    OPENAI_GPT_LUNA,
+                    _CODEX_CONTEXT_WINDOW,
+                    reasoning_effort="low",
+                    display_name="Luna",
+                ),
+            ),
+        ),
+        "llama_cpp": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("llama_cpp", LLAMA_CPP_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),
+        "ollama": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("ollama", OLLAMA_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),
+    },
+)
+
+# Additional model that config init assigns to the router and thread summaries (with their one-shot tags).
+CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"codex": "luna"})
 
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {

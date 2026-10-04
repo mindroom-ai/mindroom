@@ -53,6 +53,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
+from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
@@ -84,6 +85,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -562,6 +564,14 @@ class _MultiAgentOrchestrator:
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
+
+    def active_call_identities(self) -> list[ResponseIdentity]:
+        """Return one identity per voice call that any bot has joined or is joining."""
+        return [
+            ResponseIdentity(responder=entity_name, requester_id=requester_id)
+            for entity_name, bot in self.agent_bots.items()
+            for requester_id in bot.active_call_requesters
+        ]
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
@@ -2732,7 +2742,7 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(
+async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway listener share one lifecycle
     host: str,
     port: int,
     log_level: str,
@@ -2744,6 +2754,7 @@ async def _run_api_server(
     thread_export_runner: WorkspaceThreadExportRunner | None = None,
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
+    active_calls: Callable[[], list[ResponseIdentity]] | None = None,
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,
@@ -2751,6 +2762,7 @@ async def _run_api_server(
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api import main as api_main  # noqa: PLC0415
     from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
+    from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
     api_main.initialize_api_app(api_main.app, runtime_paths)
@@ -2759,6 +2771,8 @@ async def _run_api_server(
     api_state.thread_export_runner = thread_export_runner
     api_state.leave_matrix_room = leave_matrix_room
     api_state.response_admission_gate = response_admission_gate
+    api_state.active_calls = active_calls
+    api_state.active_script_runs = script_runtime.active_runs if script_runtime is not None else None
     api_state.config_reload_status = config_reload_status
     if agent_reply_memberships is not None:
         api_state.agent_reply_memberships = agent_reply_memberships
@@ -2787,7 +2801,13 @@ async def _run_api_server(
     logger.info("embedded_api_server_starting", **api_server.log_context())
     try:
         try:
-            await server.serve()
+            async with serve_script_gateway_listener(
+                runtime_paths,
+                host=host,
+                broker=None if script_runtime is None else script_runtime.broker,
+                log_level=log_level,
+            ):
+                await server.serve()
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
@@ -2795,6 +2815,8 @@ async def _run_api_server(
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
+        api_state.active_calls = None
+        api_state.active_script_runs = None
         api_state.config_reload_status = None
         api_state.agent_reply_memberships = AgentReplyMembershipIndex()
         if script_runtime is not None:
@@ -3122,7 +3144,7 @@ def _start_auxiliary_tasks(
     return tasks
 
 
-async def main(
+async def main(  # noqa: PLR0915
     log_level: str,
     runtime_paths: RuntimePaths,
     *,
@@ -3132,6 +3154,7 @@ async def main(
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     await migrate_private_storage(runtime_paths)
+    await migrate_state_root_records(runtime_paths)
     await migrate_usage_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     storage_path = runtime_paths.storage_root
@@ -3176,6 +3199,7 @@ async def main(
                     thread_export_runner=orchestrator._thread_export_runner,
                     leave_matrix_room=orchestrator.leave_matrix_room,
                     response_admission_gate=orchestrator._response_admission_gate,
+                    active_calls=orchestrator.active_call_identities,
                     config_reload_status=lambda: orchestrator.config_reload.status,
                     agent_reply_memberships=orchestrator.agent_reply_memberships,
                     agent_cli_registry=orchestrator.agent_cli_registry,

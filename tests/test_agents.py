@@ -1144,40 +1144,26 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     assert [tool.name for tool in agent.tools] == ["shell"]
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 @patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_skips_only_the_toolkit_whose_worker_store_worker_code_broke(
+def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
 ) -> None:
-    """Worker code breaking its own credential store must not stop the primary from building the agent."""
+    """A toolkit failing with something other than ValueError or ImportError must not stop the agent."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].tools = ["openai", "calculator"]
+    config.agents["general"].tools = ["file", "calculator"]
     config.agents["general"].include_default_tools = False
-    config.agents["general"].worker_scope = "shared"
-    shared_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id=None,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=None,
-        account_id=None,
-    )
-    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
-    assert worker_key is not None
-    worker_root = worker_root_path(tmp_path, worker_key)
-    worker_root.mkdir(parents=True)
-    # The worker replaces its credential directory and then makes its root read-only.
-    (worker_root / "credentials").write_text("planted", encoding="utf-8")
-    worker_root.chmod(0o555)
-    try:
-        agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
-    finally:
-        worker_root.chmod(0o755)
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "file":
+            msg = "toolkit constructor bug"
+            raise RuntimeError(msg)
+        return build_agent_toolkit(tool_name, **kwargs)
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build):
+        agent = _create_agent_for_test("general", config=config)
 
     assert [tool.name for tool in agent.tools] == ["calculator"]
 
@@ -4220,6 +4206,27 @@ async def test_create_agent_hides_agno_generated_functions_an_approval_rule_may_
     assert "get_skill_instructions" in functions
     assert "get_skill_script" not in functions
     assert "search_knowledge_base" not in functions
+
+
+@pytest.mark.asyncio
+async def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(tmp_path: Path) -> None:
+    """The system message never tells the model to call skill or knowledge-search functions it cannot see."""
+    config = _config_with_workspace_skill(tmp_path)
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    agent = _create_agent_for_test("general", config, knowledge=Knowledge(name="docs"))
+    session = AgentSession(session_id="session", agent_id="general", created_at=1, updated_at=1)
+    run_context = RunContext(run_id="run", session_id="session")
+    tools = await agent.aget_tools(
+        RunOutput(run_id="run", agent_id="general", agent_name="GeneralAgent", session_id="session"),
+        run_context,
+        session,
+    )
+
+    message = await agent.aget_system_message(session, run_context, [t for t in tools if isinstance(t, Function)])
+
+    assert message is not None
+    for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
+        assert advertised not in str(message.content)
 
 
 @pytest.mark.asyncio

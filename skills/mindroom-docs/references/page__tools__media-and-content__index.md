@@ -42,6 +42,11 @@ Despite the `enable_process_video` config name, the current upstream method it e
 `stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
 Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
+Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
+MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output inside the workspace replaces its target only once it is complete, while `unrestricted` writes an output outside the workspace in place.
+A video input above 1 GiB or a caption file above 1 MiB returns an error.
+Video inputs must be plain media files in one of these formats, and other formats are refused: MP4, MOV, M4A, 3GP, 3G2, Motion JPEG 2000, Matroska, WebM, AVI, MPEG-TS, MPEG program stream (`.mpg`, `.vob`), FLV, WMV or other ASF, GIF, Ogg, WAV, MP3, FLAC, and AAC.
+FFmpeg playlists and manifests such as HLS and DASH are refused whatever their file name, because FFmpeg would open the files and URLs they list.
 
 ### Configuration
 
@@ -71,7 +76,7 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 ### Notes
 
 - `moviepy` is the declared Python dependency, and the upstream toolkit also expects FFmpeg support for real audio and video processing.
-- `embed_captions()` defaults the output filename to `<video>_captioned.mp4` when `output_path` is omitted.
+- `embed_captions()` writes `<video>_captioned.mp4` next to the input video when `output_path` is omitted, where `<video>` is the input file name without its extension.
 - Use this tool for simple local media transforms, not remote video discovery or hosting.
 
 ## [`giphy`]
@@ -261,8 +266,10 @@ search_by_brand("OpenAI")
 `spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
 The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
-By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`.
-The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
+Before a tool call or dashboard status check, MindRoom renews an access token that expires within a minute with the stored `refresh_token`, `SPOTIFY_CLIENT_ID`, and `SPOTIFY_CLIENT_SECRET`, and saves the new `access_token`, `expires_at`, and any rotated `refresh_token`, so connections keep working past Spotify's one-hour token lifetime.
+A shared-scope agent that uses an installation-wide connection through `defaults.worker_grantable_credentials` does not renew it, so reconnect Spotify when that token expires.
+The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
+Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
 `get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
 Spotify's [endpoint access notice](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) restricts new and affected Development Mode apps while preserving access for qualifying existing Extended Quota Mode apps.
 
@@ -295,6 +302,7 @@ get_currently_playing()
 ### Notes
 
 - `spotify` is shared-only in MindRoom, so agents using `worker_scope=user` or `worker_scope=user_agent` will see it marked unsupported and the dashboard status/connect routes will reject that scope.
+- `spotify` always runs in the primary process, even when listed in `worker_tools`, because renewing its token needs `SPOTIFY_CLIENT_SECRET`, which never reaches workers.
 - The redirect URI defaults to the API callback URL, but `SPOTIFY_REDIRECT_URI` can override it when the dashboard is behind a different public URL.
 - `play_track()` requires an active Spotify device and returns a specific `NO_ACTIVE_DEVICE` error when playback cannot start anywhere.
 - The current OAuth helper marks saved Spotify credentials as UI-managed so unscoped and shared execution can mirror them correctly.

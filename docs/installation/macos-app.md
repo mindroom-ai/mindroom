@@ -83,6 +83,7 @@ Once the service is running, **Open Dashboard** opens the local dashboard inside
 The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
 It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
 Automatic sign-in is limited to HTTP loopback URLs (`localhost`, `127.0.0.1`, or `[::1]`) with an explicit port.
+The key is sent only when this Mac's MindRoom launchd service is the only program listening on that port, so another app or user that takes the port first cannot receive it; if the dashboard reports it cannot connect while the service is starting, select **Reload**.
 The dashboard session stays separate from Chat and is not saved after the app quits.
 **Open Chat** opens the Chat section in the app.
 
@@ -112,8 +113,10 @@ A saved setup shows **Connection saved · Access off** and opens the next incomp
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
 2. In **Connect**, paste it into **Setup data** and select **Import Setup**.
-3. Review the controller fingerprint, requester, and agent. The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
-4. Confirm the displayed identities and select **Save and Connect**.
+3. Review the homeserver, Matrix account, controller fingerprint, requester, and agent, and confirm them before signing in, because pasted setup data chooses which server receives your sign-in.
+   The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
+   Replacing a saved login names both the saved and the new homeserver before it signs in.
+4. Confirm the displayed values again if signing in changed the saved login, and select **Save and Connect**.
 5. Copy the displayed confirmation command into the same agent chat. After the agent confirms pairing, select **I’ve Confirmed in Chat**.
 6. In **Access**, choose **Applications**, **Read-only folders**, or **Shell commands**, and save each choice.
    For applications, search and check the applications to allow, then select **Save App Access** above the list.
@@ -171,6 +174,7 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
 
 While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
 The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and each line kept left to right.
+If any of them contains a non-ASCII character, the card warns that it can look like ASCII and repeats each such field, labeled, with every non-ASCII character escaped.
 **Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.
 Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
 Without a waiting request, **Allow Without Asking…** offers the same durations.

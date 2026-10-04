@@ -130,6 +130,14 @@ def _describe_pending_request(pending: Mapping[str, object], *, now: float) -> s
     ]
     if shown != fields:
         lines.append("Control, formatting, invisible, non-ASCII space, and backslash characters are shown escaped.")
+    if non_ascii := [label for label, value in fields.items() if not value.isascii()]:
+        # Look-alike letters and punctuation, such as Cyrillic U+0430 or U+2024, read as an ASCII host or path.
+        lines.append(
+            "This request contains non-ASCII characters that can look like ASCII. The same fields with them escaped:",
+        )
+        lines.extend(
+            f"  {label}: {shown[label].encode('ascii', 'backslashreplace').decode('ascii')}" for label in non_ascii
+        )
     lines.append("Timed and until-stopped choices also approve later commands from every allowed requester and agent.")
     # Next to the choices, so a command too long for the screen cannot hide its start above the visible rows.
     command_lines = command.count("\n") + 1

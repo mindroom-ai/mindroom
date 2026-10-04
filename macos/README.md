@@ -68,6 +68,7 @@ macos/build-macos-app.sh --dmg
 ```
 
 `build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment using the locked `desktop-helper` dependency group.
+The release workflow runs `build-desktop-helper.sh` in a separate job without secrets or a write token, and the signing job unpacks that helper and sets `SKIP_DESKTOP_HELPER_BUILD=1`, so `build-macos-app.sh` bundles it instead of building it again.
 It copies the helper into the parent, stamps matching versions, signs the helper before the parent, and runs `verify-desktop-helper.sh`.
 The helper build does not modify the project environment.
 The frozen helper uses its bundled `certifi` roots for HTTPS, unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is explicitly set.

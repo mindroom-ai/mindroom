@@ -220,6 +220,7 @@ Opening a thread is atomic per key.
 While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
 A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
 Reservations are fenced: a delivery that outlives its reservation can neither bind its root over a newer reservation nor release it, so a slow first delivery cannot orphan the thread that replaced it.
+If the trigger's `thread_key` records reach their limit while such a slow delivery is posting, its message is still recorded as delivered but its key is not kept, so a later delivery with that key opens a new thread once there is room.
 
 A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
 
@@ -235,9 +236,11 @@ If delivery succeeds, a later signed request with the same `event_id` is treated
 
 Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
 
-Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 characters.
+Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 bytes as the JSON replay store writes them: printable ASCII characters other than `"` and `\` take one byte each, and every other character takes the 2 to 12 bytes of its JSON escape.
 
-Each trigger may hold at most 10,000 unexpired nonces and 10,000 unexpired `event_id` records, and a request that would add one more is answered with `429` until older records expire.
+Each trigger may hold at most 10,000 unexpired nonces, 10,000 unexpired `event_id` records, and 10,000 unexpired `thread_key` records, and a request that would add one more is answered with `429` until older records expire.
+
+Rotating a trigger's key deletes the replay records kept for its previous key, and deleting a trigger deletes all of its replay records.
 
 Retries must create a fresh signed request with the same `--event-id`.
 
@@ -245,7 +248,7 @@ Each nonce-bearing HTTP request is single-use.
 
 Do not reuse the same HTTP request body and headers as a retry strategy.
 
-Replay state lives at `<control-state>/external_triggers/replay.json` and uses an advisory file lock.
+Replay state lives in one file per trigger and signing key epoch under `<control-state>/external_triggers/replay/`, each with its own advisory file lock, so one trigger's records never slow another trigger's deliveries.
 
 Deploy trigger ingress with a single shared control-state filesystem, or keep one API writer until replay storage moves to a distributed atomic backend.
 

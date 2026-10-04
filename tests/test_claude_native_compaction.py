@@ -241,6 +241,69 @@ def test_null_compaction_preserves_thinking_during_tool_continuation(*, native: 
     assert wire[1]["content"] == [thinking, tool_use]
 
 
+@pytest.mark.parametrize("vertex", [False, True])
+def test_replay_drops_unsigned_thinking_from_a_cut_off_response(*, vertex: bool) -> None:
+    """A stream that stopped mid-block leaves an unsigned thinking block that the API rejects on replay."""
+    model = (
+        MindroomVertexAIClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
+        if vertex
+        else MindRoomAnthropicClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
+    )
+    # Opus-class models stream thinking with empty text; only the signature makes a block valid.
+    signed = {"type": "thinking", "thinking": "", "signature": "complete"}
+    unsigned = {"type": "thinking", "thinking": "", "signature": ""}
+    tool_use = {"type": "tool_use", "id": "toolu_save", "name": "save_file", "input": {"file_name": "notes.md"}}
+    unfinished_tool_use = {"type": "tool_use", "id": "toolu_shell", "name": "run_shell_command", "input": {}}
+    stored_blocks = [signed, tool_use, unsigned, unfinished_tool_use]
+    messages = [
+        Message(role="user", content="Save the notes."),
+        Message(
+            role="assistant",
+            content="",
+            provider_data={"content_blocks": [dict(block) for block in stored_blocks], "signature": "complete"},
+            tool_calls=[
+                {"id": "toolu_save", "type": "function", "function": {"name": "save_file", "arguments": "{}"}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="toolu_save", content="saved"),
+    ]
+
+    wire, _ = format_messages(model.native_replay_messages(messages))
+
+    assert wire[1]["content"] == [signed, tool_use]
+    assert messages[1].provider_data["content_blocks"] == stored_blocks
+
+
+def test_checkpoint_replay_drops_unsigned_thinking_after_the_checkpoint() -> None:
+    """Checkpoint items replace the stored blocks on replay, so they must drop unsigned thinking too."""
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
+    model.configure_native_compaction(threshold=60000)
+    signed = {"type": "thinking", "thinking": "", "signature": "complete"}
+    unsigned = {"type": "thinking", "thinking": "", "signature": ""}
+    tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
+    parsed = model._parse_provider_response(
+        BetaMessage.model_validate(_response([_CHECKPOINT, signed, tool_use, unsigned], stop_reason="tool_use")),
+    )
+    messages = [
+        Message(role="user", content="Look it up."),
+        Message(
+            role="assistant",
+            content=parsed.content,
+            provider_data=parsed.provider_data,
+            tool_calls=parsed.tool_calls,
+            reasoning_content=parsed.reasoning_content,
+        ),
+        Message(role="tool", tool_call_id="toolu_lookup", content="Found it"),
+    ]
+
+    wire, _ = format_messages(model.native_replay_messages(messages))
+
+    assistant_blocks = wire[-2]["content"]
+    assert unsigned not in assistant_blocks
+    assert signed in assistant_blocks
+    assert tool_use in assistant_blocks
+
+
 @pytest.mark.asyncio
 async def test_native_reactivation_discards_only_mismatched_thinking() -> None:
     """Restoring an old checkpoint must drop canonical-prefix thinking and retain new valid reasoning."""

@@ -42,6 +42,7 @@ Each model configuration supports the following fields:
 | `api_key` | No | `null` | Model-specific API key used instead of the provider's shared key; equivalent to `extra_kwargs.api_key` |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
 | `context_window` | No | `null` | Actual provider context window size in tokens; MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction sets a smaller `replay_window_tokens`; an explicit `compaction.model` or `compaction.fallback_model` needs its own `context_window` for summary generation; on `vertexai_claude` it also enables request-time fitting |
+| `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before MindRoom treats it as stalled; unset means 300 for hosted providers on their built-in endpoint and no limit for `ollama`, `llama_cpp`, or a configured endpoint; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or a model-specific key.
@@ -160,7 +161,7 @@ models:
   # OpenAI via a Codex CLI ChatGPT login
   codex:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.1-sol
     context_window: 258000
 
   # Kimi K3 via a Kimi Code CLI login (1M requires Pro/Allegretto or higher)
@@ -218,6 +219,7 @@ models:
     provider: zai
     id: glm-5.3
     context_window: 1048576
+    stream_idle_timeout_seconds: 300  # hosted service behind a custom endpoint; see Stalled Streams
     extra_kwargs:
       base_url: https://api.z.ai/api/coding/paas/v4
 
@@ -310,6 +312,7 @@ models:
     provider: openai
     id: orcarouter/auto
     api: chat_completions
+    stream_idle_timeout_seconds: 300  # hosted service behind a custom endpoint; see Stalled Streams
     extra_kwargs:
       base_url: https://api.orcarouter.ai/v1
       api_key: your-orcarouter-api-key
@@ -317,6 +320,7 @@ models:
 
 The `orcarouter/auto` ID lets OrcaRouter choose a model per request; you can replace it with a model ID from its [catalog](https://docs.orcarouter.ai/getting-started/models).
 Set an agent's `model: orcarouter`, or select it for a thread with `!model orcarouter`.
+`stream_idle_timeout_seconds` gives this custom endpoint the same [stall protection](#stalled-streams) that hosted providers get by default.
 
 To keep the key out of YAML, omit `extra_kwargs.api_key` and save the OrcaRouter key in the dashboard's **Models** editor, in this model's **API Key** field.
 That model-specific credential takes precedence over `extra_kwargs.api_key` and the shared OpenAI key, so OrcaRouter and direct OpenAI models can use separate keys.
@@ -333,32 +337,53 @@ MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
+| GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
 | GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
-| GPT-6 Sol | `gpt-6-sol` | Strong reasoning on demanding tasks |
-| GPT-6 Luna | `gpt-6-luna` | Efficient, repeatable work at scale |
+| GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
-The LLM-plugin-style form `openai-codex/gpt-6-astra` is accepted as an alternative to the bare alias.
+The LLM-plugin-style form `openai-codex/gpt-6.1-sol` is accepted as an alternative to the bare alias.
 If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
+The starter defines GPT-6.1 Sol as `default`, GPT-6 Astra as `astra`, and GPT-6 Luna at low reasoning effort as `luna`, with the display names Sol, Astra, and Luna, and runs the router and thread summaries (with their one-shot tags) on `luna`.
 
 ```yaml
 models:
   default:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.1-sol
+    display_name: Sol
     context_window: 258000
-    # Related agent conversations share a prompt-cache key automatically.
     extra_kwargs:
       reasoning_effort: medium
+  astra:
+    provider: codex
+    id: gpt-6-astra
+    display_name: Astra
+    context_window: 258000
+    extra_kwargs:
+      reasoning_effort: medium
+  luna:
+    provider: codex
+    id: gpt-6-luna
+    display_name: Luna
+    context_window: 258000
+    extra_kwargs:
+      reasoning_effort: low
+
+router:
+  model: luna
+
+defaults:
+  thread_summary_model: luna
 ```
 
-The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface, not the larger context window exposed by the separately billed OpenAI API.
+The `258000` context window is the conservative effective budget used by the Codex ChatGPT surface (just under 95% of its 272000-token window), not the larger context window exposed by the separately billed OpenAI API.
 Set Codex reasoning effort through `extra_kwargs.reasoning_effort`.
 Agno maps this to the Responses API `reasoning.effort` field.
-Supported GPT-6 Astra effort values are `low`, `medium`, `high`, `xhigh`, and `max`.
-Codex clients also show Ultra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
-The starter Codex profile uses `medium`.
+GPT-6.1 Sol, GPT-6 Astra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Codex clients also show Ultra for GPT-6.1 Sol and GPT-6 Astra, but Ultra adds Codex-managed subagent orchestration and is not reproduced by this model adapter.
+The starter Codex profile uses `medium` for `default` and `astra`, and `low` for `luna`.
 
 The Codex provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
 
@@ -471,6 +496,36 @@ models:
 
 MindRoom reads AWS settings from the config-adjacent `.env` file, exported environment, local AWS profile, or runtime IAM role.
 For starter config generation, use `mindroom config init --provider bedrock_claude`.
+
+## Stalled Streams
+
+A provider sometimes accepts a streamed request and then sends nothing more, which would leave the agent busy and queue every follow-up message behind it.
+HTTP read timeouts do not catch this, because proxies such as OpenRouter keep the connection alive with SSE comments while an upstream hangs.
+MindRoom therefore ends a streamed request when the provider sends no event for `stream_idle_timeout_seconds`.
+If nothing was streamed yet, MindRoom sends the request once more; a second silent attempt, or a stall after text already appeared, ends the turn with a "temporarily unavailable" error.
+The limit covers the gap between provider events within one request, so long replies and slow tool calls are unaffected.
+It applies only to streamed responses (`defaults.enable_streaming: true`, the default); with streaming disabled, requests rely on the provider client's own timeouts.
+
+By default the limit is 300 seconds for hosted providers on their built-in endpoint.
+Local servers often stay silent for minutes while a request waits behind another one or a model loads, so `ollama`, `llama_cpp`, and any model with a configured endpoint get no limit unless configured.
+A configured endpoint is a `base_url` anywhere in `extra_kwargs` (such as `extra_kwargs.base_url` or `extra_kwargs.client_params.base_url`) or one MindRoom reads from the environment (`OPENAI_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`).
+MindRoom cannot tell a hosted service behind a custom endpoint, such as OrcaRouter or the Z.ai coding endpoint, from a local server, so set the limit explicitly to protect it.
+Endpoint variables that only a provider SDK reads, such as `ANTHROPIC_BASE_URL`, are not detected; set `0` when one points at a local server.
+To opt a local model in, pick a value above its slowest queue wait plus model load; set `0` to turn the limit off for a hosted model:
+
+```yaml
+models:
+  local:
+    provider: openai
+    id: qwen3-coder
+    extra_kwargs:
+      base_url: http://localhost:8080/v1
+    stream_idle_timeout_seconds: 1800  # longest wait for a queued request plus model load
+  deep_thinker:
+    provider: openrouter
+    id: openai/gpt-6-astra
+    stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
+```
 
 ## Context Window
 

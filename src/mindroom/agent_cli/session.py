@@ -42,7 +42,7 @@ class CliCallConflictError(ValueError):
 
 
 class CliBashWindowRequiredError(ValueError):
-    """A tool operation arrived while no Bash call of its turn was executing."""
+    """A tool call or describe named no Bash window of its turn that still admits calls."""
 
 
 class CliOperationError(ValueError):
@@ -51,19 +51,16 @@ class CliOperationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class CliTurnOwner:
-    """Server-derived identity for one response generation and shell worker."""
+    """Server-derived identity for one response generation."""
 
     execution_identity: ToolExecutionIdentity
     turn_id: str
     generation: str
-    worker_id: str
 
 
 def cli_turn_owner(
     runtime_context: ToolRuntimeContext,
     turn_context: ResponseTurnContext,
-    *,
-    worker_id: str,
 ) -> CliTurnOwner:
     """Build one owner only from matching trusted runtime objects."""
     if runtime_context.agent_name not in runtime_context.config.agents:
@@ -98,7 +95,6 @@ def cli_turn_owner(
         (runtime_context.requester_id, "requester"),
         (runtime_context.room_id, "room"),
         (runtime_context.session_id, "session"),
-        (worker_id, "worker"),
     )
     for value, label in required:
         if not value:
@@ -112,7 +108,6 @@ def cli_turn_owner(
         execution_identity=identity,
         turn_id=cast("str", runtime_context.membership_turn_id),
         generation=cast("str", turn_context.run_id),
-        worker_id=worker_id,
     )
 
 
@@ -122,7 +117,7 @@ class CliAuthenticationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class CliGrant:
-    """One raw bearer returned to trusted worker setup exactly once."""
+    """One raw bearer returned to the response's shell setup exactly once."""
 
     raw_token: str = field(repr=False)
     expires_at_ns: int
@@ -168,7 +163,7 @@ class TurnToolBridge:
         return self.owner
 
     def revoke(self) -> None:
-        """Revoke this turn's bearer before worker retirement."""
+        """Revoke this turn's bearer when its response ends."""
         self._revoked = True
 
 
@@ -185,8 +180,8 @@ class CliOperationOwner(Protocol):
         """Fence authority before response-owned teardown."""
         ...
 
-    async def operation(self, operation: AgentCliOperation) -> dict[str, object]:
-        """Read metadata or enqueue one owned operation."""
+    async def operation(self, operation: AgentCliOperation, *, window: str | None) -> dict[str, object]:
+        """Read metadata, or enqueue one owned operation from the shell command that opened ``window``."""
         ...
 
     async def get_call(self, call_id: str) -> dict[str, object]:

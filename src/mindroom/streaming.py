@@ -50,6 +50,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     is_visible_tool_marker_line,
     tool_markers_match_trace,
+    tool_trace_from_content,
 )
 from mindroom.tool_system.runtime_context import worker_progress_pump_scope
 
@@ -74,7 +75,7 @@ __all__ = [
     "PROGRESS_PLACEHOLDER",
     "RESTART_INTERRUPTED_RESPONSE_NOTE",
     "SYNC_RESTART_CANCEL_MSG",
-    "TEAM_THINKING_PLACEHOLDER",
+    "TEAM_PROGRESS_PLACEHOLDER",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
@@ -87,6 +88,7 @@ __all__ = [
     "StreamingResponse",
     "TerminalEdit",
     "TerminalSend",
+    "UnfinishedStreamedReply",
     "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
@@ -99,11 +101,12 @@ __all__ = [
     "stream_progress_edits",
     "strip_matching_visible_tool_markers",
     "strip_visible_tool_markers",
+    "unfinished_streamed_reply",
 ]
 
 _PROGRESS_PLACEHOLDER = "Thinking..."
+TEAM_PROGRESS_PLACEHOLDER = "🤝 Team Response: Thinking..."
 _IN_PROGRESS_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
-TEAM_THINKING_PLACEHOLDER = "🤝 Team Response: Thinking..."
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +308,7 @@ def clean_partial_reply_text(text: str) -> str:
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
 
-    if cleaned in {_PROGRESS_PLACEHOLDER, TEAM_THINKING_PLACEHOLDER} or not any(char.isalnum() for char in cleaned):
+    if cleaned in {_PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER} or not any(char.isalnum() for char in cleaned):
         return ""
     return cleaned
 
@@ -316,6 +319,29 @@ def build_restart_interrupted_body(text: str) -> str:
     if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
         return RESTART_INTERRUPTED_RESPONSE_NOTE
     return f"{stripped_text}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
+
+
+@dataclass(frozen=True)
+class UnfinishedStreamedReply:
+    """What one reply showed when the process streaming it stopped before finishing it."""
+
+    partial_text: str
+    tool_trace: tuple[ToolTraceEntry, ...]
+
+
+def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:
+    """Read back the work a stopped stream left visible, or ``None`` when it left none.
+
+    ``body`` is the canonical visible body. Placeholder text shows nothing the
+    turn did, so only a tool trace beside it is carried forward.
+    """
+    if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES:
+        return None
+    partial_text = clean_partial_reply_text(strip_visible_tool_markers(body)).strip()
+    tool_trace = tuple(tool_trace_from_content(content))
+    if not partial_text and not tool_trace:
+        return None
+    return UnfinishedStreamedReply(partial_text=partial_text, tool_trace=tool_trace)
 
 
 @dataclass(frozen=True)

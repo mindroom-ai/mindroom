@@ -1,7 +1,7 @@
 # Minimal Agent Mode
 
 Minimal mode gives an existing agent a short prompt and one Bash tool.
-The agent uses `mindroom-agent` inside its shell worker to discover and call its other tools.
+The agent uses `mindroom-agent` in that Bash, where its shell normally runs, to discover and call its other tools.
 Its identity, model, workspace, memory, history, and tool permissions stay tied to the same agent.
 Standard mode is the default.
 
@@ -31,11 +31,24 @@ A caller with the [`delegate`](agent-orchestration.md#delegate) tool can pass `m
 The child starts with the short prompt and Bash tool described here instead of its full system prompt and tool schemas, so each of its requests carries far fewer tokens.
 Use it for self-contained tasks whose child does not need its role, instructions, and tool guidance up front; the child can still read them with `mindroom-agent context`.
 `continue_subagent` keeps the child's mode.
-The tool description offers minimal mode only when the deployment meets the [deployment requirements](#deployment-requirements), and lists the allowed subagents that have the `shell` tool.
+The tool description and schema offer minimal mode only for allowed subagents that have the `shell` tool and whose shell location meets the [deployment requirements](#deployment-requirements); otherwise the option is hidden.
 A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it, and minimal mode is not offered while shell commands require approval.
 Minimal subagents run only inside Matrix conversations.
-Each minimal child response gets its own dedicated Docker worker, which retires when that response ends.
+A minimal child runs Bash where its own shell runs.
+
+## Standard mode
+
+Standard-mode agents with the `shell` tool can also use `mindroom-agent` inside their shell commands, so one script can combine many tool calls, loop over results, or filter them before anything returns to the model.
+It is available automatically when the agent answers a Matrix conversation itself and its shell meets the [deployment requirements](#deployment-requirements); the agent's instructions then mention it.
+Team members, call agents, workflow participants, and OpenAI-compatible requests do not get it.
+The agent keeps all of its tools as ordinary tools as well.
+Tools that may require approval, ask the requester a question, delegate to another agent, or end the turn are not offered through the CLI in standard mode; the agent calls them directly instead.
+The CLI is not offered when the agent's shell commands themselves require approval, and after a response pauses for any approval, the rest of that response continues without it.
+Calls are admitted only while the shell command that makes them is running or its earlier calls are finishing; shell commands still run in parallel, and each keeps its own calls and their media.
+Media returned by those calls reaches the model with the shell command's result.
+Calls through the CLI count against their own `max_tool_calls_per_turn` budget, separate from the agent's ordinary tool calls.
+Streamed responses show calls made through the CLI as their own tool-trace entries.
 
 ## Instructions and context
 
@@ -74,19 +87,20 @@ mindroom-agent calls wait CALL_ID
 ```
 
 Tool names are qualified by toolkit.
+`TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
 Discovery and calls use the current agent's permissions and requester context.
-Calling a tool returns JSON containing its call ID and current status.
+Calling a tool waits up to 30 seconds for the result and prints its receipt: call ID, status, and the outcome once it has finished.
+Use `--timeout SECONDS` on the call to choose another budget, or `--timeout 0` to return at once.
 Top-level `--help` lists every command, including `calls wait CALL_ID` for queued, running, or waiting calls.
 Use command-specific `--help` for arguments and options.
 Use `calls wait` when the result is still queued, running, or waiting for a decision.
 It polls for up to 30 seconds by default, then returns the current receipt with exit code `3` if still pending.
 Use `--timeout SECONDS` to choose another polling budget; reaching it does not cancel the tool.
 Waiting pauses that shell command and its owning response; other conversations can continue.
-New tool calls and schema preparation require an active Bash call.
-Background shell commands that submit new work after Bash has returned are rejected instead of being queued for a later call.
+New tool calls and schema preparation must come from a Bash call that is still running or whose earlier calls are still finishing; later ones are rejected instead of being queued for a later call.
 
-Arguments can also come from `--json-file arguments.json` or `--json-stdin`.
-These three JSON input options are mutually exclusive and require a JSON object.
+Arguments can also be given as a final argument (`tools call TOOLKIT FUNCTION '{...}'`), or come from `--json-file arguments.json` or `--json-stdin`.
+These JSON inputs are mutually exclusive and require a JSON object.
 Omitting them supplies an empty object.
 Use `--call-id UUID` when the caller needs to retain a known ID before submission.
 Reusing an ID with the same tool and arguments joins the existing live call; different arguments are rejected.
@@ -96,7 +110,7 @@ Reusing an ID with the same tool and arguments joins the existing live call; dif
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
 | `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION` | `--call-id`, `--json`, `--json-file`, `--json-stdin` |
+| `tools call TOOLKIT FUNCTION [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |
@@ -112,7 +126,7 @@ mindroom-agent context read NAME --offset 0 --limit 8000
 Use names returned by context discovery.
 Context reads do not accept arbitrary filesystem paths.
 Large schemas provide a context name for paged readback.
-Large tool results provide a bounded preview and a workspace artifact path containing the full output.
+Large tool results provide a bounded preview and a workspace artifact path containing the full output; for an agent without a workspace, they are shortened instead.
 Images, audio, and files remain available through the normal response attachment handling.
 
 ## Exit codes
@@ -133,16 +147,16 @@ Submitting a fresh ID may repeat a side effect.
 
 Calls use the agent's existing approval rules and interactive response handling.
 An approval decision applies to the saved tool and arguments.
-The isolated worker remains owned by the response across its live waits and continuations, then retires when the response ends.
+The response keeps its grant across its live waits and continuations and revokes it when the response ends.
 Each Bash command starts a fresh shell; workspace files persist, while shell variables and working-directory changes do not carry into the next command.
-Background command handles belong to that response's worker.
+Background commands behave like the agent's ordinary shell commands, but their new `mindroom-agent` calls are rejected once their Bash call has returned and its calls have finished; `calls wait` on earlier receipts works until the response ends.
 
 CLI tool calls count against the agent's `max_tool_calls_per_turn` budget; calls past it return a failed receipt.
 One response keeps at most 1024 call receipts and runs at most 64 CLI operations at once; further submissions are rejected with an explanatory error.
 Ordinary call results and duplicate-call tracking live only as long as their response owner.
 They are unavailable after process restart.
 Pending approvals use existing durable approval recovery.
-If a pending approval outlasts the CLI grant's 24-hour limit, its live shell retires and the approval resumes with a fresh worker after the decision.
+If a pending approval outlasts the CLI grant's 24-hour limit, its grant expires and the approval resumes with a fresh grant after the decision.
 Recovery does not directly rerun a saved outer Bash script, and an already claimed interrupted approval is not dispatched again.
 When the recovered approval is for the outer Bash command itself, the agent is told that the command was not run and can issue it again.
 A recovered approval streams its progress into the paused reply through the same continuation driver as a standard approval.
@@ -151,26 +165,34 @@ Normal agent restart behavior still applies to subsequent model decisions; this 
 
 ## Deployment requirements
 
-The first supported profile requires a dedicated Docker worker with the `mindroom-agent` CLI installed and the agent's existing shell permission.
-Local and static shell runners are unsupported.
-Docker worker images from earlier releases lack the CLI routes; minimal mode reports that the image must be updated, while standard mode keeps using them.
-Configure the existing Docker worker backend and separate origins for `MINDROOM_AGENT_CLI_GATEWAY_URL` and `MINDROOM_AGENT_CLI_PRIMARY_URL`.
-The primary API must require `MINDROOM_API_KEY` authentication, because worker shells keep network access to it.
-`!mode <agent> minimal` lists every missing setting at once; set them in the runtime's `.env` and restart MindRoom.
+Minimal mode runs Bash where the agent's shell already runs, and needs the agent's existing run, check, and kill shell permissions, its workspace, and MindRoom's API server.
+`!mode <agent> minimal` lists every missing requirement at once; set environment settings in the runtime's `.env` and restart MindRoom.
+
+### Shell in MindRoom itself
+
+When the agent's shell runs in the MindRoom process, which is the default without a worker backend, minimal mode needs no setup.
+Bash runs in MindRoom like the agent's ordinary shell, and `mindroom-agent` calls the running API over its local address.
+Such an agent is already fully trusted, as described in [the security posture](../architecture/security-posture.md), so no worker, key, or URL is required.
+
+### Shell in a worker
+
+When the agent's shell runs in a worker, minimal Bash runs in that same worker through the sandbox proxy, like the agent's ordinary shell commands.
+Each command receives the response's grant and MindRoom's API address in its environment, so the worker image must come from the same MindRoom release.
+Worker shells keep network access to MindRoom's API, so that API must require `MINDROOM_API_KEY`.
+`mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential; an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
 Unauthenticated OpenAI execution and spoofable trusted-upstream header authentication are unsupported.
 
-The CLI gateway forwards only `POST /api/agent-cli/operations` and `GET /api/agent-cli/calls/<call-id>`.
-Other API and worker-control routes must not be forwarded by that gateway.
-Startup checks verify those routes and reject unsupported authentication setups.
-The Docker profile isolates processes, mounted state, and injected credentials; it is not a network sandbox.
-Outbound internet, LAN services, and cloud metadata endpoints remain reachable when the deployment's network allows them.
-Operators must block access to network-provided credentials, including cloud metadata, through their deployment's egress controls.
-The startup probes check MindRoom's protected routes; they do not certify isolation from arbitrary network services.
+Workers call MindRoom back at `MINDROOM_AGENT_CLI_PRIMARY_URL` when it is set.
+Otherwise MindRoom uses its own API address; with Docker workers and the default API bind on every interface, workers reach it through `host.docker.internal`.
+Kubernetes workers and shared static runners need `MINDROOM_AGENT_CLI_PRIMARY_URL` unless the API listens on a specific non-loopback address.
+An API that listens only on loopback cannot be reached from workers, and a host firewall may drop connections from Docker networks; a `mindroom-agent` call that cannot connect names the address it tried.
+With the runtime chart's worker egress policy, allow the API through `egressProxy.networkPolicy.extraEgress`, and admit workers in `networkPolicy.apiIngressFrom` when that list is set, because `mindroom-agent` connects directly rather than through the egress proxy.
 
 Provider credentials stay at the tools' existing authorized execution locations.
 The shell receives a grant for its own active response, not provider or administrator credentials.
-That grant is readable by its authorized shell and cannot select another agent, requester, or conversation.
-The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach the gateway, until expiry or revocation.
+That grant cannot select another agent, requester, or conversation.
+Other code in the same worker can read it while the response runs; agents and requesters that share a worker already share its trust, as described in [the security posture](../architecture/security-posture.md).
+The grant is bearer authority: a process that can read and export it can use the same scoped permissions from any host that can reach MindRoom's API, until expiry or revocation.
 The external MCP gateway keeps its separate authentication and compatible-tool restrictions; minimal mode does not widen its exposed tool set.
 
 ## Compare modes

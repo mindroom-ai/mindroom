@@ -45,10 +45,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import nio
+from nio.api import RelationshipType
 
 from mindroom.event_journal import (
     HistoryRecoveryOutcome,
@@ -61,6 +62,7 @@ from mindroom.event_journal import (
     visible_content,
 )
 from mindroom.event_journal.projection import is_newer_revision
+from mindroom.event_journal.reads import PAGE_CONTENT_BUDGET_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.matrix.legacy_media_edits import readable_legacy_file_edit
 from mindroom.matrix.message_content import resolve_event_source_content
@@ -135,6 +137,7 @@ _HYDRATION_EPOCH_ATTEMPTS = 3
 _HIDDEN_EVENT_ERRCODES = frozenset({"M_NOT_FOUND", "M_FORBIDDEN"})
 
 _UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
+_UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
 
 
 class _HydrationError(RuntimeError):
@@ -296,6 +299,11 @@ def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
     return end
 
 
+def _with_notice(content: Mapping[str, object], notice: str) -> dict[str, object]:
+    """Return one revision's content with a notice appended to its body."""
+    return {**content, "body": f"{content.get('body', '')}\n\n{notice}"}
+
+
 @dataclass
 class _UnreadableHistory:
     """Bounded diagnostics for fetched events, separate from live E2EE counters."""
@@ -304,12 +312,31 @@ class _UnreadableHistory:
     invalid_events: int = 0
     sessions: set[tuple[str, str]] = field(default_factory=set)
     sessions_limited: bool = False
+    # A point refetch's message and its sender, and the newest unreadable event
+    # that claims to be that sender's edit of it, as ``(origin_server_ts,
+    # event_id)``. An encrypted event's relation is cleartext, so this is known
+    # even when its content is not.
+    revision_of: tuple[str, str] | None = None
+    newest_hidden_revision: tuple[int, str] | None = None
 
     def __bool__(self) -> bool:
         return bool(self.encrypted_events or self.invalid_events)
 
     def add(self, event: nio.BaseEvent) -> None:
         """Count one unreadable event without retaining its payload."""
+        content = event.source.get("content")
+        timestamp = event.source.get("origin_server_ts")
+        event_id = event.source.get("event_id")
+        if (
+            self.revision_of is not None
+            and isinstance(content, dict)
+            and isinstance(timestamp, int)
+            and isinstance(event_id, str)
+            and (replacement_target(content), event.source.get("sender")) == self.revision_of
+        ):
+            revision = (timestamp, event_id)
+            if self.newest_hidden_revision is None or is_newer_revision(revision, self.newest_hidden_revision):
+                self.newest_hidden_revision = revision
         if not isinstance(event, nio.MegolmEvent) or event.sender_key is None or event.session_id is None:
             self.invalid_events += 1
             return
@@ -354,14 +381,19 @@ class _Walk:
     It forces ``complete`` down, because a conversation missing an event nobody
     could read is not whole. It is kept as its own field anyway, because
     "stopped early" and "read everything and understood some of it" call for
-    opposite responses from a point refetch: the first still found the newest
-    revision, since relations arrive newest first, and the second may have
-    dropped exactly the edit it was sent to fetch.
+    opposite responses from a point refetch: the first still found the sender's
+    newest edit if it found any of theirs, since relations arrive newest first,
+    and the second may have dropped exactly the edit it was sent to fetch.
+
+    ``ceiling_reached`` is what lets a point refetch tell those apart, because
+    an unreadable event forces ``complete`` down as well. Only the relation
+    walk sets it.
     """
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
     unreadable: _UnreadableHistory = field(default_factory=_UnreadableHistory)
+    ceiling_reached: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +483,13 @@ def _reduce_current_revision(
             content=visible_content(relation.content),
         )
     return winner
+
+
+def _edited_by_sender(original: ProjectedEvent, relations: Sequence[ProjectedEvent]) -> bool:
+    """Return whether the relations hold an edit of one message by its own sender."""
+    return any(
+        relation.replaces_event_id == original.event_id and relation.sender == original.sender for relation in relations
+    )
 
 
 @dataclass
@@ -858,9 +897,11 @@ class ConversationHydrator:
         than its logical message count, and all of it used to be accumulated in
         one list and written in one projection transaction.
 
-        The request ceiling has no counterpart. This is a single
-        ``room_get_event_relations`` call; nio paginates inside it and yields
-        events, not pages, so there is nothing here to count.
+        The request ceiling has no counterpart. nio paginates inside each
+        ``room_get_event_relations`` call and yields events, not pages, so
+        there is nothing here to count. The walk is one such call. A walk that
+        is not complete, because it stopped at a bound or met an unreadable
+        relation, may add one edits-only call for the root.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -890,12 +931,39 @@ class ConversationHydrator:
             window_messages=self.prompt_window_messages,
             unreadable=unreadable,
         )
+        events.extend(relations.events)
+        if (
+            root_projected is not None
+            and not relations.complete
+            and not _edited_by_sender(root_projected, relations.events)
+        ):
+            # The root sits outside the window, but an early edit of it sorts
+            # behind every newer reply, so a walk that stopped short may never
+            # reach it. Its direct edits are fetched on their own, so the root
+            # is not installed at a stale revision.
+            root_edits = await self._fetch_relations(
+                room_id,
+                thread_id,
+                window_messages=None,
+                unreadable=unreadable,
+                edits_only=True,
+            )
+            events.extend(root_edits.events)
+            if root_edits.ceiling_reached and not _edited_by_sender(root_projected, root_edits.events):
+                # Edits arrive newest first, so anyone in the room can push the
+                # sender's own past the ceiling with edits of theirs. The root,
+                # first in the walk, gets the notice a refetch gives rather than
+                # passing as unedited.
+                events[0] = replace(
+                    root_projected,
+                    content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
+                )
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
         # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
-            events=(*events, *relations.events),
+            events=tuple(events),
             complete=relations.complete and readable_root is not None,
             unreadable=relations.unreadable,
         )
@@ -907,8 +975,9 @@ class ConversationHydrator:
         *,
         window_messages: int | None,
         unreadable: _UnreadableHistory | None = None,
+        edits_only: bool = False,
     ) -> _Walk:
-        """Walk the relation tree newest first, without filtering by relation type.
+        """Walk the relation tree newest first, filtering by type only for ``edits_only``.
 
         Filtering by ``m.thread`` would miss the edits and replies hanging off
         thread members, which is exactly the content a conversation is made of.
@@ -932,20 +1001,34 @@ class ConversationHydrator:
         ``window_messages`` is ``None`` for a point refetch, which is one logical
         message and has no window: a threaded reply among its relations must not
         end the walk before the edit it came for arrives.
+
+        ``edits_only`` walks just the event's direct ``m.replace`` relations,
+        for a message whose edits a windowed walk of the whole tree may never
+        reach.
         """
         events: list[ProjectedEvent] = []
         admitted = 0
         fetched = 0
         complete = True
+        ceiling_reached = False
         if unreadable is None:
             unreadable = _UnreadableHistory()
         client = self._client()
-        relations = client.room_get_event_relations(
-            room_id=room_id,
-            event_id=event_id,
-            direction=nio.MessageDirection.back,
-            recurse=True,
-            minimum_recursion_depth=self.required_recursion_depth,
+        relations = (
+            client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                rel_type=RelationshipType.replacement,
+                direction=nio.MessageDirection.back,
+            )
+            if edits_only
+            else client.room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                direction=nio.MessageDirection.back,
+                recurse=True,
+                minimum_recursion_depth=self.required_recursion_depth,
+            )
         )
         try:
             # Closed explicitly, because every exit below but exhaustion leaves
@@ -984,6 +1067,7 @@ class ConversationHydrator:
                                     break
                     if fetched >= self.max_fetched_events:
                         complete = False
+                        ceiling_reached = True
                         # Said out loud for the same reason the room walk says
                         # it: this is not the window being met, it is a
                         # conversation whose remaining relations cost more than
@@ -1004,7 +1088,12 @@ class ConversationHydrator:
                 f"conversation would be missing indirectly related events"
             )
             raise _HydrationError(msg) from error
-        return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
+        return _Walk(
+            events=tuple(events),
+            complete=complete,
+            unreadable=unreadable,
+            ceiling_reached=ceiling_reached,
+        )
 
     async def _fetch_room(self, room_id: str) -> _Walk:
         """Walk back until this walk's job is done, or the room runs out.
@@ -1110,12 +1199,14 @@ class ConversationHydrator:
                 )
             start = next_start
 
-    async def refresh(self, request: RefreshRequest) -> bool:
+    async def refresh(self, request: RefreshRequest) -> int | None:
         """Refetch one logical message whose visible revision was redacted.
 
-        Returns whether the projection was updated. A ``False`` result leaves
-        the message hidden and its refresh token durable, so the next strict
-        read tries again rather than serving anything stale.
+        Returns the size of the content the projection now stores for the
+        message, 0 once the message is removed, or ``None`` when the projection
+        was not updated. ``None`` leaves the message hidden and its refresh
+        token durable, so the next strict read tries again rather than serving
+        anything stale.
         """
         original = await self._client().room_get_event(request.room_id, request.logical_event_id)
         if not isinstance(original, nio.RoomGetEventResponse):
@@ -1124,7 +1215,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
+            return None
         readable_original = readable_event(self._client(), original.event)
         if readable_original is None:
             # Unreadable is not deleted, and the branch below would treat it as
@@ -1139,7 +1230,7 @@ class ConversationHydrator:
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
+            return None
         projected = _projected_from_event(request.room_id, readable_original, self_sender=self.self_sender)
         if projected is None or projected.redacts_event_id is not None:
             # The whole logical message is gone, not just the revision that was
@@ -1147,24 +1238,42 @@ class ConversationHydrator:
             # row is the conditional form of that -- it holds the refresh token
             # and membership epoch this request was issued under, which
             # projecting the redaction would bypass.
-            return await self.store.drop_refetched_message(request)
-        relations = await self._fetch_relations(request.room_id, request.logical_event_id, window_messages=None)
-        if relations.unreadable:
-            # An empty relation list is a real answer -- it is how a server that
-            # already reclaimed the superseded edits reports the original as
-            # current -- so reducing over relations that were dropped unread
-            # cannot be told apart from it, and reinstalls the pre-edit body as
-            # though the server had said so. The walk's own ceiling is not this
-            # case: relations arrive newest first, so a ceiling drops older
-            # relations that could never have won.
+            return 0 if await self.store.drop_refetched_message(request) else None
+        unreadable = _UnreadableHistory(revision_of=(request.logical_event_id, projected.sender))
+        relations = await self._fetch_relations(
+            request.room_id,
+            request.logical_event_id,
+            window_messages=None,
+            unreadable=unreadable,
+        )
+        revision = _reduce_current_revision(projected, relations.events)
+        content = await self._resolved_content(revision.event_id, revision.content)
+        hidden = unreadable.newest_hidden_revision
+        if hidden is not None and is_newer_revision(hidden, (revision.origin_server_ts, revision.event_id)):
+            # Only the sender's own edit can replace what is on screen, so no
+            # other unreadable relation holds the refetch back. One that would
+            # be the newest edit is not passed over silently: the newest
+            # readable revision is installed with a notice. Keeping the debt
+            # instead would fail every strict read of this conversation for as
+            # long as the edit stays unreadable, which its sender alone decides.
             logger.info(
-                "conversation_refresh_unreadable",
+                "conversation_refresh_edit_unreadable",
                 room_id=request.room_id,
                 logical_event_id=request.logical_event_id,
             )
-            return False
-        revision = _reduce_current_revision(projected, relations.events)
-        content = await self._resolved_content(revision.event_id, revision.content)
+            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
+        elif (
+            relations.ceiling_reached
+            and revision.event_id == request.logical_event_id
+            and request.revision_event_id != request.logical_event_id
+        ):
+            # Relations arrive newest first, so a sender's edit found before the
+            # ceiling is still their newest. Finding none proves nothing once
+            # the screen held an edit, because anyone in the room can push the
+            # sender's surviving edits past the ceiling with relations of their
+            # own. The original gets the same notice rather than passing as
+            # unedited, and the debt still settles: another walk stops there too.
+            content = _with_notice(content, _UNREADABLE_EDIT_NOTICE)
         return await self.store.install_refetched_revision(
             request,
             revision_event_id=revision.event_id,
@@ -1211,9 +1320,7 @@ class ConversationHydrator:
             "conversation_refresh_sidecar_unresolved",
             event_id=event_id,
         )
-        unreadable = without_sidecar_reference(content)
-        unreadable["body"] = f"{unreadable.get('body', '')}\n\n{_UNREADABLE_SIDECAR_NOTICE}"
-        return unreadable
+        return _with_notice(without_sidecar_reference(content), _UNREADABLE_SIDECAR_NOTICE)
 
     async def resolve_refreshes(self, requests: Sequence[RefreshRequest]) -> None:
         """Repair exactly the messages one read found missing.
@@ -1228,6 +1335,16 @@ class ConversationHydrator:
         The next strict read is what runs this. There is no background refresh
         worker, so an unreachable homeserver degrades reads instead of building
         up retry state nobody is watching.
+
+        A page lists its debts newest first, and refetching stops once what it
+        stored passes the page's content budget. Debts cost that budget nothing
+        until resolved, so otherwise one read would download and store every
+        attachment its debts name, even when all of them name one large file.
+        The read that follows ends its page at or before the last message
+        refetched here, leaving the rest as history behind its cursor.
         """
+        stored_bytes = 0
         for request in requests:
-            await self.refresh(request)
+            if stored_bytes > PAGE_CONTENT_BUDGET_BYTES:
+                return
+            stored_bytes += await self.refresh(request) or 0

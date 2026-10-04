@@ -97,6 +97,32 @@ Path prefix prepended to client file locations; empty at the origin root.
 }
 {{- end -}}
 
+{{/*
+Render every string inside a config.values entry with tpl, recursing into maps and lists.
+Arguments: list <root context> <value>.
+Returns JSON {"value": <rendered>} so scalars survive fromJson.
+*/}}
+{{- define "mindroom-client.tplConfigValue" -}}
+{{- $root := index . 0 -}}
+{{- $value := index . 1 -}}
+{{- if kindIs "string" $value -}}
+{{- $value = tpl $value $root -}}
+{{- else if kindIs "map" $value -}}
+{{- $rendered := dict -}}
+{{- range $key, $item := $value -}}
+{{- $_ := set $rendered $key (include "mindroom-client.tplConfigValue" (list $root $item) | fromJson).value -}}
+{{- end -}}
+{{- $value = $rendered -}}
+{{- else if kindIs "slice" $value -}}
+{{- $rendered := list -}}
+{{- range $item := $value -}}
+{{- $rendered = append $rendered (include "mindroom-client.tplConfigValue" (list $root $item) | fromJson).value -}}
+{{- end -}}
+{{- $value = $rendered -}}
+{{- end -}}
+{{- dict "value" $value | toJson -}}
+{{- end -}}
+
 {{- define "mindroom-client.matrixClientWellKnown" -}}
 {{- $wellKnown := dict "m.homeserver" (dict "base_url" .Values.matrix.homeserverUrl) -}}
 {{- $focus := dict "type" "livekit" "livekit_service_url" .Values.matrixRTC.livekitServiceUrl -}}
@@ -247,12 +273,30 @@ server {
   }
 {{- end }}
 
+  # The bundled Element Call ships its own assets/ directory, so strip only the
+  # route prefix before public/element-call/. Its hashed assets never change.
+  # Without "always", add_header skips 404s, so a missing build file never gets
+  # the immutable header.
+  location ~ ^/(?:.+/)?(public/element-call/assets/.+)$ {
+    root /usr/share/nginx/html;
+    try_files /$1 =404;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+  }
+
+  # Stable Element Call names such as index.html must revalidate so a client
+  # upgrade cannot leave them pointing at removed hashed assets.
+  location ~ ^/(?:.+/)?(public/element-call/.+)$ {
+    root /usr/share/nginx/html;
+    try_files /$1 =404;
+    add_header Cache-Control "no-cache";
+  }
+
   # Hashed build assets are referenced relative to the current route, so strip
   # any route prefix before the assets/ or public/ segment.
   location ~ ^/(?:.+/)?(assets|public)/(.+)$ {
     root /usr/share/nginx/html;
     try_files /$1/$2 =404;
-    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    add_header Cache-Control "public, max-age=31536000, immutable";
   }
 {{- if eq $base "/" }}
 

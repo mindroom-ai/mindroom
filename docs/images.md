@@ -83,7 +83,8 @@ If that budget is exhausted, the error is surfaced without a new media-free retr
 Errors requesting a guided retry, incomplete Responses streams, and provider safeguard refusals do not trigger the media-free fallback.
 Non-streaming calls have separate eligibility rules: an eligible transient failure may receive the one media-free retry.
 
-When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+When the retry succeeds after exactly one previously unknown media kind was present, and the provider error says the model does not support that kind of input (for example `does not support image input` or `is not a multimodal model`), the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
+Any other rejection, such as an image the provider could not decode or a file in a format it does not accept, removes the media from that one request only, so one participant's attachment cannot hide media from other requests on the same model.
 Eligible failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
@@ -91,8 +92,8 @@ Transient failures (HTTP 5xx and 429 status codes on the provider exception) als
 
 ## Limitations
 
-- **Incoming image size** -- the downloaded payload and, for encrypted images, the decrypted payload must each be at most 64 MiB (67,108,864 bytes).
-  These checks run after download returns; send a smaller image if rejected, and account for any stricter homeserver or provider limits.
+- **Incoming image size** -- downloaded payloads must be at most 64 MiB (67,108,864 bytes), and encrypted images decrypt to the same size.
+  MindRoom stops a download as soon as it passes that limit, so send a smaller image when it is rejected, and account for any stricter homeserver or provider limits.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.

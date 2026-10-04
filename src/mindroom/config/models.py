@@ -415,6 +415,14 @@ class DefaultsConfig(BaseModel):
         description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
+    max_consecutive_agent_replies: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Most consecutive agent or team messages in one conversation before mentions in them stop waking "
+            "other agents and teams; a message from a person resets the count"
+        ),
+    )
     auto_resume_after_restart: bool = Field(
         default=True,
         description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
@@ -687,6 +695,15 @@ class ModelConfig(BaseModel):
             "summary generation. "
             "On vertexai_claude models it additionally "
             "enables request-time fitting that trims replayed history when a request would exceed the window"
+        ),
+    )
+    stream_idle_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a streamed model request may go without a provider event before MindRoom treats it as "
+            "stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their "
+            "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
         ),
     )
 

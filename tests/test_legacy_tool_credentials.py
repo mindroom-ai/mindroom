@@ -1,10 +1,11 @@
-"""The one-time startup cleanup re-enables TLS verification for Daytona settings saved with the old default."""
+"""The one-time startup cleanups of tool settings saved with former insecure defaults or placements."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import importlib
+import os
 import threading
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -56,7 +57,8 @@ async def test_startup_drops_saved_daytona_verify_ssl_false_once(tmp_path: Path,
 
     migrated = {"api_key": "dt-secret", "api_url": "https://api.daytona.io", "persistent": True}
     assert primary.load_credentials("daytona") == migrated
-    assert worker_credentials.load_credentials("daytona") == migrated
+    # Daytona only runs in the primary, so the worker's own copy is deleted rather than migrated.
+    assert worker_credentials.load_credentials("daytona") is None
     assert worker_shared.load_credentials("daytona") == migrated
     assert primary.load_credentials("custom_api") == {"api_key": "sk", "verify_ssl": False}
     if encrypted:
@@ -67,6 +69,99 @@ async def test_startup_drops_saved_daytona_verify_ssl_false_once(tmp_path: Path,
     await migrate_tool_credential_defaults(runtime_paths)
 
     assert primary.load_credentials("daytona") == {**migrated, "verify_ssl": False}
+
+
+@pytest.mark.asyncio
+async def test_startup_deletes_worker_copies_of_primary_only_tool_settings_once(tmp_path: Path) -> None:
+    """Worker copies of settings for tools that never run in a worker are deleted once; every other store is kept."""
+    runtime_paths = _runtime(tmp_path)
+    primary = get_runtime_credentials_manager(runtime_paths)
+    shared_worker = primary.for_worker("v1:default:shared:general")
+    user_worker = primary.for_worker("v1:default:user:@alice:example.org")
+    slack = {"token": "xoxb-secret"}
+    shared_worker.save_credentials("slack", slack)
+    user_worker.save_credentials("sql", {"password": "db-secret"})
+    user_worker.save_credentials("matrix_voice_message", {"api_key": "room-only-secret"})
+    shared_worker.save_credentials("shell", {"extra_env_passthrough": "PATH"})
+    shared_worker.save_credentials("custom_api", {"api_key": "worker-key"})
+    shared_worker.shared_manager().save_credentials("slack", slack)
+    primary.save_credentials("slack", slack)
+    primary.for_primary_runtime_agent_scope("general").save_credentials("slack", slack)
+
+    await migrate_tool_credential_defaults(runtime_paths)
+
+    assert shared_worker.list_services() == ["custom_api", "shell"]
+    assert user_worker.list_services() == []
+    assert shared_worker.shared_manager().load_credentials("slack") == slack
+    assert primary.load_credentials("slack") == slack
+    assert primary.for_primary_runtime_agent_scope("general").load_credentials("slack") == slack
+
+    # The cleanup runs once; a later document is not the former dashboard placement.
+    shared_worker.save_credentials("slack", slack)
+    await migrate_tool_credential_defaults(runtime_paths)
+
+    assert shared_worker.load_credentials("slack") == slack
+
+
+@pytest.mark.asyncio
+async def test_a_worker_store_that_cannot_be_cleaned_keeps_the_cleanup_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker store whose copy cannot be deleted is retried at the next start instead of being forgotten."""
+    runtime_paths = _runtime(tmp_path)
+    worker = get_runtime_credentials_manager(runtime_paths).for_worker("v1:default:shared:general")
+    worker.save_credentials("slack", {"token": "xoxb-secret"})
+    real_unlink = os.unlink
+
+    def refuse_unlink(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "unlink", refuse_unlink)
+    await migrate_tool_credential_defaults(runtime_paths)
+    assert worker.load_credentials("slack") == {"token": "xoxb-secret"}
+
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    await migrate_tool_credential_defaults(runtime_paths)
+    assert worker.load_credentials("slack") is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+@pytest.mark.asyncio
+async def test_a_worker_store_hidden_from_discovery_keeps_the_cleanup_pending(tmp_path: Path) -> None:
+    """A worker root that worker code made unsearchable hides its store only until the next start."""
+    runtime_paths = _runtime(tmp_path)
+    worker = get_runtime_credentials_manager(runtime_paths).for_worker("v1:default:shared:general")
+    worker.save_credentials("slack", {"token": "xoxb-secret"})
+    worker_root = worker.base_path.parent
+    worker_root.chmod(0)
+    try:
+        await migrate_tool_credential_defaults(runtime_paths)
+    finally:
+        worker_root.chmod(0o700)
+    assert worker.load_credentials("slack") == {"token": "xoxb-secret"}
+
+    await migrate_tool_credential_defaults(runtime_paths)
+    assert worker.load_credentials("slack") is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
+@pytest.mark.asyncio
+async def test_a_worker_copy_that_cannot_be_inspected_keeps_the_cleanup_pending(tmp_path: Path) -> None:
+    """A worker store that can be listed but whose entries cannot be inspected is retried at the next start."""
+    runtime_paths = _runtime(tmp_path)
+    worker = get_runtime_credentials_manager(runtime_paths).for_worker("v1:default:shared:general")
+    worker.save_credentials("slack", {"token": "xoxb-secret"})
+    # Without search permission the store can still be opened and listed, but none of its entries can be inspected.
+    worker.base_path.chmod(0o400)
+    try:
+        await migrate_tool_credential_defaults(runtime_paths)
+    finally:
+        worker.base_path.chmod(0o700)
+    assert worker.load_credentials("slack") == {"token": "xoxb-secret"}
+
+    await migrate_tool_credential_defaults(runtime_paths)
+    assert worker.load_credentials("slack") is None
 
 
 @pytest.mark.asyncio

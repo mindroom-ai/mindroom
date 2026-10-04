@@ -20,6 +20,7 @@ from mindroom.agent_cli.session import (
     CliCallConflictError,
     CliOperationError,
 )
+from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.api import config_lifecycle
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ async def submit_operation(request: Request) -> Response:
         body.extend(chunk)
     try:
         operation = parse_operation(read_json(bytes(body)))
-        return _response(await owner.operation(operation))
+        return _response(await owner.operation(operation, window=request.headers.get(AGENT_CLI_WINDOW_HEADER)))
     except CliAuthenticationError:
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
     except (CliCallConflictError, CliBashWindowRequiredError) as exc:

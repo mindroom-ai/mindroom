@@ -473,9 +473,9 @@ def test_agent_and_team_names_must_not_overlap() -> None:
 
 
 @pytest.mark.parametrize("section", ["agents", "teams"])
-@pytest.mark.parametrize("entity_name", [constants_mod.ROUTER_AGENT_NAME, "user"])
+@pytest.mark.parametrize("entity_name", [constants_mod.ROUTER_AGENT_NAME, "user", "_shared"])
 def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_name: str) -> None:
-    """Built-in managed entity account keys are not configurable responder aliases."""
+    """Names MindRoom uses for its own accounts and storage are not configurable responder aliases."""
     config_data = {
         "agents": {
             "assistant": {
@@ -533,6 +533,26 @@ def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert pair_called, "pair_local_install should have been called"
     assert seen_credentials == [("test_id", "test_secret")]
+
+
+def test_run_protects_the_dashboard_api_before_starting_dedicated_workers(tmp_path: Path) -> None:
+    """Dedicated workers can reach the API, so `run` writes a key that startup then sees."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_WORKER_BACKEND=docker\n", encoding="utf-8")
+    seen_keys = []
+
+    async def fake_run(*, config_path: Path | None, storage_path: Path | None, **_kwargs: object) -> None:
+        seen_keys.append(activate_cli_runtime(config_path, storage_path=storage_path).env_value("MINDROOM_API_KEY"))
+
+    with patch("mindroom.cli.main._run", side_effect=fake_run):
+        result = runner.invoke(app, ["run", "--no-api", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    keys = re.findall(r"^MINDROOM_API_KEY=(.+)$", env_path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    assert len(keys) == 1
+    assert seen_keys == keys
 
 
 def _unused_local_port() -> int:

@@ -4,13 +4,14 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 ## Architecture
 
-MindRoom uses five Helm charts:
+MindRoom uses six Helm charts:
 
 - **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 - **Runtime Chart** (`cluster/k8s/runtime/`) - MindRoom runtime only, for clusters that provide Matrix, storage, secrets, ingress, and platform services externally
 - **Tuwunel Chart** (`cluster/k8s/tuwunel/`) - Standalone Tuwunel homeserver (MindRoom fork) for clusters that pair the runtime chart with a chart-managed Matrix homeserver
 - **Client Chart** (`cluster/k8s/client/`) - Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS
+- **MatrixRTC Chart** (`cluster/k8s/matrixrtc/`) - Optional LiveKit SFU and MatrixRTC authorization service for voice calls, paired with the client chart's MatrixRTC proxy
 
 ## Prerequisites
 
@@ -175,6 +176,20 @@ workers:
 See `cluster/k8s/runtime/README.md` and `cluster/k8s/runtime/values.yaml` for the full values surface.
 For chart-managed worker egress with human-approved temporary hostname grants, see [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/).
 
+### Chart Reference
+
+Each chart's README documents its values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).
+Optional features are described in these sections:
+
+- [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](https://docs.mindroom.chat/tools/background-scripts/).
+- [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
+- [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files.
+- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
+- Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
+- The [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md) runs the [voice call](https://docs.mindroom.chat/voice-calls/) backend, which the client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy.
+- [Operational log events](https://docs.mindroom.chat/deployment/operational-log-events/) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through the runtime chart's `env.extra`.
+
 ## Worker Backends
 
 The runtime chart supports two worker backend modes for worker-routed tools such as `coding`, `docker`, `file`, `python`, and `shell`.
@@ -211,7 +226,9 @@ Each worker pod runs the sandbox-runner app and mounts the same agent workspace 
 Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
 When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 Worker pods can reach the primary API over the pod network, so the runtime chart also gives the primary a generated `MINDROOM_API_KEY` in this mode unless the explicit opt-out is configured; worker pods never receive that key.
-The runtime chart stores derived worker tokens and optional credential-encryption keys as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+The runtime chart stores derived worker tokens as per-worker entries in one chart-created worker-auth Secret when workers run in the release namespace.
+Dedicated workers never receive the credential encryption key, matching dedicated Docker workers.
+With encrypted credential storage enabled, the worker credential stores and the `.shared_credentials` mirror the primary writes are encrypted with that key, so worker code cannot read them and tool settings reach the worker only through [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 If `workers.kubernetes.namespace` is set to a separate worker namespace, the runtime chart can instead manage per-worker auth Secrets in that namespace.
 
 > [!WARNING]
@@ -290,7 +307,8 @@ Important behavior and constraints:
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's workspace plus the worker's scratch space; each workspace is a `subPath` mount at its canonical path.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
 - Dedicated workers start with no shared credentials by default.
-- Only services listed in `defaults.worker_grantable_credentials` are available inside a dedicated worker.
+- Only services listed in `defaults.worker_grantable_credentials` are mirrored into a dedicated worker's shared credentials.
+- That allowlist also decides which shared settings scoped calls may lease, but it does not limit unscoped calls: as with the `static_runner` backend, unscoped calls still lease the called tool's saved settings from the primary credential store, including the `openai` and `groq` provider keys, because those tools share their service names with the model providers (see [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases)).
 - `google_vertex_adc` is intentionally unsupported for dedicated workers because workers do not receive ADC files or `GOOGLE_APPLICATION_CREDENTIALS`; keep Vertex ADC usage in the primary runtime.
 - `workers.kubernetes.extraEnv` and `MINDROOM_KUBERNETES_WORKER_ENV_JSON` are filtered before reaching worker pods or startup manifests: generated worker env, runtime control env, Kubernetes backend config env, and vendor telemetry env are dropped.
 - The one sandbox-control value intentionally allowed through Kubernetes worker extra env is `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, so operators can tune runner subprocess timeouts.
@@ -324,6 +342,84 @@ Label that namespace with `pod-security.kubernetes.io/enforce=baseline`, so admi
 The authenticated dashboard API exposes `/api/workers` to list active or idle workers and `/api/workers/cleanup` to trigger cleanup manually.
 Dedicated workers are internal-only cluster Services and are authenticated with per-worker runner tokens derived from the primary runtime's `sandbox_proxy_token`.
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for the execution model, credential leases, and non-Kubernetes deployment modes.
+
+## Backup and Restore
+
+This section covers the runtime chart and the Tuwunel chart.
+Several volumes and Secrets only work together, so plan backups as restore units rather than as independent volumes.
+
+### What each volume holds
+
+| Volume | Values | Contents |
+|--------|--------|----------|
+| `<fullname>-storage` | `storage` | The storage root (`MINDROOM_STORAGE_PATH`, default `/app/agent_data`): `matrix_state.yaml` with each agent's Matrix account, device ID, and access token; `tracking/` with the event journal binding file and, with `eventCache.backend: sqlite`, the journal itself; `credentials/` and `private_oauth/` credential files and OAuth stores; agent and team sessions, learning, memory, and workspaces; `control_state/`; `knowledge_db/` and `knowledge_git/`; `logs/`; and `encryption_keys/` and `sync_continuity/` unless `stateStorage` is enabled |
+| `<fullname>-state` | `stateStorage` | When enabled, the `encryption_keys/` and `sync_continuity/` directories: each agent's Matrix device store, which holds its E2EE keys and its Matrix sync position, and the pending join and decrypt fences; also each `stateStorage.extraSubPaths` directory, such as `tracking/` |
+| `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
+| `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
+| `<volumeName>-<fullname>-event-cache-postgres-0`, default `data-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal: admitted Matrix events, turn records, the response outbox, and history debt |
+| `<server.name>-data`, default `agent-vault-data` | `workers.kubernetes.agentVault.server.persistence` | The chart-managed Agent Vault server's data, protected by its master password |
+| `<approved egress name>-data`, default `<fullname>-egress-proxy-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
+| Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
+
+Data that `stateStorage`, `sessionStorage`, or `knowledgeStorage` mount lives on those volumes instead of the storage claim.
+Back up and restore the sessions volume, like a session store relocated with `MINDROOM_SESSION_STORAGE_PATH`, together with the storage claim.
+[Docker Data Persistence](https://docs.mindroom.chat/deployment/docker/#data-persistence) describes the storage root's directories in more detail.
+
+### Restore units
+
+Restore each of these sets together, from the same point in time:
+
+- **Credentials encryption key and credential stores.**
+  With `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` set (for example through `workers.sandbox.credentialsEncryptionKey.existingSecret`), credential files and OAuth stores on the storage claim are encrypted under that key.
+  Under a different key MindRoom cannot decrypt them and logs `Failed to load encrypted credentials`, and with a different or missing key it refuses to overwrite them, so back up the key's Secret value with the storage claim.
+- **Agent Vault volume and its master password.**
+  The `AGENT_VAULT_MASTER_PASSWORD` key in `workers.kubernetes.agentVault.bootstrapSecretName` protects the vault's encryption key, so keep that Secret, including its `AGENT_VAULT_OWNER_PASSWORD`, with every vault snapshot.
+- **Event journal, journal binding, and Matrix device stores.**
+  `tracking/event_journal_binding.json` must name the journal database's generation, or startup refuses the journal as never used or as a different journal.
+  The journal also records, per agent, the last Matrix sync batch admitted from that agent's device store and rejects batches out of sequence, so the journal and `encryption_keys/` must come from the same moment.
+  Keep `matrix_state.yaml` and `sync_continuity/` with them.
+  A restored chart-managed PostgreSQL volume keeps the password it was created with, while the chart generates a new random one when `<fullname>-event-cache-postgres-auth` no longer exists, so back up that password with the volume.
+  To keep it, set `eventCache.postgres.auth.password` to it, or set both `eventCache.postgres.auth.existingSecret` and `eventCache.databaseUrl.existingSecret` to a Secret holding the password and the matching connection URL, because the auth Secret alone leaves the runtime without a database URL.
+- **Homeserver and runtime Matrix state.**
+  Each agent's access token and device exist on both sides, and the homeserver holds the device's published encryption keys.
+  If the homeserver no longer knows an agent's stored token or device, or reports a different one, that agent does not start.
+  If the runtime is older than the homeserver, encryption keys received after the runtime snapshot are lost, and the journal does not know about anything that happened after it, including which later messages were already answered.
+  When both are lost, restore both from the same point.
+
+### Snapshot consistency
+
+Per-volume snapshots taken at different times while MindRoom runs are not a consistent restore set for the event journal and the device stores.
+Take them from one quiet point instead:
+
+1. Scale the runtime Deployment to zero and wait until its Pod has terminated, then scale dedicated worker Deployments (label `mindroom.ai/worker-id`) to zero and wait until their Pods have terminated, because workers write agent workspaces to the storage claim and a terminating Pod can still write.
+2. Snapshot the storage claim, the sessions claim if enabled, the state claim, and the event journal volume, or dump the journal database with `pg_dump`.
+   When the homeserver belongs to the same restore set, back it up in this window too, as described below for the Tuwunel volume.
+3. Once the snapshots are taken or the dump has finished, scale the runtime back up; it recreates workers on demand.
+
+A storage-level group snapshot that captures all coupled volumes at the same instant behaves like the whole runtime crashing at that instant, which the journal is designed to recover from: a batch committed before a crash is recognized when the device store delivers it again.
+The Agent Vault, approved egress, and knowledge volumes are not coupled to the journal and can be snapshotted on their own schedules.
+For the Tuwunel volume, prefer an offline snapshot or Tuwunel's own database backups, since copying the files of a running RocksDB database does not produce a consistent copy, and Tuwunel's online backups do not include media; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
+
+### Rebuildable data
+
+- `knowledge_db/` holds only the knowledge indexes and their metadata.
+  When an index is missing, agents report the base as initializing and MindRoom rebuilds it in the background from the knowledge sources the next time the base is used, which repeats every embedding call.
+  The sources themselves, including files uploaded through the dashboard, are not rebuildable unless they come from Git: a Git-backed base restores its files from the configured repository when its folder is missing or empty, reusing `<storage>/knowledge_git/` when it survives and initializing it again when it does not.
+- `logs/` only holds runtime log files.
+- The approved egress volume only holds temporary grants, which expire after at most `approvedEgress.maxTtlSeconds`, while static allowlists come from values.
+
+Everything else on the storage, sessions, state, and journal volumes is not rebuildable.
+
+### Restoring
+
+1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
+   A PersistentVolumeClaim restored under the StatefulSet's claim name, `<volumeName>-<fullname>-event-cache-postgres-0`, is adopted by the chart-managed PostgreSQL, so set its original password as described in [Restore units](#restore-units); with an external database, restore the database and keep its URL Secret.
+   To restore a `pg_dump` instead, install with a new journal volume and `replicaCount: 0`, load the dump into it, then set `replicaCount` back to 1, so the runtime never opens a partly loaded journal.
+2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
+3. Start Tuwunel first, then the runtime.
+   `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError` in the runtime log means the device stores do not match the journal, and an event journal binding error means the binding file and journal database do not match; restore the matching backups rather than deleting state, because automatic device replacement is unsupported.
+
+See [Moving a journal safely](https://docs.mindroom.chat/cli/#moving-a-journal-safely) for copying or adopting a journal database, and [Device recovery after the upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/#device-recovery-after-the-upgrade) for device-store recovery.
 
 ## Secrets Management
 
@@ -388,6 +484,13 @@ Platform ingress hosts:
 - `api.{domain}` - Platform backend API
 - `webhooks.{domain}/webhooks/stripe` - Stripe webhooks
 
+The backend keys its rate limits and its authentication-failure lockout on the client address.
+It takes that address from `X-Real-IP` only when the connection comes from a network in `trustedProxyCidrs` (`TRUSTED_PROXY_CIDRS`), and keys every other caller by its own connection address.
+The default lists the private IPv4 ranges, so an in-cluster ingress-nginx controller is trusted, while instance pods cannot reach the backend port to use that trust.
+Narrow the list to the controller's pod network when you know it, and include only proxies that set `X-Real-IP` from the client connection rather than from client-supplied `X-Forwarded-For` or PROXY protocol headers.
+The reference Terraform configures ingress-nginx that way, with `use-forwarded-headers` and `use-proxy-protocol` off and the controller Service's `externalTrafficPolicy` set to `Local` so the controller sees the client's address instead of the node's.
+Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is keyed by its connection address.
+
 ## Local Development with Kind
 
 ```bash
@@ -446,6 +549,7 @@ If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner f
 Keep this source stable because changing it changes future derived credential encryption keys.
 New provisioned instances receive a derived credential encryption key by default.
 When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
+An existing instance whose MindRoom storage PVC no longer exists, such as one torn down after its grace period, starts on an empty volume and also receives the derived key.
 To enable credential encryption for an existing keyless instance, include `"enable_credentials_encryption": true` in the `POST /system/provision` request body.
 Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
@@ -485,8 +589,12 @@ Changing a plan's `included_ai_budget_usd` redeploys every running instance of t
 Re-provisioning never shrinks an instance's volumes, because Kubernetes refuses to shrink a PVC; a downgrade from `pro` keeps its larger volumes.
 Checkout grants a plan's trial only to a Stripe customer who never had a trial, so cancelling and checking out again starts a paid subscription.
 After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
-Re-provisioning a `deprovisioned` instance claims the row only while it is still `deprovisioned`, whether a customer's provision request or a lifecycle resume after teardown does it, so concurrent runs on several replicas deploy it once and mint one OpenRouter key.
-A losing provision request gets `409`, and a losing lifecycle resume, including one a provision request started for a held instance, stops without enabling a key or clearing the hold.
+A customer's provision request for a `deprovisioned` instance claims the row only while it is still `deprovisioned`, and every lifecycle redeploy, whether it resumes a held instance or applies a plan change, claims it only while it keeps the status the lifecycle read, so such a run loses to a provision that claimed the instance after the run read it, instead of deploying it again and minting another OpenRouter key.
+A losing provision request gets `409`, and a losing lifecycle run, including a resume a provision request started for a held instance, skips the instance without enabling a key, clearing the hold, or recording an error.
+Every provision records a newly created OpenRouter key only while the instance records no key, and before it writes the key into the instance Secret, so when concurrent redeploys of one instance each create a key, the first recorded key is kept and the others are deleted before their run publishes them or deploys the instance; a key whose record fails to save is deleted too.
+Operator reprovisioning (`/system/provision`, admin provision) claims the row without a condition, and a lifecycle resume that redeploys a held instance it read while another provision already had it `provisioning`, such as a resume on another replica, claims it too, because claiming leaves that status unchanged.
+When either starts while another provision of the same instance has recorded its key but not yet written it into the Secret, it can revoke that key, which the other provision then still publishes, and the instance's hosted AI calls fail.
+If writing the instance Secret then fails, the provision deletes its key and, once OpenRouter confirms the key is gone, clears the recorded key, unless another run has recorded a different key in the meantime; a key whose deletion fails stays recorded, so revoking or disabling the instance's key still reaches it.
 A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
 When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
@@ -504,7 +612,7 @@ If Stripe fails, the request returns `502`, the subscriptions it had already set
 It then marks the account pending deletion and stops its instances with their platform OpenRouter keys disabled; the response says so when stopping failed and will be retried.
 Only once the deletion is recorded does it cancel `incomplete` and `paused` subscriptions, which have no paid period to finish; a failure there is retried by the nightly run.
 An account pending deletion never runs instances, whatever Stripe reports, so its instances stay stopped during the grace period even while its subscription is still paid, and the nightly run keeps them stopped even while Stripe is unreachable.
-Such an account cannot provision or start instances, open a checkout or the billing portal, or cancel or reactivate its subscription (`409`) until the deletion is cancelled, and an instance being provisioned for it is kept stopped.
+Such an account cannot provision or start instances, open a checkout or the billing portal, or cancel or reactivate its subscription (`409`) until the deletion is cancelled, and an instance being provisioned or resumed for it is kept stopped.
 Each nightly run repeats these Stripe steps for accounts still inside their grace period, which retries a step the request could not finish and also covers deletions requested before these steps existed; it skips an account the customer restored meanwhile and undoes its own change when the restore lands while it runs.
 Cancelling the deletion (`POST /my/gdpr/cancel-deletion`) restores only the account and lets the marked subscriptions renew again; its instances restart once a subscription is entitled, which for a subscription whose period ended meanwhile means a new checkout.
 A customer who cancels or reactivates a subscription through `/my/subscription/cancel` or `/my/subscription/reactivate` also clears the marker, so a later cancelled deletion never renews a subscription the customer chose to end.
@@ -519,7 +627,8 @@ If a teardown, the hard delete, or the auth user deletion fails, the account kee
 The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion and claims it at once, runs the same teardown, calls `hard_delete_account`, and then deletes the auth user, which takes the account row with it.
 When a step fails it answers `500` and keeps the account row, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
 The nightly run, and any reconcile of an account pending deletion, marks instances that an older release's soft delete left `deprovisioned` while their deployment kept running as `running` again; the lifecycle then holds them, or keeps them running for an entitled subscription.
-A held instance of an account pending deletion is never uninstalled by its own teardown date, even when `cleanupScheduler.teardownGraceDays` is shorter than 7 days; the account's cleanup removes it once the customer can no longer cancel, and until then its teardown date keeps moving forward, so a restored account's instance gets the full grace period.
+A held instance of an account pending deletion is never uninstalled by its own teardown date, even when `cleanupScheduler.teardownGraceDays` is shorter than 7 days; the account's cleanup removes it once the customer can no longer cancel, and until then its teardown date keeps moving forward.
+Cancelling the deletion restarts the teardown grace period of every held instance, so a restored account's instance gets the full grace period.
 
 ## Release Deployment
 

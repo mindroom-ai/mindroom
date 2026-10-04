@@ -38,7 +38,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │ --help                -h        Show this message and exit.                            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ check-active-responses   Check live responses; exit 0 idle, 1 busy, or 2 unavailable.  │
+│ check-active-responses   Check live work; exit 0 idle, 1 busy, or 2 unavailable.       │
 │ version                  Show the current version of Mindroom.                         │
 │ run                      Run the mindroom multi-agent system.                          │
 │ doctor                   Check your environment for common issues.                     │
@@ -64,30 +64,32 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 
 ## check-active-responses
 
-Check the running process's admitted Matrix work and OpenAI-compatible requests.
+Check the running process for live work that a restart would interrupt: admitted Matrix work, OpenAI-compatible requests, voice calls, and background script runs.
 
 ```
 mindroom check-active-responses
 mindroom check-active-responses --json
 mindroom check-active-responses --details
 mindroom check-active-responses --details --json
+mindroom check-active-responses --wait 1800
 ```
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Runtime ready, admission open, and no admitted Matrix work or active OpenAI requests. |
-| `1` | Admitted Matrix work or OpenAI-compatible requests are active. |
+| `0` | Runtime ready, admission open, and no admitted Matrix work, OpenAI requests, voice calls, or interruptible script runs. |
+| `1` | Admitted Matrix work, OpenAI-compatible requests, voice calls, or interruptible script runs are active. |
 | `2` | Status unavailable, including startup, replacement, connection failure, or an incompatible server. |
 
 The command reads `GET /api/responses/activity`, an unauthenticated operational probe exposing only runtime phase, admission state, and counts.
 The bundled API must be enabled and connected to the orchestrator; an API-only process cannot report the runtime as idle.
 Responses carry `Cache-Control: no-store`.
 
-`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point.
-Rows contain `channel`, `responder`, and `requester_id`.
-The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope or authenticated OpenAI requester context.
+`--details` uses `GET /api/responses/activity/details` and adds one row per response observed at the central Matrix response lifecycle or OpenAI request entry point, plus one row per voice call.
+Rows contain `channel` (`matrix`, `openai`, or `call`), `responder`, and `requester_id`.
+The responder is the configured agent or `team/<team-name>`; the requester comes from the canonical response envelope, authenticated OpenAI requester context, or the caller the agent joined.
+Details also list `script_runs` with `run_id`, the owning agent as `responder`, the owner as `requester_id`, and `recoverable`.
 Unknown identities are `null` in JSON and labeled unknown in text.
-Identities are held only in memory; no database, history, or Matrix lookups are added.
+Response and call identities are held only in memory; script rows come from a read-only query of the durable script run store, and no history or Matrix lookups are added.
 
 Detailed access requires a configured `MINDROOM_API_KEY` and the matching bearer token, including when browser proxy authentication is enabled.
 The CLI reads that key from the selected runtime environment.
@@ -98,14 +100,28 @@ Aggregate output never includes identities.
 Nested admission slots count separately, so this is not a count of unique responses.
 Detailed rows describe response lifecycles and do not need to match that count; planning and other admitted work can be busy before a response identity is available.
 `active_openai_requests` counts chat completion HTTP requests through their normal response-body lifetime.
+`active_calls` counts [voice calls](https://docs.mindroom.chat/voice-calls/) that an agent has joined or is joining.
+A restart, or a configuration reload that restarts the call agent, drops the agent from its calls, and a rejoined call starts a new call session, so calls count as busy.
+
+`interruptible_script_runs` counts unfinished [background script runs](https://docs.mindroom.chat/tools/background-scripts/) that a restart would interrupt, including Docker, unsafe-local, cancelling, and runs whose recovery contract or owner authorization cannot be confirmed.
+`recoverable_script_runs` counts runs whose worker process restart startup would adopt under the current runtime environment.
+Recoverable runs do not make the runtime busy, because they are designed to survive restarts and may run for hours.
+They survive only while the replacement keeps their recovery contract, so treat them as busy before a change that [interrupts them](https://docs.mindroom.chat/tools/background-scripts/#lifecycle-and-failure-semantics).
+
 Persisted approval waits, delivery recovery outside admission, cleanup that outlives its response, unadmitted queues, and unrelated background jobs are outside this snapshot.
 
 This is a point-in-time observation, not a drain or restart lock.
 New work can start immediately afterward.
 For multiple processes, check each process directly.
 
+`--wait SECONDS` polls every 5 seconds while the runtime is busy and exits as soon as it is idle.
+If work is still active at the deadline, the command exits `1` with the last busy snapshot.
+An unavailable result ends the wait immediately with exit `2`, because work could have been interrupted while the status was unknown.
+A poll still in flight at the deadline is not cut short, so the total runtime can exceed `--wait`.
+Only the final snapshot is printed.
+
 The URL defaults to `MINDROOM_URL` from the selected environment, then `http://127.0.0.1:8765`.
-Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to bound the request (10 seconds by default).
+Use `--config /path/to/config.yaml` to select the environment, `--url` to override the server, and `--timeout` to set each request's HTTP connect, read, and write timeouts (10 seconds by default).
 The CLI sends `MINDROOM_API_KEY` when configured; credentialed remote requests require HTTPS, while loopback HTTP is supported.
 Redirects are disabled.
 
@@ -148,8 +164,10 @@ It asks for a provider preset and, for `anthropic`, `openai`, or `openrouter`, f
 Pressing Enter skips the key; connect the provider later through the dashboard's provider setup, or add the key to the `.env` next to `config.yaml` and restart `mindroom run`.
 It does not ask for a key that is already set in the environment, and other presets print their remaining setup step instead.
 `.env` is read only at startup, so settings added there after setup take effect when `mindroom run` restarts.
-The same process then pairs with MindRoom Chat and starts.
-Without a terminal, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
+The same process then pairs with MindRoom Chat, offers to install a login service (see [`service`](#service)), and otherwise starts in the terminal.
+`--provider <preset>` answers the provider question, and with it first-run setup also runs without a terminal: nothing is asked, the API key comes from the environment, and a missing key is skipped with the same hint.
+`--service` installs the login service after pairing without asking, and `--no-service` never offers it, so `OPENAI_API_KEY=... mindroom run --provider openai --service` sets up, pairs, and installs MindRoom in one command.
+Without a terminal and without `--provider`, for example under a service manager, Docker, or the macOS app, a missing config stays an error with setup instructions.
 An interactive terminal that nobody answers waits at the first prompt, so unattended runs should set `MINDROOM_CONFIG_TEMPLATE` or create the config first with `mindroom config init --no-input`.
 While a hosted install waits for pairing approval, `mindroom run` already listens on the API address: `/api/health` returns `200` and `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`, so container health checks do not restart it.
 The dashboard and the rest of the API start after pairing, and `--no-api` skips these probes too.
@@ -172,45 +190,63 @@ The dashboard and the rest of the API start after pairing, and `--no-api` skips 
  Run the mindroom multi-agent system.
 
  This command starts the multi-agent bot system which automatically:
- - Creates a hosted starter config on first run in a terminal
+ - Creates a hosted starter config on first run in a terminal, or with --provider
  - Pairs hosted installs with your MindRoom Chat account on first run
+ - Offers on first run to keep running as a background service that starts at login
+ (--service/--no-service)
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level                     -l              TEXT     Set the logging level (DEBUG, │
-│                                                          INFO, WARNING, ERROR)         │
-│                                                          [env var: LOG_LEVEL]          │
-│                                                          [default: INFO]               │
-│ --config                        -c              PATH     Use this config file path.    │
-│                                                          Defaults the storage location │
-│                                                          to the selected config        │
-│                                                          directory unless              │
-│                                                          --storage-path is set.        │
-│ --storage-path                  -s              PATH     Base directory for persistent │
-│                                                          MindRoom data (state,         │
-│                                                          sessions, tracking)           │
-│ --bootstrap-config-bundle                       PATH     Initialize the selected       │
-│                                                          config directory from this    │
-│                                                          bundle only when the          │
-│                                                          directory is absent.          │
-│ --bootstrap-config-bundle-rev…                  TEXT     Install a changed bootstrap   │
-│                                                          revision through native       │
-│                                                          validation; preserve a        │
-│                                                          matching active revision.     │
-│ --api                               --no-api             Start the bundled             │
-│                                                          dashboard/API server          │
-│                                                          alongside the bot             │
-│                                                          [default: api]                │
-│ --api-port                                      INTEGER  Port for the bundled          │
-│                                                          dashboard/API server          │
-│                                                          [default: 8765]               │
-│ --api-host                                      TEXT     Host for the bundled          │
-│                                                          dashboard/API server          │
-│                                                          [default: 0.0.0.0]            │
-│ --help                          -h                       Show this message and exit.   │
+│ --log-level                   -l                  TEXT     Set the logging level       │
+│                                                            (DEBUG, INFO, WARNING,      │
+│                                                            ERROR)                      │
+│                                                            [env var: LOG_LEVEL]        │
+│                                                            [default: INFO]             │
+│ --config                      -c                  PATH     Use this config file path.  │
+│                                                            Defaults the storage        │
+│                                                            location to the selected    │
+│                                                            config directory unless     │
+│                                                            --storage-path is set.      │
+│ --storage-path                -s                  PATH     Base directory for          │
+│                                                            persistent MindRoom data    │
+│                                                            (state, sessions, tracking) │
+│ --bootstrap-config-bundle                         PATH     Initialize the selected     │
+│                                                            config directory from this  │
+│                                                            bundle only when the        │
+│                                                            directory is absent.        │
+│ --bootstrap-config-bundle-r…                      TEXT     Install a changed bootstrap │
+│                                                            revision through native     │
+│                                                            validation; preserve a      │
+│                                                            matching active revision.   │
+│ --api                             --no-api                 Start the bundled           │
+│                                                            dashboard/API server        │
+│                                                            alongside the bot           │
+│                                                            [default: api]              │
+│ --api-port                                        INTEGER  Port for the bundled        │
+│                                                            dashboard/API server        │
+│                                                            [default: 8765]             │
+│ --api-host                                        TEXT     Host for the bundled        │
+│                                                            dashboard/API server        │
+│                                                            [default: 0.0.0.0]          │
+│ --provider                                        TEXT     Model provider preset for   │
+│                                                            the starter config when     │
+│                                                            none exists, with the       │
+│                                                            choices of `config init     │
+│                                                            --provider`. It also lets   │
+│                                                            setup run without a         │
+│                                                            terminal, taking the API    │
+│                                                            key from the environment.   │
+│ --service                         --no-service             After setup and pairing,    │
+│                                                            install and start MindRoom  │
+│                                                            as a login service (systemd │
+│                                                            or launchd) instead of      │
+│                                                            running it here, or never   │
+│                                                            offer to. A first run in a  │
+│                                                            terminal asks.              │
+│ --help                        -h                           Show this message and exit. │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -708,6 +744,7 @@ Export Matrix threads to YAML files for grep/ripgrep search.
 Keep MindRoom running with its API enabled while exporting; both one-shot and `--watch` exports use its live Matrix clients and journal readers.
 The CLI calls `--url`, then `MINDROOM_URL` from the selected runtime environment, or `http://127.0.0.1:8765` by default.
 Set `MINDROOM_API_KEY` when API authentication is enabled; hosted deployments require an authorized bearer token.
+When `MINDROOM_API_KEY` is set, the CLI sends it only over HTTPS or loopback HTTP and refuses a remote `http://` URL before making any request, even with `--watch`; redirects are disabled.
 The selected `--config` and `--storage-path` must match the running installation, and output paths refer to that runtime's filesystem.
 There is no offline export mode or separate Matrix login.
 Rooms joined through authorized invites (user-created rooms) are exported too, each with the invited entity's own account, unless `--no-invited-rooms` is passed.
@@ -716,6 +753,9 @@ For a continuously updated copy inside an agent's own workspace, set `thread_exp
 A thread file is only rewritten when its content changed, so `exported_at` reflects the last content-changing export.
 Each thread document includes the latest MindRoom thread summary as `thread.summary` when one exists.
 Each room directory also gets an `index.json` mapping every thread file to its message count, participants, latest summary, and last activity, sorted by most recent activity.
+A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed from its header without participants or last activity.
+A thread whose messages together pass 128 MiB is not exported: the pass reports it as failed and leaves any previous file for it in place.
+A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
 Complete passes normally remove exported room and thread files that are no longer present or authorized; a `--room` pass only reconciles the selected room.
 The zero-room guard skips only final directory-wide reconciliation of rooms absent from the pass, while definitive per-room category or membership revocations still delete their exports.
 A warning is logged when that guard preserves existing target state because the pass has no positive room evidence.
@@ -931,9 +971,22 @@ mindroom journal adopt --storage-path mindroom_data --yes
 
 Install and manage MindRoom as a background user service.
 MindRoom runs the version installed by this command through `uv tool run` and starts automatically at login.
+The command also installs that version as a uv tool (`uv tool install mindroom==<version>`), because `uv tool run` then uses that persistent environment instead of one in uv's cache, which `uv cache clean` deletes along with the tool extras MindRoom installs at runtime.
+This also installs a `mindroom` executable in uv's tool directory (usually `~/.local/bin`), which a `uvx mindroom run` setup otherwise lacks.
+An already installed tool of that version is kept as is, and when uv cannot install it, for example because another `mindroom` executable is in the way, MindRoom warns and the service runs from uv's cache.
+From a source checkout with commits past a release, the checkout's version differs from that release, so this replaces an installed `mindroom` uv tool, including an editable one, with the release.
 Rerun `mindroom service install` after upgrading MindRoom.
 On macOS, MindRoom uses launchd user agents.
 On Linux, MindRoom uses systemd user services.
+On first run in a terminal, a plain `mindroom run` offers the same installation after pairing; answering yes starts the service instead of running MindRoom in that terminal.
+The offer is skipped when a MindRoom service is already installed, when systemd is not running (for example in containers), with `--no-service`, and when `run` was given `--config`, `--storage-path`, `--no-api`, `--api-host`, or `--api-port`, because the service runs a plain `mindroom run`.
+If installation fails, MindRoom starts in the terminal instead.
+`mindroom run --service` installs without asking, replaces an installed service like `service install --no-confirm`, refuses those options, and exits with an error when the service cannot be installed, before setup and pairing when this machine cannot run it at all.
+Both `mindroom service install` and `mindroom run` save `MINDROOM_API_KEY` and the provider API keys exported in your shell (`OPENAI_API_KEY`, `OPENAI_API_KEY_FILE`, and the like) to `.env` before installing, because the service does not see your shell's environment and would otherwise serve the dashboard on every interface without the key your terminal runs used.
+Keys are quoted where needed so `.env` reads them back unchanged, and installation stops with an error when an exported key contains `${`, which reading `.env` would expand, or when a key that needs quoting ends in a backslash.
+When the service will still start without a dashboard credential, installing it prints the same open-dashboard warning as a terminal run, since the service's own warning only reaches its logs.
+If you skipped the question, run `mindroom service install` or `mindroom run --service` later.
+On a headless Linux machine, run `loginctl enable-linger` so the systemd user service keeps running after you log out.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -954,6 +1007,8 @@ On Linux, MindRoom uses systemd user services.
 
  MindRoom runs the version installed by this command through `uv tool run` and starts
  automatically at login.
+ That version is also installed as a uv tool, so the service runs from a persistent
+ environment instead of uv's cache.
  Rerun `mindroom service install` after upgrading MindRoom.
 
  Supported platforms:
@@ -1154,19 +1209,23 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and model.         │
-│ show             Display the current config file with syntax highlighting.             │
-│ edit             Open config.yaml in your default editor.                              │
-│ validate         Validate config.yaml and check for common issues.                     │
-│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
-│ path             Show the resolved config file path and search locations.              │
-│ migrate          Migrate config.yaml to membership access settings.                    │
-│ fingerprint      Print the config source SHA-256, including all transitively included  │
-│                  files.                                                                │
-│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
-│                  runtime reload.                                                       │
-│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
-│                  failed/restart-required/unavailable.                                  │
+│ init              Create a starter config.yaml with a personal agent and model.        │
+│ show              Display the current config file with syntax highlighting.            │
+│ edit              Open config.yaml in your default editor.                             │
+│ validate          Validate config.yaml and check for common issues.                    │
+│ resolve           Print the fully merged config YAML with all !include tags resolved.  │
+│ path              Show the resolved config file path and search locations.             │
+│ migrate           Migrate config.yaml to membership access settings.                   │
+│ fingerprint       Print the config source SHA-256, including all transitively included │
+│                   files.                                                               │
+│ install-bundle    Validate and install a complete tree; use check-applied to confirm   │
+│                   runtime reload.                                                      │
+│ classify-change   Classify tree differences; exit 0 YAML/include sources only, 1 other │
+│                   changes, 2 error.                                                    │
+│ apply-bundle      Hot-apply a source-only tree change; exit 0 applied, 1 pending, 2    │
+│                   failed, 3 rolled back, 4 unconfirmed, 5 restart.                     │
+│ check-applied     Confirm config application; exit 0 applied, 1 pending/mismatch, 2    │
+│                   failed/restart-required/unavailable.                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1176,7 +1235,7 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
 ### config init
 
-Create a starter `config.yaml` with the personal Mind agent, one model, file-based memory, and sensible defaults.
+Create a starter `config.yaml` with the personal Mind agent, starter models, file-based memory, and sensible defaults.
 For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first run, so `config init` is the explicit path for choosing presets up front, self-hosted Matrix, or creating files without starting.
 
 Matrix server presets (`--matrix-server`) choose where MindRoom should create Matrix users and rooms: `mindroom.chat` (default hosted Matrix) or `self-hosted` (your own homeserver).
@@ -1212,8 +1271,8 @@ mindroom config init --force
 Use `--print` to preview the generated `config.yaml` in the terminal with YAML syntax highlighting.
 It does not create or modify `config.yaml`, `.env`, or starter workspace files.
 
-The `--provider codex` preset generates `provider: codex` with `id: gpt-6-astra` and `context_window: 258000`.
-They set `extra_kwargs.reasoning_effort: medium`.
+The `--provider codex` preset generates a `default` model with `provider: codex`, `id: gpt-6.1-sol`, `display_name: Sol`, `context_window: 258000`, and `extra_kwargs.reasoning_effort: medium`.
+It also generates an `astra` model (`Astra`) for `gpt-6-astra` at `medium` effort and a `luna` model (`Luna`) for `gpt-6-luna` at `low` effort, and sets `router.model` and `defaults.thread_summary_model` to `luna`.
 Prompt caching is enabled automatically per active agent session; leave `prompt_cache_key` unset unless you intentionally want to override the derived key.
 Run `codex login` first so MindRoom can read `~/.codex/auth.json`.
 
@@ -1297,9 +1356,11 @@ mindroom config install-bundle ./candidate --target ./active --json
 mindroom config install-bundle ./candidate --target ./active --initialize-only
 mindroom config install-bundle ./candidate --target ./active --revision deploy-2
 mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
-# Keep each installation receipt; pin rollback to the previous revision's digest:
-mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
+# Pin rollback to the digest of the tree the installation moved aside:
+mindroom config install-bundle ./active.previous --target ./active --expected-digest <receipt-previous-digest> --json
 ```
+
+To install, confirm, and roll back in one step, use [`config apply-bundle`](#config-apply-bundle).
 
 `--config` selects a relative file inside the bundle (default `config.yaml`).
 The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
@@ -1323,6 +1384,8 @@ Changed managed trees replace the active tree only if its file names, modes, and
 This covers `.env` and files outside the YAML include graph too.
 An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
 `--force` cannot be combined with `--initialize-only`.
+`--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
+The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
 
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
@@ -1331,7 +1394,7 @@ Mounts at or inside active and recovery trees are rejected before rotation or cl
 Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
 
 Rollback uses the same validated installation operation with `TARGET.previous` as its source.
-Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
+Pass the installation receipt's `previous_digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
 The rejected active revision then becomes the new previous tree.
 Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
 The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
@@ -1365,8 +1428,9 @@ If retired cleanup deletes some files before failing, its content no longer matc
 A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
 The target must be a directory below a writable mount, not the mount point itself.
 
-JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`.
+JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, `recovery_pending`, and `previous_digest`.
 The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
+`previous_digest` is the whole-tree digest of the tree this installation moved to `TARGET.previous`, or `null` when it replaced nothing.
 Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
 An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
 A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
@@ -1375,6 +1439,53 @@ The fingerprint identifies native YAML/include sources, so use the existing `che
 The installer advances the root config mtime on changed activation for the existing watcher.
 Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
 Preserve `TARGET.previous` until runtime confirmation succeeds.
+
+### config classify-change
+
+Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
+
+```bash
+mindroom config classify-change ./active ./candidate --json
+mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml --config staging/config.yaml
+```
+
+Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
+Directories that only appear or disappear around those files also count as sources.
+Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
+Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](https://docs.mindroom.chat/plugins/#live-development-hot-reload).
+A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
+Each `--config` entrypoint (default `config.yaml`) must load in both trees.
+Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
+The command only reads both trees, and its results list paths, never file contents.
+
+JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
+Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
+
+### config apply-bundle
+
+Hot-apply a source-only change to the directory a running MindRoom loads, wait for the runtime to apply it, and optionally restore the previous tree when the runtime rejects it:
+
+```bash
+mindroom config apply-bundle ./candidate --target ./active --rollback-on-failure --wait 300 --json
+```
+
+The command first reads `GET /api/config/reload-status` and installs nothing unless the runtime reports a reload status, with the same `--url`, `--timeout`, `MINDROOM_API_KEY`, and HTTPS rules as `check-applied`.
+It then runs an ordinary installation without `--force`, honoring `--config` and `--expected-digest`, and waits up to `--wait` seconds (default 300) for the runtime result of the installed fingerprint.
+The installation always uses `--source-only`, because the runtime fingerprint covers only YAML/include sources; changes to `.env`, plugins, or other files that config reload does not reread are refused before anything is installed, so install those with `install-bundle` instead.
+With `--rollback-on-failure`, only a `failed` runtime result for the exact fingerprint of a changed installation restores `TARGET.previous`, pinned to the receipt's `previous_digest`, and then waits again for that tree's fingerprint.
+A reload already pending or failed before installation, for the same or a not-yet-known fingerprint, does not count, and pending, unreadable, or restart-required results never roll back.
+
+| Status | Exit code | Meaning |
+| --- | --- | --- |
+| `applied` | `0` | The runtime applied the candidate fingerprint. |
+| `pending` | `1` | The candidate is installed, but the runtime had not settled its fingerprint within `--wait`; confirm later with `check-applied`. |
+| `failed` | `2` | Nothing was installed, or the runtime rejected the candidate and no rollback was requested or possible, so the candidate stays installed. |
+| `rolled_back` | `3` | The runtime rejected the candidate, and the restored previous tree was applied. |
+| `unconfirmed` | `4` | The runtime result could not be read or proven, or restoring or confirming the previous tree failed; inspect before retrying. |
+| `restart_required` | `5` | The runtime adopted the candidate, but part of it needs a restart. |
+
+The JSON receipt contains `status`, `detail`, the candidate `install` receipt and its `runtime_status`, and the `rollback` receipt and its `rollback_runtime_status`.
+`install` is `null` when nothing was installed, and `rollback` is `null` unless the previous tree was restored.
 
 ### config fingerprint and config check-applied
 
@@ -1434,8 +1545,9 @@ You usually do not need `connect` at all, because `mindroom run` pairs automatic
 
 After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
 Anyone who sees the link or code can approve it, and the approving account is the one your agents will trust.
-In a terminal, `connect` and `run` then ask `Is this your account? [y/N]`.
-Answering `n`, pressing Enter without an answer, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
+In a terminal, `connect` and `run` then ask `Is this your account? [Y/n]`.
+Pressing Enter or answering `y` saves the credentials.
+Answering `n`, pressing Ctrl+C, or closing input discards the credentials without writing `.env` or changing `config.yaml`, and the command exits with an error (`run` does not start).
 The discarded connection is unusable, and you can revoke it in MindRoom Chat → Settings → Local MindRoom.
 Without a terminal, such as under a service or the macOS app, nothing is asked, and the approving account is printed with the same revoke hint.
 If the provisioning service does not name the approving account, nothing is asked either, because there is no account to recognize; the same revoke hint is printed.

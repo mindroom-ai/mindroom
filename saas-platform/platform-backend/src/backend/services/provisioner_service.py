@@ -393,16 +393,30 @@ async def _existing_instance_credentials_encryption_key(instance_id: str, namesp
 
 
 async def _provision_credentials_encryption_key(
-    *, customer_id: str, existing_instance_id: Any, data: dict, namespace: str
+    *, customer_id: str, existing_instance_id: Any, existing_storage: bool, data: dict, namespace: str
 ) -> str:
-    """Return the instance chart credential encryption key value for this provision run."""
+    """Return the instance chart credential encryption key value for this provision run.
+
+    Only an existing MindRoom storage volume can hold plaintext credential files, so an instance without one, new or
+    torn down, always gets the derived key.
+    """
     existing_key = (
         await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
     )
     if existing_key is not None:
         return existing_key
-    if not existing_instance_id or data.get("enable_credentials_encryption") is True:
+    if not existing_storage or data.get("enable_credentials_encryption") is True:
         return _instance_credentials_encryption_key(customer_id)
+    # LEGACY_COMPAT: Hosted instances whose storage volume still holds a plaintext credential store.
+    # Legacy format: an instance Secret without `credentials_encryption_key` while the `mindroom-storage-<id>` PVC,
+    #   which may hold plaintext credential files, still exists.
+    # Last legacy release: v2026.5.139, which provisioned every instance keyless; replacement: v2026.5.140 gives every
+    #   newly provisioned instance its derived key.
+    # Handling: the instance stays keyless, because the runtime rejects plaintext credential files once a key is set,
+    #   until `enable_credentials_encryption` opts it into the derived key as a one-way switch; a stored key is always
+    #   reused, and an instance without that PVC gets the derived key.
+    # Coverage: saas-platform/platform-backend/tests/test_provisioner.py::TestProvisionerEndpoints::test_reprovision_without_a_stored_key_keeps_plaintext_only_on_an_existing_volume,
+    #   saas-platform/platform-backend/tests/test_provisioner.py::TestProvisionerEndpoints::test_provision_re_provision_existing_can_opt_into_credentials_encryption
     return ""
 
 
@@ -412,6 +426,7 @@ class _ExistingVolumes:
 
     storage_class_name: str | None = None
     storage: str | None = None  # Largest requested size; a bound PVC can grow but never shrink.
+    mindroom_storage: bool = False  # Whether the MindRoom storage PVC, which holds the credential store, exists.
 
 
 def _quantity_bytes(quantity: str) -> float:
@@ -434,7 +449,8 @@ async def _existing_instance_volumes(instance_id: str, namespace: str) -> _Exist
     if not out.strip():
         return _ExistingVolumes()
 
-    specs = [item.get("spec", {}) for item in json.loads(out).get("items", [])]
+    items = json.loads(out).get("items", [])
+    specs = [item.get("spec", {}) for item in items]
     storage_classes = {spec.get("storageClassName", "").strip() for spec in specs} - {""}
     if len(storage_classes) > 1:
         msg = f"Instance {instance_id} has PVCs with different storage classes: {', '.join(sorted(storage_classes))}"
@@ -443,6 +459,9 @@ async def _existing_instance_volumes(instance_id: str, namespace: str) -> _Exist
     return _ExistingVolumes(
         storage_class_name=next(iter(storage_classes), None),
         storage=max(sizes, key=_quantity_bytes, default=None),
+        mindroom_storage=any(
+            item.get("metadata", {}).get("name") == f"mindroom-storage-{instance_id}" for item in items
+        ),
     )
 
 
@@ -558,7 +577,7 @@ async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, 
 
 
 async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> None:
-    """Delete the platform-paid OpenRouter key of one instance and forget its metadata."""
+    """Delete the platform-paid OpenRouter key of one instance and forget it, unless another run recorded a new one."""
     key_hash = _stored_openrouter_key_hash(get_instance(sb, instance_id, columns="openrouter_key_hash"))
     if key_hash is None:
         return
@@ -567,7 +586,7 @@ async def revoke_instance_openrouter_key(sb: Any, instance_id: str | int) -> Non
         await anyio.to_thread.run_sync(delete_key)
     except OpenRouterKeyNotFoundError:
         logger.info("OpenRouter key %s for instance %s was already deleted", key_hash, instance_id)
-    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA)
+    update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=key_hash)
 
 
 async def _delete_resources_outside_release(instance_id: str | int) -> None:
@@ -581,9 +600,9 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
             raise RuntimeError(msg)
 
 
-def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Persist non-secret OpenRouter key metadata for reuse and audit."""
-    update_instance(
+def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> bool:
+    """Persist non-secret metadata of a created key unless the instance records a key already; return whether it did."""
+    recorded = update_instance(
         sb,
         instance_id,
         {
@@ -593,7 +612,9 @@ def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: Cre
             "openrouter_key_limit_reset": created_key.limit_reset,
             "openrouter_key_created_at": datetime.now(UTC).isoformat(),
         },
+        without_openrouter_key=True,
     )
+    return bool(recorded)
 
 
 def _mark_instance_provision_error(sb: Any, instance_id: str, context: str) -> None:
@@ -616,7 +637,8 @@ async def _provision_openrouter_key(
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
     Stored keys keep their usage across plan changes; only their spending limit changes.
-    A created key is recorded after its Secret is published, or discarded if publication fails.
+    A created key is recorded before its Secret is published, so a run that loses the record to another run never
+    publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
     monthly_limit_usd = _included_ai_budget_usd(tier)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
@@ -651,26 +673,51 @@ async def _provision_openrouter_key(
 
 
 async def _commit_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
-    """Record a newly published key."""
+    """Record a newly created key before it is published, or delete it when it cannot be recorded.
+
+    Disabling, limiting, and revoking act only on the recorded key, so a created key is never left unrecorded.
+    Concurrent provisions of one instance may each create a key; only the first one recorded is kept, and the
+    others get `InstanceClaimLostError`.
+    """
     try:
-        await anyio.to_thread.run_sync(partial(_persist_openrouter_key_metadata, sb, instance_id, created_key))
+        recorded = await anyio.to_thread.run_sync(
+            partial(_persist_openrouter_key_metadata, sb, instance_id, created_key)
+        )
     except Exception:
-        logger.exception("Failed to persist OpenRouter key metadata for instance %s", instance_id)
+        await _discard_openrouter_key(created_key, instance_id)
+        raise
+    if not recorded:
+        await _discard_openrouter_key(created_key, instance_id)
+        raise InstanceClaimLostError
 
 
-async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> None:
-    """Best-effort delete of a key whose Secret was never published, so the next attempt mints a fresh one."""
+async def _discard_openrouter_key(created_key: CreatedOpenRouterKey, instance_id: str) -> bool:
+    """Best-effort delete of a created key that was not published or not recorded; return whether the key is gone."""
     delete_key = partial(
         delete_openrouter_key, management_api_key=OPENROUTER_PROVISIONING_API_KEY, key_hash=created_key.hash
     )
     try:
         await anyio.to_thread.run_sync(delete_key)
+    except OpenRouterKeyNotFoundError:
+        return True
     except OpenRouterError:
         logger.warning("Failed to delete unpublished OpenRouter key for instance %s", instance_id, exc_info=True)
+        return False
+    return True
+
+
+async def _discard_recorded_openrouter_key(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> None:
+    """Delete a recorded key whose Secret was not published, and forget it once it is gone.
+
+    A key whose deletion fails stays recorded, so a later revocation can still reach it; a key another run recorded
+    in the meantime also stays recorded.
+    """
+    if await _discard_openrouter_key(created_key, instance_id):
+        update_instance(sb, instance_id, CLEARED_OPENROUTER_KEY_METADATA, expected_openrouter_key_hash=created_key.hash)
 
 
 class InstanceClaimLostError(HTTPException):
-    """Another request claimed the instance first, so this re-provision neither deploys it nor mints its key."""
+    """Another run claimed the instance or recorded its key first, so this run neither deploys it nor keeps a key."""
 
     def __init__(self) -> None:
         super().__init__(status_code=409, detail="Instance is already being provisioned")
@@ -687,10 +734,15 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     """Provision (or re-provision) a tenant instance and return the portal response payload.
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
-    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`).
+    unless the lifecycle itself is resuming it (`resume_lifecycle_hold`) and its account is not pending deletion.
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
+    Runs that claim the instance without a condition may each create a key, but only the first one recorded is
+    kept; the others delete theirs and get `InstanceClaimLostError` before publishing it or deploying. Such a run can
+    still revoke a key that another run recorded but has not published yet. The lifecycle claims with the status it
+    read to avoid that, but a claim expecting `provisioning` still succeeds while another run holds the instance, so a
+    lifecycle resume that read the instance as `provisioning` can overlap that run the same way.
     """
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
@@ -791,12 +843,16 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     sandbox_proxy_token = secrets.token_hex(32)
     try:
         await _enforce_pod_security_baseline(namespace)
-        # Existing instances may have plaintext credential files; preserve their current encryption state.
-        credentials_encryption_key = await _provision_credentials_encryption_key(
-            customer_id=customer_id, existing_instance_id=existing_instance_id, data=data, namespace=namespace
-        )
         existing_volumes = (
             await _existing_instance_volumes(customer_id, namespace) if existing_instance_id else _ExistingVolumes()
+        )
+        # Existing volumes may have plaintext credential files; preserve their current encryption state.
+        credentials_encryption_key = await _provision_credentials_encryption_key(
+            customer_id=customer_id,
+            existing_instance_id=existing_instance_id,
+            existing_storage=existing_volumes.mindroom_storage,
+            data=data,
+            namespace=namespace,
         )
         storage_class_name = existing_volumes.storage_class_name or INSTANCE_STORAGE_CLASS_NAME
         openrouter_key, created_openrouter_key = await _provision_openrouter_key(
@@ -926,16 +982,17 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             ]
 
         _append_matrix_oidc_helm_args(helm_args)
+        # Record a created key before publishing it, so a run that loses the record never publishes its key.
+        if created_openrouter_key is not None:
+            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         # Apply before Helm so pods restarted by the new secret hash read the new values;
         # Synapse reads its OIDC client secret only at startup.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
             if created_openrouter_key is not None:
-                await _discard_openrouter_key(created_openrouter_key, customer_id)
+                await _discard_recorded_openrouter_key(sb, customer_id, created_openrouter_key)
             raise
-        if created_openrouter_key is not None:
-            await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         code, stdout, stderr = await run_helm(helm_args)
         if code != 0:
             msg = f"Helm install failed: {stderr}"
@@ -944,6 +1001,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Older releases managed this Secret in Helm. Apply it again after Helm
         # because Helm's resource pruning deletes the externally managed Secret.
         await _apply_instance_secret(customer_id, namespace, instance_secret_data)
+    except InstanceClaimLostError:
+        # The provision that recorded its key owns the instance and its status.
+        raise
     except HTTPException:
         _mark_instance_provision_error(sb, customer_id, "deployment HTTP exception")
         raise
@@ -962,13 +1022,13 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     }
     # The lifecycle holds instances without the provisioning request knowing, and Helm just set every replica back
     # to one, so a hold that exists now, or lands during the readiness wait, keeps the instance stopped.
-    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+    if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
-    if not resume_lifecycle_hold and _held_by_lifecycle(sb, customer_id):
+    if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
     try:
@@ -1011,10 +1071,13 @@ def refuse_pending_deletion(sb: Any, account_id: str, detail: str) -> None:
         raise HTTPException(status_code=409, detail=detail)
 
 
-def _held_by_lifecycle(sb: Any, instance_id: str | int) -> bool:
-    """Return whether the lifecycle holds the instance right now, or will because its account is pending deletion."""
+def _held_by_lifecycle(sb: Any, instance_id: str | int, *, resuming: bool = False) -> bool:
+    """Return whether the lifecycle holds the instance right now, or will because its account is pending deletion.
+
+    A run that is `resuming` the hold disregards the hold itself, but not a pending deletion.
+    """
     row = get_instance(sb, instance_id, columns="lifecycle_stopped_at,account_id") or {}
-    if row.get("lifecycle_stopped_at") is not None:
+    if row.get("lifecycle_stopped_at") is not None and not resuming:
         return True
     return row.get("account_id") is not None and account_pending_deletion(sb, row["account_id"])
 

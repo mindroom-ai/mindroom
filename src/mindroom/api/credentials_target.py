@@ -343,13 +343,21 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
     if target.worker_scope is None:
         target.target_manager.delete_credentials(service)
         return
+    primary_built_tool = target_primary_owns_tool_settings(service, target)
     delete_scoped_credentials(
         service,
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
         worker_credentials_manager=target.target_manager,
-        primary_built_tool=target_primary_owns_tool_settings(service, target),
+        primary_built_tool=primary_built_tool,
     )
+    if primary_built_tool:
+        # LEGACY_COMPAT: Worker-store copies of settings the primary now owns.
+        # Legacy format: `<service>_credentials.json` in the agent's worker store, where the dashboard saved a scoped agent's tool settings; the dashboard no longer lists or reads that copy.
+        # Last legacy release: v2026.10.39 for `openai` and `groq`, v2026.10.8 for `homeassistant` and `spotify`, whose dedicated dashboard routes kept saving there, v2026.9.414 for other tools routed to a worker, and v2026.9.404 for the rest; replacement: v2026.10.40, v2026.10.9, v2026.9.415, and v2026.9.405 respectively save them in the primary's agent- or requester-scoped stores.
+        # Handling: deleting the settings also deletes that worker copy, so a deleted value stops reaching worker code.
+        # Coverage: tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings.
+        target.target_manager.delete_credentials(service)
 
 
 def primary_runtime_scoped_services_for_target(target: RequestCredentialsTarget) -> set[str]:

@@ -1,12 +1,12 @@
 """CLI approval recovery uses the existing claim and normal response driver."""
 
-# ruff: noqa: ANN001, ANN003, ANN202, ARG002, PLR0915
+# ruff: noqa: ANN001, ANN003, ANN202, PLR0915
 
 from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+import time
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -28,15 +28,17 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, approval_execution, approval_tools, cli_approval_recovery, minimal_agent
+from mindroom.agent_cli import response_owner
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.events import emit_cli_suspension, project_cli_execution
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
-from mindroom.agent_cli.session import TurnToolRegistry
+from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_storage import create_session_storage, create_state_storage
 from mindroom.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.config.agent import AgentConfig
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
@@ -52,6 +54,12 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tools.shell import shell_tools
 from tests.conftest import unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    agent_cli_api,
+    cli_window,
+    install_scripted_shell,
+    shell_cli_owner,
+)
 from tests.response_runner_helpers import _bot
 from tests.test_agent_cli_authority import _runtime_context
 from tests.test_agent_tool_calls import _catalog
@@ -91,6 +99,7 @@ async def test_approval_tool_restore_requires_current_dynamic_manager_assignment
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize("continuation_count", [2, 4])
 async def test_recovered_dynamic_call_retains_response_lifecycle(
     tmp_path: Path,
@@ -124,12 +133,12 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
     responses = [ModelResponse(content="Recovered with knowledge.")]
     resumed_counts = []
 
-    @asynccontextmanager
-    async def worker(_runtime):
+    def shell_env(_config, _runtime_paths, _agent_name, token):
+        # The resumed response issues its grant with the remaining continuation budget.
         resumed_counts.append(current_cli_lifetime().continuation_count)
-        yield SimpleNamespace(handle=SimpleNamespace(worker_id="worker"), install_grant=AsyncMock())
+        return AgentCliShellEnv("http://127.0.0.1:8765", token)
 
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
+    monkeypatch.setattr(response_owner, "agent_cli_shell_env", shell_env)
     monkeypatch.setattr(agents, "_initialize_agent_instance", build)
     monkeypatch.setattr(
         agents,
@@ -176,7 +185,16 @@ async def test_recovered_dynamic_call_retains_response_lifecycle(
         state="claimed",
         request_body="Load sleep and answer using knowledge",
         continuation_count=continuation_count,
-        calls=(ApprovalCall("loader", "load_tool", "helper", 100, toolkit_name="dynamic_tools"),),
+        calls=(
+            ApprovalCall(
+                "loader",
+                "load_tool",
+                "helper",
+                100,
+                toolkit_name="dynamic_tools",
+                arguments_digest=approval_arguments_digest({"tool_name": "sleep"}),
+            ),
+        ),
         cli_call={
             "kind": "agent_cli",
             "toolkit": "dynamic_tools",
@@ -313,6 +331,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
                 100,
                 decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
                 toolkit_name="actions",
+                arguments_digest=approval_arguments_digest({"value": "exact\nargument"}),
             ),
         ),
         cli_call={
@@ -435,6 +454,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
                 100,
                 decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
                 toolkit_name="shell",
+                arguments_digest=approval_arguments_digest(arguments),
             ),
         ),
         cli_call=CliApprovalCall(
@@ -474,6 +494,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
     ("shell", "missing_shell_function", "nested"),
     [
@@ -483,7 +504,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     ]
     + [(True, None, "media"), (True, None, "approval"), (True, None, "suspend")],
 )
-async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  # noqa: C901 - checkpoint through real resumed provider
+async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
@@ -502,12 +523,52 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         memory_backend="file",
         learning=False,
     )
+    registry = TurnToolRegistry()
     runtime = replace(
         runtime,
         storage_path=tmp_path / "attachments",
-        orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()),
+        orchestrator=SimpleNamespace(agent_cli_registry=registry),
     )
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
+    effects = []
+    shell_tokens = []
+
+    async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
+        assert args in {"exact approved shell", "later model shell"}
+        effects.append(args)
+        token = current_agent_cli_shell_env().token
+        if token not in shell_tokens:
+            shell_tokens.append(token)
+        if nested:
+            owner = shell_cli_owner(registry)
+            queued = await owner.operation(
+                window=cli_window(),
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="media",
+                    function="media",
+                    arguments={"value": "nested media"},
+                ),
+            )
+            async with asyncio.timeout(5):
+                while (receipt := await owner.get_call(queued["call_id"]))["status"] in {  # noqa: ASYNC110 - poll the public receipt API
+                    "queued",
+                    "running",
+                    "waiting",
+                }:
+                    await asyncio.sleep(0)
+            if nested != "suspend":
+                assert receipt["status"] == "completed"
+        return "fresh shell result"
+
+    def assert_fresh_grant_revoked() -> None:
+        # The recovery's Bash ran with its own grant, which ended with the recovery.
+        assert len(shell_tokens) == 1
+        with pytest.raises(CliAuthenticationError):
+            registry.resolve("Bearer " + shell_tokens[0], now_ns=time.time_ns())
+
+    install_scripted_shell(monkeypatch, run_shell_command)
     agent = agents.create_agent(
         "helper",
         runtime.config,
@@ -520,7 +581,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
     request.addfinalizer(partial(close_agent_runtime_state_dbs, agent))
     requests = []
     sibling_image = Image(url="https://example.test/completed-sibling.png")
-    effects = []
     image = Image(content=b"saved-image", mime_type="image/png")
     audio = Audio(content=b"saved-audio", mime_type="audio/wav")
 
@@ -601,7 +661,15 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         response_text=presentation.response_text,
         response_tool_trace=serialize_tool_trace(presentation.tool_trace, include_internal=True),
         calls=(
-            ApprovalCall("hidden", name, "helper", 100, decision=ApprovalDecision.APPROVED, toolkit_name=namespace),
+            ApprovalCall(
+                "hidden",
+                name,
+                "helper",
+                100,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name=namespace,
+                arguments_digest=approval_arguments_digest(arguments),
+            ),
         ),
         cli_call={
             "kind": "agent_cli",
@@ -614,7 +682,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
             "delegation_depth": 2,
         },
     )
-    workers = []
     approvals = []
     pauses = []
     responses = []
@@ -655,46 +722,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         )
         request.addfinalizer(partial(close_agent_runtime_state_dbs, agent))
         agent.add_tool(toolkit)
-
-    class Worker:
-        handle = SimpleNamespace(worker_id="fresh-worker")
-
-        async def install_grant(self, owner, grant, *, shell):
-            self.owner = owner
-            workers.append("installed")
-
-        async def invoke_shell(self, function_name, values):
-            assert function_name == name
-            assert values["args"] in {"exact approved shell", "later model shell"}
-            effects.append(values["args"])
-            if nested:
-                queued = await self.owner.operation(
-                    ToolCallOperation(
-                        operation="tools.call",
-                        call_id=uuid4(),
-                        toolkit="media",
-                        function="media",
-                        arguments={"value": "nested media"},
-                    ),
-                )
-                async with asyncio.timeout(5):
-                    while (receipt := await self.owner.get_call(queued["call_id"]))["status"] in {  # noqa: ASYNC110 - poll the public receipt API
-                        "queued",
-                        "running",
-                        "waiting",
-                    }:
-                        await asyncio.sleep(0)
-                if nested != "suspend":
-                    assert receipt["status"] == "completed"
-            return "fresh worker result"
-
-    @asynccontextmanager
-    async def worker(_runtime):
-        workers.append("opened")
-        try:
-            yield Worker()
-        finally:
-            workers.append("closed")
 
     async def send(**request):
         requests.append(request)
@@ -758,7 +785,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
             assert trace[1].toolkit_name == "media"
             assert trace[1].parent_bash_call_id == "old-bash"
         if shell:
-            assert workers == ["opened", "installed", "closed"]
+            assert_fresh_grant_revoked()
         if not shell or nested:
             assert follow_up.media.images[-1].content == image.content
             assert follow_up.media.audio[0].content == b"saved-audio"
@@ -772,7 +799,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         "get_async_client",
         lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send))),
     )
-    monkeypatch.setattr(minimal_agent, "open_configured_cli_worker", worker)
     if nested:
         monkeypatch.setattr(approval_tools, "authorize_prepared_tool_call", authorize)
 
@@ -826,7 +852,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
             saved_before = agent.db.get_session(runtime.session_id).to_dict()
             with pytest.raises(RuntimeError, match="run, check, and kill shell permissions"):
                 await recover()
-            assert workers == []
+            assert shell_tokens == []
             assert requests == []
             assert effects == []
             assert agent.db.get_session(runtime.session_id).to_dict() == saved_before
@@ -842,7 +868,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_worker(  #
         assert result.cli_call["call_id"] == approvals[0]
         assert responses == []
         assert effects == ["exact approved shell"]
-        assert workers == ["opened", "installed", "closed"]
+        assert_fresh_grant_revoked()
         saved = agent.db.get_session(runtime.session_id).runs[0]
         assert any(item.get("id") == "old-bash" for message in saved.messages for item in message.tool_calls or ())
         return

@@ -269,7 +269,7 @@ Set `model` to an alias from `models:` to override the child's model without cha
 The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
 Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 Set `minimal` to `True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
-The tool description recommends this for self-contained tasks whose child does not need that context and, when the deployment supports minimal mode, lists the allowed subagents that have the `shell` tool.
+The tool description recommends this for self-contained tasks whose child does not need that context and lists the allowed subagents whose shell can run minimal mode; when none can, the `minimal` parameter is not offered.
 When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
@@ -714,8 +714,9 @@ revoke_public_report("pub_...")
 `manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
 Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
 Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
+In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
 Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
-A patch whose value contains the `***redacted***` marker is refused, so copying inspected output back never replaces a hidden real value.
+A patch value, or a `display_name`, `role`, or `instructions` value given to `manage_agent()`, that contains the `***redacted***` marker or a URL password masked as `user:***@host` is refused, so copying redacted output back never replaces a hidden real value.
 `manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
 `dry_run=True` validates a patch and returns its receipt without writing.
 Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
@@ -786,6 +787,7 @@ manage_team(
 
 `self_config` exposes `get_own_config()` and `update_own_config()`.
 `get_own_config()` returns the current agent's authored YAML block, redacted like `config_manager` inspection.
+`update_own_config()` refuses a `display_name`, `role`, or `instructions` value that contains the `***redacted***` marker or a URL password masked as `user:***@host`, so copying that redacted output back never replaces a hidden real value.
 Reads and writes both require a requester listed in `administrators`.
 `update_own_config()` only changes fields that you pass explicitly.
 On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.

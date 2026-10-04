@@ -693,8 +693,8 @@ class PrincipalStore:
         revision_sender: str,
         revision_transaction_id: str | None = None,
         content: Mapping[str, object],
-    ) -> bool:
-        """Install a point-refetched revision if its refresh token still holds."""
+    ) -> int | None:
+        """Install a point-refetched revision if its refresh token still holds, returning its stored size."""
         return await self._backend.write(
             lambda transaction: install_refetched_revision(
                 transaction,

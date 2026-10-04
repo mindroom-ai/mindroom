@@ -44,7 +44,7 @@ def quartz(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 def test_double_click_preserves_negative_points_and_click_count(quartz: SimpleNamespace) -> None:
     """A secondary-display click must not be clamped onto the primary display."""
-    click(-1200, 300, button="left", count=2, check=lambda: None)
+    click(-1200, 300, button="left", count=2, check=lambda _point: None)
     assert [event["point"] for event in quartz.posted] == [(-1200, 300)] * 4
     assert [event[10] for event in quartz.posted] == [1, 1, 2, 2]
 
@@ -53,7 +53,7 @@ def test_drag_releases_button_after_emergency_stop(quartz: SimpleNamespace) -> N
     """A fail-safe during motion must still post the matching mouse-up event."""
     checks = 0
 
-    def check() -> None:
+    def check(_point: tuple[int, int]) -> None:
         nonlocal checks
         checks += 1
         if checks == 3:
@@ -70,7 +70,7 @@ def test_drag_releases_button_after_emergency_stop(quartz: SimpleNamespace) -> N
 
 def test_horizontal_wheel_uses_second_axis(quartz: SimpleNamespace) -> None:
     """Horizontal scroll reaches the target location and the correct wheel axis."""
-    scroll(-500, 100, clicks=-6, horizontal=True, check=lambda: None)
+    scroll(-500, 100, clicks=-6, horizontal=True, check=lambda _point: None)
     assert quartz.posted[0]["point"] == (-500, 100)
     assert quartz.posted[1] == {"wheel": (0, -6)}
 
@@ -84,5 +84,21 @@ def test_drag_revalidates_after_hover_before_press(quartz: SimpleNamespace) -> N
         raise RuntimeError(msg)
 
     with pytest.raises(RuntimeError, match="target changed"):
-        drag((-1800, 100), (-1200, 400), duration=0.1, check=lambda: None, before_press=reject)
+        drag((-1800, 100), (-1200, 400), duration=0.1, check=lambda _point: None, before_press=reject)
     assert len(quartz.posted) == 1
+
+
+def test_drag_start_covered_before_press_posts_no_unpaired_release(quartz: SimpleNamespace) -> None:
+    """A start point that becomes covered after the hover gets neither a press nor a release."""
+    checked: list[tuple[int, int]] = []
+
+    def check(point: tuple[int, int]) -> None:
+        checked.append(point)
+        if len(checked) == 2:
+            msg = "covered"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="covered"):
+        drag((-1800, 100), (-1200, 400), duration=0.1, check=check)
+    assert checked == [(-1800, 100), (-1800, 100)]
+    assert [event["kind"] for event in quartz.posted] == [quartz.kCGEventMouseMoved]

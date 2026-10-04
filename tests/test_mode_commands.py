@@ -12,14 +12,17 @@ import pytest
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, minimal_mode_preflight
+from mindroom.agent_cli.shell_access import agent_cli_shell_env
 from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent_mode
 from mindroom.commands import mode_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.constants import primary_records_dir
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -32,19 +35,32 @@ from tests.test_agent_cli_authority import _runtime_context as _authority_runtim
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
+# Agents' shells run in Docker workers, which call MindRoom back over the network.
 _CLI_DEPLOYMENT_ENV = {
     "MINDROOM_API_KEY": "fake-admin-key",
-    "MINDROOM_AGENT_CLI_GATEWAY_URL": "http://gateway.test",
     "MINDROOM_AGENT_CLI_PRIMARY_URL": "http://primary.test",
     "MINDROOM_WORKER_BACKEND": "docker",
     "MINDROOM_DOCKER_WORKER_IMAGE": "mindroom-worker:test",
-    "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
 }
+
+
+def _mode_file(paths: RuntimePaths, state_root: Path) -> Path:
+    return primary_records_dir(state_root, paths) / "agent_modes.json"
+
+
+@pytest.fixture(autouse=True)
+def api_server_address() -> Iterator[None]:
+    """Run like `mindroom run`, whose API server the minimal CLI calls back."""
+    set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
+    yield
+    clear_api_server_address()
 
 
 def _runtime_context(tmp_path: Path) -> ToolRuntimeContext:
@@ -80,7 +96,7 @@ async def test_mode_command_matches_response_runner_session(
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
     result = mode_commands.handle_mode_command(
         f"general {action}",
         config=config,
@@ -101,7 +117,7 @@ async def test_mode_command_matches_response_runner_session(
     assert turn.agent_mode == expected
     assert f"uses `{expected}`" in result
     # Choosing the default keeps no record in the bounded mode store.
-    assert clear_agent_mode(root, "general", target.session_id) is (action == "show")
+    assert clear_agent_mode(paths, root, "general", target.session_id) is (action == "show")
 
 
 @pytest.mark.asyncio
@@ -116,7 +132,7 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request)
     root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(root, "general", target.session_id, "minimal", request.user_id)
+    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
 
     def show(requester_id: str) -> str:
         return mode_commands.handle_mode_command(
@@ -159,7 +175,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
     ).state_root
-    set_agent_mode(root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
     room = nio.MatrixRoom(runtime.room_id, "@router:example.test")
     event = nio.RoomMessageText.from_dict(
         {
@@ -202,7 +218,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         command=_CommandParser().parse(event.body),
         requester_user_id=runtime.requester_id,
     )
-    assert resolve_agent_mode(root, "helper", runtime.session_id) == "standard"
+    assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "standard"
 
 
 def test_mode_parser_preserves_target_and_action() -> None:
@@ -212,26 +228,31 @@ def test_mode_parser_preserves_target_and_action() -> None:
     assert command.args == {"args_text": "helper minimal"}
 
 
-_NON_ROOT_USER_REQUIRED = "Set `MINDROOM_DOCKER_WORKER_USER` to a non-root user such as `1000:1000`."
-
-
 @pytest.mark.parametrize(
     ("invalid_env", "reason"),
     [
-        ({"MINDROOM_DOCKER_WORKER_USER": "root"}, _NON_ROOT_USER_REQUIRED),
-        ({"MINDROOM_DOCKER_WORKER_USER": "0:1000"}, _NON_ROOT_USER_REQUIRED),
-        ({"MINDROOM_DOCKER_WORKER_USER": ""}, _NON_ROOT_USER_REQUIRED),
         (
-            {"MINDROOM_DOCKER_WORKER_IMAGE": ""},
-            "MINDROOM_DOCKER_WORKER_IMAGE must be set when MINDROOM_WORKER_BACKEND=docker.",
+            {"MINDROOM_API_KEY": ""},
+            "Set `MINDROOM_API_KEY` to a long random secret, because minimal-mode worker shells can reach "
+            "the MindRoom API; the dashboard then asks for this key.",
         ),
         (
-            {"MINDROOM_DOCKER_WORKER_ENV_JSON": '{"CUSTOM_SECRET": "fake-secret-value"}'},
-            "Unset `MINDROOM_DOCKER_WORKER_ENV_JSON`, because minimal-mode workers accept no extra environment.",
+            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
+            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
+            "trusted-upstream headers.",
+        ),
+        (
+            {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+            "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
+            "the unauthenticated OpenAI-compatible API.",
+        ),
+        (
+            {"MINDROOM_AGENT_CLI_PRIMARY_URL": "http://admin:fake-secret-value@primary.test"},
+            "Set `MINDROOM_AGENT_CLI_PRIMARY_URL` to a plain `http(s)://host:port` origin.",
         ),
     ],
 )
-def test_selection_refuses_invalid_docker_profile_before_saving(
+def test_selection_refuses_unsafe_worker_shell_deployment_before_saving(
     tmp_path: Path,
     invalid_env: dict[str, str],
     reason: str,
@@ -246,8 +267,8 @@ def test_selection_refuses_invalid_docker_profile_before_saving(
         paths,
         build_execution_identity_from_runtime_context(context),
     )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    saved = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    saved = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
@@ -258,7 +279,7 @@ def test_selection_refuses_invalid_docker_profile_before_saving(
     )
     assert result.splitlines()[:2] == ["Minimal mode is not available for `helper` yet:", f"- {reason}"]
     assert "fake-secret-value" not in result
-    assert (storage.state_root / "agent_modes.json").read_bytes() == saved
+    assert _mode_file(paths, storage.state_root).read_bytes() == saved
 
 
 def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
@@ -282,12 +303,12 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
     ).state_root
-    set_agent_mode(root, "helper", context.session_id, "minimal", context.requester_id)
+    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal", context.requester_id)
     assert "minimal" in mode_commands.handle_mode_command("helper show", **kwargs)
     assert "shell" in mode_commands.handle_mode_command("helper minimal", **kwargs)
-    assert resolve_agent_mode(root, "helper", context.session_id) == "minimal"
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
     assert "standard" in mode_commands.handle_mode_command("helper standard", **kwargs)
-    assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "standard"
     assert "standard" in mode_commands.handle_mode_command("helper reset", **kwargs)
     assert "denied" in mode_commands.handle_mode_command(
         "helper minimal",
@@ -364,8 +385,8 @@ def test_selection_checks_effective_shell_permissions(
             worker_target=target,
             primary_built_tool=primary_built,
         )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    prior_choice = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    prior_choice = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
@@ -394,11 +415,11 @@ def test_selection_checks_effective_shell_permissions(
     required = {"run_shell_command", "check_shell_command", "kill_shell_command"}
     assert required.issubset(shell_functions) is permitted
     assert ("uses `minimal`" if permitted else "run, check, and kill") in result
-    assert resolve_agent_mode(storage.state_root, "helper", context.session_id) == (
+    assert resolve_agent_mode(paths, storage.state_root, "helper", context.session_id) == (
         "minimal" if permitted else "standard"
     )
     if not permitted:
-        assert (storage.state_root / "agent_modes.json").read_bytes() == prior_choice
+        assert _mode_file(paths, storage.state_root).read_bytes() == prior_choice
 
 
 @pytest.mark.parametrize("failure", ["registry_import", "tool_import", "tool_config"])
@@ -417,8 +438,15 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
     )
-    set_agent_mode(storage.state_root, "helper", context.session_id, "standard", context.requester_id)
-    saved = (storage.state_root / "agent_modes.json").read_bytes()
+    set_agent_mode(
+        context.runtime_paths,
+        storage.state_root,
+        "helper",
+        context.session_id,
+        "standard",
+        context.requester_id,
+    )
+    saved = _mode_file(context.runtime_paths, storage.state_root).read_bytes()
 
     def unavailable(*_args: object, **_kwargs: object) -> None:
         error = ValueError if failure == "tool_config" else ImportError
@@ -443,7 +471,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "- Fix the `shell` tool configuration of `helper` so it loads.",
     ]
     assert "fake-secret" not in result
-    assert (storage.state_root / "agent_modes.json").read_bytes() == saved
+    assert _mode_file(context.runtime_paths, storage.state_root).read_bytes() == saved
 
 
 def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path) -> None:
@@ -454,9 +482,11 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
     env = {
         key: value
         for key, value in _CLI_DEPLOYMENT_ENV.items()
-        if key not in {"MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_GATEWAY_URL", "MINDROOM_AGENT_CLI_PRIMARY_URL"}
+        if key not in {"MINDROOM_API_KEY", "MINDROOM_AGENT_CLI_PRIMARY_URL"}
     }
     paths = replace(context.runtime_paths, process_env=env)
+    # Workers cannot reach an API that listens only on loopback, so no callback URL can be derived.
+    set_api_server_address("127.0.0.1", 8765)
     root = resolve_agent_storage(
         "helper",
         context.config,
@@ -473,11 +503,67 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
         membership_index=context.agent_reply_memberships,
     )
 
-    assert [line.split("`")[1] for line in result.splitlines() if line.startswith("- ")] == [
-        "MINDROOM_API_KEY",
-        "MINDROOM_AGENT_CLI_PRIMARY_URL",
-        "MINDROOM_AGENT_CLI_GATEWAY_URL",
-    ]
+    bullets = [line for line in result.splitlines() if line.startswith("- ")]
+    assert len(bullets) == 2, bullets
+    assert "`MINDROOM_API_KEY`" in bullets[0]
+    assert "`MINDROOM_AGENT_CLI_PRIMARY_URL`" in bullets[1]
+    assert "inside worker shells" in bullets[1]
     assert f"`{paths.env_path}`" in result
     assert "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements" in result
-    assert resolve_agent_mode(root, "helper", context.session_id) == "standard"
+    assert resolve_agent_mode(paths, root, "helper", context.session_id) == "standard"
+
+
+@pytest.mark.parametrize("api_running", [True, False])
+def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, api_running: bool) -> None:
+    """An agent whose shell runs in MindRoom needs no workers, key, or URLs, only the running API."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    if not api_running:
+        clear_api_server_address()
+    root = resolve_agent_storage(
+        "helper",
+        context.config,
+        context.runtime_paths,
+        build_execution_identity_from_runtime_context(context),
+    ).state_root
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    if api_running:
+        assert "uses `minimal`" in result, result
+    else:
+        assert "- Run MindRoom with its API server" in result
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == (
+        "minimal" if api_running else "standard"
+    )
+
+
+def test_docker_worker_callback_url_is_derived_from_the_running_api(tmp_path: Path) -> None:
+    """Docker workers reach an API listening on every interface through the host alias, without a URL setting."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    env = {key: value for key, value in _CLI_DEPLOYMENT_ENV.items() if key != "MINDROOM_AGENT_CLI_PRIMARY_URL"}
+    paths = replace(context.runtime_paths, process_env=env)
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=paths,
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    assert "uses `minimal`" in result, result
+    shell_env = agent_cli_shell_env(context.config, paths, "helper", "grant")
+    assert shell_env.api_url == "http://host.docker.internal:8765"
+    assert shell_env.bin_dir is None

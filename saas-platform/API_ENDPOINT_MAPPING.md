@@ -59,7 +59,6 @@ An operation without a platform frontend caller can still serve an external inte
 | POST | `/admin/{resource}` | `admin.py` | No current frontend caller; generic record creation |
 | PUT | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record update |
 | DELETE | `/admin/{resource}/{resource_id}` | `admin.py` | No current frontend caller; generic record deletion |
-| POST | `/admin/auth/logout` | `admin.py` | No current frontend caller; logout placeholder |
 
 The generic list callers use `accounts`, `subscriptions`, `instances`, `audit_logs`, and `usage_metrics` as resource values.
 Account detail requests use the specific `/admin/accounts/{account_id}` route, registered before generic record lookup.
@@ -103,7 +102,7 @@ Suspending an account through either admin update endpoint bans its Supabase Aut
 Running instances and existing instance-cookie and Matrix sessions continue, so stop instances separately.
 The audit middleware writes one `audit_logs` row for every POST, PUT, PATCH, or DELETE that a route answers with a 2xx status, including system and webhook routes.
 Rows hold the method, path, status, client IP, and the account and email that `verify_user`, `verify_user_allow_deleted`, or `verify_admin` verified; the middleware never reads request bodies, and the admin routes record their request data in their own audit entries.
-Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account awaiting deletion answers 409, because `deleted_at` would stay set; set its status to `deleted` so the owner can cancel the deletion, or clear `deleted_at` and set the status through `PUT /admin/accounts/{account_id}`.
+Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account awaiting deletion answers 409, because `deleted_at` would stay set; set its status to `deleted` so the owner can cancel the deletion through `POST /my/gdpr/cancel-deletion`.
 
 ## SSO and Matrix OIDC
 

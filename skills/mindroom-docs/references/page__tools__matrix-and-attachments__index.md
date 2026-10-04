@@ -276,9 +276,9 @@ The tool normalizes the target to the canonical thread root before sending a new
 Manual summaries are marked with `model_name="manual"` and pin the thread by default, which stops automatic summaries from overwriting the title.
 Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
-Manual tool writes require complete projected thread history within the 2,000-message read window.
+Manual tool writes require complete projected thread history within one read, 2,000 messages or 16 MiB of stored content, whichever comes first.
 If history is incomplete or unavailable, the tool returns an error before publishing the summary.
-A history read can be incomplete below that window limit.
+A history read can be incomplete below those limits.
 
 Manual edits from MindRoom Chat also pin the summary immediately using a version 1 `m.notice` with `model="manual"` and `pinned=true` in `io.mindroom.thread_summary` metadata.
 The sender must have responder access to the updating agent or another eligible responder in the room, so a shared thread title stays pinned across agents.
@@ -337,10 +337,12 @@ The other three functions require an active thread context and return an error o
 Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
 With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
 With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to all agents and teams in the thread and persists across restarts.
-`get_thread_model` returns the active override and the available model names.
-When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports `override: null` plus a `stale_override` field instead of an active override.
-`reset_thread_model` removes the thread override so room-level model selection applies: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
+Every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
+`get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
+`reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
 
 ### Configuration
 
@@ -364,7 +366,7 @@ reset_thread_model()
 
 ### Notes
 
-- The override is stored per thread root in `mindroom_data/tracking/thread_models.json`.
+- The override is stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
 - Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
 - An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
 
@@ -378,6 +380,7 @@ reset_thread_model()
 It defaults `room_id` to the active room, but it also supports cross-room access when the requester has access to the agent and is currently joined to that other room.
 It never infers thread IDs, event IDs, or state keys from thread context, so callers must pass those identifiers explicitly for low-level operations.
 `send_event`, `put_state`, and `redact` are rate-limited per `(agent_name, requester_id, room_id)` and audited in logs.
+An `m.room.message` that `send_event` sends for a human or configured bot-account requester names that requester, so the agents and teams it mentions act for that requester, as they do for the agent's ordinary replies.
 Dangerous state event types like `m.room.power_levels` and `m.room.encryption` are blocked by default.
 Pass `allow_dangerous=true` only when you intentionally want to change critical room state.
 A dangerous write also requires the human requester, or one of their configured bridge aliases, to be joined to the target room with room admin power (power level 100), so the model's flag alone never authorizes it.
@@ -508,9 +511,9 @@ The next scheduled refresh uses one structured model call to update the summary 
 The background task reads fresh authoritative history for counting and includes the delivered response.
 The model prompt excludes trusted summary notices and messages with empty bodies.
 If more than 50 messages remain, it includes only the first three and last three plus an omission notice; at 50 or fewer, it includes all remaining messages.
-Automatic refreshes require complete projected thread history within the 2,000-message read window, just like manual tool writes.
-Incomplete or unavailable history skips an automatic refresh, and incompleteness can occur below the window limit.
-The read window counts projected messages, while prompt sampling counts body-bearing non-summary messages; neither is a raw Matrix event count.
+Automatic refreshes require complete projected thread history within one read, 2,000 messages or 16 MiB of stored content, whichever comes first, just like manual tool writes.
+Incomplete or unavailable history skips an automatic refresh, and incompleteness can occur below those limits.
+The read's message limit counts projected messages, while prompt sampling counts body-bearing non-summary messages; neither is a raw Matrix event count.
 Existing tags win, including tags observed after the model call finishes.
 MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
 The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the refreshed summary.

@@ -8,17 +8,15 @@ on:
         required: true
         type: string
 
+# Any job on main can write the Actions cache, so no job here restores one.
 jobs:
-  deploy:
+  build:
+    # Build code never runs in the job that can mint a PyPI upload token.
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/mindroom
     permissions:
       contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ inputs.release_ref }}
           fetch-depth: 0
@@ -27,22 +25,76 @@ jobs:
       - name: Fetch Git LFS assets
         run: git lfs pull
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: false
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - name: Build
         run: uv build --wheel
+      - name: Upload package distributions
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mindroom
+    permissions:
+      id-token: write
+    steps:
+      - name: Download package distributions
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: python-package-distributions
+          path: dist/
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           # A retried release must reach the macOS job, which waits for this one.
           skip-existing: true
 
+  build_macos_helper:
+    name: Build macOS desktop helper
+    # Helper build code runs on its own runner, never beside the signing and release secrets.
+    # It starts after PyPI publishing so it cannot touch this run's wheel artifact before it is published.
+    needs: deploy
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ inputs.release_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: false
+      - name: Build desktop helper
+        run: macos/build-desktop-helper.sh
+      # Artifacts drop symlinks and executable bits, so ship the bundle as a tarball.
+      - name: Archive desktop helper
+        run: tar -C dist/macos/desktop-helper/dist -cf "$RUNNER_TEMP/desktop-helper.tar" "MindRoom Desktop Helper.app"
+      - name: Upload desktop helper
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: macos-desktop-helper
+          path: ${{ runner.temp }}/desktop-helper.tar
+          if-no-files-found: error
+
   build_macos_app:
     name: Build and publish macOS app
     # The app installs the runtime release matching its own version, so publish
-    # it only after that version is on PyPI.
-    needs: deploy
+    # it only after that version is on PyPI, which the helper job waits for.
+    needs: build_macos_helper
     runs-on: macos-latest
     timeout-minutes: 45
     permissions:
@@ -52,11 +104,11 @@ jobs:
       # so a misconfigured app fails the job before the expensive notarized build.
       - name: Mint release bot token
         id: release-bot
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ inputs.release_ref }}
           fetch-depth: 0
@@ -65,9 +117,20 @@ jobs:
       - name: Fetch Git LFS assets
         run: git lfs pull
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: false
+      - name: Download desktop helper
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: macos-desktop-helper
+          path: ${{ runner.temp }}
+      - name: Unpack desktop helper
+        run: |
+          mkdir -p dist/macos/desktop-helper/dist
+          tar -xf "$RUNNER_TEMP/desktop-helper.tar" -C dist/macos/desktop-helper/dist
       - name: Import Developer ID certificate
-        uses: apple-actions/import-codesign-certs@v7
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
         with:
           p12-file-base64: ${{ secrets.MACOS_CODESIGN_CERTIFICATE_BASE64 }}
           p12-password: ${{ secrets.MACOS_CODESIGN_CERTIFICATE_PASSWORD }}
@@ -93,6 +156,7 @@ jobs:
           APP_VERSION: ${{ inputs.release_ref }}
           BUILD_VERSION: ${{ github.run_number }}
           SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+          SKIP_DESKTOP_HELPER_BUILD: "1"
         run: |
           if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
             echo "SPARKLE_PUBLIC_ED_KEY repository variable is required to enable Sparkle updates." >&2
@@ -223,7 +287,7 @@ jobs:
       # which the mindroom-release-bot app installation grants.
       - name: Mint release bot token
         id: release-bot
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
