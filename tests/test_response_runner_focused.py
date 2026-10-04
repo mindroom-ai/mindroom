@@ -6683,21 +6683,39 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 
 @pytest.mark.asyncio
-async def test_agent_turn_checks_its_own_room_for_redacted_history(tmp_path: Path) -> None:
-    """The turn driver asks the response's room which events its history derives from were redacted."""
+async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Path) -> None:
+    """The turn driver's redaction lookup reads the tombstones the bot's journal recorded for the room."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lookups: list[tuple[str, tuple[str, ...]]] = []
-
-    async def redacted_event_ids(room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-        lookups.append((room_id, event_ids))
-        return frozenset()
-
-    coordinator.deps = replace(coordinator.deps, redacted_event_ids=redacted_event_ids)
+    store = coordinator.deps.approval_store
+    await _admit_approval_source(store, event_id="$older")
+    await store.admit(
+        InboundEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.REDACTION,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={"event_id": "$redaction", "redacts": "$older", "content": {}},
+        ),
+        ProjectedEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            content={},
+            replaces_event_id=None,
+            redacts_event_id="$older",
+        ),
+    )
+    found: list[frozenset[str]] = []
 
     async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
         assert ctx.redacted_event_ids is not None
-        await ctx.redacted_event_ids(("$event",))
+        found.append(await ctx.redacted_event_ids(("$older", "$kept")))
         return "final text"
 
     with (
@@ -6713,7 +6731,7 @@ async def test_agent_turn_checks_its_own_room_for_redacted_history(tmp_path: Pat
     ):
         await coordinator._process_and_respond(_plain_request(_target()))
 
-    assert lookups == [("!room:localhost", ("$event",))]
+    assert found == [frozenset({"$older"})]
 
 
 @pytest.mark.asyncio

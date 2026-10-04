@@ -894,23 +894,23 @@ async def _remove_history_of_redacted_events(
     )
     if not event_ids:
         return
-    redacted_event_ids = await ctx.redacted_event_ids(tuple(sorted(event_ids)))
-    for event_id in sorted(redacted_event_ids):
-        await run_blocking_until_complete(
-            partial(
-                remove_redacted_event_from_history,
-                scope_context.storage,
-                session,
-                scope_context.scope,
-                event_id=event_id,
-            ),
+    removed_event_ids: list[str] = []
+    for event_id in sorted(await ctx.redacted_event_ids(tuple(sorted(event_ids)))):
+        removal = partial(
+            remove_redacted_event_from_history,
+            scope_context.storage,
+            session,
+            scope_context.scope,
+            event_id=event_id,
         )
-    if redacted_event_ids:
+        if await run_blocking_until_complete(removal):
+            removed_event_ids.append(event_id)
+    if removed_event_ids:
         logger.info(
             "Removed history derived from redacted events",
             session_id=session.session_id,
             history_scope=scope_context.scope.key,
-            redacted_event_ids=sorted(redacted_event_ids),
+            redacted_event_ids=removed_event_ids,
         )
 
 

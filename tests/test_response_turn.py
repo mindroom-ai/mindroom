@@ -777,25 +777,28 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
 
     log = _AdapterLog()
     ctx = _ctx(redacted_event_ids=_redacted_event_ids)
-    if streaming:
-        await _collect(
-            stream_response_turn(
+    for _turn in range(2):
+        if streaming:
+            await _collect(
+                stream_response_turn(
+                    ctx,
+                    _streaming_adapter(log, _streaming_attempt, open_scope=_open_scope),
+                    TurnSinks(),
+                    continuation=_continuation(),
+                ),
+            )
+        else:
+            await run_blocking_response_turn(
                 ctx,
-                _streaming_adapter(log, _streaming_attempt, open_scope=_open_scope),
+                _blocking_adapter(log, _blocking_attempt, open_scope=_open_scope),
                 TurnSinks(),
                 continuation=_continuation(),
-            ),
-        )
-    else:
-        await run_blocking_response_turn(
-            ctx,
-            _blocking_adapter(log, _blocking_attempt, open_scope=_open_scope),
-            TurnSinks(),
-            continuation=_continuation(),
-        )
+            )
 
     assert redacted_event_id in lookups[0]
-    assert attempt_history == [["earlier"]]
+    # Nothing that derived from the redacted event is left for the next turn to find.
+    assert redacted_event_id not in lookups[1]
+    assert attempt_history == [["earlier"], ["earlier"]]
     stored = get_agent_session(storage, "session-1")
     assert stored is not None
     assert [history_run.run_id for history_run in stored.runs or []] == ["earlier"]
