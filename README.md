@@ -330,10 +330,12 @@ If your client or bridge only sends plain replies, MindRoom keeps them in an exi
 Plain replies that never reach threaded context still stay plain replies.
 
 1. **Mentioned agents and teams respond** - Tag them to get their attention
-2. **Single responder continues** - One agent or team in a thread keeps responding
+2. **Single responder continues** - In a thread with one person, the agent or team that answered keeps responding without a tag
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
-4. **Smart routing** - System picks the best agent or team for new threads
-5. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
+4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one
+5. **Group threads stay human-first** - Once two or more people talk in a thread, agents answer only when tagged, so they don't interrupt
+6. **Adaptive participation** - An agent with [`participation`](docs/configuration/threads.md#adaptive-participation) enabled that has already replied in a group thread decides for each untagged message whether it can help, so nobody has to tag it
+7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
 
 <details>
 <summary><b>Chat commands</b></summary>
