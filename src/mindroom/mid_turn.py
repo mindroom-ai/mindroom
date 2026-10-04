@@ -23,8 +23,9 @@ logger = get_logger(__name__)
 
 # Long background text reaches the judge as its start and end, so one big reply cannot disable judgment.
 _CLIPPED_TEXT_CHARS = 2_000
-# Redaction scans this far past each cut, so the kept half of a split credential still counts as one.
-_REDACTION_MARGIN_CHARS = 256
+# The redactor refuses input over 64 KiB, so longer text is scanned in overlapping chunks below that bound.
+_REDACTION_CHUNK_CHARS = 60_000
+_REDACTION_OVERLAP_CHARS = 4_000
 _MAX_CONTEXT_MESSAGES = 63
 
 MID_TURN_QUESTION = JudgmentQuestion(
@@ -49,14 +50,20 @@ def _clip(text: str, limit: int = _CLIPPED_TEXT_CHARS) -> str:
         return text
     half = limit // 2
     # A cut inside a sender tag would leak part of a Matrix ID past speaker aliasing.
-    head = re.sub(r"<[^<>]*$", "", text[:half])
-    tail = re.sub(r"^[^<>]*>", "", text[-half:])
+    head = re.sub(r"<(?:m|ms|msg\b[^<>]*)?$", "", text[:half])
+    tail = re.sub(r"^[^<>]*[\"']>", "", text[-half:])
     return f"{head}\n[... {len(text) - 2 * half} characters omitted ...]\n{tail}"
 
 
-def _clip_is_unredacted(text: str) -> bool:
-    scanned = _clip(text, _CLIPPED_TEXT_CHARS + 2 * _REDACTION_MARGIN_CHARS)
-    return redact_sensitive_text(scanned) == scanned
+def _is_unredacted(text: str) -> bool:
+    """Scan the whole text, so a credential that clipping cuts in half still blocks the request."""
+    return all(
+        redact_sensitive_text(chunk) == chunk
+        for chunk in (
+            text[start : start + _REDACTION_CHUNK_CHARS + _REDACTION_OVERLAP_CHARS]
+            for start in range(0, len(text) or 1, _REDACTION_CHUNK_CHARS)
+        )
+    )
 
 
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
@@ -144,9 +151,7 @@ class MidTurnGate:
         if not pending or len(pending) > 8:
             return "queued_message_count"
         if not all(
-            _is_plain_text(message.text)
-            and len(message.text) <= MAX_REQUEST_BYTES
-            and redact_sensitive_text(message.text) == message.text
+            _is_plain_text(message.text) and len(message.text) <= MAX_REQUEST_BYTES and _is_unredacted(message.text)
             for message in pending
         ):
             return "queued_message_unjudgeable"
@@ -154,11 +159,9 @@ class MidTurnGate:
             self.active_text,
             *(message.text for message in self.conversation_context[-_MAX_CONTEXT_MESSAGES:]),
         )
-        if not all(_is_plain_text(text) and _clip_is_unredacted(text) for text in background):
+        if not all(_is_plain_text(text) and _is_unredacted(text) for text in background):
             return "context_unjudgeable"
-        if any(
-            message.visible_response is None or not _clip_is_unredacted(message.visible_response) for message in pending
-        ):
+        if any(message.visible_response is None or not _is_unredacted(message.visible_response) for message in pending):
             return "visible_response_unavailable"
         return None
 

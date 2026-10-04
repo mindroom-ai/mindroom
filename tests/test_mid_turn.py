@@ -838,13 +838,14 @@ async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: in
 
 @pytest.mark.asyncio
 async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
-    """Redaction scans past each cut, so the visible half of a split credential never reaches the judge."""
+    """Redaction scans the whole text, so the kept half of a split credential never reaches the judge."""
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         pytest.fail("Credentials must not reach the judgment backend")
 
-    # The kept end starts inside the key, where its value alone no longer looks like a credential.
-    text = "x" * 20_000 + "api_key=s" + "k-" + "a" * 48 + "x" * 950
+    # The kept end starts hundreds of characters into the token, where it no longer looks like a credential.
+    token = "Authorization: Bearer eyJ" + "".join(chr(ord("a") + i * 7 % 26) for i in range(900))
+    text = "x" * 20_000 + token + "x" * 600
     gate = MidTurnGate(
         active_text="Do the task",
         evaluate=evaluate,
@@ -875,6 +876,28 @@ async def test_clipping_never_splits_a_speaker_tag(cut: str) -> None:
     )
     assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
     assert "alice" not in requests[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_clipping_keeps_text_around_stray_angle_brackets() -> None:
+    """Only a split sender tag is trimmed; comparisons and arrows near a cut keep the kept text whole."""
+    requests: list[dict] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        assert request.body is not None
+        requests.append(json.loads(request.body))
+        return True
+
+    text = "If a < b then " + "x" * 20_000 + " then step1 -> step2 " + "y" * 900
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        conversation_context=(JudgmentMessage("user", text),),
+    )
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    clipped = requests[0]["state"]["conversation"][0]["text"]
+    assert clipped.startswith("If a < b then xxx")
+    assert "then step1 -> step2" in clipped
 
 
 @pytest.mark.asyncio

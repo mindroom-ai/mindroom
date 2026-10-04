@@ -219,8 +219,9 @@ It represents the server-published view at queue admission, not proof of which u
 Private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
 To fit the 16 KB request limit, a long earlier message, active request, or reply snapshot reaches the judge as its first and last 1,000 characters, and older messages give way to the newest 63 or fewer that fit.
 Queued messages are always sent whole.
-Missing or partial conversation history, earlier media, and queued messages that do not fit retain wrap-up.
-Each wrap-up without a judge decision logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`.
+Missing or partial conversation history, earlier media, and a queue that does not fit even without earlier messages retain wrap-up; each queued message carries its own reply snapshot, and the limit counts bytes, so non-Latin text fits fewer characters.
+Text that looks like a credential anywhere in a message, including a clipped-out middle, retains wrap-up.
+Each wrap-up that skips the judge logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`; judge timeouts and backend errors are logged as `Mid-turn continuation evaluated` with a `failure`.
 Room-mode turns currently have no public conversation snapshot and retain normal wrap-up; empty history is sufficient only for a proven new thread.
 The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
 Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
