@@ -362,12 +362,20 @@ class TurnStore:
                 timestamp=0.0,
             )
 
+        conversation_records = (
+            self._ledger.turn_records_for_conversation(session_id=turn_record.conversation_target.session_id)
+            if turn_record.conversation_target is not None
+            else ()
+        )
         split_redacted_event_ids = {
             event_id
-            for source_event_id in turn_record.source_event_ids
-            if (existing := self._ledger.get_turn_record(source_event_id)) is not None and not existing.completed
+            for existing in (
+                *conversation_records,
+                *filter(None, map(self._ledger.get_turn_record, turn_record.source_event_ids)),
+            )
+            if not existing.completed and not set(existing.source_event_ids).isdisjoint(turn_record.source_event_ids)
             for event_id in existing.redacted_source_event_ids
-            if event_id not in turn_record.source_event_ids
+            if event_id not in turn_record.indexed_event_ids
         }
         await self._ledger.update_handled_turn(turn_record.indexed_event_ids, terminal_record)
         # A redacted source this turn splits from its coalesced pending turn still names that turn;

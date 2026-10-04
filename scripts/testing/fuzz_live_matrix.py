@@ -6097,8 +6097,8 @@ class FinalStateAuditor:
                     continue
                 tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
                 is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
-                # Edit acknowledgement is monotonic before model admission.
-                # Original-source callbacks can re-arm debt after an ordinary call.
+                # Every registered owner reconciles an edit tombstone before model admission;
+                # an original source's callback may still be reconciling after an ordinary call.
                 requires_cleanup = probe_id in self.cleanup_probes or (bool(calls) and is_edit)
                 if not tombstoned or (pending and requires_cleanup):
                     msg = (

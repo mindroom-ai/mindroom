@@ -1321,7 +1321,7 @@ async def test_prepare_redaction_removes_runs_that_consumed_the_source(
 
 
 @pytest.mark.asyncio
-async def test_prepare_redaction_removes_source_from_every_recorded_history_scope(
+async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_opened(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
@@ -1401,7 +1401,7 @@ async def test_prepare_redaction_removes_source_from_every_recorded_history_scop
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_owner", [None, "other"])
-async def test_prepare_redaction_cleans_later_owned_scopes_across_requesters(
+async def test_another_requesters_private_scope_drops_a_redacted_source_when_opened(
     journal_store: EventJournalStore,
     tmp_path: Path,
     *,
@@ -1647,7 +1647,7 @@ async def test_redaction_detaches_from_a_pending_coalesced_turn_after_sibling_co
 
 
 @pytest.mark.asyncio
-async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
+async def test_completed_sibling_detaches_redacted_alias_from_coalesced_turn(
     journal_store: EventJournalStore,
     tmp_path: Path,
 ) -> None:
@@ -1691,6 +1691,11 @@ async def test_redaction_cleanup_clears_after_pending_coalesced_turn_splits(
     assert completed_sibling is not None
     assert completed_sibling.source_event_ids == ("$second",)
     assert completed_sibling.response_event_id == "$second-reply"
+    _reset_handled_turn_ledger_runtime()
+    reopened = await _store_with_storage(journal_store, storage)
+    persisted = reopened.get_turn_record("$first")
+    assert persisted is not None
+    assert persisted.redacted_source_event_ids == ("$first",)
 
 
 @pytest.mark.asyncio

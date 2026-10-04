@@ -877,37 +877,43 @@ async def _remove_history_of_redacted_events(
     ctx: ResponseTurnContext,
     scope_context: ScopeSessionContext | None,
 ) -> None:
-    """Remove persisted history derived from events the room has since redacted.
+    """Remove persisted history derived from events since redacted, before the history is used.
 
-    A message no turn answered, such as one a newer message superseded, leaves
-    no turn to clean up after its redaction, yet a later turn may have read it as
-    thread context. Checking what this scope's history derives from catches it
-    before the history is used again.
+    This is the only cleanup after a redaction: every event this scope's history derives
+    from is checked against the room's and the conversation's tombstones each time a
+    response opens it, which also covers a message no turn answered but a later turn read
+    as context. A rollback can restore older runs, so the check repeats until it removes
+    nothing new.
     """
     if ctx.redacted_history_events is None or scope_context is None or scope_context.session is None:
         return
     session = scope_context.session
-    event_ids = await run_blocking_until_complete(
-        read_scope_history_event_ids,
-        scope_context.storage,
-        session,
-        scope_context.scope,
-    )
-    if not event_ids:
-        return
     removed_event_ids: list[str] = []
-    redacted = await ctx.redacted_history_events(tuple(sorted(event_ids)))
-    for event_id in sorted(redacted):
-        removal = partial(
-            remove_redacted_event_from_history,
+    while True:
+        event_ids = await run_blocking_until_complete(
+            read_scope_history_event_ids,
             scope_context.storage,
             session,
             scope_context.scope,
-            event_id=event_id,
-            legacy_source_event_id=redacted[event_id],
         )
-        if await run_blocking_until_complete(removal):
-            removed_event_ids.append(event_id)
+        if not event_ids:
+            break
+        redacted = await ctx.redacted_history_events(tuple(sorted(event_ids)))
+        newly_removed: list[str] = []
+        for event_id in sorted(set(redacted).difference(removed_event_ids)):
+            removal = partial(
+                remove_redacted_event_from_history,
+                scope_context.storage,
+                session,
+                scope_context.scope,
+                event_id=event_id,
+                legacy_source_event_id=redacted[event_id],
+            )
+            if await run_blocking_until_complete(removal):
+                newly_removed.append(event_id)
+        if not newly_removed:
+            break
+        removed_event_ids.extend(newly_removed)
     if removed_event_ids:
         logger.info(
             "Removed history derived from redacted events",

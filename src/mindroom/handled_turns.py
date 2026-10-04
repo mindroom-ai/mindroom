@@ -1044,7 +1044,8 @@ def _response_group_requires_retention(
     """Return whether one group still owns unfinished durable work or redaction evidence.
 
     A conversation's ledger tombstones are what history cleanup derives from when the
-    journal no longer has them, so they stay as long as some history might still hold the event.
+    journal no longer has them, and nothing tracks which histories still hold an event,
+    so they are kept for good; their number grows only with redactions.
     """
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)

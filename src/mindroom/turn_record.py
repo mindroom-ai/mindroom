@@ -832,9 +832,8 @@ def sanitize_revision_replay(  # noqa: C901
 ) -> TurnRecord:
     """Join monotonic invalidation before removing any candidate provenance.
 
-    Acknowledgement is final for one physical revision: no future request may
-    consume it. Only ledger records carry cleanup state; model runs cannot
-    acknowledge debt or restore it after acknowledgement.
+    A revision tombstone is final: no future request may consume that physical
+    revision, and no later record can clear it.
     """
     replay = dict(candidate.revision_replay or {})
     for source, (timestamp, revision_id) in (candidate.source_event_revisions or {}).items():

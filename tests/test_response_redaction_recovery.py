@@ -1,4 +1,4 @@
-"""Exact redaction cleanup debt can outlive an interrupted response."""
+"""Exact redaction tombstones survive an interrupted response and its recovery."""
 
 from __future__ import annotations
 

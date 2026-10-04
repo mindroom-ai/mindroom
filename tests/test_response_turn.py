@@ -819,6 +819,40 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     assert [history_run.run_id for history_run in stored.runs or []] == ["earlier"]
 
 
+@pytest.mark.asyncio
+async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rollback can restore older runs that read another redacted event; the same response removes those too."""
+    histories = iter([{"$x", "$kept"}, {"$z", "$kept"}, {"$z", "$kept"}])
+    removed: list[str] = []
+
+    def read_history(*_args: object) -> set[str]:
+        return next(histories)
+
+    def remove(*_args: object, event_id: str, legacy_source_event_id: str | None) -> bool:
+        assert legacy_source_event_id is None
+        removed.append(event_id)
+        return True
+
+    async def redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        return dict.fromkeys(set(event_ids) & {"$x", "$z"})
+
+    monkeypatch.setattr(response_turn_module, "read_scope_history_event_ids", read_history)
+    monkeypatch.setattr(response_turn_module, "remove_redacted_event_from_history", remove)
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=Mock(spec=BaseDb),
+        session=AgentSession(session_id="session-1", agent_id="general"),
+    )
+
+    await response_turn_module._remove_history_of_redacted_events(
+        _ctx(redacted_history_events=redacted_history_events),
+        scope_context,
+    )
+
+    # The third pass still sees "$z" but has nothing new to remove, so it stops.
+    assert removed == ["$x", "$z"]
+
+
 def test_blocking_completion_records_and_updates_collector() -> None:
     """A completed blocking attempt records the turn and publishes run metadata once."""
     log = _AdapterLog()
