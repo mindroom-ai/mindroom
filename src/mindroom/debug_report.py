@@ -135,7 +135,8 @@ def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozens
         if isinstance(value, str) and (key.endswith("_json") or key in extra):
             try:
                 decoded[key] = json.loads(value)
-            except json.JSONDecodeError:
+            # JSONDecodeError and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
+            except (ValueError, RecursionError):
                 decoded[key] = value
         else:
             decoded[key] = value
@@ -300,7 +301,7 @@ def _read_jsonl_records(paths: Sequence[Path], ids: _DebugReportIds, *, location
                     continue
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(record, dict) or not _record_matches(record, ids):
                     continue
@@ -357,18 +358,31 @@ def _failed(location: str, error: Exception) -> _SourceResult:
     return _SourceResult("error", [location], error=_describe_error(error))
 
 
+def _journal_failed(location: str, message: str) -> dict[str, _SourceResult]:
+    return {name: _SourceResult("error", [location], error=message) for name in _JOURNAL_SOURCES}
+
+
+def _read_postgres_journal(database_url: str, ids: _DebugReportIds) -> dict[str, _SourceResult]:
+    try:
+        import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
+    except ImportError as error:
+        return _journal_failed(
+            "postgres",
+            f"{_describe_error(error)}; reading a PostgreSQL journal needs the mindroom[postgres] extra",
+        )
+    try:
+        with _postgres_query(database_url) as query:
+            return _read_journal(query, ids, "postgres")
+    except (psycopg.Error, OSError) as error:
+        return _journal_failed("postgres", _describe_error(error))
+
+
 def _read_journal_source(sources: DebugReportSources, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
     if sources.journal_error is not None:
-        return {name: _SourceResult("error", ["postgres"], error=sources.journal_error) for name in _JOURNAL_SOURCES}
+        return _journal_failed("postgres", sources.journal_error)
     if sources.journal_postgres_url is not None:
-        import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
-
-        try:
-            with _postgres_query(sources.journal_postgres_url) as query:
-                return _read_journal(query, ids, "postgres")
-        except (psycopg.Error, OSError) as error:
-            return {name: _failed("postgres", error) for name in _JOURNAL_SOURCES}
+        return _read_postgres_journal(sources.journal_postgres_url, ids)
     path = sources.journal_sqlite_path
     try:
         # `is_file()` raises PermissionError when a parent directory is unreadable, so it belongs in the guard.
@@ -377,7 +391,7 @@ def _read_journal_source(sources: DebugReportSources, ids: _DebugReportIds) -> d
         with _sqlite_query(path) as query:
             return _read_journal(query, ids, str(path))
     except (sqlite3.Error, OSError) as error:
-        return {name: _failed(str(path), error) for name in _JOURNAL_SOURCES}
+        return _journal_failed(str(path), _describe_error(error))
 
 
 def _read_guarded(read: Callable[[], _SourceResult], location: Path) -> _SourceResult:

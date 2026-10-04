@@ -29,7 +29,8 @@ def _fail(message: str) -> NoReturn:
 def _read_report(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    # UnicodeDecodeError, JSONDecodeError, and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
+    except (OSError, ValueError, RecursionError) as exc:
         _fail(f"cannot read {path}: {exc}")
     if not isinstance(data, dict) or data.get("type") != _BUG_REPORT_TYPE:
         _fail(f"{path} is not a MindRoom Chat bug report.")
@@ -123,7 +124,8 @@ def debug_report(
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     sources = _resolve_sources(runtime_paths)
     document = build_debug_report(sources, ids, generated_at=datetime.now(UTC).isoformat())
-    text = json.dumps(document, indent=2, ensure_ascii=False, default=str)
+    # ASCII escaping is lossless: a stored lone surrogate stays its exact \udXXX escape instead of failing to encode.
+    text = json.dumps(document, indent=2, default=str)
     if output is None:
         typer.echo(text)
     else:

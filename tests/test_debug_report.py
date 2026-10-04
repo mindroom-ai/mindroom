@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -78,21 +79,23 @@ def test_collect_ids_merges_flags_and_derives_unthreaded_session() -> None:
     assert collect_ids(None).is_empty()
 
 
+_TURN_INSERT = "INSERT INTO turn_records (agent_name, index_event_id, anchor_event_id, record_json) VALUES (?, ?, ?, ?)"
+_JOURNAL_INSERT = (
+    "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, "
+    "origin_server_ts, source_json, membership_epoch, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
 def _seed_journal(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as db:
         for statement in schema_statements(SQLITE_DIALECT):
             db.execute(statement)
-        turn = "INSERT INTO turn_records (agent_name, index_event_id, anchor_event_id, record_json) VALUES (?, ?, ?, ?)"
-        db.execute(turn, ("general", "$user", "$user", json.dumps({"correlation_id": "$user"})))
-        db.execute(turn, ("general", "$unrelated", "$unrelated", "{}"))
-        journal = (
-            "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, "
-            "origin_server_ts, source_json, membership_epoch, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
+        db.execute(_TURN_INSERT, ("general", "$user", "$user", json.dumps({"correlation_id": "$user"})))
+        db.execute(_TURN_INSERT, ("general", "$unrelated", "$unrelated", "{}"))
         alice, bob = "@alice:example.com", "@bob:example.com"
         db.executemany(
-            journal,
+            _JOURNAL_INSERT,
             [
                 ("general@x", "$user", ROOM, "$root", "message", alice, 1, '{"a": 1}', 1, "settled"),
                 ("general@x", "$late", ROOM, "$root", "message", alice, 2, "{}", 1, "pending"),
@@ -432,6 +435,30 @@ def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(t
     assert sources["tool_calls"]["status"] == "ok"
 
 
+def test_build_debug_report_marks_journal_sources_when_psycopg_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the postgres extra the journal sources name the missing dependency and the others are still read."""
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    _seed_files(tmp_path)
+
+    document = build_debug_report(
+        _sources(tmp_path, journal_postgres_url="postgresql://nobody@127.0.0.1:1/none"),
+        collect_ids(_report(), event_ids=["$user"]),
+        generated_at="now",
+    )
+
+    sources = document["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert "psycopg" in sources[name]["error"]
+        assert "mindroom[postgres]" in sources[name]["error"]
+        assert sources[name]["paths"] == ["postgres"]
+    assert sources["tool_calls"]["status"] == "ok"
+    assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 def test_build_debug_report_survives_an_unreadable_tracking_directory(tmp_path: Path) -> None:
     """An unreadable parent directory makes `is_file()` raise; the affected sources error and the rest still report."""
@@ -593,6 +620,58 @@ def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path
     assert json.loads(result.stdout)["type"] == "io.mindroom.debug_report"
 
 
+@pytest.mark.parametrize("to_file", [True, False], ids=["output-file", "stdout"])
+def test_cli_writes_valid_json_for_a_lone_surrogate_in_stored_json(tmp_path: Path, *, to_file: bool) -> None:
+    """A lone-surrogate escape the journal stored survives as the same escape, in an output file and on stdout."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    journal = storage / "tracking" / "event_journal.db"
+    _seed_journal(journal)
+    with closing(sqlite3.connect(journal)) as db:
+        source = '{"body": "broken \\ud83d emoji"}'
+        db.execute(_JOURNAL_INSERT, ("general@x", "$garbled", ROOM, "", "message", "@a:x", 4, source, 1, "settled"))
+        db.commit()
+    output = tmp_path / "backend.json"
+    args = ["debug-report", "-e", "$garbled", "-c", str(config), "-s", str(storage)]
+
+    result = runner.invoke(app, [*args, "-o", str(output)] if to_file else args)
+
+    assert result.exit_code == 0, result.output
+    text = output.read_text(encoding="utf-8") if to_file else result.stdout
+    assert "\\ud83d" in text
+    events = json.loads(text)["sources"]["journal_events"]["items"]
+    assert [event["source_json"] for event in events] == [{"body": "broken \ud83d emoji"}]
+
+
+def test_build_debug_report_keeps_values_the_json_decoder_refuses(tmp_path: Path) -> None:
+    """A 5,000-digit integer or deep nesting keeps a column's raw text or skips a JSONL line instead of aborting."""
+    huge = "{" + '"n": ' + "1" * 5000 + "}"
+    deep = "[" * 100_000 + "]" * 100_000
+    journal = tmp_path / "tracking" / "event_journal.db"
+    _seed_journal(journal)
+    with closing(sqlite3.connect(journal)) as db:
+        db.execute(_TURN_INSERT, ("general", "$huge", "$huge", huge))
+        db.execute(_TURN_INSERT, ("general", "$deep", "$deep", deep))
+        db.commit()
+    _seed_files(tmp_path)
+    with (tmp_path / "tracking" / "tool_calls.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"tool_name": "huge", "correlation_id": "$user", "n": ' + "1" * 5000 + "}\n")
+        handle.write('{"tool_name": "deep", "correlation_id": "$user", "x": ' + deep + "}\n")
+
+    document = build_debug_report(
+        _sources(tmp_path),
+        collect_ids(None, event_ids=["$user", "$huge", "$deep"]),
+        generated_at="now",
+    )
+
+    sources = document["sources"]
+    turns = {item["index_event_id"]: item["record_json"] for item in sources["turn_records"]["items"]}
+    assert turns == {"$deep": deep, "$huge": huge, "$user": {"correlation_id": "$user"}}
+    assert sources["tool_calls"]["status"] == "ok"
+    assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
+
+
 def test_cli_requires_an_identifier(tmp_path: Path) -> None:
     """With nothing to look up the command fails and says what to pass."""
     result = runner.invoke(app, ["debug-report", "-s", str(tmp_path)])
@@ -600,11 +679,19 @@ def test_cli_requires_an_identifier(tmp_path: Path) -> None:
     assert "at least one of --event, --room, --thread" in result.output
 
 
-def test_cli_rejects_a_binary_file_as_a_bug_report(tmp_path: Path) -> None:
-    """A file that is not UTF-8 text is refused with a message instead of a traceback."""
-    binary = tmp_path / "bug-report.json"
-    binary.write_bytes(b"\xff\xfe\x00\x80 not text")
-    result = runner.invoke(app, ["debug-report", str(binary), "-s", str(tmp_path)])
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"\xff\xfe\x00\x80 not text", id="binary"),
+        pytest.param(b'{"type": "io.mindroom.bug_report", "n": ' + b"1" * 5000 + b"}", id="huge-integer"),
+        pytest.param(b"[" * 100_000 + b"]" * 100_000, id="deep-nesting"),
+    ],
+)
+def test_cli_rejects_an_unreadable_bug_report(tmp_path: Path, content: bytes) -> None:
+    """A file that is not UTF-8 text, or JSON the decoder refuses, is refused with a message instead of a traceback."""
+    report = tmp_path / "bug-report.json"
+    report.write_bytes(content)
+    result = runner.invoke(app, ["debug-report", str(report), "-s", str(tmp_path)])
     assert result.exit_code == 1
     assert "cannot read" in result.output
 
