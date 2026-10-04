@@ -141,7 +141,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'A chat app built for agents',
-    body: 'MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, join voice calls, and work in a browser you can take over.',
+    body: 'MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, open interactive canvases, join voice calls, and work in a real browser you can take over.',
     icon: MessageSquare,
     href: `${docsUrl}#a-chat-app-built-for-agents`,
   },
