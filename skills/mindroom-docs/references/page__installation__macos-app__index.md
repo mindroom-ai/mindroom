@@ -60,6 +60,37 @@ The app opens at the first step that needs attention: **Install** when the runti
 These controls manage only this Mac's launchd service.
 **Service running** means the process is running; use Chat or the dashboard to confirm agents are ready.
 
+### Local AI Models
+
+In **Configure**, choose a model under **Run AI on this Mac** and click **Set Up Local Model**.
+The app includes a Metal-enabled llama.cpp server; no separate inference application is required.
+Setup downloads the model, displays download progress, loads it, and sets `models.default` to use the local server.
+The initial download requires internet, while subsequent inference uses cached model files on this Mac.
+Matrix chat and hosted pairing still require their configured network connection.
+
+The suggested Qwen 3.5 Q4_K_M models are conservative starting points based on total unified memory:
+
+| Unified memory | Suggested model | Approximate model download |
+| --- | --- | --- |
+| 8–15 GB | Qwen 3.5 2B | 1.5 GB |
+| 16–23 GB | Qwen 3.5 4B | 2.8 GB |
+| 24 GB or more | Qwen 3.5 9B | 5.7 GB |
+
+Local inference currently supports text and tool calls.
+Other apps and longer conversations consume additional memory; choose a smaller model when memory is tight.
+The server uses an 8,192-token context and loads at most one model at a time.
+It releases model memory after five minutes without requests and loads the model again when needed.
+Agents and the router using `default` follow the new selection; explicitly selected models and existing credentials are kept.
+Setup saves the original YAML as `config.yaml.before-local-model` and rewrites the active YAML without its comments.
+Configurations using `!include` require editing the model's source file manually; setup refuses to flatten them.
+
+**Stop Inference** releases the local inference service, and **Start Inference** starts it again.
+Agents configured to use it cannot answer while it is stopped.
+The service starts at login and continues after quitting the app.
+Its engine and model cache live in `~/Library/Application Support/MindRoom/inference`, with logs in `~/Library/Logs/mindroom/inference.log`.
+Its launchd label is `chat.mindroom.inference`, separate from the agent service.
+It listens only on `127.0.0.1:11435` and uses a generated local API key.
+
 ### Where Do My Agents Run?
 
 Your agents run on this Mac.

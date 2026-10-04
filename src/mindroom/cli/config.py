@@ -925,6 +925,24 @@ def validate_config_source_quiet(
     return _call_config_loader_quietly(validate)
 
 
+@config_app.command("use-local-model")
+def config_use_local_model(
+    model: str = typer.Option(..., help="Model ID served by the local inference engine."),
+    base_url: str = typer.Option(..., help="OpenAI-compatible local server URL."),
+    api_key: str = typer.Option(LOCAL_OPENAI_API_KEY_DEFAULT, help="Local server authentication key."),
+    path: Path | None = CONFIG_PATH_OPTION,
+) -> None:
+    """Use a local model as the default, keeping explicitly selected agent models.
+
+    A backup is saved before replacing YAML. Configurations composed with
+    !include must be edited in their authored source files instead.
+    """
+    # This module imports the CLI helpers above; defer it to avoid a circular import.
+    from mindroom.cli.local_model_config import apply_local_model  # noqa: PLC0415
+
+    apply_local_model(model=model, base_url=base_url, api_key=api_key, path=path)
+
+
 def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Return the providers with a model that has no credential of its own, so it needs the shared key."""
     # model_loading pulls in the Agno runtime, which CLI startup must not import.

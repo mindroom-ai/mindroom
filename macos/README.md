@@ -18,6 +18,22 @@ The menu app launches it as a foreground child and communicates only through inh
 Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
 
+## Local inference
+
+The Configure step includes **Set Up Local Model**, using a bundled llama.cpp Metal server and its built-in model download and cache APIs.
+Hardware recommendations choose Qwen 3.5 2B for 8 GB, 4B for 16 GB, and 9B for 24 GB or more, with Q4_K_M quantization and an 8,192-token context.
+The native controller copies the engine to Application Support and installs the independent `chat.mindroom.inference` launchd service, so inference survives app updates, moves, and quitting the app.
+The service binds to `127.0.0.1:11435`, authenticates with a generated key stored in a private file, loads at most one model, and sleeps after five idle minutes.
+Model downloads use llama.cpp's resumable Hugging Face cache; Cancel Setup stops downloading without replacing configuration.
+After loading succeeds, `mindroom config use-local-model` atomically sets the default provider and model, keeping explicit model selections and saving the original YAML backup.
+Included YAML configurations are refused rather than flattened; ordinary YAML comments are retained in the backup.
+See [the user guide](../docs/installation/macos-app.md#local-ai-models) for setup and storage paths.
+
+`bundle-llama-cpp.sh` downloads upstream build b11146 for arm64 and verifies its SHA-256 digest before extracting the server and dylibs.
+`build-macos-app.sh` signs those libraries and the server before signing the enclosing app.
+The upstream MIT license is included alongside the engine.
+No C++ compiler, Homebrew inference installation, or Ollama service is needed on the user's Mac.
+
 ## Local agents
 
 Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.
