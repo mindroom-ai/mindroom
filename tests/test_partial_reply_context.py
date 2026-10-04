@@ -566,6 +566,32 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == set()
         assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
+    @pytest.mark.parametrize("stream_status", [STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED])
+    def test_another_entitys_symbol_only_reply_is_read_and_recorded(self, stream_status: str) -> None:
+        """A reply made only of symbols is still content, unlike a placeholder."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+
+        unseen, _partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
+            [
+                _make_visible_message(
+                    event_id="e1",
+                    sender="@mindroom_other:localhost",
+                    body="✅",
+                    stream_status=stream_status,
+                ),
+            ],
+            "helper",
+            config,
+            runtime_paths,
+            seen_event_ids=set(),
+            current_event_id=None,
+            active_event_ids=set(),
+        )
+
+        assert [msg.body for msg in unseen] == ["✅"]
+        assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e1"]
+
     def test_another_entitys_streamed_text_is_recorded_as_consumed(self) -> None:
         """Text already read from another entity's unfinished reply stays traceable, so redacting that reply finds the run."""
         config = _make_config()

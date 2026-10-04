@@ -42,7 +42,13 @@ from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
+from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
+    TEAM_PROGRESS_PLACEHOLDER,
+    clean_partial_reply_text,
+    is_interrupted_partial_reply,
+    strip_visible_tool_markers,
+)
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
 
@@ -688,6 +694,18 @@ def _get_unseen_event_ids_for_metadata(
     return event_ids
 
 
+def _has_nothing_to_read(msg: ResolvedVisibleMessage) -> bool:
+    """Return whether one message is a lifecycle notice or a streamed reply that so far shows only its placeholder.
+
+    MindRoom redacts a placeholder that ends empty, so recording one as consumed would let that tidy-up remove
+    the history of whoever read it.
+    """
+    content = msg.content
+    if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
+        return True
+    return msg.stream_status is not None and msg.body.strip() in {PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER}
+
+
 def _get_unseen_messages_for_sender(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -703,16 +721,11 @@ def _get_unseen_messages_for_sender(
     for msg in thread_history:
         event_id = msg.event_id
         sender = msg.sender
-        content = msg.content
         if event_id and event_id in seen_event_ids:
             continue
         if current_event_id and event_id == current_event_id:
             continue
-        if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
-            continue
-        if msg.stream_status is not None and not _clean_partial_reply_body(msg.body):
-            # A streamed reply that shows only its placeholder or a status note has nothing to read, and a
-            # placeholder that ends empty is redacted, so recording it as consumed would let that remove history.
+        if _has_nothing_to_read(msg):
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(
@@ -722,6 +735,9 @@ def _get_unseen_messages_for_sender(
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
             if partial_kind is not None:
+                cleaned_body = _clean_partial_reply_body(msg.body)
+                if not cleaned_body:
+                    continue
                 partial_reply_kinds.add(partial_kind)
                 if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
                     in_progress_event_ids.add(event_id)
@@ -729,7 +745,7 @@ def _get_unseen_messages_for_sender(
                     replace_visible_message(
                         msg,
                         sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                        body=_clean_partial_reply_body(msg.body),
+                        body=cleaned_body,
                     ),
                 )
                 continue
