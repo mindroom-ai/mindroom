@@ -3652,7 +3652,7 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases or unusually large or deeply nested structures.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
 A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
 
 ## Installing and managing skills
@@ -5226,8 +5226,9 @@ A thread file is rewritten only when its content changed, so `exported_at` refle
 Size limits:
 
 - A thread file larger than 64 MiB or holding more than 250,000 YAML nodes, roughly 15,000 messages, is indexed without participants or last activity.
-- A thread whose messages together pass 128 MiB is not exported; the export reports it as failed and keeps any previous file for it.
+- A thread whose messages together pass 128 MiB, or whose file would pass 128 MiB, is not exported; the export reports it as failed and keeps any previous file for it.
 - A room whose thread files together pass 256 MiB gets an index of its most recently written threads only, listing the rest under `unindexed_files`, with a logged warning.
+- An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room.
 
 ## When Workspace Exports Update
 
@@ -10971,7 +10972,7 @@ todos:
 
 Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
 Outside Linux, workspace templates may only substitute `{{ NAME }}`.
-YAML aliases and collections nested more than 64 levels deep are refused.
+YAML aliases, `%TAG` directives, and collections nested more than 64 levels deep are refused.
 
 Workspace templates have these limits:
 
@@ -13432,7 +13433,7 @@ Reads of worker-controlled files are capped per surface.
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).
 Workspace todo templates have the size, render, and listing limits documented in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
 
-Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
+Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
 
 ## Hosted tenant isolation
 

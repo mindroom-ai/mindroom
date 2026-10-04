@@ -107,7 +107,7 @@ todos:
 
 Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
 Outside Linux, workspace templates may only substitute `{{ NAME }}`.
-YAML aliases and collections nested more than 64 levels deep are refused.
+YAML aliases, `%TAG` directives, and collections nested more than 64 levels deep are refused.
 
 Workspace templates have these limits:
 

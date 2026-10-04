@@ -79,7 +79,7 @@ Reads of worker-controlled files are capped per surface.
 Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).
 Workspace todo templates have the size, render, and listing limits documented in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
 
-Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
+Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, `%TAG` directives, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
 
 ## Hosted tenant isolation
 

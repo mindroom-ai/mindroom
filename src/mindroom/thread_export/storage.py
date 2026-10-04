@@ -35,9 +35,15 @@ _ROOT_MARKER_TEXT = '{"format":"mindroom-thread-exports","version":1}\n'
 _THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 _DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # `thread.exported_at` is the only two-space-indented exported_at key a dump writes; scalar continuations indent further.
-_EXPORTED_AT_LINE = re.compile(r"^  exported_at: .*$", re.MULTILINE)
+_EXPORTED_AT_LINE = re.compile(rb"^  exported_at: .*$", re.MULTILINE)
 # An unchanged file differs from a new export only in that line's timestamp, so the comparison reads at most this much more.
 _EXPORTED_AT_SLACK_BYTES = 64
+# libyaml escapes every character outside the Basic Multilingual Plane in ten bytes, so a thread file can be
+# two and a half times the message JSON the fetch guard counts; a larger file is refused before it is compared or written.
+_MAX_THREAD_FILE_BYTES = 2 * MAX_READ_BYTES
+# Worker code can replace index.json, and decoded JSON can take forty times its size in memory, so the drift check
+# reads at most this much and rebuilds a larger index; thousands of indexed threads take far less.
+_MAX_ROOM_INDEX_JSON_BYTES = 8 << 20
 # Worker code can add thread files to a room directory, and a rebuild parses each one under the process-wide export lock,
 # so one rebuild reads at most this much; four files at the read cap is far beyond an ordinary room.
 _MAX_ROOM_INDEX_BYTES = 256 << 20
@@ -329,7 +335,7 @@ def _claim_export_root(root_fd: int, output_dir: Path) -> None:
     if _has_valid_export_root_marker(root_fd):
         return
     if not os.listdir(root_fd):
-        _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT)
+        _atomic_write_at(root_fd, _ROOT_MARKER_FILENAME, _ROOT_MARKER_TEXT.encode("utf-8"))
         return
     logger.warning(
         "Refusing to mark populated thread export root",
@@ -419,17 +425,17 @@ def _fsync_directory_fd(directory_fd: int) -> None:
         os.fsync(directory_fd)
 
 
-def _read_text_at(directory_fd: int, filename: str, *, max_bytes: int = MAX_READ_BYTES) -> str | None:
+def _read_bytes_at(directory_fd: int, filename: str, *, max_bytes: int) -> bytes | None:
     """Read a regular file relative to a pinned directory through a capped no-follow open."""
     try:
-        return read_regular_file_within_root(directory_fd, filename, max_bytes=max_bytes).decode("utf-8")
+        return read_regular_file_within_root(directory_fd, filename, max_bytes=max_bytes)
     except (OSError, ValueError):
         return None
 
 
-def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:
-    """Publish UTF-8 text with the temporary naming scheme used by export cleanup."""
-    atomic_write_bytes_at(directory_fd, filename, text.encode("utf-8"), temp_prefix=f".{filename}.")
+def _atomic_write_at(directory_fd: int, filename: str, data: bytes) -> None:
+    """Publish bytes with the temporary naming scheme used by export cleanup."""
+    atomic_write_bytes_at(directory_fd, filename, data, temp_prefix=f".{filename}.")
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:
@@ -631,12 +637,13 @@ def _room_index_payload(room_fd: int, output_dir: Path, room: ThreadExportRoom) 
 
 def _declared_room_index_filenames(room_fd: int) -> set[str] | None:
     """Return the thread filename set the current room index indexed or left out for its read budget."""
-    text = _read_text_at(room_fd, _ROOM_INDEX_FILENAME)
-    if text is None:
+    data = _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=_MAX_ROOM_INDEX_JSON_BYTES)
+    if data is None:
         return None
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+        payload = json.loads(data)
+    except (RecursionError, ValueError):
+        # Invalid JSON or UTF-8 raises ValueError, and lists nested past the recursion limit raise RecursionError.
         return None
     if (
         not isinstance(payload, dict)
@@ -695,9 +702,10 @@ def write_room_index(
         if not thread_files_changed and _room_index_filename_set_matches(room_fd):
             return
         payload = _room_index_payload(room_fd, output_dir, room)
-        text = f"{json.dumps(payload, indent=2)}\n"
-        if _read_text_at(room_fd, _ROOM_INDEX_FILENAME) != text:
-            _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, text)
+        data = f"{json.dumps(payload, indent=2)}\n".encode()
+        # Only an index of the same size can be unchanged, so a larger one is replaced without being read.
+        if _read_bytes_at(room_fd, _ROOM_INDEX_FILENAME, max_bytes=len(data)) != data:
+            _atomic_write_at(room_fd, _ROOM_INDEX_FILENAME, data)
     finally:
         os.close(room_fd)
 
@@ -932,9 +940,14 @@ def clear_thread_export_root(
         os.close(root_fd)
 
 
-def _without_exported_at(text: str) -> str:
-    """Return serialized thread YAML without its per-pass exported_at line."""
-    return _EXPORTED_AT_LINE.sub("", text, count=1)
+def _differs_only_in_exported_at(existing: bytes, data: bytes) -> bool:
+    """Return whether two serialized threads match outside their per-pass exported_at lines, without copying either."""
+    old = _EXPORTED_AT_LINE.search(existing)
+    new = _EXPORTED_AT_LINE.search(data)
+    if old is None or new is None:
+        return existing == data
+    old_view, new_view = memoryview(existing), memoryview(data)
+    return old_view[: old.start()] == new_view[: new.start()] and old_view[old.end() :] == new_view[new.end() :]
 
 
 @_serialized_export_mutation
@@ -947,6 +960,10 @@ def write_thread_payload(
     trusted_root: Path | None = None,
 ) -> bool:
     """Write one thread payload when changed and return whether bytes were replaced."""
+    data = yaml_io.safe_dump(payload, default_flow_style=False, sort_keys=False, allow_unicode=True, encoding="utf-8")
+    if len(data) > _MAX_THREAD_FILE_BYTES:
+        msg = f"Thread {thread_id} is too large to export: its file passes {_MAX_THREAD_FILE_BYTES >> 20} MiB"
+        raise RuntimeError(msg)
     root_fd = _open_owned_export_root(
         output_dir,
         create=True,
@@ -964,19 +981,12 @@ def write_thread_payload(
         raise RuntimeError(msg)
     try:
         filename = f"{_safe_path_segment(thread_id)}.yaml"
-        text = yaml_io.safe_dump(
-            payload,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-        # Compare text rather than parse it, so even a thread too long for the bounded parser is not rewritten unchanged.
+        # Compare bytes rather than parse them, so even a thread too long for the bounded parser is not rewritten unchanged.
         # A larger existing file has changed, so the read stops just past the new export's size, even above the read cap.
-        max_bytes = len(text.encode("utf-8")) + _EXPORTED_AT_SLACK_BYTES
-        existing = _read_text_at(room_fd, filename, max_bytes=max_bytes)
-        if existing is not None and _without_exported_at(existing) == _without_exported_at(text):
+        existing = _read_bytes_at(room_fd, filename, max_bytes=len(data) + _EXPORTED_AT_SLACK_BYTES)
+        if existing is not None and _differs_only_in_exported_at(existing, data):
             return False
-        _atomic_write_at(room_fd, filename, text)
+        _atomic_write_at(room_fd, filename, data)
         return True
     finally:
         os.close(room_fd)
