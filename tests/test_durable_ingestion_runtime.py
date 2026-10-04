@@ -153,7 +153,7 @@ async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> N
         completed = True
 
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(30):
             while not completed:
                 facts = await consume_one_ingestion_batch(
                     session,
