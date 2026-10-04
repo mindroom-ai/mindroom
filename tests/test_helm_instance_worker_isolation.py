@@ -2384,7 +2384,10 @@ def test_chart_progress_deadline_is_optional(
 
 
 @_PROGRESS_DEADLINE_CHARTS
-@pytest.mark.parametrize("deadline", [0, -1, 1.5, "abc", True, "", 2147483648, 999999999999999999999999])
+@pytest.mark.parametrize(
+    "deadline",
+    [0, -1, 1.5, "abc", True, "", 2147483648, 99999999999999999999, 999999999999999999999999],
+)
 @pytest.mark.parametrize("from_values_file", [False, True])
 def test_chart_rejects_invalid_progress_deadline(
     tmp_path: Path,
