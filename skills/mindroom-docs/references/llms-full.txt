@@ -128,6 +128,58 @@ Each video comes in a light and a dark recording to match your color scheme.
       <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4" type="video/mp4">
     </video>
 
+## Canvases
+
+Agents can show a page they made beside the conversation and act on what you pick in it.
+See [Interactive Canvases](https://docs.mindroom.chat/canvases/).
+
+=== "Overview · 27 s"
+
+    A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
+
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    </video>
+
+=== "Scheduling"
+
+    A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    </video>
+
+=== "Data"
+
+    An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    </video>
+
+=== "Slides"
+
+    A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    </video>
+
+=== "Trip planner"
+
+    One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
+
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    </video>
+
 ## At work
 
 ### Ask, approve, done
@@ -4076,6 +4128,11 @@ See [Cancellation and Errors](https://docs.mindroom.chat/streaming/#cancellation
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
+</video>
+
 
 
 ## How It Works
@@ -4848,6 +4905,53 @@ Only human users can answer; reactions and messages from agents are ignored.
 An agent can show the user a web page it wrote, such as a dashboard, report, slide deck, form, or picker, in the Canvas panel beside the conversation in MindRoom Chat.
 The user can work in the page and send an answer, which reaches the agent as the user's next message.
 Use a canvas when seeing or clicking beats reading or typing; for a quick choice between a few options, a plain reply or an [interactive question](https://docs.mindroom.chat/interactive/) is simpler.
+
+=== "Overview · 27 s"
+
+    A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
+
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    </video>
+
+=== "Scheduling"
+
+    A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    </video>
+
+=== "Data"
+
+    An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    </video>
+
+=== "Slides"
+
+    A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    </video>
+
+=== "Trip planner"
+
+    One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
+
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    </video>
 
 ## Turn canvases on
 
@@ -15655,7 +15759,7 @@ Its `env` value is a map with `extra` and `envFrom`, not a list of environment v
 The hosted instance chart instead mounts provider keys as files under `/etc/secrets/` and sets the matching [`*_API_KEY_FILE`](https://docs.mindroom.chat/configuration/models/#file-based-secrets) variables.
 
 For passwordless agent accounts ([`appservice` mode](https://docs.mindroom.chat/matrix/#agent-users)), set `matrix.managedAccountAuth: appservice` and point `matrix.appserviceToken` at a Secret holding the registration's `as_token`, and leave `matrix.registrationToken` unset (see [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication)).
-On the Tuwunel chart, mount the complete registration YAML from a Secret through `tuwunel.appserviceRegistration`, whose `key` is also the mounted filename and must end in `.yaml` or `.yml`, and optionally disable password login with `login_with_password = false` in `tuwunel.extraConfig` (see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts)).
+On the Tuwunel chart, mount the complete registration YAML from a Secret through `tuwunel.appserviceRegistration`, whose `key` is also the mounted filename and must end in `.yaml` or `.yml`, and optionally disable password login with `login_with_password: false` in `tuwunel.settings` (see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts)).
 
 ### Chart Reference
 
@@ -15665,7 +15769,7 @@ Optional features:
 - [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](https://docs.mindroom.chat/tools/background-scripts/).
 - [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
 - [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
-- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) gives workers human-approved temporary hostname grants.
 - [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
 - Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
@@ -16475,7 +16579,8 @@ Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring without
 Set allowlist entries in `approvedEgress.allowlist.domains`, or provide them in `approvedEgress.allowlist.existingConfigMap` under the key named by `approvedEgress.allowlist.key` (default `allowed-domains.txt`); you cannot set both.
 A plain hostname matches exactly, and a leading dot such as `.docs.example.com` matches the domain and all its subdomains.
 Allowlisted hostnames never need approval.
-The proxy and MindRoom read the allowlist only at startup; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) describes which allowlist changes roll the proxy and when to restart it or MindRoom.
+Changing `approvedEgress.allowlist.domains` restarts the proxy automatically when you apply the chart, but edits to an `existingConfigMap` reach the proxy only after you restart it.
+MindRoom keeps the allowlist it started with until its own pod restarts, so until then a removed domain is still reported as allowed and gets no grant; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) names the Deployments to restart.
 
 ## Requesting Access
 
@@ -16598,7 +16703,7 @@ approvedEgress:
 
 Entries match like allowlist entries: exact hostnames, or a leading dot for a domain and its subdomains.
 Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
-Bypassed destinations still need an allowlist match or grant, and changing the list restarts the proxy automatically.
+Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
 Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
 The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.
@@ -17019,7 +17124,7 @@ A source-only result does not prove that the runtime applies every changed setti
 The command only reads both trees, rejects symlinks and special files, and lists paths but never file contents.
 
 JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
-Exit codes are `0` when every difference is a source change (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
+Exit codes are `0` when every difference is a source change (including no difference), `1` for other changes, and `2` when either tree cannot be classified, printed as `{"status": "failed", "detail": ...}` with `--json`.
 
 ## config apply-bundle
 

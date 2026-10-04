@@ -39,6 +39,58 @@ Each video comes in a light and a dark recording to match your color scheme.
       <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4" type="video/mp4">
     </video>
 
+## Canvases
+
+Agents can show a page they made beside the conversation and act on what you pick in it.
+See [Interactive Canvases](https://docs.mindroom.chat/canvases/).
+
+=== "Overview · 27 s"
+
+    A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
+
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    </video>
+
+=== "Scheduling"
+
+    A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    </video>
+
+=== "Data"
+
+    An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    </video>
+
+=== "Slides"
+
+    A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    </video>
+
+=== "Trip planner"
+
+    One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
+
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    </video>
+
 ## At work
 
 ### Ask, approve, done
