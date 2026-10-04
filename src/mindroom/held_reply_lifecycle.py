@@ -167,6 +167,11 @@ class HeldReplyLifecycle:
                 else ended_edit(continued, cancel_source=final_outcome.resolved_cancel_source or "interrupted"),
             )
 
+    async def released(self, hold: HeldReply) -> bool:
+        """Whether a hold is gone, such as after a Stop released its message before a turn on it could be stopped."""
+        saved = await self.store.load(hold.key.hold_id)
+        return saved is None or saved.generation != hold.generation
+
     async def on_message(self, message_id: str | None) -> HeldReply | None:
         """Return the hold one of this entity's messages carries; only an instance running background jobs has any."""
         if message_id is None or get_background_runtime(self.runtime_paths) is None:

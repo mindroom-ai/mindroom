@@ -17,6 +17,7 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.orchestration.runtime import cancel_failure_reason
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.stop import StopManager
@@ -920,3 +921,53 @@ async def test_attempt_reuses_and_keeps_a_held_message_stop_button(*, keep: bool
             event_id="$button",
             reason="Response completed",
         )
+
+
+@pytest.mark.asyncio
+async def test_attempt_stops_when_a_stop_released_its_hold_before_it_could_be_stopped() -> None:
+    """A Stop that released the message before the turn on it was tracked stops that turn once it is."""
+    manager = StopManager()
+    manager.add_stop_button = AsyncMock()  # type: ignore[method-assign]
+    started = asyncio.Event()
+    reasons: list[str] = []
+
+    async def response(_message_id: str | None) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    runner = ResponseAttemptRunner(
+        ResponseAttemptDeps(
+            client=MagicMock(),
+            stop_manager=manager,
+            logger=MagicMock(),
+            show_stop_button=lambda: False,
+            config=MagicMock(),
+        ),
+    )
+    await asyncio.wait_for(
+        runner.run(
+            ResponseAttemptRequest(
+                target=_target(thread_id=_THREAD),
+                response_function=response,
+                existing_event_id="$reply",
+                on_cancelled=reasons.append,
+                released_before_start=AsyncMock(return_value=True),
+            ),
+        ),
+        JOB_TEST_TIMEOUT,
+    )
+    for task in manager.cleanup_tasks:
+        task.cancel()
+    assert reasons == [cancel_failure_reason("user_stop")]
+
+
+@pytest.mark.asyncio
+async def test_a_hold_a_stop_deleted_is_released(held: _Held) -> None:
+    """A turn tells a hold a Stop deleted from one it still owns, generation by generation."""
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    assert not await held.runner.held_messages.released(hold)
+    assert await held.runner.held_messages.released(replace(hold, generation="older"))
+    await held.runner.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation)
+    assert await held.runner.held_messages.released(hold)

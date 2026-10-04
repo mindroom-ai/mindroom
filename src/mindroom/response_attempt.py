@@ -17,7 +17,7 @@ from mindroom.orchestration.runtime import cancel_failure_reason, classify_cance
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import nio
     import structlog
@@ -56,6 +56,8 @@ class ResponseAttemptRequest:
     stop_button_event_id: str | None = None
     # Asked once the attempt ends, with the button it shows; True keeps the button for a message that goes on holding.
     keep_stop_button: Callable[[str | None], bool] | None = None
+    # Asked once the attempt can be stopped; True when a Stop released the held message it runs on before then.
+    released_before_start: Callable[[], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,12 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
+    async def _stop_if_released_before_start(self, request: ResponseAttemptRequest, task: asyncio.Task[None]) -> None:
+        """Stop an attempt whose held message a Stop released before the attempt could be stopped."""
+        if request.released_before_start is not None and await request.released_before_start():
+            # That Stop found no turn to stop, so it stops this one now that it can be.
+            self.deps.stop_manager.request_task_stop(task)
+
     async def run(self, request: ResponseAttemptRequest) -> _MatrixEventId | None:
         """Run one response coroutine under visible message tracking."""
         with bound_log_context(**request.target.log_context):
@@ -180,6 +188,7 @@ class ResponseAttemptRunner:
             )
 
             try:
+                await self._stop_if_released_before_start(request, task)
                 if message_id is not None:
                     show_stop_button = await self._show_stop_button(request, message_id)
                 await asyncio.shield(task)

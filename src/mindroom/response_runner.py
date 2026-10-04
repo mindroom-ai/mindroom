@@ -4230,6 +4230,7 @@ class ResponseRunner:
                     show_stop_button=not _is_silent_schedule_response(request),
                     stop_button_event_id=held.stop_button_event_id if held is not None else None,
                     keep_stop_button=keep_stop_button,
+                    released_before_start=None if held is None else partial(self.held_messages.released, held),
                 )
         except ResponsePausedForApproval as error:
             if approval_suspension_handler is None:
@@ -5068,6 +5069,7 @@ class ResponseRunner:
         show_stop_button: bool = True,
         stop_button_event_id: str | None = None,
         keep_stop_button: Callable[[str | None], bool] | None = None,
+        released_before_start: Callable[[], Awaitable[bool]] | None = None,
     ) -> _MatrixEventId | None:
         """Run one response-generation attempt with cancellation support."""
         return await ResponseAttemptRunner(
@@ -5088,6 +5090,7 @@ class ResponseRunner:
                 on_cancelled=on_cancelled,
                 stop_button_event_id=stop_button_event_id,
                 keep_stop_button=keep_stop_button,
+                released_before_start=released_before_start,
             ),
         )
 
