@@ -122,7 +122,7 @@ A source-only result does not prove that the runtime applies every changed setti
 The command only reads both trees, rejects symlinks and special files, and lists paths but never file contents.
 
 JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
-Exit codes are `0` when every difference is a source change (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
+Exit codes are `0` when every difference is a source change (including no difference), `1` for other changes, and `2` when either tree cannot be classified, printed as `{"status": "failed", "detail": ...}` with `--json`.
 
 ## config apply-bundle
 

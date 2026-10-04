@@ -98,9 +98,9 @@ config:
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
-  # Optional native initialize-only installation before run, sourced from one contentBundles entry.
-  # Requires source: file and path inside its own directory below storage.mountPath.
-  # The source and revision derive from the bundle's targetPath, subPath, and image digest; see "Content Bundles" in the README.
+  # Optional native installation before run from one contentBundles entry, whose image digest, sourcePath, and subPath set the revision.
+  # Like bootstrapBundlePath, requires source: file, path in its own directory below storage.mountPath, and workers.backend other than
+  # the default static_runner. The bundle must keep overwrite enabled, with no seed or volumeMounts; see "Content Bundles" in the README.
   bootstrapContentBundle:
     # contentBundles[].name to bootstrap from.
     name: ""
@@ -538,6 +538,8 @@ workers:
             drop:
               - ALL
         resources: {}
+        podAnnotations: {}
+        podLabels: {}
         # NetworkPolicy admitting only in-chart vault clients and limiting egress to DNS, TCP 80/443, and
         # enabled SMTP; see "Agent Vault Server NetworkPolicy" in the README.
         networkPolicy:

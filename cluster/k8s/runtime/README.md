@@ -362,17 +362,15 @@ The restart path ships any change, including `.env`, plugins, and other files a 
 A candidate that fails validation, or an active tree edited outside the installer, for example by a dashboard save, stops startup with `Bundle initialization failed` and leaves the active tree unchanged; pin the previous digest to start again.
 
 The hot path applies changes limited to the YAML/include sources without a restart.
-Copy the candidate tree, the bundle directory that `subPath` selects, into the running pod, check it, install it, and wait for the runtime to apply it:
+Copy the candidate tree, the bundle directory that `subPath` selects, into the running pod, then install it and wait for the runtime to apply it:
 
 ```bash
 pod=$(kubectl -n mindroom get pods -l app.kubernetes.io/instance=mindroom-runtime,app.kubernetes.io/component=runtime -o jsonpath='{.items[0].metadata.name}')
 kubectl -n mindroom exec "$pod" -c mindroom -- rm -rf /app/agent_data/config-candidate
 kubectl -n mindroom cp ./environments/prod "$pod:/app/agent_data/config-candidate" -c mindroom
-kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config classify-change /app/agent_data/active-config /app/agent_data/config-candidate
 kubectl -n mindroom exec "$pod" -c mindroom -- mindroom config apply-bundle /app/agent_data/config-candidate --target /app/agent_data/active-config --rollback-on-failure --json
 ```
 
-`classify-change` exits `1` when the change also touches other files, which need the restart path, and `apply-bundle` refuses such a candidate too.
 A hot install keeps the stored revision, so restarts preserve it until the next bundle digest replaces the tree; ship the same change in that image.
 
 ## Provider API Keys from Kubernetes Secrets
@@ -684,7 +682,8 @@ Workers are matched like the worker NetworkPolicy and the runtime's own worker l
 The selector matches any worker pod that carries all of those labels, so releases that share a worker namespace must each set a different value for the same `workers.kubernetes.extraLabels` key, for example `mindroom.ai/instance`.
 If one release's `extraLabels` are empty or a subset of another release's, its vault also admits the other release's workers.
 Ingress to the proxy port (`server.mitmPort`) is limited to the approved egress proxy when `approvedEgress.parentProxy.enabled` is true, or to dedicated workers when `approvedEgress` is disabled and workers use `agentVault.proxyUrl` directly.
-Egress is limited to DNS, TCP `80` and `443` for proxied upstreams and OAuth providers, and `server.smtp.port` when SMTP is enabled.
+Egress is limited to DNS, TCP `80` and `443` for proxied upstreams and OAuth providers, and `server.smtp.port` when SMTP is enabled; the TCP ports are open to any address.
+When `egressProxy` or `approvedEgress` is enabled with `egressProxy.networkPolicy.create` (the default), vault DNS is limited to the same `egressProxy.networkPolicy.dns` destinations as worker DNS (default kube-dns in `kube-system`), and otherwise to port 53 on any address.
 Kubelet health probes are unaffected.
 
 Clients the chart does not render, such as an SSO proxy in front of the vault UI or an ingress controller, need `server.networkPolicy.extraIngress`.
@@ -896,7 +895,7 @@ workers:
 - Containers that run the runtime image default to `securityContext.runAsNonRoot: true`, which the kubelet enforces against the image's numeric uid 1000.
   The chart-managed Agent Vault server defaults to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
   A custom image that runs as root, or an Agent Vault image with a different uid, needs matching `securityContext` overrides.
-  The state-storage init container still runs as root for `chown` and `chmod`, and content bundles and user-supplied containers keep their own security contexts.
+  The state-storage init container still runs as root for `chown` and `chmod`, the Agent Vault bootstrap Job sets no security context on its containers, and content bundles, the event journal PostgreSQL, and user-supplied containers use the security contexts you set for them.
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.

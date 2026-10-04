@@ -59,8 +59,8 @@ tuwunel:
   appserviceRegistration:
     existingSecret: matrix-appservice
     key: registration.yaml
-  extraConfig: |
-    login_with_password = false
+  settings:
+    login_with_password: false
 ```
 
 The registration should use `url: null`, a dedicated `as_token`, and an exclusive anchored user namespace that matches only MindRoom-managed accounts.
@@ -124,6 +124,7 @@ config:
 ```
 
 The Secret mounts from `tuwunel.registrationToken`, `tuwunel.oidc`, and `tuwunel.appserviceRegistration` still apply, so a custom config can reference the chart's standard secret file paths from the table above.
+`tuwunel.settings` and `tuwunel.extraConfig` apply only to the chart-rendered config, so the chart rejects them together with `config.existingConfigMap`.
 Config changes in an existing ConfigMap do not roll the pod automatically; restart the Deployment or annotate the pod template yourself.
 
 ## Pairing With mindroom-runtime
@@ -260,5 +261,5 @@ Writes accepted after the snapshot are lost.
 - The image defaults to the fork's `latest` tag with `pullPolicy: Always`; pin `image.tag` or `image.digest` for reproducible production deployments.
 - The MindRoom fork's compact-edit collapsing for streaming responses is enabled by default; set `tuwunel.compactEdits: false` to disable it.
 - The release image runs Tuwunel as root, so the chart sets no restrictive container security context by default; tighten `podSecurityContext` and `securityContext` to match your policy.
-- Any Tuwunel option without a dedicated value can be set through `tuwunel.settings`, `tuwunel.extraConfig` (raw TOML in `[global]`), or `TUWUNEL_*` environment overrides in `env.extra`.
+- Set Tuwunel options without a dedicated value through [`tuwunel.settings`](#structured-settings), or `tuwunel.extraConfig` for arrays of tables; a `TUWUNEL_*` environment override in `env.extra` takes precedence over the same option in `tuwunel.toml`.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector, and `storage.existingClaim` when adopting an existing data PVC.
