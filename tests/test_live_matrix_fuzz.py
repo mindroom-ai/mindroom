@@ -2328,6 +2328,8 @@ def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_resp
         }
         assert config["agents"]["general"]["model"] == "synthetic"
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+        # The managed sender is an agent, so every workload root counts toward the consecutive agent-reply limit.
+        assert config["defaults"]["max_consecutive_agent_replies"] > 200
         assert config["models"]["synthetic"]["extra_kwargs"] == {
             "seed": 1,
             "min_response_chars": 4800,
@@ -5363,6 +5365,43 @@ def _threaded_reply_event(
 
 
 @pytest.mark.asyncio
+async def test_reply_to_a_redacted_threaded_parent_keeps_the_thread_the_parent_had() -> None:
+    """Redaction strips a parent's thread relation, so the audit uses the relation it had before."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    try:
+        oracle.expect("op:1", "$source")
+        parent = _agent_reply_event("$root", "$parent", "Thinking...")
+        oracle._ingest_event(parent)
+        redacted_parent = {**parent, "content": {}, "unsigned": {"redacted_because": {"event_id": "$redaction"}}}
+        source = {
+            "event_id": "$source",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 50,
+            "content": {"body": "plain reply", "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}}},
+        }
+        reply = _threaded_reply_event(
+            sender="@agent:example",
+            event_id="$reply",
+            thread_root="$root",
+            in_reply_to="$source",
+            body="LIVE-FUZZ call=1 END call=1",
+        )
+        events = {"$parent": redacted_parent, "$source": source, "$reply": reply}
+
+        assert auditor._canonical_agent_replies(events)["$source"] == {"$reply"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_final_state_auditor_flags_incomplete_final_bodies() -> None:
     """An interrupted terminal note must fail the completed-stream audit."""
     client = LiveMatrixClient("http://matrix.invalid", "!room:example")
@@ -5701,6 +5740,11 @@ async def test_final_state_auditor_rejects_reply_outside_source_thread(
 def test_body_call_id_parses_only_canonical_prefixes() -> None:
     """Call IDs come only from exact stub-format bodies."""
     assert _body_call_id("LIVE-FUZZ call=17 segment-000 END call=17") == 17
+    # A reply continued in place after a restart belongs to its newest attempt's call.
+    continued = (
+        f"LIVE-FUZZ call=172\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nLIVE-FUZZ call=175 segment-000 END call=175"
+    )
+    assert _body_call_id(continued) == 175
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
 
@@ -9543,6 +9587,118 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source(monkeypat
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=3)
     assert runner._pending_edit_markers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["tombstoned_before_cleanup_finished", "declined"])
+async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    cause: str,
+) -> None:
+    """An edit of a redacted or superseded source can change no reply, so the checkpoint stops waiting for one."""
+    runner = _temporal_revision_runner()
+    runner._pending_edit_markers = {"$root": {"$edit": _source_marker("root:10", "edit:15")}}
+    if cause == "declined":
+        runner.oracle.declined_edit_sources = frozenset({"$root"})
+    else:
+        runner.oracle._ledger_records["$root"] = TurnRecord.create(
+            source_event_ids=("$root",),
+            completed=False,
+            redacted_source_event_ids=("$root",),
+            pending_redaction_cleanup_event_ids=("$root",),
+        )
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
+    assert runner._pending_edit_markers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("journal_event_states", "released"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$root": "settled"}, False),
+    ],
+    ids=["seen_only_deleted", "redaction_unsettled", "source_admitted"],
+)
+async def test_chaos_checkpoint_releases_tombstone_for_source_mindroom_only_saw_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    journal_event_states: dict[str, str],
+    released: bool,
+) -> None:
+    """A source redacted before MindRoom read it never starts a turn, so its settled redaction is the whole effect."""
+    runner = _temporal_revision_runner()
+    runner._pending_source_tombstones = {"$root"}
+    runner.redacted_targets = {"$root": "$redaction"}
+    runner.oracle.journal_event_states = journal_event_states
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    if released:
+        await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
+        assert runner._pending_source_tombstones == set()
+    else:
+        with pytest.raises(AssertionError, match="timed out waiting for mutation effects"):
+            await runner._wait_for_pending_mutation_effects(deadline_seconds=0.05, batch_index=4)
+
+
+def test_runner_settles_edit_debts_whenever_the_oracle_refreshes_its_ledger() -> None:
+    """A reply wait refreshes the ledger, so it must also settle edit debts that block supersession proofs."""
+    stack = ManagedTuwunelStack()
+    try:
+        client = Mock(spec=LiveMatrixClient)
+        runner = LiveFuzzRunner(
+            stack,
+            (client,),
+            live_scenario_from_seed(1, steps=4, thread_count=2),
+            reply_timeout=1.0,
+            settle_seconds=0.0,
+        )
+        assert runner.oracle.after_ledger_refresh == runner._reconcile_edit_debts
+    finally:
+        stack.close()
+
+
+def test_cold_restart_resets_only_durable_nio_stores(tmp_path: Path) -> None:
+    """An account store without durable ingestion tables has no sync cursor to reset."""
+    keys = tmp_path / "encryption_keys"
+    (keys / "agent").mkdir(parents=True)
+    (keys / "user").mkdir()
+    durable = keys / "agent" / "agent.db"
+    with closing(sqlite3.connect(durable)) as database:
+        database.executescript(
+            "CREATE TABLE NioDurableMeta (id INTEGER PRIMARY KEY, cursor TEXT);"
+            "INSERT INTO NioDurableMeta VALUES (1, 'since');"
+            "CREATE TABLE NioDurableInput (id INTEGER PRIMARY KEY);"
+            "CREATE TABLE NioDurableBatch (sequence INTEGER PRIMARY KEY);",
+        )
+    with closing(sqlite3.connect(keys / "user" / "user.db")) as database:
+        database.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
+
+    assert live_fuzz._durable_store_paths(tmp_path) == (durable,)
+    live_fuzz._reset_durable_sync_cursors(tmp_path)
+    with closing(sqlite3.connect(durable)) as database:
+        assert database.execute("SELECT cursor FROM NioDurableMeta").fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    ("journal_event_states", "seen_only_deleted"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$source": "settled"}, False),
+        ({}, False),
+    ],
+    ids=["settled_unadmitted", "redaction_unsettled", "source_admitted", "redaction_unseen"],
+)
+def test_oracle_knows_a_source_mindroom_only_saw_deleted(
+    journal_event_states: dict[str, str],
+    seen_only_deleted: bool,
+) -> None:
+    """Only a settled redaction of a source MindRoom never journaled proves it saw the source already deleted."""
+    oracle = ExactReplyOracle(Mock(spec=LiveMatrixClient), "@agent:example")
+    oracle.journal_event_states = journal_event_states
+
+    assert oracle.saw_only_deleted("$source", "$redaction") is seen_only_deleted
 
 
 @pytest.mark.asyncio

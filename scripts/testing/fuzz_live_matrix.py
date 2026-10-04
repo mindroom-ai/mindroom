@@ -3874,6 +3874,9 @@ class ManagedTuwunelStack:
             config["agents"][AGENT_NAME]["model"] = "synthetic"
             config["agents"][AGENT_NAME]["tools"] = ["shell"]
             config["agents"][AGENT_NAME]["worker_tools"] = []
+            # The managed load sender is an agent, so without this its workload roots would stop
+            # waking the responder once they reach the consecutive agent-reply limit.
+            cast("dict[str, Any]", config["defaults"])["max_consecutive_agent_replies"] = 1_000_000
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
                 "role": "Author deterministic managed-load workload roots.",
@@ -4855,6 +4858,13 @@ class ExactReplyOracle:
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
+        # Sources whose pending edits MindRoom settled without anything to regenerate.
+        self.declined_edit_sources: frozenset[str] = frozenset()
+        # Admission state of every event MindRoom's agent principal journaled.
+        self.journal_event_states: Mapping[str, str] = {}
+        # Settles the runner's edit debts from each refreshed ledger view, so a reply
+        # wait can see the debts that block a supersession proof clear.
+        self.after_ledger_refresh: Callable[[], None] | None = None
         self.supersession_proofs: dict[str, SupersessionProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.next_batch: str | None = None
@@ -4927,6 +4937,8 @@ class ExactReplyOracle:
             return
         self._ledger_read_at = now
         self.supersession_proofs = {}
+        self.declined_edit_sources = frozenset()
+        self.journal_event_states = {}
         if self.log_path is None:
             self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
         else:
@@ -4948,17 +4960,34 @@ class ExactReplyOracle:
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
+                self.declined_edit_sources = frozenset()
+                self.journal_event_states = {}
                 self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
             for event_id, record in self._ledger_observations.items()
             if record.completed or not record.replay_source_event_ids
         }
+        if self.after_ledger_refresh is not None:
+            self.after_ledger_refresh()
 
     def ledger_response(self, event_id: str) -> str | None:
         """Return the durable response one source's completed record attributes."""
         record = self._ledger_records.get(event_id)
         return record.response_event_id if record is not None else None
+
+    def saw_only_deleted(self, source_event_id: str, redaction_event_id: str | None) -> bool:
+        """Return whether MindRoom settled a redaction of a source it never journaled.
+
+        MindRoom reads each room in order, so it only ever saw that source already
+        deleted, started no turn for it, and owes it no tombstone.
+        """
+        states = self.journal_event_states
+        return (
+            source_event_id not in states
+            and redaction_event_id is not None
+            and states.get(redaction_event_id) == "settled"
+        )
 
     def source_tombstoned(self, event_id: str) -> bool:
         """Return whether one source has its exact durable redaction tombstone."""
@@ -5591,7 +5620,8 @@ def _final_attempt_body(body: str) -> str:
 
 
 def _body_call_id(body: str) -> int | None:
-    """Parse the model call ID a completed response body must embed."""
+    """Parse the model call ID a completed response body must embed, from its newest attempt."""
+    body = _final_attempt_body(body)
     if not body.startswith(_CALL_ID_PREFIX):
         return None
     digits = body[len(_CALL_ID_PREFIX) :].split(" ", 1)[0]
@@ -5777,6 +5807,18 @@ class FinalStateAuditor:
         assert self.ledger_path is not None
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
+        self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
+        # A message MindRoom never answered, such as one it superseded, has no reply to
+        # regenerate, so MindRoom settles each edit of it without any visible effect.
+        self.oracle.declined_edit_sources = frozenset(
+            source
+            for source, edits in self.pending_edit_markers.items()
+            if source not in snapshot.records
+            and all(
+                (row := snapshot.sources.get(event_id)) is not None and row.state == "settled"
+                for event_id in (source, *edits)
+            )
+        )
         # Final audit already validated this view; live polling must validate
         # with the same retained ancestry before joining durable ownership.
         replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
@@ -5902,7 +5944,7 @@ class FinalStateAuditor:
                 for delivery in snapshot.pending_deliveries
             )
             or not all(self._journal_source_matches(item, events, root) for item in (row, next_row))
-            or self.pending_edit_markers.get(source)
+            or (self.pending_edit_markers.get(source) and source not in self.oracle.declined_edit_sources)
             or self.pending_edit_markers.get(newer)
         ):
             return None
@@ -5998,7 +6040,12 @@ class FinalStateAuditor:
                         f"record {event_id!r} is incomplete without exact supersession proof",
                         strict=True,
                     )
-            redacted_sources = set(redacted) & set(self.oracle.expected_sources)
+            # A source MindRoom only ever saw deleted started no turn, so it has no tombstone to audit.
+            redacted_sources = {
+                source
+                for source in set(redacted) & set(self.oracle.expected_sources)
+                if not self.oracle.saw_only_deleted(source, redacted[source] or None)
+            }
             ledger_metrics = self._assert_ledger_attribution(
                 replies,
                 records=records,
@@ -6010,7 +6057,7 @@ class FinalStateAuditor:
                 redacted_source_event_ids=redacted_sources,
                 redacted_targets=redacted,
             )
-            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records))
+            ledger_metrics.update(self._assert_redaction_cleanup_probes(events, records, redacted_targets=redacted))
         else:
             self._assert_direct_reply_model_sources(events, replies)
         return {
@@ -6023,10 +6070,12 @@ class FinalStateAuditor:
             **ledger_metrics,
         }
 
-    def _assert_redaction_cleanup_probes(
+    def _assert_redaction_cleanup_probes(  # noqa: C901
         self,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, TurnRecord],
+        *,
+        redacted_targets: Mapping[str, str] | None = None,
     ) -> dict[str, int]:
         """Dedicated probes owe responses; ordinary sources retain their own terminal contract."""
         uncovered = 0
@@ -6055,6 +6104,10 @@ class FinalStateAuditor:
             if call_id is not None:
                 calls.add(call_id)
             for source_id in source_ids:
+                redaction_event_id = (redacted_targets or {}).get(source_id)
+                # A source MindRoom only ever saw deleted started no turn, so there is nothing to clean up.
+                if redaction_event_id and self.oracle.saw_only_deleted(source_id, redaction_event_id):
+                    continue
                 tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
                 is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
                 # Edit acknowledgement is monotonic before model admission.
@@ -6260,16 +6313,19 @@ class FinalStateAuditor:
             raise AssertionError(msg)
         return replies
 
-    @classmethod
     def _source_thread_root(
-        cls,
+        self,
         event_id: str,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, _SentRecord],
         *,
         seen: set[str],
     ) -> str | None:
-        """Resolve one source's canonical thread root through reply ancestry."""
+        """Resolve one source's canonical thread root through reply ancestry.
+
+        A redaction strips an ancestor's relation, so a redacted ancestor keeps the
+        relation the oracle saw while it was live, which is what MindRoom resolved.
+        """
         if event_id in seen:
             return None
         seen.add(event_id)
@@ -6279,6 +6335,9 @@ class FinalStateAuditor:
         if not isinstance(content, dict):
             return None
         relation = content.get("m.relates_to")
+        unsigned = event.get("unsigned")
+        if relation is None and isinstance(unsigned, dict) and unsigned.get("redacted_because"):
+            relation = self.oracle.event_summaries.get(event_id, {}).get("relates_to")
         if not isinstance(relation, dict):
             return event_id
         root = relation.get("event_id")
@@ -6287,7 +6346,7 @@ class FinalStateAuditor:
         reply = relation.get("m.in_reply_to")
         target = reply.get("event_id") if isinstance(reply, dict) else None
         if isinstance(target, str):
-            return cls._source_thread_root(target, events, records, seen=seen)
+            return self._source_thread_root(target, events, records, seen=seen)
         return event_id
 
     def _assert_reply_cardinality(self, replies: Mapping[str, set[str]]) -> None:
@@ -6831,6 +6890,7 @@ class LiveFuzzRunner:
         self.oracle.log_path = stack.log_path
         self.oracle.source_current_markers = self.source_current_markers
         self.oracle.pending_edit_markers = self._pending_edit_markers
+        self.oracle.after_ledger_refresh = self._reconcile_edit_debts
         self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
@@ -8314,12 +8374,16 @@ class LiveFuzzRunner:
             self._pending_source_tombstones.difference_update(
                 source_event_id
                 for source_event_id in tuple(self._pending_source_tombstones)
-                if _redaction_target_state(
-                    source_event_id,
-                    self.oracle._ledger_observations,
-                    self.source_revision_markers,
-                )[0]
+                if self._source_tombstone_settled(source_event_id)
             )
+
+    def _source_tombstone_settled(self, target_event_id: str) -> bool:
+        """Return whether MindRoom durably settled one redaction target."""
+        if self.oracle.saw_only_deleted(target_event_id, self.redacted_targets.get(target_event_id)):
+            return True
+        return _redaction_target_state(target_event_id, self.oracle._ledger_observations, self.source_revision_markers)[
+            0
+        ]
 
     def _current_pending_edit_marker(self, source_id: str) -> str | None:
         """Choose the newest observed live debt by canonical Matrix replacement order."""
@@ -8334,10 +8398,14 @@ class LiveFuzzRunner:
     def _reconcile_edit_debts(self) -> None:
         """Only exact visible terminal consumption can discharge or supersede live edit debt."""
         for source_id, pending in tuple(self._pending_edit_markers.items()):
+            # An edit of a redacted source, or one MindRoom declined, can change no reply.
+            if self.oracle.source_tombstoned(source_id) or source_id in self.oracle.declined_edit_sources:
+                del self._pending_edit_markers[source_id]
+                continue
             record = self.oracle._ledger_records.get(source_id)
             if record is None or not record.completed or source_id not in record.source_event_ids:
                 continue
-            if self.oracle.source_tombstoned(source_id) or self.oracle.source_completed_without_response(source_id):
+            if self.oracle.source_completed_without_response(source_id):
                 del self._pending_edit_markers[source_id]
                 continue
             latest = self.oracle.latest_reply_bodies.get(record.response_event_id or "")
@@ -8800,11 +8868,7 @@ class LiveFuzzRunner:
         targets = tuple(self.event_ids[source] for source in operation.cleanup_sources)
         while True:
             self.oracle.refresh_ledger_attributions(min_interval=0.0)
-            observed = {
-                target
-                for target in targets
-                if _redaction_target_state(target, self.oracle._ledger_observations, self.source_revision_markers)[0]
-            }
+            observed = {target for target in targets if self._source_tombstone_settled(target)}
             self._pending_source_tombstones.difference_update(observed)
             if len(observed) == len(targets):
                 break
@@ -9769,8 +9833,13 @@ def _capture_error_text(artifact: str, error: BaseException) -> str:
 
 
 def _durable_store_paths(storage_path: Path) -> tuple[Path, ...]:
-    """Find the managed accounts' durable Nio SQLite stores."""
-    return tuple(sorted((storage_path / "encryption_keys").rglob("*.db")))
+    """Find the managed accounts' durable Nio SQLite stores; an account that never ingested durably has none."""
+    paths = []
+    for path in sorted((storage_path / "encryption_keys").rglob("*.db")):
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='NioDurableMeta'").fetchone():
+                paths.append(path)
+    return tuple(paths)
 
 
 def _reset_durable_sync_cursors(storage_path: Path) -> None:
@@ -9800,9 +9869,6 @@ def _nio_recovery_snapshot(storage_path: Path) -> dict[str, object]:
     stores: dict[str, object] = {}
     for path in _durable_store_paths(storage_path):
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
-            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "NioDurableMeta" not in tables:
-                continue
             version_number, stream_id, acknowledged, cursor_present = database.execute(
                 "SELECT version, stream_id, acked_sequence, cursor IS NOT NULL FROM NioDurableMeta WHERE id=1",
             ).fetchone()

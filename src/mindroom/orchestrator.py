@@ -355,6 +355,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         super().__init__(config)
         self._shutdown_requested = shutdown_requested
         self._on_started = on_started
+        self.received_signal_name: str | None = None
 
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
         """Publish the API address only after Uvicorn successfully binds it."""
@@ -378,11 +379,9 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         """Mirror Uvicorn signal handling and surface shutdown to the orchestrator."""
         del frame
         signal_number = int(sig)
-        logger.info(
-            "embedded_api_server_signal_received",
-            signal_number=signal_number,
-            signal_name=_signal_name(signal_number),
-        )
+        # A signal handler can interrupt a log write, which is not reentrant, so it
+        # only records the signal; the serve loop's exit log reports it.
+        self.received_signal_name = _signal_name(signal_number)
         if self._shutdown_requested is not None:
             self._shutdown_requested.set()
         if self.should_exit and signal_number == int(signal.SIGINT):
@@ -2701,6 +2700,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and script-gateway
         shutdown_expected=shutdown_expected,
         server_should_exit=server.should_exit,
         server_force_exit=server.force_exit,
+        received_signal=server.received_signal_name,
     )
     if not shutdown_expected:
         _raise_embedded_api_server_exit(
