@@ -893,9 +893,10 @@ workers:
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
 - Containers that run the runtime image default to `securityContext.runAsNonRoot: true`, which the kubelet enforces against the image's numeric uid 1000.
-  The chart-managed Agent Vault server defaults to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
+  The chart-managed Agent Vault server and the bootstrap Job's `bootstrap-owner` container default to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
   A custom image that runs as root, or an Agent Vault image with a different uid, needs matching `securityContext` overrides.
-  The state-storage init container still runs as root for `chown` and `chmod`, the Agent Vault bootstrap Job sets no security context on its containers, and content bundles, the event journal PostgreSQL, and user-supplied containers use the security contexts you set for them.
+  The bootstrap Job's `publish-ca` container leaves out `runAsNonRoot` because `kubectlImage` may run as root, so add it to `workers.kubernetes.agentVault.bootstrap.kubectlSecurityContext` for a non-root image or a restricted Pod Security policy.
+  The state-storage init container still runs as root for `chown` and `chmod`, and content bundles, the event journal PostgreSQL, and user-supplied containers use the security contexts you set for them.
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
 - Use `providerCredentials` to feed model-provider API keys from existing Kubernetes Secrets into the runtime's credential service.

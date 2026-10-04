@@ -571,6 +571,24 @@ workers:
         allowedDomains: ""
         inviteOnly: true
         resources: {}
+        podSecurityContext:
+          seccompProfile:
+            type: RuntimeDefault
+        # bootstrap-owner runs the Agent Vault image; runAsUser repeats its uid, as for the server.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        # The publish-ca container runs kubectlImage, which may run as root.
+        # Add runAsNonRoot when it does not, and runAsUser when it names its user.
+        kubectlSecurityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       # Optional wiring for the agent_vault_access tool: agents grant their
       # requester UI access to the vault backing their own worker. When
       # bootstrap.enabled, the bootstrap Job mints an owner-role agent and
