@@ -9,12 +9,11 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
-from mindroom.cli.config import activate_cli_runtime, load_config_quiet
+from mindroom.cli.config import activate_cli_runtime
 
 if TYPE_CHECKING:
     from typing import NoReturn
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.debug_report import DebugReportSources
 
@@ -37,48 +36,73 @@ def _read_report(path: Path) -> dict[str, Any]:
     return data
 
 
-def _load_config_if_present(runtime_paths: RuntimePaths) -> Config | None:
-    """Load the config for journal and log locations; defaults still find most data without it."""
-    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+def _read_config_source(runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Parse the config file with its includes, without validating, migrating, or writing it.
 
-    if not runtime_paths.config_path.exists():
-        return None
+    Loading the full config can persist an access migration, and inspecting an install must not rewrite its config.
+    Only `event_journal` and `debug.llm_request_log_dir` are used, so a config the runtime would reject still works.
+    """
+    import yaml  # noqa: PLC0415
+
+    from mindroom.config.yaml_includes import load_yaml_config_source_with_digests  # noqa: PLC0415
+
+    path = runtime_paths.config_path
+    if not path.exists():
+        typer.echo(f"Note: no config at {path}; using default storage locations.", err=True)
+        return {}
     try:
-        return load_config_quiet(runtime_paths, tolerate_plugin_load_errors=True)
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        typer.echo(f"Warning: config not loaded ({exc}); using default storage locations.", err=True)
-        return None
+        data, _source_digests, _uses_includes = load_yaml_config_source_with_digests(path)
+    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        typer.echo(f"Warning: config not read ({exc}); using default storage locations.", err=True)
+        return {}
+    if not isinstance(data, dict):
+        typer.echo(f"Warning: {path} is not a mapping; using default storage locations.", err=True)
+        return {}
+    return data
+
+
+def _llm_request_log_dir(config_source: dict[str, Any], storage_root: Path) -> Path:
+    """Return the directory the runtime writes LLM request logs to (`llm_request_logging._daily_log_path`).
+
+    The configured value is used as given, so a relative directory is relative to the working directory, like the
+    runtime's; the default is the one `model_loading` passes.
+    """
+    debug = config_source.get("debug")
+    configured = debug.get("llm_request_log_dir") if isinstance(debug, dict) else None
+    if isinstance(configured, str) and configured:
+        return Path(configured)
+    return storage_root / "logs" / "llm_requests"
 
 
 def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
+    from mindroom.config.matrix import EventJournalConfig  # noqa: PLC0415
     from mindroom.constants import resolve_session_state_root  # noqa: PLC0415
     from mindroom.debug_report import DebugReportSources  # noqa: PLC0415
+    from mindroom.event_journal_open import event_journal_sqlite_path  # noqa: PLC0415
 
     storage_root = runtime_paths.storage_root
-    llm_request_log_dir = storage_root / "logs" / "llm_requests"
-    journal_sqlite_path: Path | None = storage_root / "tracking" / "event_journal.db"
+    config_source = _read_config_source(runtime_paths)
+    journal_sqlite_path: Path | None = event_journal_sqlite_path(storage_root)
     journal_postgres_url: str | None = None
     journal_error: str | None = None
-    config = _load_config_if_present(runtime_paths)
-    if config is not None:
-        if config.debug.llm_request_log_dir:
-            configured = Path(config.debug.llm_request_log_dir).expanduser()
-            llm_request_log_dir = configured if configured.is_absolute() else runtime_paths.config_dir / configured
-        if config.event_journal.backend == "postgres":
+    try:
+        journal = EventJournalConfig.model_validate(config_source.get("event_journal") or {})
+        if journal.backend == "postgres":
             journal_sqlite_path = None
-            try:
-                journal_postgres_url = config.event_journal.resolve_postgres_database_url(runtime_paths)
-            except ValueError as exc:
-                # The URL usually lives in the service's environment, not in this shell.
-                # Reading the SQLite file instead would show the wrong database, so the journal sources report the error.
-                journal_error = str(exc)
-                typer.echo(f"Warning: {exc}; the journal sources are reported as errors.", err=True)
+            journal_postgres_url = journal.resolve_postgres_database_url(runtime_paths)
+    except ValueError as exc:
+        # An invalid section (pydantic's ValidationError is a ValueError), or a URL that lives in the service's
+        # environment rather than this one.
+        # Reading the SQLite file instead could show the wrong database, so the journal sources report the error.
+        journal_sqlite_path = None
+        journal_error = str(exc)
+        typer.echo(f"Warning: {exc}; the journal sources are reported as errors.", err=True)
     return DebugReportSources(
         storage_root=storage_root,
         session_root=resolve_session_state_root(storage_root, runtime_paths),
         journal_sqlite_path=journal_sqlite_path,
         journal_postgres_url=journal_postgres_url,
-        llm_request_log_dir=llm_request_log_dir,
+        llm_request_log_dir=_llm_request_log_dir(config_source, storage_root),
         journal_error=journal_error,
     )
 
@@ -121,6 +145,8 @@ def debug_report(
     )
     if ids.is_empty():
         _fail("pass a bug report file or at least one of --event, --room, --thread.")
+    if config_path is not None and not config_path.expanduser().exists():
+        _fail(f"config file not found: {config_path}")
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     sources = _resolve_sources(runtime_paths)
     document = build_debug_report(sources, ids, generated_at=datetime.now(UTC).isoformat())

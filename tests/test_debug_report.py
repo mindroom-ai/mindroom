@@ -19,7 +19,9 @@ from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
 from mindroom.agent_storage import create_state_storage
+from mindroom.cli.debug_report import _resolve_sources
 from mindroom.cli.main import app
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.debug_report import (
     DebugReportSources,
     _postgres_query,
@@ -32,6 +34,9 @@ from mindroom.debug_report import (
     collect_ids,
 )
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
+from mindroom.event_journal_open import event_journal_sqlite_path
+from mindroom.session_ids import create_session_id
+from mindroom.tool_system import tool_calls
 from tests.conftest import postgres_journal_schema_url, seed_session
 
 if TYPE_CHECKING:
@@ -88,6 +93,35 @@ _JOURNAL_INSERT = (
     "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, "
     "origin_server_ts, source_json, membership_epoch, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
+_OUTBOX_INSERT = (
+    "INSERT INTO matrix_delivery_outbox (principal_id, delivery_id, stage, event_type, room_id, membership_epoch, "
+    "thread_id, transaction_id, payload_json, result_json, created_at_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path: Path) -> None:
+    """The reader stays stdlib-only, so its copies of runtime names and file layouts are pinned to the originals."""
+    assert debug_report_module._AI_RUN_KEY == AI_RUN_METADATA_KEY
+    assert collect_ids(None, room_id=ROOM, thread_id="$root").session_ids == {create_session_id(ROOM, "$root")}
+    assert collect_ids(None, room_id=ROOM).session_ids == {create_session_id(ROOM, None)}
+    assert debug_report_module._TOOL_CALL_ROTATIONS == tool_calls._TOOL_CALL_LOG_BACKUPS
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "absent.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    sources = _resolve_sources(runtime_paths)
+    assert sources.journal_sqlite_path == event_journal_sqlite_path(runtime_paths.storage_root)
+    # model_loading.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
+    # as an inline expression, so that literal is what is pinned here.
+    assert sources.llm_request_log_dir == runtime_paths.storage_root / "logs" / "llm_requests"
+
+    tool_call_log = tool_calls._tool_call_log_path(runtime_paths)
+    tool_call_log.parent.mkdir(parents=True)
+    tool_call_log.write_text(json.dumps({"correlation_id": "$user"}) + "\n", encoding="utf-8")
+    document = build_debug_report(sources, collect_ids(None, event_ids=["$user"]), generated_at="now")
+    assert document["sources"]["tool_calls"]["paths"] == [str(tool_call_log)]
 
 
 def _seed_journal(path: Path) -> None:
@@ -104,6 +138,14 @@ def _seed_journal(path: Path) -> None:
                 ("general@x", "$user", ROOM, "$root", "message", alice, 1, '{"a": 1}', 1, "settled"),
                 ("general@x", "$late", ROOM, "$root", "message", alice, 2, "{}", 1, "pending"),
                 ("general@x", "$other", "!other:example.com", "", "message", bob, 3, "{}", 1, "settled"),
+            ],
+        )
+        payload = json.dumps({"msgtype": "m.text", "body": "answer"})
+        db.executemany(
+            _OUTBOX_INSERT,
+            [
+                ("general@x", "d1", "final", "m.room.message", ROOM, 1, "$root", "t1", payload, '{"ok": true}', 1),
+                ("general@x", "d2", "final", "m.room.message", ROOM, 1, "$elsewhere", "t2", payload, None, 2),
             ],
         )
         db.commit()
@@ -125,8 +167,23 @@ def test_read_journal_matches_events_and_thread_and_decodes_json(tmp_path: Path)
     events = results["journal_events"].items
     assert [item["event_id"] for item in events] == ["$user", "$late"]
     assert events[0]["source_json"] == {"a": 1}
-    assert results["delivery_outbox"].status == "ok"
-    assert results["delivery_outbox"].items == []
+    outbox = results["delivery_outbox"]
+    assert outbox.status == "ok"
+    assert [item["delivery_id"] for item in outbox.items] == ["d1"]
+    assert outbox.items[0]["payload_json"] == {"msgtype": "m.text", "body": "answer"}
+    assert outbox.items[0]["result_json"] == {"ok": True}
+
+
+def test_read_journal_matches_a_turn_record_by_its_anchor_alone(tmp_path: Path) -> None:
+    """A turn record whose index event differs from the reported event still matches through its anchor."""
+    path = tmp_path / "event_journal.db"
+    _seed_journal(path)
+    with closing(sqlite3.connect(path)) as db:
+        db.execute(_TURN_INSERT, ("general", "$index", "$anchor", "{}"))
+        db.commit()
+    with _sqlite_query(path) as query:
+        results = _read_journal(query, collect_ids(None, event_ids=["$anchor"]), str(path))
+    assert [item["index_event_id"] for item in results["turn_records"].items] == ["$index"]
 
 
 def test_read_journal_without_thread_matches_event_ids_only(tmp_path: Path) -> None:
@@ -236,6 +293,15 @@ def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> 
     assert [item["run_id"] for item in result.items] == ["run-1"]
     assert result.items[0]["run_data"]["metadata"] == {"matrix_event_id": "$user"}
     assert result.items[0]["table"] == "general_sessions_runs"
+
+
+def test_read_agno_runs_matches_a_run_id_alone(tmp_path: Path) -> None:
+    """Without a room there is no session to match, and a run is still found by its run ID."""
+    _seed_agno(tmp_path)
+    ids = dataclasses.replace(collect_ids(None, event_ids=["$x"]), run_ids=frozenset({"run-other"}))
+    assert ids.session_ids == frozenset()
+    result = _read_agno_runs(tmp_path, ids)
+    assert [item["run_id"] for item in result.items] == ["run-other"]
 
 
 def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,6 +414,20 @@ def test_jsonl_and_log_readers_match_structured_fields_and_bound_output(tmp_path
     assert [item["line"] for item in logs.items] == [1, 3]
     assert logs.truncated == 1
     assert len(logs.items[1]["text"]) == debug_report_module._MAX_LOG_LINE_CHARS
+
+
+def test_jsonl_reader_matches_a_record_by_its_reply_target_alone(tmp_path: Path) -> None:
+    """A record without a matching correlation or session still matches through reply_to_event_id."""
+    log = tmp_path / "tool_calls.jsonl"
+    log.write_text(
+        json.dumps({"tool_name": "replied", "correlation_id": "$other", "reply_to_event_id": "$user"})
+        + "\n"
+        + json.dumps({"tool_name": "unrelated", "correlation_id": "$other", "reply_to_event_id": "$other"})
+        + "\n",
+        encoding="utf-8",
+    )
+    result = _read_jsonl_records([log], collect_ids(None, event_ids=["$user"]), location=log)
+    assert [item["tool_name"] for item in result.items] == ["replied"]
 
 
 def test_jsonl_reader_caps_records_keeping_the_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -681,6 +761,136 @@ def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
     assert sources["tool_calls"]["status"] == "ok"
     assert "Warning:" in result.output
     assert "turn_records: error, 0 items (PostgreSQL event journal requires" in result.output
+
+
+def _write_request_log(directory: Path, request_log_id: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "llm-requests-2026-10-03.jsonl").write_text(
+        json.dumps({"request_log_id": request_log_id, "correlation_id": "$user"}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_cli_reads_a_relative_request_log_dir_from_the_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative debug.llm_request_log_dir is read from the working directory, where the runtime writes it."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = config_dir / "config.yaml"
+    _write_config(config)
+    config.write_text(
+        config.read_text(encoding="utf-8") + "debug:\n  llm_request_log_dir: request-logs\n",
+        encoding="utf-8",
+    )
+    workdir = tmp_path / "workdir"
+    _write_request_log(workdir / "request-logs", "in-working-directory")
+    _write_request_log(config_dir / "request-logs", "beside-config")
+    monkeypatch.chdir(workdir)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(tmp_path / "storage"), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    llm_requests = json.loads(output.read_text(encoding="utf-8"))["sources"]["llm_requests"]
+    assert [item["request_log_id"] for item in llm_requests["items"]] == ["in-working-directory"]
+
+
+def test_cli_reads_the_config_without_migrating_it(tmp_path: Path) -> None:
+    """A config the runtime would migrate on load (retired authorization.global_users) is left byte-for-byte as is."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = config_dir / "config.yaml"
+    _write_config(config)
+    original = config.read_bytes()
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert config.read_bytes() == original
+    assert [path.name for path in config_dir.iterdir()] == ["config.yaml"]
+    turn_records = json.loads(output.read_text(encoding="utf-8"))["sources"]["turn_records"]
+    assert [item["index_event_id"] for item in turn_records["items"]] == ["$user"]
+
+
+def test_cli_reads_settings_from_a_config_the_runtime_would_reject(tmp_path: Path) -> None:
+    """An invalid but parseable config still supplies the request-log directory, and the report is written."""
+    config = tmp_path / "config.yaml"
+    request_logs = tmp_path / "request-logs"
+    config.write_text(
+        "agents:\n  general:\n    model: no-such-model\nnot_a_config_section: 1\n"
+        f"debug:\n  llm_request_log_dir: {request_logs}\n",
+        encoding="utf-8",
+    )
+    _write_request_log(request_logs, "from-invalid-config")
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(tmp_path / "storage"), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    llm_requests = json.loads(output.read_text(encoding="utf-8"))["sources"]["llm_requests"]
+    assert [item["request_log_id"] for item in llm_requests["items"]] == ["from-invalid-config"]
+    assert "Warning" not in result.output
+
+
+def test_cli_reports_journal_errors_when_the_event_journal_section_is_invalid(tmp_path: Path) -> None:
+    """An event_journal section the runtime would reject is a journal error, never a guess at the SQLite file."""
+    config = tmp_path / "config.yaml"
+    config.write_text("event_journal:\n  backend: mysql\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    _seed_files(storage)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert "EventJournalConfig" in sources[name]["error"]
+        assert sources[name]["items"] == []
+    assert sources["tool_calls"]["status"] == "ok"
+
+
+def test_cli_fails_when_the_given_config_does_not_exist(tmp_path: Path) -> None:
+    """A --config path that does not exist is an error instead of a silent fall back to default locations."""
+    missing = tmp_path / "missing.yaml"
+    result = runner.invoke(app, ["debug-report", "-e", "$user", "-c", str(missing), "-s", str(tmp_path)])
+    assert result.exit_code == 1
+    assert f"config file not found: {missing}" in result.output
+
+
+def test_cli_notes_default_locations_when_the_default_config_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without --config and without a config at the default path, the report is written and stderr says so."""
+    missing = tmp_path / "absent.yaml"
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(missing))
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(app, ["debug-report", "-e", "$user", "-s", str(tmp_path / "storage"), "-o", str(output)])
+
+    assert result.exit_code == 0, result.output
+    assert f"Note: no config at {missing}; using default storage locations." in result.output
+    assert json.loads(output.read_text(encoding="utf-8"))["type"] == "io.mindroom.debug_report"
 
 
 def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path) -> None:
