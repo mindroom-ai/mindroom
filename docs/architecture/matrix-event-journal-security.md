@@ -179,8 +179,6 @@ Membership fencing deliberately does not sweep up pending redactions along with 
 Tombstones are keyed by the room the redaction arrived in, and the durable turn and session cleanup it triggers is limited to turns recorded in that room, because a homeserver can pass along a redaction that names another room's event without applying it.
 An event for which no turn has recorded a room is tombstoned in the turn ledger only when the journal admitted it in the redaction's room, so a redaction cannot mark another room's event as handled, even before the bot sees it there.
 
-Session cleanup does not depend on a turn owning the redacted event: each response checks every event its opened history scope derives from against the room's tombstones and removes that history from the first run that read, answered, or wrote a redacted one, which covers a message a turn only read as context.
-
 ## Membership
 
 Every projected row carries the `membership_epoch` it was written under.
