@@ -2002,8 +2002,10 @@ class BrowserTools(Toolkit):
     @staticmethod
     def _record_page_error(tab: _BrowserTabState, error: PlaywrightError) -> None:
         # Uncaught exceptions never reach console.*, yet they are what a broken page produces.
-        name = getattr(error, "name", "") or "Error"
-        BrowserTools._append_console(tab, {"level": "error", "text": f"Uncaught {name}: {error.message}"})
+        BrowserTools._append_console(
+            tab,
+            {"level": "error", "text": f"Uncaught {error.name or 'Error'}: {error.message}"},
+        )
 
     @staticmethod
     def _append_console(tab: _BrowserTabState, entry: dict[str, Any]) -> None:
