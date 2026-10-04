@@ -71,6 +71,14 @@ def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document
         yaml_io.safe_load_without_aliases(document)
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\x85", "\u2028", "\u2029"])
+def test_safe_load_without_aliases_counts_directives_before_parsing(line_break: str) -> None:
+    """Libyaml compares each directive with every earlier one, so too many are refused before parsing starts."""
+    document = "".join(f"%TAG !t{k}! x{line_break}" for k in range(17)) + "--- a\n"
+    with pytest.raises(yaml.YAMLError, match="directives at most"):
+        yaml_io.safe_load_without_aliases(document)
+
+
 def test_safe_load_without_aliases_refuses_tag_directives_before_composing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``%TAG`` prefix is copied into every node naming its handle, so a short document is refused before it is composed."""
     composed: list[object] = []
