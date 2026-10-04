@@ -743,6 +743,7 @@ path = "mindroom.response_turn"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.helper_usage",
+    "mindroom.history.storage",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",
@@ -4966,7 +4967,6 @@ depends_on = [
 path = "mindroom.turn_store"
 depends_on = [
     "mindroom.agent_storage",
-    "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
     "mindroom.history.storage",

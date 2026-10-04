@@ -79,6 +79,7 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 Text compaction moves older runs into an archive in the conversation database and replays a merged summary in their place.
 Compaction deletes no stored history; only Matrix redaction and conversation deletion remove archived runs.
+Redacting a message removes an agent's stored history from the first run that read, answered, or wrote it, including a message the agent never answered, before that agent replies in the conversation again.
 Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run, removing that run and everything after it, instead of clearing the whole conversation.
 
 If a reply fails with `Saved conversation summary exceeds the available history budget`, the saved summary no longer fits beside the current prompt.

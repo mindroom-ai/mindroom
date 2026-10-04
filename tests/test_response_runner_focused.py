@@ -6683,6 +6683,40 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 
 @pytest.mark.asyncio
+async def test_agent_turn_checks_its_own_room_for_redacted_history(tmp_path: Path) -> None:
+    """The turn driver asks the response's room which events its history derives from were redacted."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    lookups: list[tuple[str, tuple[str, ...]]] = []
+
+    async def redacted_event_ids(room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        lookups.append((room_id, event_ids))
+        return frozenset()
+
+    coordinator.deps = replace(coordinator.deps, redacted_event_ids=redacted_event_ids)
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        assert ctx.redacted_event_ids is not None
+        await ctx.redacted_event_ids(("$event",))
+        return "final text"
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond(_plain_request(_target()))
+
+    assert lookups == [("!room:localhost", ("$event",))]
+
+
+@pytest.mark.asyncio
 async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: Path) -> None:
     """A room-default change during locked preparation must wait for the next turn."""
     bot = _bot(tmp_path)

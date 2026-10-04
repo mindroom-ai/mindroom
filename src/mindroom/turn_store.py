@@ -12,7 +12,6 @@ from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
 from mindroom.agent_storage import get_agent_session, get_team_session
-from mindroom.agents import remove_run_by_event_id
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -21,7 +20,7 @@ from mindroom.handled_turns import (
     same_turn_identity,
     with_user_stop,
 )
-from mindroom.history.storage import remove_redacted_event_from_compaction
+from mindroom.history.storage import remove_redacted_event_from_history, remove_run_by_event_id
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
 from mindroom.session_ids import create_session_id
@@ -1210,28 +1209,18 @@ class TurnStore:
         storage = self.deps.state_writer.create_storage(execution_identity, scope=history_scope)
         session_type = self.deps.state_writer.session_type_for_scope(history_scope)
         try:
-            removed_run = remove_run_by_event_id(
-                storage,
-                target.session_id,
-                redacted_event_id,
-                session_type=session_type,
-                include_seen_event_ids=True,
-                remove_following_runs=True,
-            )
             session = (
                 get_team_session(storage, target.session_id)
                 if session_type is SessionType.TEAM
                 else get_agent_session(storage, target.session_id)
             )
-            removed_compacted = session is not None and remove_redacted_event_from_compaction(
+            return session is not None and remove_redacted_event_from_history(
                 storage,
                 session,
                 history_scope,
                 event_id=redacted_event_id,
-                removed_live_run=removed_run,
                 legacy_source_event_id=legacy_summary_source_id,
             )
-            return removed_run or removed_compacted
         finally:
             storage.close()
 

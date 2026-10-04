@@ -764,6 +764,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
+                redacted_event_ids=self._journal_store.principal(self._journal_principal_id).redacted_event_ids,
             ),
         )
         self._edit_regenerator = EditRegenerator(

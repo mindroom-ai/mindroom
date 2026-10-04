@@ -25,13 +25,12 @@ from hypothesis import strategies as st
 
 from mindroom import constants
 from mindroom.agent_storage import create_state_storage, get_agent_session
-from mindroom.agents import remove_run_by_event_id
 from mindroom.history import archive
 from mindroom.history.storage import (
     archive_compaction_chunk,
     read_scope_seen_event_ids,
     reconcile_compaction_state,
-    remove_redacted_event_from_compaction,
+    remove_redacted_event_from_history,
 )
 from mindroom.history.types import HistoryScope
 from tests.conftest import seed_session
@@ -217,20 +216,7 @@ class _Runner:
         if not self._events:
             return None
         event_id = self._events[action.index % len(self._events)]
-        removed = remove_run_by_event_id(
-            self._storage,
-            _SESSION,
-            event_id,
-            include_seen_event_ids=True,
-            remove_following_runs=True,
-        )
-        remove_redacted_event_from_compaction(
-            self._storage,
-            self._load(),
-            _SCOPE,
-            event_id=event_id,
-            removed_live_run=removed,
-        )
+        remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
         self._redacted.add(event_id)
         return event_id
 
