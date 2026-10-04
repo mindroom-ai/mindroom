@@ -59,7 +59,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `voice` | Speech-to-text for voice messages | [Voice](https://docs.mindroom.chat/voice/) |
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](https://docs.mindroom.chat/voice-calls/) |
 | `administrators`, `room_defaults`, `rooms`, `authorization`, `bot_accounts` | Access control, managed rooms, invitations, bridge aliases, and bridge bots | [Authorization](https://docs.mindroom.chat/authorization/) |
-| `room_models` | Map of room alias to model name, the authored model default for a room | [Chat Commands](https://docs.mindroom.chat/chat-commands/) (`!room_model`) |
+| `room_models` | Map of room alias to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#related-matrix-runtime-features) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |

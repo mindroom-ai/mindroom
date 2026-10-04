@@ -175,7 +175,7 @@ With `include_requests=true`, the report adds reconciled provider-request token 
 Both routes share background preparation and cache state while authenticating every request independently.
 It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
 
-Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
+Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated service audience and exact client ID:
 
 ```bash
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true

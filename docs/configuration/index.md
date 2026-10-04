@@ -63,7 +63,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `voice` | Speech-to-text for voice messages | [Voice](../voice.md) |
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](../voice-calls.md) |
 | `administrators`, `room_defaults`, `rooms`, `authorization`, `bot_accounts` | Access control, managed rooms, invitations, bridge aliases, and bridge bots | [Authorization](../authorization.md) |
-| `room_models` | Map of room alias to model name, the authored model default for a room | [Chat Commands](../chat-commands.md) (`!room_model`) |
+| `room_models` | Map of room alias to model name, the authored model default for a room | [Models](models.md#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](../tools/matrix-and-attachments.md#related-matrix-runtime-features) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](../rooms.md#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](../scheduling.md) |

@@ -505,7 +505,7 @@ uvx mindroom run
 
 To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
 
-See [Getting Started](https://docs.mindroom.chat/getting-started/) for the full walkthrough and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
+See [the full walkthrough](#recommended-hosted-matrix-local-mindroom-uv-only) and [Hosted Matrix Deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for architecture details.
 
 ### Hosted Matrix + local MindRoom (recommended)
 
@@ -1775,7 +1775,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `voice` | Speech-to-text for voice messages | [Voice](https://docs.mindroom.chat/voice/) |
 | `calls` | Agents joining Element Call voice calls | [Voice Calls](https://docs.mindroom.chat/voice-calls/) |
 | `administrators`, `room_defaults`, `rooms`, `authorization`, `bot_accounts` | Access control, managed rooms, invitations, bridge aliases, and bridge bots | [Authorization](https://docs.mindroom.chat/authorization/) |
-| `room_models` | Map of room alias to model name, the authored model default for a room | [Chat Commands](https://docs.mindroom.chat/chat-commands/) (`!room_model`) |
+| `room_models` | Map of room alias to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#related-matrix-runtime-features) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |
@@ -3302,7 +3302,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/) for the policy fi
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
-1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in adaptive participation described below
+1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in [adaptive participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation)
 2. If exactly one eligible responder remains, that agent or team handles the message directly
 3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
 4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
@@ -3414,7 +3414,7 @@ Mention multiple agents when you want an ad-hoc collaboration, or mention a conf
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
 Explicit tags select the agents or teams you want next.
 An untagged single-human thread can also continue an eligible ad-hoc team of previously mentioned or participating individual agents; named team IDs do not become ad-hoc members.
-Multi-human threads use the explicit-targeting default and opt-in individual participation described above.
+Multi-human threads use the explicit-targeting default and opt-in individual [participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation).
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
 
 # Threads, Replies & Participation
@@ -7140,7 +7140,7 @@ With `include_requests=true`, the report adds reconciled provider-request token 
 Both routes share background preparation and cache state while authenticating every request independently.
 It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
 
-Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
+Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated service audience and exact client ID:
 
 ```bash
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
@@ -23893,6 +23893,10 @@ The primary's egress proxy must also allow `CONNECT` to IP addresses on ports 80
 In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
 A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
 Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
+
+### Compaction Archive
+
+See [History & Compaction](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) for the compaction archive.
 
 - Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
 

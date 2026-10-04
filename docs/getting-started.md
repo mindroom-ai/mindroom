@@ -164,7 +164,7 @@ uvx mindroom run
 
 To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
 
-See [Getting Started](getting-started.md) for the full walkthrough and [Hosted Matrix Deployment](deployment/hosted-matrix.md) for architecture details.
+See [the full walkthrough](#recommended-hosted-matrix-local-mindroom-uv-only) and [Hosted Matrix Deployment](deployment/hosted-matrix.md) for architecture details.
 
 ### Hosted Matrix + local MindRoom (recommended)
 

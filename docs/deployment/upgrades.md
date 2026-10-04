@@ -164,6 +164,10 @@ In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_pro
 A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
 Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
+### Compaction Archive
+
+See [History & Compaction](../configuration/history.md#agent-compaction-settings) for the compaction archive.
+
 - Downgrading to a release without the archive is unsupported: older releases neither maintain nor redact the archive, and compaction state they write is never adopted again.
 
 ### Workspace-only worker mounts

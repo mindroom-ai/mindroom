@@ -41,7 +41,7 @@ See [Authorization](../authorization.md) for the policy fields.
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
-1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in adaptive participation described below
+1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in [adaptive participation](threads.md#adaptive-participation)
 2. If exactly one eligible responder remains, that agent or team handles the message directly
 3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
 4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
@@ -153,5 +153,5 @@ Mention multiple agents when you want an ad-hoc collaboration, or mention a conf
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
 Explicit tags select the agents or teams you want next.
 An untagged single-human thread can also continue an eligible ad-hoc team of previously mentioned or participating individual agents; named team IDs do not become ad-hoc members.
-Multi-human threads use the explicit-targeting default and opt-in individual participation described above.
+Multi-human threads use the explicit-targeting default and opt-in individual [participation](threads.md#adaptive-participation).
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.
