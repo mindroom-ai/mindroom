@@ -325,10 +325,10 @@ The option controls task execution; parsing the scheduling request still uses th
 
 ## Pre-Approved Tool Calls
 
-Agents can schedule one exact tool call that the requester approves while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+Agents can schedule one tool call that the requester approves while scheduling it, so a gated action such as an external message runs at its time without a second approval.
 The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
 `arguments_json` holds the call's exact arguments as a JSON object, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
-The current `tool_approval` policy must gate the call; otherwise the scheduler refuses it, and the agent uses `schedule()` instead.
+The `tool_approval` policy must require approval for the call, and the agent must be able to reply to the requester in that room; otherwise the scheduler refuses it.
 
 ```python
 schedule_tool_call(
@@ -339,16 +339,15 @@ schedule_tool_call(
 )
 ```
 
-MindRoom saves a one-time task in the current thread and posts an approval card for the call itself, showing the tool, its exact arguments, and the send time.
-Only the original human requester can approve or deny the card, and it expires at the send time.
-When the task fires, the agent receives a trigger asking it to make that call exactly once with exactly those arguments.
-If the requester approved the card, the task is unchanged, and it fires within 15 minutes of its scheduled time, the first call with exactly those arguments from the same agent or team, requester, room, and thread is approved once.
-That call must be the only call needing approval in its model step; otherwise every gated call in that step asks for approval as usual, so the send cannot wait behind another card.
-That call publishes an approved receipt card whose `approval_provenance` has `kind: scheduled_approval` with the task, approver, approval time, scheduled time, and arguments digest, and MindRoom logs `scheduled_tool_call_approval_consumed` with the same fields.
-Every other call keeps per-call approval, including a call with different arguments, a second identical call, a call after the router left and rejoined the room, a late fire, a fire of an edited task, and a fire whose card was never answered.
-If the requester denies the card, the task is skipped, while a card that MindRoom denies on its own, for example after the router leaves the room, falls back to per-call approval when the task fires.
-Cancelling or editing the task, including the automatic cancellation when its creator leaves the room, withdraws the approval and denies a card that is still pending.
-The trigger message and the stored task carry the exact arguments without redaction, so do not schedule calls whose arguments contain secrets.
+MindRoom posts an approval card in the thread showing the tool, its arguments, and the send time; only the requester can approve or deny it, and it expires at the send time.
+The requester approves either the exact arguments shown or, when the card offers it, any arguments to the same tool.
+Approving any arguments lets the agent send whatever it decides through that tool when the task runs, so choose it only when the exact wording may change.
+Operators can stop offering it with [`tool_approval.scheduled_any_arguments`](https://docs.mindroom.chat/tool-approval/), and generic MCP `*_call_tool` calls are always approved exactly.
+When the task runs, the first matching call from the same agent or team, requester, and thread within 15 minutes of the scheduled time runs once without a new card, and an approved receipt names who approved it, when, and for which scope.
+The call must be the only one in that step needing approval.
+Anything else asks for approval as usual, including a call outside the approved scope, a second call, a late run, an edited task, and a card nobody answered.
+If the requester denies the card, the task does not run, and cancelling or editing the task withdraws the approval.
+The trigger message and the stored task contain the arguments without redaction, so do not schedule calls whose arguments contain secrets.
 Recurring schedules cannot pre-approve calls.
 
 ## Timezone

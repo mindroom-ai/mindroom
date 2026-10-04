@@ -2802,6 +2802,7 @@ class AgentBot:
             auto_approve_seconds=payload.auto_approve_seconds,
             action=payload.action,
             grant_id=payload.grant_id,
+            scheduled_scope=payload.scheduled_scope,
             membership_index=self._runtime_view.agent_reply_memberships,
         )
 

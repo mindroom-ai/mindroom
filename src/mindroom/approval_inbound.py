@@ -13,7 +13,7 @@ from mindroom.tool_approval import (
     MatrixApprovalAction,
     handle_matrix_approval_action,
 )
-from mindroom.tool_approval_grants import approval_binding, valid_auto_approve_seconds
+from mindroom.tool_approval_grants import SCHEDULED_SCOPE_OPTIONS, approval_binding, valid_auto_approve_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -44,6 +44,7 @@ class ApprovalResponsePayload:
     auto_approve_seconds: int | None = None
     action: Literal["revoke_auto_approval"] | None = None
     grant_id: str | None = None
+    scheduled_scope: str | None = None
 
 
 def parse_approval_response_event(event: nio.UnknownEvent) -> ApprovalResponsePayload:
@@ -69,11 +70,18 @@ def parse_approval_response_event(event: nio.UnknownEvent) -> ApprovalResponsePa
             and grant_id
             and "status" not in content
             and "auto_approve_seconds" not in content
+            and "scheduled_scope" not in content
         ):
             return ApprovalResponsePayload(card_event_id, None, None, action="revoke_auto_approval", grant_id=grant_id)
         return ApprovalResponsePayload(card_event_id, None, None)
-    if "grant_id" in content or (
-        "auto_approve_seconds" in content and (status != "approved" or not valid_auto_approve_seconds(raw_seconds))
+    raw_scope = content.get("scheduled_scope")
+    if (
+        "grant_id" in content
+        or ("auto_approve_seconds" in content and (status != "approved" or not valid_auto_approve_seconds(raw_seconds)))
+        or (
+            "scheduled_scope" in content
+            and (status != "approved" or raw_scope not in SCHEDULED_SCOPE_OPTIONS or "auto_approve_seconds" in content)
+        )
     ):
         return ApprovalResponsePayload(card_event_id, None, None)
     raw_reason = content.get("reason")
@@ -85,6 +93,7 @@ def parse_approval_response_event(event: nio.UnknownEvent) -> ApprovalResponsePa
         status=status,
         reason=reason,
         auto_approve_seconds=raw_seconds if isinstance(raw_seconds, int) else None,
+        scheduled_scope=raw_scope if isinstance(raw_scope, str) else None,
     )
 
 
@@ -104,6 +113,7 @@ async def handle_tool_approval_action(
     auto_approve_seconds: int | None = None,
     action: Literal["revoke_auto_approval"] | None = None,
     grant_id: str | None = None,
+    scheduled_scope: str | None = None,
 ) -> bool:
     """Resolve one approval action only when the sender still has access."""
     if approval_event_id is None:
@@ -139,6 +149,7 @@ async def handle_tool_approval_action(
         action=action,
         grant_id=grant_id,
         current_binding=approval_binding(config) if auto_approve_seconds is not None else None,
+        scheduled_scope=scheduled_scope,
     )
     result = await handle_matrix_approval_action(
         matrix_action,

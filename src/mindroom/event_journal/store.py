@@ -1219,6 +1219,7 @@ class PrincipalStore:
         *,
         task_id: str,
         workflow_digest: str,
+        any_arguments_allowed: bool,
     ) -> ScheduledApprovalArmState:
         """Arm one approved scheduled call for its unchanged task firing on time."""
         return await self._backend.write(
@@ -1227,6 +1228,7 @@ class PrincipalStore:
                 self._principal_id,
                 task_id=task_id,
                 workflow_digest=workflow_digest,
+                any_arguments_allowed=any_arguments_allowed,
                 now_ns=time.time_ns(),
             ),
         )
@@ -1303,6 +1305,8 @@ class PrincipalStore:
         """Retire spent payloads, enqueue revocations after their approval edits, and prune old scheduled calls."""
 
         def maintain(transaction: Transaction) -> tuple[str, ...]:
+            if grant_id is None:
+                approvals.retire_automatic_receipts(transaction, self._principal_id)
             deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
             if grant_id is None:
                 scheduled_approvals.prune(transaction, self._principal_id, time.time_ns())

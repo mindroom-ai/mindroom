@@ -6538,6 +6538,7 @@ expose = [
     "is_process_active_approval_card",
     "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
+    "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
     "withdraw_scheduled_call_approval",

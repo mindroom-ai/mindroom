@@ -191,6 +191,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S22 | Tiny retained default | [`custom_tools/todo_poke.py`][todo-poke] parses a todo item without `requester_id` but never pokes it, and [`custom_tools/todo.py`][todo-tool] records the current requester on the item's next write. |
 | S23 | Isolated | [`knowledge/legacy_git_checkout.py`][knowledge-legacy-git] moves a checkout's in-tree `.git` aside and hard-links only its repository files into a fresh MindRoom-owned Git directory under a new config; [`knowledge/git_source.py`][knowledge-git-source] keeps initialization, sync, and the current layout. |
 | S24 | Tiny retained default | [`delegation/state.py`][delegation-state] reads a retained subagent without `agent_mode` as standard, so delegations saved before minimal subagents continue unchanged. |
+| S25 | Tiny retained default | [`scheduling.py`][scheduling] reads a scheduled workflow without `pre_approved_call` as an ordinary task, since no task saved before scheduled tool calls carried a call approval. |
 
 ## Configuration and credentials
 

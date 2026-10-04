@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.approval_events import PendingApproval, parse_approval_datetime
 from mindroom.event_journal import (
+    SCHEDULED_APPROVAL_WINDOW_NS,
     ApprovalCardReservation,
     ApprovalDecisionMetadata,
     BackgroundApprovalDecision,
@@ -30,6 +31,8 @@ from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
 from mindroom.tool_approval_grants import (
     AUTO_APPROVE_OPTIONS,
+    EXACT_ARGUMENTS,
+    SCHEDULED_SCOPE_OPTIONS,
     ApprovalOperation,
     approval_timestamp,
     valid_auto_approve_seconds,
@@ -395,8 +398,9 @@ class ApprovalManager:
         execute_at: datetime,
         workflow_digest: str,
         scheduled_for_text: str,
+        any_arguments_offered: bool,
     ) -> bool:
-        """Publish one card approving the exact call a scheduled task will make later."""
+        """Publish one card approving the call a scheduled task will make later."""
         cards = self.cards
         if self.prepare_event is None or cards is None or self.send_delivery is None:
             return False
@@ -417,6 +421,8 @@ class ApprovalManager:
                 "approval_target": "scheduled_call",
                 "scheduled_task_id": task_id,
                 "scheduled_for": approval_timestamp(execute_at_ns),
+                "scheduled_window_seconds": SCHEDULED_APPROVAL_WINDOW_NS // 1_000_000_000,
+                **({"scheduled_scope_options": list(SCHEDULED_SCOPE_OPTIONS)} if any_arguments_offered else {}),
                 "body": f"🔒 Approval required: {tool_name} (scheduled for {scheduled_for_text})",
             },
         )
@@ -442,11 +448,21 @@ class ApprovalManager:
         self._ensure_deadline_sweep()
         return True
 
-    async def arm_scheduled_call_approval(self, task_id: str, workflow_digest: str) -> ScheduledApprovalArmState:
+    async def arm_scheduled_call_approval(
+        self,
+        task_id: str,
+        workflow_digest: str,
+        *,
+        any_arguments_allowed: bool,
+    ) -> ScheduledApprovalArmState:
         """Arm one approved scheduled call as its unchanged task fires."""
         if self.cards is None:
             return "none"
-        return await self.cards.arm_scheduled_call_approval(task_id=task_id, workflow_digest=workflow_digest)
+        return await self.cards.arm_scheduled_call_approval(
+            task_id=task_id,
+            workflow_digest=workflow_digest,
+            any_arguments_allowed=any_arguments_allowed,
+        )
 
     async def withdraw_scheduled_call_approval(self, task_id: str, *, reason: str) -> None:
         """Withdraw a cancelled or edited task's approval and deny its card if it is still pending."""
@@ -614,6 +630,7 @@ class ApprovalManager:
         before_consume: Callable[[], Awaitable[None]] | None = None,
         auto_approve_seconds: int | None = None,
         current_binding: str | None = None,
+        scheduled_scope: str | None = None,
     ) -> ApprovalActionResult:
         """Atomically choose the exact-call winner and enqueue its terminal edit."""
         if self.has_active_in_memory_approval_card(card_event_id):
@@ -688,6 +705,14 @@ class ApprovalManager:
                     or not pending.approvable
                 )
             )
+            or (
+                scheduled_scope is not None
+                and (
+                    status != "approved"
+                    or stored.target_kind != "scheduled_call"
+                    or scheduled_scope not in pending.scheduled_scope_options
+                )
+            )
         ):
             return ApprovalActionResult(consumed=False, card_event_id=card_event_id)
         if before_consume is not None:
@@ -713,6 +738,9 @@ class ApprovalManager:
                 status=resolved_status,
                 reason=resolved_reason,
                 resolved_by=sender_id if resolved_status == status else None,
+                scheduled_scope=(scheduled_scope or EXACT_ARGUMENTS)
+                if stored.target_kind == "scheduled_call" and resolved_status == "approved"
+                else None,
             )
         return ApprovalActionResult(
             consumed=True,
@@ -843,6 +871,7 @@ class ApprovalManager:
         status: _ApprovalStatus,
         reason: str | None,
         resolved_by: str | None,
+        scheduled_scope: str | None = None,
     ) -> bool:
         if self.cards is None:
             return False
@@ -850,7 +879,11 @@ class ApprovalManager:
             card_event_id=pending.card_event_id,
             requested_status=status,
             reason=reason,
-            metadata=ApprovalDecisionMetadata(resolved_by=resolved_by, resolved_at=_utcnow().isoformat()),
+            metadata=ApprovalDecisionMetadata(
+                resolved_by=resolved_by,
+                resolved_at=_utcnow().isoformat(),
+                scheduled_scope=scheduled_scope,
+            ),
         )
         if recorded.resolution is None:
             return False

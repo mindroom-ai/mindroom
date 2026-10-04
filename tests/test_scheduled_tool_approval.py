@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
+from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalManager
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -31,6 +32,7 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.scheduling import (
@@ -43,7 +45,7 @@ from mindroom.scheduling import (
     save_edited_scheduled_task,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
-from mindroom.tool_approval import ToolApprovalTransportError
+from mindroom.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.tool_approval_grants import ApprovalOperation
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -92,6 +94,7 @@ async def _schedule(
     *,
     execute_at: datetime | None = None,
     workflow_digest: str = "workflow",
+    any_arguments_offered: bool = False,
 ) -> bool:
     return await manager.request_scheduled_call_approval(
         task_id=_TASK,
@@ -105,10 +108,29 @@ async def _schedule(
         execute_at=execute_at or datetime.now(UTC) + timedelta(minutes=1),
         workflow_digest=workflow_digest,
         scheduled_for_text="9:00 AM EDT",
+        any_arguments_offered=any_arguments_offered,
     )
 
 
-async def _decide(manager: ApprovalManager, status: str) -> ApprovalActionResult:
+async def _arm(
+    manager: ApprovalManager,
+    workflow_digest: str = "workflow",
+    *,
+    any_arguments_allowed: bool = True,
+) -> str:
+    return await manager.arm_scheduled_call_approval(
+        _TASK,
+        workflow_digest,
+        any_arguments_allowed=any_arguments_allowed,
+    )
+
+
+async def _decide(
+    manager: ApprovalManager,
+    status: str,
+    *,
+    scheduled_scope: str | None = None,
+) -> ApprovalActionResult:
     return await manager.handle_card_response(
         room_id=_ROOM,
         sender_id=_REQUESTER,
@@ -116,6 +138,7 @@ async def _decide(manager: ApprovalManager, status: str) -> ApprovalActionResult
         status=status,
         reason=None,
         authorize_responder=lambda _agent: True,
+        scheduled_scope=scheduled_scope,
     )
 
 
@@ -241,7 +264,7 @@ async def test_armed_approval_runs_the_exact_call_once(
     try:
         assert await _schedule(manager)
         assert (await _decide(manager, "approved")).consumed is True
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
         sent.clear()
 
         first = await _fire_time_call(journal, manager, "first")
@@ -287,7 +310,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _arm(manager)
         await _fire_time_call(journal, manager, "first")
         cards = journal.principal("router@shared")
 
@@ -330,7 +353,7 @@ async def test_anything_but_the_armed_exact_call_still_waits_for_approval(
         assert await _schedule(manager)
         await _decide(manager, "approved")
         if armed:
-            assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+            assert await _arm(manager) == "armed"
 
         continuation = await _fire_time_call(journal, manager, "mismatch", **call)
 
@@ -355,12 +378,12 @@ async def test_arming_requires_an_approved_unchanged_task_firing_on_time(
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "none"
+        assert await _arm(manager) == "none"
         assert await _schedule(manager)
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "edited-workflow") == "unarmed"
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager, "edited-workflow") == "unarmed"
+        assert await _arm(manager) == "armed"
     finally:
         await manager.shutdown()
 
@@ -376,7 +399,7 @@ async def test_approval_far_from_the_send_time_does_not_arm(
     try:
         assert await _schedule(manager, execute_at=datetime.now(UTC) + timedelta(minutes=16))
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -392,8 +415,8 @@ async def test_denied_card_reports_denied_unless_the_task_changed(
     try:
         assert await _schedule(manager)
         await _decide(manager, "denied")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "denied"
-        assert await manager.arm_scheduled_call_approval(_TASK, "edited-workflow") == "unarmed"
+        assert await _arm(manager) == "denied"
+        assert await _arm(manager, "edited-workflow") == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -420,7 +443,7 @@ async def test_cancelling_the_task_denies_its_pending_card(
         assert decision.reason == "Schedule cancelled."
         assert [delivery.stage for delivery in sent] == [DeliveryStage.FINAL]
         assert sent[0].payload["status"] == "denied"
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -436,7 +459,7 @@ async def test_new_room_tenure_does_not_inherit_the_approval(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
         cards = journal.principal("router@shared")
         await admit_room_membership(cards, _ROOM, "leave")
         await admit_room_membership(cards, _ROOM, "join")
@@ -459,7 +482,7 @@ async def test_approval_is_not_used_when_another_gated_call_would_hold_the_run(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
         responder = journal.principal("agent@" + _AGENT)
         await responder.admit(
             InboundEvent(
@@ -539,6 +562,163 @@ async def test_approval_is_not_used_when_another_gated_call_would_hold_the_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("offered", [True, False])
+async def test_scheduling_card_offers_any_arguments_only_when_asked(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    offered: bool,
+) -> None:
+    """Cards always state the send window and offer the broader scope only when it is allowed."""
+    journal = journal_database()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(journal, tmp_path, sent)
+    try:
+        assert await _schedule(manager, any_arguments_offered=offered)
+        [card] = sent
+        assert card.payload["scheduled_window_seconds"] == 900
+        assert card.payload.get("scheduled_scope_options") == (
+            ["exact_arguments", "any_arguments"] if offered else None
+        )
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_any_arguments_approval_runs_one_call_with_different_arguments(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The broader scope accepts other arguments for the same tool, still only once."""
+    journal = journal_database()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(journal, tmp_path, sent)
+    try:
+        assert await _schedule(manager, any_arguments_offered=True)
+        assert (await _decide(manager, "approved", scheduled_scope="any_arguments")).consumed is True
+        decision = next(delivery for delivery in sent if delivery.stage is DeliveryStage.FINAL)
+        assert decision.payload["scheduled_scope"] == "any_arguments"
+        assert await _arm(manager) == "armed"
+        sent.clear()
+
+        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
+
+        assert changed.calls[0].decision is not None
+        assert changed.calls[0].decision.value == "approved"
+        [receipt] = sent
+        assert receipt.payload["approval_provenance"]["scope"] == "any_arguments"
+        assert receipt.payload["approval_provenance"]["arguments_digest"] == approval_arguments_digest(
+            {"channel": "U999", "text": "Other"},
+        )
+        again = await _fire_time_call(journal, manager, "again")
+        assert again.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_exact_approval_is_recorded_as_exact_scope(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """An approval without a scope, such as a reaction, covers only the exact arguments."""
+    journal = journal_database()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(journal, tmp_path, sent)
+    try:
+        assert await _schedule(manager, any_arguments_offered=True)
+        await _decide(manager, "approved")
+        decision = next(delivery for delivery in sent if delivery.stage is DeliveryStage.FINAL)
+        assert decision.payload["scheduled_scope"] == "exact_arguments"
+        await _arm(manager)
+
+        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
+
+        assert changed.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_disabling_any_arguments_narrows_an_existing_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Turning the broader scope off applies to approvals already given, which then need the exact call."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager, any_arguments_offered=True)
+        await _decide(manager, "approved", scheduled_scope="any_arguments")
+        assert await _arm(manager, any_arguments_allowed=False) == "armed"
+
+        changed = await _fire_time_call(journal, manager, "changed", arguments={"channel": "U999", "text": "Other"})
+        exact = await _fire_time_call(journal, manager, "exact")
+
+        assert changed.calls[0].decision is None
+        assert exact.calls[0].decision is not None
+        assert exact.calls[0].decision.value == "approved"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offered", "status", "scope"),
+    [
+        (False, "approved", "any_arguments"),
+        (True, "denied", "any_arguments"),
+        (True, "approved", "everything"),
+    ],
+    ids=["not-offered", "with-denial", "unknown-scope"],
+)
+async def test_unoffered_or_malformed_scope_is_ignored(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    offered: bool,
+    status: str,
+    scope: str,
+) -> None:
+    """A scope the card did not offer, or one sent with a denial, does not decide the card."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager, any_arguments_offered=offered)
+
+        result = await _decide(manager, status, scheduled_scope=scope)
+
+        assert result.consumed is False
+        assert await _arm(manager) == "unarmed"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scope_is_ignored_on_an_ordinary_approval_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Only scheduling-time cards accept a scheduled scope."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        await _fire_time_call(journal, manager, "plain")
+
+        result = await manager.handle_card_response(
+            room_id=_ROOM,
+            sender_id=_REQUESTER,
+            card_event_id="$card-plain",
+            status="approved",
+            reason=None,
+            authorize_responder=lambda _agent: True,
+            scheduled_scope="any_arguments",
+        )
+
+        assert result.consumed is False
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_team_member_call_consumes_the_team_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -549,7 +729,7 @@ async def test_team_member_call_consumes_the_team_approval(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
 
         continuation = await _fire_time_call(journal, manager, "team-call", member="writer")
 
@@ -571,13 +751,13 @@ async def test_cancelling_an_armed_task_revokes_its_approval(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
 
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
         continuation = await _fire_time_call(journal, manager, "after-cancel")
 
         assert continuation.calls[0].decision is None
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -594,7 +774,7 @@ async def test_only_the_requesters_denial_skips_the_send(
         assert await _schedule(manager)
         await admit_room_membership(journal.principal("router@shared"), _ROOM, "leave")
 
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -617,7 +797,7 @@ async def test_editing_the_task_withdraws_an_approval_given_for_the_old_one(
         [edit] = sent
         assert edit.payload["status"] == "denied"
         assert edit.payload["resolution_reason"] == "Schedule edited."
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "unarmed"
+        assert await _arm(manager) == "unarmed"
     finally:
         await manager.shutdown()
 
@@ -646,7 +826,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _arm(manager)
         await _fire_time_call(journal, manager, "first")
         await journal.backend.write(
             lambda transaction: transaction.execute(
@@ -700,6 +880,7 @@ async def test_receipt_names_the_account_that_approved_the_card(
             execute_at=datetime.now(UTC) + timedelta(minutes=1),
             workflow_digest="workflow",
             scheduled_for_text="9:00 AM EDT",
+            any_arguments_offered=False,
         )
         result = await manager.handle_card_response(
             room_id=_ROOM,
@@ -710,7 +891,7 @@ async def test_receipt_names_the_account_that_approved_the_card(
             authorize_responder=lambda _agent: True,
         )
         assert result.consumed is True
-        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        assert await _arm(manager) == "armed"
         sent.clear()
 
         await _fire_time_call(journal, manager, "first")
@@ -745,7 +926,7 @@ async def test_receipt_that_will_never_be_sent_does_not_block_pruning(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _arm(manager)
         await _fire_time_call(journal, manager, "first")
         await journal.backend.write(lambda transaction: transaction.execute(abandon, ("card-first",)))
         await journal.backend.write(
@@ -764,6 +945,13 @@ async def test_receipt_that_will_never_be_sent_does_not_block_pruning(
             ),
         )
         assert remaining is None
+        receipt = await journal.backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT 1 AS present FROM matrix_delivery_outbox WHERE delivery_id = ?",
+                ("card-first",),
+            ),
+        )
+        assert receipt is None
     finally:
         await manager.shutdown()
 
@@ -812,7 +1000,7 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
     try:
         assert await _schedule(manager)
         await _decide(manager, "approved")
-        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _arm(manager)
         await _fire_time_call(journal, manager, "first")
         cards = journal.principal("router@shared")
 
@@ -920,6 +1108,8 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
     assert kwargs["arguments"] == {"channel": "U123", "text": "Good morning!"}
     assert kwargs["execute_at"] == workflow.execute_at
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
+    assert kwargs["any_arguments_offered"] is True
+    assert workflow.pre_approved_call is True
     assert kwargs["workflow_digest"] == _scheduled_call_workflow_digest(record.task_id, workflow)
     start.assert_called_once()
     assert record.task_id in result
@@ -1150,6 +1340,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
         description="Morning DM",
         room_id="!test:server",
         thread_id="$thread123",
+        pre_approved_call=True,
     )
     record = ScheduledTaskRecord(
         task_id="task1234",
@@ -1177,7 +1368,11 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
             AsyncMock(),
         )
 
-    arm.assert_awaited_once_with("task1234", _scheduled_call_workflow_digest("task1234", workflow))
+    arm.assert_awaited_once_with(
+        "task1234",
+        _scheduled_call_workflow_digest("task1234", workflow),
+        any_arguments_allowed=True,
+    )
     assert execute.await_count == int(fires)
     assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
 
@@ -1220,6 +1415,7 @@ async def test_failed_withdrawal_rejects_an_edit_before_publishing_it() -> None:
         message="Remind me",
         description="Reminder",
         room_id="!test:server",
+        pre_approved_call=True,
     )
     existing = ScheduledTaskRecord(
         task_id="task1234",
@@ -1251,8 +1447,17 @@ async def test_failed_withdrawal_rejects_an_edit_before_publishing_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plain_tasks_still_fire_when_scheduled_call_arming_fails() -> None:
-    """An approval-journal error must not stop an ordinary reminder; an unarmed call still asks for approval."""
+@pytest.mark.parametrize(
+    ("pre_approved_call", "arm_error", "armed"),
+    [(False, None, False), (True, RuntimeError("db down"), True)],
+    ids=["plain-reminder", "arming-fails"],
+)
+async def test_tasks_fire_without_an_armed_approval(
+    pre_approved_call: bool,
+    arm_error: Exception | None,
+    armed: bool,
+) -> None:
+    """Plain reminders never touch call approvals, and a failed arming still fires a scheduled call."""
     client = AsyncMock()
     client.room_get_state_event.side_effect = joined_member_state
     client.room_put_state = AsyncMock()
@@ -1264,6 +1469,7 @@ async def test_plain_tasks_still_fire_when_scheduled_call_arming_fails() -> None
         description="Reminder",
         room_id="!test:server",
         thread_id="$thread123",
+        pre_approved_call=pre_approved_call,
     )
     record = ScheduledTaskRecord(
         task_id="task1234",
@@ -1272,10 +1478,11 @@ async def test_plain_tasks_still_fire_when_scheduled_call_arming_fails() -> None
         created_at=datetime.now(UTC),
         workflow=workflow,
     )
+    arm = AsyncMock(side_effect=arm_error)
 
     with (
         patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.arm_scheduled_call_approval", new=AsyncMock(side_effect=RuntimeError("db down"))),
+        patch("mindroom.scheduling.arm_scheduled_call_approval", new=arm),
         patch(
             "mindroom.scheduling_executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -1290,6 +1497,7 @@ async def test_plain_tasks_still_fire_when_scheduled_call_arming_fails() -> None
             AsyncMock(),
         )
 
+    assert arm.await_count == int(armed)
     execute.assert_awaited_once()
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
 
@@ -1322,3 +1530,128 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
     assert result == "✅ Cancelled task `task1234`"
     cancel.assert_awaited_once_with("task1234", reason="Schedule cancelled.")
     assert order == ["withdraw", "state"]
+
+
+def _response_event(content: dict[str, object]) -> nio.UnknownEvent:
+    return nio.UnknownEvent.from_dict(
+        {
+            "type": "io.mindroom.tool_approval_response",
+            "event_id": "$action",
+            "sender": "@human:test",
+            "origin_server_ts": 1000,
+            "content": {
+                **content,
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": "$card"},
+                },
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("scope", ["exact_arguments", "any_arguments"])
+def test_response_carries_an_approved_scheduled_scope(scope: str) -> None:
+    """A client approves a scheduled call's card for one of the offered scopes."""
+    payload = parse_approval_response_event(_response_event({"status": "approved", "scheduled_scope": scope}))
+
+    assert payload.status == "approved"
+    assert payload.scheduled_scope == scope
+    assert payload.card_event_id == "$card"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"status": "denied", "scheduled_scope": "any_arguments"},
+        {"status": "approved", "scheduled_scope": "everything"},
+        {"status": "approved", "scheduled_scope": "any_arguments", "auto_approve_seconds": 300},
+        {"action": "revoke_auto_approval", "grant_id": "grant-1", "scheduled_scope": "any_arguments"},
+    ],
+    ids=["with-denial", "unknown-scope", "with-timed-approval", "with-revocation"],
+)
+def test_malformed_scheduled_scope_never_becomes_a_decision(content: dict[str, object]) -> None:
+    """A scope that cannot apply makes the whole response inert rather than a plain approval."""
+    payload = parse_approval_response_event(_response_event(content))
+
+    assert payload.status is None
+    assert payload.action is None
+    assert payload.scheduled_scope is None
+
+
+@pytest.mark.parametrize(
+    ("config", "tool_name", "arguments", "offered"),
+    [
+        (Config(), "post_slack_message", {"channel": "U1"}, True),
+        (Config(tool_approval=ToolApprovalConfig(scheduled_any_arguments=False)), "post_slack_message", {}, False),
+        (
+            Config(
+                mcp_servers={"files": MCPServerConfig(transport="streamable-http", url="https://files.example/mcp")},
+            ),
+            "files_call_tool",
+            {"tool_name": "delete", "arguments": {"path": "/one"}},
+            False,
+        ),
+    ],
+    ids=["plain-tool", "operator-disabled", "generic-mcp-dispatch"],
+)
+def test_any_arguments_is_offered_only_for_a_named_tool_operators_allow(
+    config: Config,
+    tool_name: str,
+    arguments: dict[str, object],
+    offered: bool,
+) -> None:
+    """Generic MCP dispatch and an operator opt-out keep scheduled approvals exact."""
+    assert scheduled_call_offers_any_arguments(config, tool_name, arguments) is offered
+
+
+def test_workflow_without_flag_loads_as_ordinary_task() -> None:
+    """Tasks stored before scheduled tool calls existed carry no call approval."""
+    stored = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2030, 1, 2, 14, 0, tzinfo=UTC),
+        message="Remind me",
+        description="Reminder",
+        created_by="@user:localhost",
+        room_id="!room:localhost",
+    ).model_dump(mode="json")
+    stored.pop("pre_approved_call")
+
+    assert ScheduledWorkflow.model_validate(stored).pre_approved_call is False
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_plain_reminder_leaves_call_approvals_alone() -> None:
+    """Ordinary tasks cancel without touching the approval journal."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
+    )
+    plain = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2030, 1, 2, 14, 0, tzinfo=UTC),
+        message="Remind me",
+        description="Reminder",
+        created_by="@user:server",
+        room_id="!test:server",
+    )
+    withdraw = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.scheduling._read_scheduled_task_state",
+            new=AsyncMock(return_value={"status": "pending", "workflow": plain.model_dump_json()}),
+        ),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+    ):
+        result = await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+        )
+
+    assert result == "✅ Cancelled task `task1234`"
+    withdraw.assert_not_awaited()

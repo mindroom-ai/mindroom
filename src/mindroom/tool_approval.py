@@ -20,6 +20,7 @@ from mindroom.approval_manager import (
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exempt
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ __all__ = [
     "is_process_active_approval_card",
     "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
+    "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
     "withdraw_scheduled_call_approval",
@@ -98,6 +100,7 @@ class MatrixApprovalAction:
     action: Literal["revoke_auto_approval"] | None = None
     grant_id: str | None = None
     current_binding: str | None = None
+    scheduled_scope: str | None = None
 
 
 def _check_callable_from_module(
@@ -257,6 +260,7 @@ async def handle_matrix_approval_action(
         and action.grant_id is not None
         and action.status is None
         and action.auto_approve_seconds is None
+        and action.scheduled_scope is None
     ):
         return await manager.handle_grant_revocation(
             room_id=action.room_id,
@@ -266,7 +270,12 @@ async def handle_matrix_approval_action(
             authorize_responder=authorize_responder,
             before_consume=before_consume,
         )
-    if action.status is None or action.action is not None or action.grant_id is not None:
+    if (
+        action.status is None
+        or action.action is not None
+        or action.grant_id is not None
+        or (action.scheduled_scope is not None and action.auto_approve_seconds is not None)
+    ):
         return ApprovalActionResult(consumed=False)
     return await manager.handle_card_response(
         room_id=action.room_id,
@@ -278,7 +287,18 @@ async def handle_matrix_approval_action(
         authorize_responder=authorize_responder,
         auto_approve_seconds=action.auto_approve_seconds,
         current_binding=action.current_binding,
+        scheduled_scope=action.scheduled_scope,
     )
+
+
+def scheduled_call_offers_any_arguments(config: Config, tool_name: str, arguments: dict[str, object]) -> bool:
+    """Return whether a scheduled call's card may offer approving any arguments.
+
+    Generic MCP dispatch names its remote tool in the arguments, so approving any
+    arguments there would approve every tool on the server; it stays exact-only.
+    """
+    operation = grant_operation(config, tool_name, arguments)
+    return config.tool_approval.scheduled_any_arguments and operation is not None and operation.mcp_server_id is None
 
 
 async def request_scheduled_call_approval(
@@ -294,8 +314,9 @@ async def request_scheduled_call_approval(
     execute_at: datetime,
     workflow_digest: str,
     scheduled_for_text: str,
+    any_arguments_offered: bool,
 ) -> bool:
-    """Publish the card that pre-approves one exact call a scheduled task will make."""
+    """Publish the card that pre-approves a call a scheduled task will make."""
     manager = approval_manager.get_approval_store()
     return manager is not None and await manager.request_scheduled_call_approval(
         task_id=task_id,
@@ -309,13 +330,25 @@ async def request_scheduled_call_approval(
         execute_at=execute_at,
         workflow_digest=workflow_digest,
         scheduled_for_text=scheduled_for_text,
+        any_arguments_offered=any_arguments_offered,
     )
 
 
-async def arm_scheduled_call_approval(task_id: str, workflow_digest: str) -> ScheduledApprovalArmState:
+async def arm_scheduled_call_approval(
+    task_id: str,
+    workflow_digest: str,
+    *,
+    any_arguments_allowed: bool,
+) -> ScheduledApprovalArmState:
     """Arm a scheduled call's approval as its unchanged task fires; unknown without a store."""
     manager = approval_manager.get_approval_store()
-    return "none" if manager is None else await manager.arm_scheduled_call_approval(task_id, workflow_digest)
+    if manager is None:
+        return "none"
+    return await manager.arm_scheduled_call_approval(
+        task_id,
+        workflow_digest,
+        any_arguments_allowed=any_arguments_allowed,
+    )
 
 
 async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:

@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 AUTO_APPROVE_OPTIONS = (300, 600, 1800)
+# How much of a scheduled tool call a requester approves while scheduling it.
+EXACT_ARGUMENTS = "exact_arguments"
+ANY_ARGUMENTS = "any_arguments"
+SCHEDULED_SCOPE_OPTIONS = (EXACT_ARGUMENTS, ANY_ARGUMENTS)
 
 
 def valid_auto_approve_seconds(value: object) -> bool:

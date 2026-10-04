@@ -1,9 +1,11 @@
-"""One-shot approvals for exact tool calls a requester approved while scheduling them.
+"""One-shot approvals for tool calls a requester approved while scheduling them.
 
 A scheduled call's card is a detached exact-call card on the shared
 background-approval lifecycle. This module owns the binding a later call must
 match: the scheduled task fires, arms the binding only if the task is unchanged
-and on time, and the first exactly matching call consumes it.
+and on time, and the first matching call consumes it. The requester approves
+either the exact arguments shown on the card or any arguments for that tool.
+It is the only module that reads or writes the binding table.
 """
 
 from __future__ import annotations
@@ -13,23 +15,26 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_approval_grants import approval_timestamp
+from mindroom.tool_approval_grants import ANY_ARGUMENTS, EXACT_ARGUMENTS, approval_timestamp
 
 from . import approval_card_state, approval_grants, background_approvals, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
-    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
+    from .approval_card_state import ApprovalCardReservation, ApprovalDecisionMetadata, RecordedApprovalDecision
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
 __all__ = [
+    "RECEIPT",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "ScheduledApprovalArmState",
     "ScheduledCallBinding",
     "apply_armed",
     "arm",
     "prune",
+    "record_decision",
+    "remember_receipt_alias",
     "reserve",
     "withdraw",
 ]
@@ -37,12 +42,18 @@ __all__ = [
 SCHEDULED_APPROVAL_WINDOW_NS = 15 * 60 * 1_000_000_000
 _RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 ScheduledApprovalArmState = Literal["none", "armed", "denied", "unarmed"]
+# A consumed binding marks the receipt it published as an automatic terminal approval.
+RECEIPT = """EXISTS (
+    SELECT 1 FROM scheduled_call_approvals AS scheduled
+    WHERE scheduled.principal_id = {initial}.principal_id
+      AND scheduled.consumed_delivery_id = {initial}.delivery_id
+)"""
 logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
 class ScheduledCallBinding:
-    """The exact call, scope, task, and time one scheduled approval covers."""
+    """The call, scope, task, and time one scheduled approval covers."""
 
     task_id: str
     room_id: str
@@ -60,12 +71,12 @@ def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
     """Forget bindings past their send time or withdrawal once their card has retired and any receipt is settled.
 
     A receipt Matrix never accepted, because it was retired or failed for good, has no
-    event a click could target, so it no longer needs the binding that explains it.
+    event a click could target, so it is dropped with the binding that explains it.
     """
     cutoff_ns = now_ns - _RETENTION_NS
     rows = transaction.fetchall(
         """
-        SELECT task_id FROM scheduled_call_approvals AS scheduled
+        SELECT task_id, consumed_delivery_id FROM scheduled_call_approvals AS scheduled
         WHERE principal_id = ? AND (execute_at_ns < ? OR revoked_at_ns < ?)
           AND NOT EXISTS (
               SELECT 1 FROM matrix_delivery_outbox AS receipt
@@ -78,15 +89,21 @@ def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
     )
     for row in rows:
         task_id = str(row["task_id"])
-        if background_approvals.prune_calls(
+        if not background_approvals.prune_calls(
             transaction,
             principal_id,
             run_id=background_approvals.scheduled_call_run_id(task_id),
         ):
+            continue
+        if row["consumed_delivery_id"] is not None:
             transaction.execute(
-                "DELETE FROM scheduled_call_approvals WHERE principal_id = ? AND task_id = ?",
-                (principal_id, task_id),
+                "DELETE FROM matrix_delivery_outbox WHERE principal_id = ? AND delivery_id = ?",
+                (principal_id, str(row["consumed_delivery_id"])),
             )
+        transaction.execute(
+            "DELETE FROM scheduled_call_approvals WHERE principal_id = ? AND task_id = ?",
+            (principal_id, task_id),
+        )
 
 
 def reserve(
@@ -138,15 +155,70 @@ def reserve(
     return True
 
 
+def record_decision(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    recorded: RecordedApprovalDecision,
+    requested_status: str,
+    metadata: ApprovalDecisionMetadata | None,
+) -> None:
+    """Record who decided a scheduling-time card, when, and the scope they approved.
+
+    Only the requester's own decision names a decider; denials MindRoom makes by
+    itself leave it empty, so they never skip the send.
+    """
+    if not recorded.recorded or recorded.delivery_id is None or recorded.resolution is None:
+        return
+    status = recorded.resolution.get("status")
+    decided_by = metadata.resolved_by if metadata is not None and status == requested_status else None
+    approved_scope = None
+    if decided_by is not None and status == "approved":
+        assert metadata is not None
+        approved_scope = metadata.scheduled_scope or EXACT_ARGUMENTS
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET card_event_id = ?, decided_at_ns = ?, decided_by = ?, approved_scope = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (recorded.card_event_id, time.time_ns(), decided_by, approved_scope, principal_id, recorded.delivery_id),
+    )
+
+
+def remember_receipt_alias(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    card_event_id: str,
+    delivery_id: str,
+) -> None:
+    """Remember another copy of a consumed binding's receipt as terminal."""
+    transaction.execute(
+        """
+        INSERT INTO approval_action_tombstones (principal_id, room_id, card_event_id)
+        SELECT scheduled.principal_id, scheduled.room_id, ? FROM scheduled_call_approvals AS scheduled
+        WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.consumed_delivery_id = ?
+        ON CONFLICT (principal_id, card_event_id) DO NOTHING
+        """,
+        (card_event_id, principal_id, room_id, delivery_id),
+    )
+
+
 def arm(
     transaction: Transaction,
     principal_id: str,
     *,
     task_id: str,
     workflow_digest: str,
+    any_arguments_allowed: bool,
     now_ns: int,
 ) -> ScheduledApprovalArmState:
-    """Arm an approved binding for the unchanged task firing on time; only the requester's denial skips it."""
+    """Arm an approved binding for the unchanged task firing on time; only the requester's denial skips it.
+
+    When operators no longer allow approving any arguments, an approval given for
+    any arguments arms for the exact call only.
+    """
     row = transaction.fetchone(
         """
         SELECT scheduled.workflow_digest, scheduled.execute_at_ns, scheduled.revoked_at_ns, scheduled.decided_by,
@@ -168,10 +240,11 @@ def arm(
         return "unarmed"
     transaction.execute(
         """
-        UPDATE scheduled_call_approvals SET armed_at_ns = ?
+        UPDATE scheduled_call_approvals
+        SET armed_at_ns = ?, approved_scope = CASE WHEN ? THEN approved_scope ELSE ? END
         WHERE principal_id = ? AND task_id = ? AND consumed_at_ns IS NULL
         """,
-        (now_ns, principal_id, task_id),
+        (now_ns, any_arguments_allowed, EXACT_ARGUMENTS, principal_id, task_id),
     )
     return "armed"
 
@@ -216,18 +289,19 @@ def apply_armed(
     row = transaction.fetchone(
         """
         SELECT scheduled.task_id, scheduled.execute_at_ns, scheduled.decided_at_ns, scheduled.decided_by,
-               scheduled.card_event_id
+               scheduled.card_event_id, scheduled.approved_scope
         FROM scheduled_call_approvals AS scheduled
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
         WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.thread_id = ?
           AND scheduled.requester_id = ? AND scheduled.entity_name = ? AND scheduled.tool_name = ?
-          AND scheduled.arguments_digest = ? AND scheduled.membership_epoch = ?
+          AND (scheduled.arguments_digest = ? OR scheduled.approved_scope = ?)
+          AND scheduled.membership_epoch = ?
           AND scheduled.armed_at_ns IS NOT NULL AND scheduled.revoked_at_ns IS NULL
           AND scheduled.consumed_at_ns IS NULL
           AND scheduled.execute_at_ns BETWEEN ? AND ?
           AND background.decision = 'approved'
-        ORDER BY scheduled.execute_at_ns, scheduled.task_id
+        ORDER BY CASE WHEN scheduled.arguments_digest = ? THEN 0 ELSE 1 END, scheduled.execute_at_ns, scheduled.task_id
         LIMIT 1
         """,
         (
@@ -238,9 +312,11 @@ def apply_armed(
             continuation.entity_name,
             call.tool_name,
             call.arguments_digest,
+            ANY_ARGUMENTS,
             membership_epoch,
             now - SCHEDULED_APPROVAL_WINDOW_NS,
             now + SCHEDULED_APPROVAL_WINDOW_NS,
+            call.arguments_digest,
         ),
     )
     if row is None:
@@ -274,6 +350,7 @@ def apply_armed(
         "approved_by": approved_by,
         "approved_at": approved_at,
         "scheduled_for": approval_timestamp(int(row["execute_at_ns"])),
+        "scope": str(row["approved_scope"]),
         "arguments_digest": call.arguments_digest,
     }
     # Timed-grant scope is bound only when a card is reserved, so this receipt

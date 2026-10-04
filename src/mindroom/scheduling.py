@@ -47,6 +47,7 @@ from mindroom.tool_approval import (
     evaluate_tool_approval,
     request_scheduled_call_approval,
     resolve_tool_approval_approver,
+    scheduled_call_offers_any_arguments,
     withdraw_scheduled_call_approval,
 )
 
@@ -233,6 +234,15 @@ class ScheduledWorkflow(BaseModel):
     room_id: str | None = None
     new_thread: bool = False
     silent: bool = False
+    # LEGACY_COMPAT: Scheduled workflows without the pre-approved call flag.
+    # Legacy format: Scheduled workflows omitted pre_approved_call before scheduled tool calls existed.
+    # Last legacy release: v2026.10.122; replacement: the next release writes the flag on every workflow.
+    # Handling: Pydantic defaults absence to False, which is correct because no earlier task carried an approval.
+    # Coverage: tests/test_scheduled_tool_approval.py::test_workflow_without_flag_loads_as_ordinary_task.
+    pre_approved_call: bool = Field(
+        default=False,
+        description="Whether the requester approved this one-time task's tool call while scheduling it",
+    )
 
     @field_validator("execute_at")
     @classmethod
@@ -949,7 +959,8 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     return None
                 if current_task != departed_task:
                     continue
-                await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+                if current_task.workflow.pre_approved_call:
+                    await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                 await _persist_scheduled_task_state(
                     client=client,
                     room_id=room_id,
@@ -1166,7 +1177,8 @@ async def save_edited_scheduled_task(
         if current_task != existing_task:
             msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
             raise ValueError(msg)
-        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_EDITED_REASON)
+        if current_task.workflow.pre_approved_call:
+            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_EDITED_REASON)
         revision = await _persist_scheduled_task_state(
             client=client,
             room_id=room_id,
@@ -1524,7 +1536,12 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 logger.error("No execution time provided for one-time task", task_id=task_id)
                 return
 
-            approval_state = await _arm_scheduled_call(task_id, latest_workflow)
+            current_config = config_provider() if config_provider is not None else None
+            approval_state = (
+                await _arm_scheduled_call(task_id, latest_workflow, current_config or config)
+                if latest_workflow.pre_approved_call
+                else "none"
+            )
             if approval_state == "denied":
                 logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
                 final_status = "cancelled"
@@ -1908,6 +1925,12 @@ def _scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -
     return hashlib.sha256(json.dumps(defining_fields, separators=(",", ":")).encode()).hexdigest()
 
 
+def _stored_task_has_scheduled_call(room_id: str, task_id: str, content: dict[str, object]) -> bool:
+    """Return whether a stored task carries a call approval; an unreadable task counts, so cancelling fails closed."""
+    record = _parse_scheduled_task_record(room_id, task_id, content)
+    return record is None or record.workflow.pre_approved_call
+
+
 async def _withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
     """Withdraw a task's call approval, reporting a journal failure the way task-state failures are reported."""
     try:
@@ -1917,10 +1940,18 @@ async def _withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
         raise ValueError(msg) from exc
 
 
-async def _arm_scheduled_call(task_id: str, workflow: ScheduledWorkflow) -> ScheduledApprovalArmState:
+async def _arm_scheduled_call(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> ScheduledApprovalArmState:
     """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
     try:
-        return await arm_scheduled_call_approval(task_id, _scheduled_call_workflow_digest(task_id, workflow))
+        return await arm_scheduled_call_approval(
+            task_id,
+            _scheduled_call_workflow_digest(task_id, workflow),
+            any_arguments_allowed=config.tool_approval.scheduled_any_arguments,
+        )
     except Exception:
         logger.warning("scheduled_tool_call_arming_failed", task_id=task_id, exc_info=True)
         return "unarmed"
@@ -2020,6 +2051,7 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         created_by=scheduled_by,
         thread_id=thread_id,
         room_id=room_id,
+        pre_approved_call=True,
     )
     # Publish the task only once its card exists, so no cancel or edit can reach a task whose
     # card is still being prepared; a card whose task never published is withdrawn.
@@ -2037,6 +2069,7 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             execute_at=send_at,
             workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
+            any_arguments_offered=scheduled_call_offers_any_arguments(config, tool_name, arguments),
         ):
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
         await _persist_scheduled_task_state(
@@ -2226,7 +2259,8 @@ async def cancel_scheduled_task(
     # interruption between the two leaves a runnable task that asks again rather than
     # a cancelled task whose approval still works.
     try:
-        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+        if _stored_task_has_scheduled_call(room_id, task_id, existing_content):
+            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
         await _put_scheduled_task_state_content(
             client=client,
             room_id=room_id,
@@ -2269,7 +2303,8 @@ async def cancel_all_scheduled_tasks(
 
                 # Update to cancelled in Matrix state
                 try:
-                    await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+                    if _stored_task_has_scheduled_call(room_id, task_id, content):
+                        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     await _put_scheduled_task_state_content(
                         client=client,
                         room_id=room_id,

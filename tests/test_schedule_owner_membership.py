@@ -52,6 +52,7 @@ def _owner_schedule(
     schedule_type: Literal["once", "cron"] = "once",
     created_by: str | None = "@alice:server",
     writer: str = _SCHEDULE_WRITER,
+    pre_approved_call: bool = False,
 ) -> tuple[AsyncMock, scheduling.ScheduledWorkflow, dict[str, Any]]:
     workflow = scheduling.ScheduledWorkflow(
         schedule_type=schedule_type,
@@ -61,6 +62,7 @@ def _owner_schedule(
         description="Queue check",
         room_id="!test:server",
         created_by=created_by,
+        pre_approved_call=pre_approved_call,
     )
     state: dict[str, Any] = {
         "task_id": "owner_task",
@@ -107,12 +109,14 @@ def _owner_schedule(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("membership", ["leave", "ban", "invite", "knock"])
+@pytest.mark.parametrize("pre_approved_call", [False, True])
 async def test_departed_owner_cancels_persisted_schedule(
     membership: str,
+    pre_approved_call: bool,
     owner_membership_runtime_paths: RuntimePaths,
 ) -> None:
-    """Leaving, removal, or deactivation must retire the creator's pending task and its approval card."""
-    client, workflow, state = _owner_schedule([{"membership": membership}])
+    """Leaving, removal, or deactivation must retire the creator's pending task and any call approval it carries."""
+    client, workflow, state = _owner_schedule([{"membership": membership}], pre_approved_call=pre_approved_call)
     cancel_approval = AsyncMock()
 
     with patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=cancel_approval):
@@ -125,7 +129,9 @@ async def test_departed_owner_cancels_persisted_schedule(
         )
 
     assert task is None
-    cancel_approval.assert_awaited_once_with("owner_task", reason="Schedule cancelled.")
+    assert cancel_approval.await_count == int(pre_approved_call)
+    if pre_approved_call:
+        cancel_approval.assert_awaited_once_with("owner_task", reason="Schedule cancelled.")
     assert state["status"] == "cancelled"
     assert state["workflow"] == workflow.model_dump_json()
     assert state["created_at"] == "2026-09-01T00:00:00+00:00"
@@ -136,7 +142,7 @@ async def test_departed_owner_cancellation_retries_a_failed_approval_withdrawal(
     owner_membership_runtime_paths: RuntimePaths,
 ) -> None:
     """A transient approval-journal error delays the cancellation instead of failing the task."""
-    client, _workflow, state = _owner_schedule([{"membership": "leave"}])
+    client, _workflow, state = _owner_schedule([{"membership": "leave"}], pre_approved_call=True)
     withdraw = AsyncMock(side_effect=[RuntimeError("journal unavailable"), None])
 
     with (
