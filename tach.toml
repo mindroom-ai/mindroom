@@ -4347,6 +4347,7 @@ depends_on = [
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
+    "mindroom.cli.debug_report",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
@@ -6765,6 +6766,21 @@ depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.re
 [[modules]]
 path = "mindroom.cli.response_activity"
 depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
+
+[[modules]]
+path = "mindroom.debug_report"
+depends_on = []
+visibility = ["mindroom.cli.debug_report"]
+
+[[modules]]
+path = "mindroom.cli.debug_report"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.config.yaml_includes",
+    "mindroom.constants",
+    "mindroom.debug_report",
+]
+visibility = ["mindroom.cli.main"]
 
 [[modules]]
 path = "mindroom.config_reload"
