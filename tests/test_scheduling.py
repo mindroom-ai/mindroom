@@ -2076,6 +2076,83 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
 
 
 @pytest.mark.asyncio
+async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> None:
+    """Editing a pre-approved task withdraws its approval, and the parser cannot mark the edit pre-approved."""
+    client = AsyncMock()
+    serve_task_state_events(client)
+    room_state: dict[str, dict[str, Any]] = {}
+    matrix_admin = _RecordingScheduleStateAdmin(room_state)
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key: nio.RoomGetStateEventResponse(
+            content=room_state[state_key]["content"],
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+        ),
+    )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="@assistant call add",
+        description="Pre-approved add",
+        room_id="!test:server",
+        thread_id="$thread",
+        created_by="@alice:server",
+        pre_approved_call=True,
+    )
+    await _persist_scheduled_task_state(
+        client=client,
+        room_id="!test:server",
+        task_id="task123",
+        workflow=workflow,
+        matrix_admin=matrix_admin,
+        timezone="UTC",
+    )
+    withdraw = AsyncMock()
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
+        patch(
+            "mindroom.scheduling._parse_workflow_schedule",
+            new=AsyncMock(return_value=workflow.model_copy(update={"description": "Edited"})),
+        ),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+    ):
+        result = await edit_scheduled_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=_matrix_room("!test:server"),
+                matrix_admin=matrix_admin,
+            ),
+            room_id="!test:server",
+            task_id="task123",
+            full_text="rename it Edited",
+            scheduled_by="@alice:server",
+            thread_id="$thread",
+        )
+
+    assert "Updated task" in result
+    withdraw.assert_awaited_once()
+    saved = await get_scheduled_task(client, "!test:server", "task123", runtime_paths)
+    assert saved is not None
+    assert saved.workflow.description == "Edited"
+    assert saved.workflow.pre_approved_call is False
+
+
+@pytest.mark.asyncio
 async def test_edit_scheduled_task_forwards_history_limit_override(tmp_path: Path) -> None:
     """An explicit history limit on edit must reach the shared scheduling backend."""
     client = AsyncMock()

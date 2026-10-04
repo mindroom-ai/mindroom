@@ -1861,6 +1861,8 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
+    # Only schedule_tool_call creates a call approval; an edit withdraws any earlier one.
+    workflow_result.pre_approved_call = False
     workflow_result.thread_id = None if new_thread else thread_id
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
