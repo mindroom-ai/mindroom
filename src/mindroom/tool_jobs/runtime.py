@@ -621,7 +621,8 @@ class ToolJobRuntime:
             self._ensure_open(accepting=True)
             entry = self._entry(job_id, owner, depth)
             drain = await self._request_cancel(entry)
-        return await wait_for_future_until_complete(drain)
+        # The runtime owns the drain, so a Stop of the caller does not wait for work that ignores cancellation.
+        return await asyncio.shield(drain)
 
     async def stop_jobs(self, *, receipt_order: int, matches: Callable[[BackgroundJob], Awaitable[bool]]) -> None:
         """Persist explicit Stop apart from result consumption, then request cleanup unless shutdown settles it."""

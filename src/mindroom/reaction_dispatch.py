@@ -137,14 +137,14 @@ class ReactionDispatcher:
             await self.deps.journal_dispatcher.claim_semantic_consumer(
                 SemanticConsumer.STOP_REACTION,
             )
-        if held:
-            # No turn runs on the message, so the Stop ends the work it holds directly.
-            if await self.deps.stop_held_work(event.reacts_to, await self.deps.journal_dispatcher.receipt_order()):
-                self.deps.logger.info(
-                    "Stop requested for held message",
-                    message_id=event.reacts_to,
-                    requested_by=event.sender,
-                )
+        # No turn runs on a held message, so the Stop ends the work it holds directly; a turn that began continuing
+        # the message meanwhile stops like any reply.
+        if held and await self.deps.stop_held_work(event.reacts_to, await self.deps.journal_dispatcher.receipt_order()):
+            self.deps.logger.info(
+                "Stop requested for held message",
+                message_id=event.reacts_to,
+                requested_by=event.sender,
+            )
             return True
 
         async def remove_current_stop_button() -> None:

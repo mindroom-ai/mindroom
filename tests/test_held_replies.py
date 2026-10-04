@@ -437,6 +437,139 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
 
 
 @pytest.mark.asyncio
+async def test_a_wake_queued_before_a_stop_leaves_the_message_stopped(held: _Held) -> None:
+    """A Stop releases the hold at once, so a wake that queued behind another turn no longer continues the message."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    release = asyncio.Event()
+    turn = asyncio.create_task(
+        held.runner._lifecycle_coordinator.run_locked_target_operation(
+            target=held.request.response_envelope.target,
+            while_waiting=None,
+            locked_operation=release.wait,
+        ),
+    )
+    try:
+        assert await held.runner.stop_held_reply("$reply", 7)
+        assert await held.hold() is None
+        edits = len(held.edits)
+        assert await held.runner._resume_held_reply(replace(held.request, held_reply=hold)) is None
+        assert len(held.edits) == edits
+    finally:
+        release.set()
+        await turn
+    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
+    assert held.edits[-1].new_text == "Started.\n\n**[Response cancelled by user]**"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_a_held_message_a_continuation_began_on_leaves_the_message_to_that_turn(held: _Held) -> None:
+    """A turn that began continuing the message during the Stop stops like any reply, so the Stop does not edit it."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    edits = len(held.edits)
+    continuation = asyncio.create_task(asyncio.Event().wait())
+    held.runner.deps.stop_manager.set_current("$reply", held.request.response_envelope.target, continuation)
+    try:
+        assert not await held.runner.stop_held_reply("$reply", 7)
+        stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
+        assert stopped.user_stop_receipt_order == 7
+        assert await held.hold() is None
+        await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
+        assert len(held.edits) == edits
+    finally:
+        continuation.cancel()
+        await asyncio.gather(continuation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_holding_under_another_key_ends_the_hold_it_ran_on(held: _Held) -> None:
+    """A continuation whose boundary holds under a new key, such as after a roster change, retires its old hold."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    old = await held.hold()
+    assert old is not None
+    roster = replace(_KEY, participants=("general", "helper"))
+    await held.runner._settle_held_reply(
+        held.request,
+        _completed("$reply", "Continued."),
+        ReplyBoundary(roster, _WAITING_NOTICE, 1),
+        continued=old,
+        stop_button_event_id=None,
+    )
+    assert await held.hold() is None
+    saved = await held.runner.deps.held_replies.load(roster.hold_id)
+    assert saved is not None
+    assert decode_held_reply(saved).presentation.response_text == "Continued."
+
+
+@pytest.mark.asyncio
+async def test_stop_on_a_held_message_leaves_the_work_of_a_newer_reply(
+    held: _Held,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Like any Stop, a Stop on a held message ends work through its latest turn, not a newer running reply's work."""
+    await held.start("held", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    newer = held.owner
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    await start_job(
+        held.runtime,
+        "newer",
+        tool_name="tool",
+        depth=0,
+        source_event_id="$newer",
+        adapter={},
+        owner=newer,
+        operation=operation,
+    )
+    store = type(held.runner.deps.approval_store)
+    orders = {"$origin": 5, "$newer": 20}
+
+    async def response_order(_store: object, **_kwargs: object) -> int:
+        return 10
+
+    async def load_event(_store: object, event_id: str) -> MagicMock:
+        return MagicMock(receipt_order=orders[event_id])
+
+    monkeypatch.setattr(store, "response_receipt_order_before_stop", response_order)
+    monkeypatch.setattr(store, "load_event", load_event)
+    assert await held.runner.stop_held_reply("$reply", 30)
+    stopped = await lookup(held.runtime, "held", owner=held.owner, depth=0)
+    running = await lookup(held.runtime, "newer", owner=held.owner, depth=0)
+    assert (stopped.user_stop_receipt_order, running.user_stop_receipt_order) == (30, None)
+    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["error", "cancelled"])
+async def test_a_newer_reply_that_cannot_show_the_work_leaves_the_older_message_holding(
+    held: _Held,
+    status: Literal["error", "cancelled"],
+) -> None:
+    """A newer reply that reaches its boundary but ends without a finished message does not take the work over."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$first", "First.", _WAITING_NOTICE)
+    first = await held.hold()
+    edits = len(held.edits)
+    await held.runner._settle_held_reply(
+        held.request,
+        FinalDeliveryOutcome(terminal_status=status, event_id="$second", is_visible_response=True),
+        ReplyBoundary(_KEY, _WAITING_NOTICE, 0),
+        continued=None,
+        stop_button_event_id=None,
+    )
+    assert await held.hold() == first
+    assert len(held.edits) == edits
+
+
+@pytest.mark.asyncio
 async def test_stop_on_a_held_message_leaves_outcomes_turns_already_read(held: _Held) -> None:
     """An outcome an earlier turn read is not the message's outstanding work, so Stop does not mark it stopped."""
     claim = await held.start("read", claimed=True)

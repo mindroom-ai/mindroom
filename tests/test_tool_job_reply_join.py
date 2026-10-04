@@ -417,6 +417,16 @@ def test_join_prompt_retrieves_each_finished_outcome_without_waiting() -> None:
     assert 'job(action="wait", job_id="other", wait_timeout=0)' in prompt
 
 
+def test_join_prompt_names_the_member_only_for_a_team_members_job() -> None:
+    """A team retrieves each member's outcome through that member; an agent's own outcome needs no member."""
+    own = completed_delegation_job()
+    own = replace(own, owner=replace(own.owner, transport_agent_name=own.owner.agent_name))
+    member = replace(own, job_id="member", owner=replace(own.owner, transport_agent_name="squad"))
+    prompt = completion_prompt([own, member])
+    assert f'job(action="wait", job_id="{own.job_id}", wait_timeout=0);' in prompt
+    assert f'job(action="wait", job_id="member", wait_timeout=0) through member {own.owner.agent_name}' in prompt
+
+
 def _job_context(tmp_path: Path, owner: ToolExecutionIdentity) -> ToolRuntimeContext:
     paths = test_runtime_paths(tmp_path)
     return replace(

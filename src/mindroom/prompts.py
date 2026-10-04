@@ -613,7 +613,6 @@ A child tool that requires approval asks the requester through an approval card 
 Waiting neither restarts the child nor grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
 Direct API calls and nested delegation wait within their existing execution owner.
-If a background child needs approval, call job(action="wait", job_id=...) with its Job ID to present its exact pending approvals.
 The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation."""
 
 

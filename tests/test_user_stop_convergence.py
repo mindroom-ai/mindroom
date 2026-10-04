@@ -356,6 +356,23 @@ async def test_stop_on_a_held_message_ends_its_work_without_a_turn(
     assert await dispatcher._maybe_handle_stop_reaction(foreign, _stop_reaction("$held"), None) is False
 
 
+async def test_stop_on_a_held_message_whose_continuation_began_meanwhile_stops_that_turn(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A turn that began continuing the held message while the Stop was routed stops like any reply."""
+    store = await _store(journal_store)
+    dispatcher, journal, reconciler = _stop_dispatcher(store, tmp_path, StopManager(), held_message="$held")
+    journal.receipt_order.return_value = 9
+    dispatcher.deps.stop_held_work.return_value = False
+    reconciler.finalize.return_value = True
+    room = nio.MatrixRoom(_ROOM_ID, "@agent:localhost")
+    assert await dispatcher._maybe_handle_stop_reaction(room, _stop_reaction("$held"), None) is True
+    dispatcher.deps.stop_held_work.assert_awaited_once_with("$held", 9)
+    reconciler.finalize.assert_awaited_once()
+    assert reconciler.finalize.await_args.args[:2] == ("$held", 9)
+
+
 async def test_stop_on_a_message_whose_continuation_runs_cancels_that_turn(
     journal_store: EventJournalStore,
     tmp_path: Path,

@@ -910,6 +910,53 @@ async def test_repeated_cancel_joins_the_in_flight_drain(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_caller_does_not_wait_for_work_that_ignores_cancellation(tmp_path: Path) -> None:
+    """A Stop of the reply waiting on a cancel returns at once, while the runtime keeps draining the work."""
+    runtime = await tool_job_runtime(tmp_path)
+    started, cancel_seen, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        # Like a tool thread, it runs on whatever cancellation asks.
+        started.set()
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancel_seen.set()
+        return BackgroundOutcome("completed", "late")
+
+    try:
+        await start_job(
+            runtime,
+            "stubborn",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        await started.wait()
+        cancelling = asyncio.create_task(runtime.cancel("stubborn", owner=job_owner(), depth=0))
+        await cancel_seen.wait()
+        # The request is saved and the caller now waits for the drain.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not cancelling.done()
+        cancelling.cancel()
+        done, _pending = await asyncio.wait({cancelling}, timeout=JOB_TEST_TIMEOUT)
+        assert done == {cancelling}
+        assert cancelling.cancelled()
+        assert runtime._entries["stubborn"].job.status == "cancel_requested"
+        release.set()
+        drain = runtime._entries["stubborn"].drain
+        assert drain is not None
+        assert (await asyncio.wait_for(drain, JOB_TEST_TIMEOUT)).status in runtime_module.TERMINAL_STATUSES
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_caller_still_settles_its_cancellation_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

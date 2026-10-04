@@ -3295,10 +3295,10 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
-                # A pause after a job join keeps the output the reply already published.
+                # A pause after a job join, or while continuing a held message, keeps the output already published.
                 joined_output = (
                     StreamingPresentation(response_text=run.prior_response_text, tool_trace=run.prior_response_tools)
-                    if run.attempted_job_outcomes
+                    if run.job_joins
                     else None
                 )
                 return replace(
@@ -3630,9 +3630,9 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
         nonlocal attempt_prefix
-        # Background joins continue the already-published document. A fresh
+        # Background joins, and turns continuing a held message, continue the already-published document. A fresh
         # tracker owns this attempt while the prior trace remains a frozen prefix.
-        attempt_prefix = previous_presentation if run.attempted_job_outcomes else None
+        attempt_prefix = previous_presentation if run.job_joins else None
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(
                 requested_agent_names,

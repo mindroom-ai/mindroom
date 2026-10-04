@@ -90,7 +90,11 @@ def reply_boundary_report(report: ReplyBoundaryReport) -> Iterator[None]:
 def _retrieval_calls(jobs: Sequence[BackgroundJob]) -> str:
     calls = []
     for job in jobs:
-        member = f" through member {job.owner.agent_name}" if job.owner.transport_agent_name else ""
+        member = (
+            f" through member {job.owner.agent_name}"
+            if job.owner.transport_agent_name not in {None, job.owner.agent_name}
+            else ""
+        )
         calls.append(f'job(action="wait", job_id="{job.job_id}", wait_timeout=0){member}')
     return "; ".join(calls)
 

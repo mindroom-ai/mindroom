@@ -3160,28 +3160,21 @@ class ResponseRunner:
 
         ``continued`` is the hold of the message this turn ran on, such as one it continued or an edit regenerated.
         """
-        if boundary is None:
-            if continued is None:
-                return
-            # The turn failed, was stopped or interrupted, or paused for approval before its boundary, so its message
-            # holds nothing any more; an approval pause reaches a boundary of its own once it resumes.
-            released = await self.deps.held_replies.delete(continued.key.hold_id, generation=continued.generation)
-            if (
-                released is not None
-                and continued.message_event_id is not None
-                and final_outcome.delivery_kind is None
-                and final_outcome.terminal_status != "suspended"
-            ):
-                # Nothing replaced the message, which still shows the waiting notice.
-                await self.deps.delivery_gateway.edit_text(
-                    released_edit(continued)
-                    if final_outcome.terminal_status == "completed"
-                    else ended_edit(continued, cancel_source=final_outcome.resolved_cancel_source or "interrupted"),
-                )
-            return
         message_id = final_outcome.final_visible_event_id
+        if boundary is not None and continued is not None and continued.key.hold_id != boundary.key.hold_id:
+            # The turn holds under another key, such as after its team's roster changed, so the hold it ran on ends.
+            await self.deps.held_replies.delete(continued.key.hold_id, generation=continued.generation)
+        notice = boundary.notice if boundary is not None else None
+        if boundary is not None and notice is None:
+            # Nothing is outstanding, so the message that held the conversation's work holds nothing any more.
+            released = await self.deps.held_replies.delete(boundary.key.hold_id)
+            previous = self._held_reply(released) if released is not None else None
+            if previous is not None and previous.message_event_id != message_id:
+                await self._release_held_message(previous)
+            return
         if (
-            boundary.notice is not None
+            boundary is not None
+            and notice is not None
             and final_outcome.terminal_status == "completed"
             and (message_id is not None or boundary.key.silent)
         ):
@@ -3196,17 +3189,31 @@ class ResponseRunner:
                         tool_trace=final_outcome.tool_trace,
                     ),
                     extra_content=dict(final_outcome.extra_content or {}),
-                    notice=boundary.notice,
+                    notice=notice,
                     stop_button_event_id=stop_button_event_id,
                     joins=boundary.joins,
                     offered=boundary.offered,
                 ),
             )
             return
-        released = await self.deps.held_replies.delete(boundary.key.hold_id)
-        previous = self._held_reply(released) if released is not None else None
-        if previous is not None and previous.message_event_id != message_id:
-            await self._release_held_message(previous)
+        # The turn could not show the work it leaves outstanding: it failed, was stopped or interrupted, or paused for
+        # approval. A message that held that work before goes on holding it, but the one this turn ran on holds nothing
+        # any more; an approval pause reaches a boundary of its own once it resumes.
+        if continued is None:
+            return
+        # A Stop on the message may have released the hold already.
+        await self.deps.held_replies.delete(continued.key.hold_id, generation=continued.generation)
+        if (
+            continued.message_event_id is not None
+            and final_outcome.delivery_kind is None
+            and final_outcome.terminal_status != "suspended"
+        ):
+            # Nothing replaced the message, which still shows the waiting notice.
+            await self.deps.delivery_gateway.edit_text(
+                released_edit(continued)
+                if final_outcome.terminal_status == "completed"
+                else ended_edit(continued, cancel_source=final_outcome.resolved_cancel_source or "interrupted"),
+            )
 
     async def _hold_on_message(self, message_id: str | None) -> HeldReply | None:
         """Return the hold one of this entity's messages carries; only an instance running background jobs has any."""
@@ -3221,34 +3228,48 @@ class ResponseRunner:
         return hold is not None and hold.key.room_id == room_id
 
     async def stop_held_reply(self, message_id: str, stop_receipt_order: int) -> bool:
-        """End the work a message holds while no turn runs on it, and show the message as stopped."""
+        """End the work a message holds while no turn runs on it, and show the message as stopped.
+
+        False when the message holds nothing, or when a turn began continuing it meanwhile; that turn stops like any
+        reply and shows how it ended.
+        """
         hold = await self._hold_on_message(message_id)
         runtime = get_background_runtime(self.deps.runtime_paths)
         if hold is None or runtime is None:
             return False
+        # Released first, so a wake queued for the message no longer continues it.
+        released = await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation)
+        store = self.deps.approval_store
+        # Like any Stop, it ends work through the message's latest turn, not the work of a newer reply still running.
+        cutoff = await store.response_receipt_order_before_stop(
+            room_id=hold.key.room_id,
+            response_event_id=message_id,
+            stop_receipt_order=stop_receipt_order,
+        )
 
         async def held_by_message(job: BackgroundJob) -> bool:
             # Outcomes a turn already read belong to that turn, not to the message's outstanding work.
-            return holds_job(hold.key, job) and not job.consumed
+            if not holds_job(hold.key, job) or job.consumed:
+                return False
+            source = await store.load_event(job.source_event_id) if job.source_event_id is not None else None
+            return cutoff is None or source is None or source.receipt_order <= cutoff
 
         await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
-        # The message settles once the conversation is free; a turn running meanwhile, perhaps for long, must not
-        # hold up the room's other events, such as a Stop of that turn.
-        create_background_task(
-            self._lifecycle_coordinator.run_locked_target_operation(
-                target=hold.target,
-                while_waiting=None,
-                locked_operation=partial(self._settle_stopped_hold, hold),
-            ),
-            name=f"held_reply_stop:{message_id}",
-            owner=self.deps.runtime,
-        )
+        if self.deps.stop_manager.can_handle_stop_reaction(message_id, hold.key.room_id):
+            return False
+        if released is not None:
+            # The message settles once the conversation is free; a turn running meanwhile, perhaps for long, must not
+            # hold up the room's other events, such as a Stop of that turn.
+            create_background_task(
+                self._lifecycle_coordinator.run_locked_target_operation(
+                    target=hold.target,
+                    while_waiting=None,
+                    locked_operation=partial(self._release_held_message, hold, stopped=True),
+                ),
+                name=f"held_reply_stop:{message_id}",
+                owner=self.deps.runtime,
+            )
         return True
-
-    async def _settle_stopped_hold(self, hold: HeldReply) -> None:
-        """Show a stopped message as stopped, unless a turn that ran meanwhile already settled it."""
-        if await self.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation) is not None:
-            await self._release_held_message(hold, stopped=True)
 
     async def handoff_held_reply_wake(self, event: JournalEvent) -> bool:
         """Transfer a held reply's wake to a detached response owner; it settles once that turn is done."""
