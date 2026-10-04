@@ -49,7 +49,7 @@ const navLinks = [
   { href: '#hosted', label: 'Hosted' },
 ]
 
-const heroFacts = ['Personal and team agents', 'Any model, local or cloud', 'Self-host the whole stack']
+const heroFacts = ['Open source, Apache 2.0', 'Any model, local or cloud', 'Self-host the whole stack']
 
 const personalUses = [
   'Plan a family trip, from flights to a packing list.',
@@ -336,10 +336,7 @@ export default function LandingPage() {
         <HeroParticleBackground />
         <div className="relative z-10 mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 sm:py-12 lg:grid-cols-[1fr_0.9fr] lg:items-center lg:px-8 lg:py-16">
           <div>
-            <p className="inline-flex rounded-md border border-orange-200 bg-orange-50 px-3 py-1 text-sm font-medium text-orange-700 dark:border-orange-500/25 dark:bg-orange-500/10 dark:text-orange-300">
-              Open source, Apache 2.0
-            </p>
-            <div className="mt-5 flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-4">
               <MindRoomLogo className="h-14 w-14 sm:h-16 sm:w-16" size={64} />
               <h1 className="text-5xl font-semibold text-gray-950 dark:text-white sm:text-6xl">
                 MindRoom
