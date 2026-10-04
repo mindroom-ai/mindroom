@@ -757,6 +757,20 @@ async def test_supersession_cannot_borrow_blocking_terminal_metadata(
 
 
 @pytest.mark.asyncio
+async def test_ledger_refresh_settles_edit_debts_before_the_next_proof(tmp_path: Path) -> None:
+    """Edit debts settle on every ledger refresh, so a reply wait can unblock a supersession whose anchor was edited."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False)
+    seen: list[dict[str, Any]] = []
+    case.oracle.after_ledger_refresh = lambda: seen.append(dict(case.oracle.supersession_proofs))
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert len(seen) == 1
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("variant", ["declined", "edit_unsettled", "old_answered"])
 async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: Path, variant: str) -> None:
     """MindRoom settles an edit of a message it superseded without regenerating anything, so the edit owes nothing."""

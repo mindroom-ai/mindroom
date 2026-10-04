@@ -9636,6 +9636,23 @@ async def test_chaos_checkpoint_releases_tombstone_for_source_mindroom_only_saw_
             await runner._wait_for_pending_mutation_effects(deadline_seconds=0.05, batch_index=4)
 
 
+def test_runner_settles_edit_debts_whenever_the_oracle_refreshes_its_ledger() -> None:
+    """A reply wait refreshes the ledger, so it must also settle edit debts that block supersession proofs."""
+    stack = ManagedTuwunelStack()
+    try:
+        client = Mock(spec=LiveMatrixClient)
+        runner = LiveFuzzRunner(
+            stack,
+            (client,),
+            live_scenario_from_seed(1, steps=4, thread_count=2),
+            reply_timeout=1.0,
+            settle_seconds=0.0,
+        )
+        assert runner.oracle.after_ledger_refresh == runner._reconcile_edit_debts
+    finally:
+        stack.close()
+
+
 def test_cold_restart_resets_only_durable_nio_stores(tmp_path: Path) -> None:
     """An account store without durable ingestion tables has no sync cursor to reset."""
     keys = tmp_path / "encryption_keys"

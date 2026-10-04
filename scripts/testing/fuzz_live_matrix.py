@@ -4862,6 +4862,9 @@ class ExactReplyOracle:
         self.declined_edit_sources: frozenset[str] = frozenset()
         # Admission state of every event MindRoom's agent principal journaled.
         self.journal_event_states: Mapping[str, str] = {}
+        # Settles the runner's edit debts from each refreshed ledger view, so a reply
+        # wait can see the debts that block a supersession proof clear.
+        self.after_ledger_refresh: Callable[[], None] | None = None
         self.supersession_proofs: dict[str, SupersessionProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.next_batch: str | None = None
@@ -4965,6 +4968,8 @@ class ExactReplyOracle:
             for event_id, record in self._ledger_observations.items()
             if record.completed or not record.replay_source_event_ids
         }
+        if self.after_ledger_refresh is not None:
+            self.after_ledger_refresh()
 
     def ledger_response(self, event_id: str) -> str | None:
         """Return the durable response one source's completed record attributes."""
@@ -6878,6 +6883,7 @@ class LiveFuzzRunner:
         self.oracle.log_path = stack.log_path
         self.oracle.source_current_markers = self.source_current_markers
         self.oracle.pending_edit_markers = self._pending_edit_markers
+        self.oracle.after_ledger_refresh = self._reconcile_edit_debts
         self._pending_source_tombstones: set[str] = set()
         self.operation_count = 0
         # Monotonic sequence for the realized journal, spanning both mutations
