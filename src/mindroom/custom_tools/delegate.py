@@ -147,8 +147,10 @@ class DelegateTools(Toolkit):
         return instructions
 
     def _background_jobs_available(self) -> bool:
+        # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.
         return (
-            background_tool_jobs_enabled(self._config, self._runtime_paths)
+            self._delegation_depth == 0
+            and background_tool_jobs_enabled(self._config, self._runtime_paths)
             and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
             and self._execution_identity is not None
             and self._execution_identity.channel == "matrix"

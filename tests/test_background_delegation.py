@@ -1211,3 +1211,31 @@ async def test_native_job_source_survives_restart(
         assert saved.status == "completed"
     finally:
         await restored.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [0, 1])
+async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path, depth: int) -> None:
+    """A nested subagent's delegate calls always run inline, so its guidance offers no background wait."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+            "code": AgentConfig(display_name="Code"),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+    )
+    config.background_tool_jobs.enabled = True
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner, delegation_depth=depth)
+        description = delegate.async_functions["run_subagent"].description or ""
+        offered = "wait_timeout" in description
+        instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")
+        assert (offered, instructed) == (depth == 0, depth == 0)
+    finally:
+        await runtime.shutdown()
