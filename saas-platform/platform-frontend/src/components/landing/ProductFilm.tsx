@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { useDarkMode } from '@/hooks/useDarkMode'
 
 // The films are GitHub attachments so the video files stay out of Git history; next.config's media-src allows their hosts.
@@ -16,18 +17,19 @@ const FILMS = {
 
 export function ProductFilm() {
   const { isDarkMode } = useDarkMode()
-  const film = isDarkMode ? FILMS.dark : FILMS.light
+  // A film the reader started keeps its theme, so a theme switch never restarts it.
+  const [startedFilm, setStartedFilm] = useState<typeof FILMS.light | null>(null)
+  const film = startedFilm ?? (isDarkMode ? FILMS.dark : FILMS.light)
 
   return (
     <video
-      // Keyed by source, so a theme switch restarts the film in the new theme instead of playing the old one on.
-      key={film.src}
       src={film.src}
       poster={film.poster}
       controls
       playsInline
       preload="none"
       aria-label="MindRoom product film"
+      onPlay={() => setStartedFilm(film)}
       className="aspect-video w-full rounded-lg border border-gray-200 bg-gray-100 shadow-sm dark:border-gray-800 dark:bg-gray-900"
     />
   )
