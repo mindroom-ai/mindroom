@@ -74,7 +74,7 @@ _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
-# A page an agent wrote; Claude Code artifacts allow the same 16 MiB.
+# A self-contained page an agent wrote, with embedded images; a larger file is not a page to check.
 _MAX_OPEN_FILE_BYTES = 16 * 1024 * 1024
 # Upload snapshots stay on disk until their tab closes, so bound what one browser holds at once.
 _MAX_STAGED_UPLOAD_BYTES = 256 * 1024 * 1024
@@ -977,7 +977,9 @@ class BrowserTools(Toolkit):
                     msg = "action=open takes targetUrl or one HTML file in paths."
                     raise ValueError(msg)
                 page_html = await asyncio.to_thread(self._read_page_file, paths[0])
-                return json.dumps(await self._open_tab(profile_name, html=page_html), sort_keys=True)
+                # The page shows as about:blank, so the result names the file it holds.
+                opened = await self._open_tab(profile_name, html=page_html)
+                return json.dumps({**opened, "path": paths[0]}, sort_keys=True)
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
@@ -1953,6 +1955,7 @@ class BrowserTools(Toolkit):
         tab = _BrowserTabState(target_id=target_id, page=page)
         state.tabs[target_id] = tab
         page.on("console", lambda message: self._record_console(tab, message))
+        page.on("pageerror", lambda error: self._record_page_error(tab, error))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
         page.on("close", lambda _: self._remove_tab(state, target_id))
         if self._worker_workspace is not None:
@@ -1994,6 +1997,16 @@ class BrowserTools(Toolkit):
             "location": message.location,
             "text": message.text,
         }
+        BrowserTools._append_console(tab, entry)
+
+    @staticmethod
+    def _record_page_error(tab: _BrowserTabState, error: PlaywrightError) -> None:
+        # Uncaught exceptions never reach console.*, yet they are what a broken page produces.
+        name = getattr(error, "name", "") or "Error"
+        BrowserTools._append_console(tab, {"level": "error", "text": f"Uncaught {name}: {error.message}"})
+
+    @staticmethod
+    def _append_console(tab: _BrowserTabState, entry: dict[str, Any]) -> None:
         tab.console.append(entry)
         if len(tab.console) > _MAX_CONSOLE_ENTRIES:
             del tab.console[:-_MAX_CONSOLE_ENTRIES]

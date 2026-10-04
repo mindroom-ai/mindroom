@@ -200,7 +200,7 @@ chat_ui.show_canvas(
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
 - **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
-  Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
+  Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel, and the browser does not block everything the panel blocks.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
   Each update of a page larger than about 24 KB stores a new copy on the homeserver that users cannot delete, so iterate on large pages sparingly.
 

@@ -512,10 +512,8 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
     (workspace / "page.html").write_text(
         f"""<title>Plans</title><h1 id="state">Waiting</h1>
 <img id="local" src="{secret_image.as_uri()}">
-<script>
-  document.getElementById('state').textContent = 'Rendered';
-  setTimeout(() => {{ location.href = '{secret_page.as_uri()}'; }}, 100);
-</script>""",
+<script>document.getElementById('state').textContent = 'Rendered';</script>
+<script>drawChart();</script>""",
         encoding="utf-8",
     )
     paths = resolve_primary_runtime_paths(
@@ -524,21 +522,33 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
         process_env={"BROWSER_EXECUTABLE_PATH": executable},
     )
     tool = BrowserTools(paths, tool_output_workspace_root=workspace)
-    try:
-        opened = json.loads(await tool.browser(action="open", paths=["page.html"]))
-        assert opened["title"] == "Plans"
-        await asyncio.sleep(0.5)
-        state = json.loads(
+
+    async def page_state() -> list[object]:
+        payload = json.loads(
             await tool.browser(
                 action="act",
                 request={
                     "kind": "evaluate",
                     "fn": "() => [document.title, document.getElementById('state').textContent, "
-                    "location.protocol, document.getElementById('local').naturalWidth]",
+                    "location.protocol, self.origin, document.getElementById('local').naturalWidth]",
                 },
             ),
         )
-        assert state["result"] == ["Plans", "Rendered", "about:", 0]
+        return payload["result"]
+
+    try:
+        opened = json.loads(await tool.browser(action="open", paths=["page.html"]))
+        assert (opened["title"], opened["path"]) == ("Plans", "page.html")
+        assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
+        # The page's own navigation to a local file is refused, so it stays on the agent's page.
+        await tool.browser(
+            action="act",
+            request={"kind": "evaluate", "fn": f"() => {{ location.href = '{secret_page.as_uri()}'; }}"},
+        )
+        await asyncio.sleep(0.5)
+        assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
+        console = json.loads(await tool.browser(action="console"))
+        assert {"level": "error", "text": "Uncaught ReferenceError: drawChart is not defined"} in console["entries"]
         screenshot = await tool.browser(action="screenshot")
         assert isinstance(screenshot, ToolResult)
     finally:
