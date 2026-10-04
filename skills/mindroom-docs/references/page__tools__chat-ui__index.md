@@ -170,7 +170,8 @@ The answer is an ordinary threaded message from the user that mentions the agent
 ```
 
 MindRoom Chat displays that message as a one-line receipt (expandable to the exact data) and carries the same values in `io.mindroom.canvas_response`; other Matrix clients show the text.
-`data` must be JSON-serializable and at most 8 KB.
+`data` must be JSON-serializable and at most 512 KB, enough for a long document the user edited in the canvas.
+An answer too large for one Matrix event is sent the way MindRoom sends long replies: the event is a short preview, and the whole message is an uploaded file (encrypted in encrypted rooms) that MindRoom downloads before the agent reads it, so the agent still receives one ordinary message.
 Numbers that are not whole (or are too large for a JSON integer) arrive as text, because homeservers refuse them in unencrypted events, and object keys arrive sorted.
 
 ### Updating a canvas in place
