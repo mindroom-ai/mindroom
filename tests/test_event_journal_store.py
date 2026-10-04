@@ -5722,7 +5722,6 @@ class TestOutbox:
         assert persisted.revision_replay[driving].response_event_id == "$answer"
         assert persisted.revision_replay[later].redacted
         assert persisted.revision_replay[later].response_event_id is None
-        assert persisted.revision_replay[later].cleanup_pending == current.revision_replay[later].cleanup_pending
         assert tombstone.redacted_source_event_ids == (later,)
         delivered = await principal.load_matrix_delivery(delivery_id=driving, stage=DeliveryStage.FINAL)
         assert delivered is not None

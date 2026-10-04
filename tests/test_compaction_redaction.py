@@ -9,6 +9,7 @@ import pytest
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 
@@ -222,6 +223,25 @@ def test_compacted_history_that_read_a_redacted_event_is_found_and_removed(stora
     assert loaded.runs == []
     assert loaded.summary is None
     assert "$context" not in read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
+
+
+def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: SqliteDb) -> None:
+    """Redaction finds a coalesced source compaction archived and a run paused for approval."""
+    coalesced = _run("r1")
+    assert coalesced.metadata is not None
+    coalesced.metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = ["$coalesced"]
+    paused = _run("r3")
+    paused.status = RunStatus.paused
+    session = seed_session(
+        storage,
+        AgentSession(session_id="session", agent_id="code", runs=[coalesced, _run("r2"), paused]),
+    )
+    _compact(storage, session, ["r1"], "summary of r1")
+
+    event_ids = read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
+
+    assert {"$coalesced", "$r1", "$r2", "$r3"} <= event_ids
+    assert "$coalesced" not in read_scope_seen_event_ids(storage, _stored(storage), _SCOPE)
 
 
 def test_redaction_without_any_matching_history_changes_nothing(storage: SqliteDb) -> None:

@@ -315,8 +315,9 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
-    # Which of the given events this turn's room has redacted; set for Matrix replies so their history drops them first.
-    redacted_event_ids: Callable[[tuple[str, ...]], Awaitable[frozenset[str]]] | None = None
+    # Which events this turn's history derives from are redacted, each with the source a legacy summary consumed
+    # it through; set for Matrix replies so their history drops them first.
+    redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -883,7 +884,7 @@ async def _remove_history_of_redacted_events(
     thread context. Checking what this scope's history derives from catches it
     before the history is used again.
     """
-    if ctx.redacted_event_ids is None or scope_context is None or scope_context.session is None:
+    if ctx.redacted_history_events is None or scope_context is None or scope_context.session is None:
         return
     session = scope_context.session
     event_ids = await run_blocking_until_complete(
@@ -895,13 +896,15 @@ async def _remove_history_of_redacted_events(
     if not event_ids:
         return
     removed_event_ids: list[str] = []
-    for event_id in sorted(await ctx.redacted_event_ids(tuple(sorted(event_ids)))):
+    redacted = await ctx.redacted_history_events(tuple(sorted(event_ids)))
+    for event_id in sorted(redacted):
         removal = partial(
             remove_redacted_event_from_history,
             scope_context.storage,
             session,
             scope_context.scope,
             event_id=event_id,
+            legacy_source_event_id=redacted[event_id],
         )
         if await run_blocking_until_complete(removal):
             removed_event_ids.append(event_id)

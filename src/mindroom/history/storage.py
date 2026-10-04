@@ -301,15 +301,16 @@ def read_scope_history_event_ids(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
 ) -> set[str]:
-    """Return every Matrix event id one scope's replayed history derives from.
+    """Return every Matrix event id one scope's stored history derives from.
 
-    These are the ids redaction cleanup matches: what live runs consumed or
-    answered, and what compacted history represents.
+    These are the ids redaction cleanup matches: what each top-level run consumed,
+    answered, or wrote, including a run paused for approval, and what compacted
+    history represents.
     """
-    event_ids = archive.compacted_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
+    event_ids = archive.redactable_compacted_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
     for run in session.runs or []:
-        if is_model_history_visible_run(run) and _scope_for_run(run) == scope:
-            event_ids |= _run_event_ids(run)
+        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and _scope_for_run(run) == scope:
+            event_ids |= _run_seen_event_ids(run) | _run_source_event_ids(run)
     return event_ids
 
 

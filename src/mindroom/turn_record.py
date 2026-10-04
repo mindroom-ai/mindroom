@@ -152,17 +152,15 @@ class RevisionReplay:
     source_event_id: str
     timestamp_ms: int
     redacted: bool = False
-    cleanup_pending: bool = False
     response_event_id: str | None = None
     legacy_summary_provenance: bool = False
 
     def to_record(self) -> dict[str, object]:
-        """Serialize ledger-owned provenance and cleanup state."""
+        """Serialize ledger-owned provenance."""
         return {
             "source_event_id": self.source_event_id,
             "timestamp_ms": self.timestamp_ms,
             "redacted": self.redacted,
-            "cleanup_pending": self.cleanup_pending,
             "response_event_id": self.response_event_id,
             "legacy_summary_provenance": self.legacy_summary_provenance,
         }
@@ -183,7 +181,6 @@ def _revision_replay_map(raw: Mapping[str, object] | None) -> Mapping[str, Revis
                     source,
                     timestamp,
                     value.get("redacted") is True,
-                    value.get("cleanup_pending") is True,
                     canonical_optional_string(value.get("response_event_id")),
                     value.get("legacy_summary_provenance") is True,
                 )
@@ -197,7 +194,6 @@ class _CanonicalSourceState:
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
     redacted_source_event_ids: tuple[str, ...]
-    pending_redaction_cleanup_event_ids: tuple[str, ...]
     anchor_event_id: str | None
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, SourceEventRevision] | None
@@ -250,7 +246,6 @@ class TurnRecord:
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
     redacted_source_event_ids: tuple[str, ...] = ()
-    pending_redaction_cleanup_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
@@ -282,7 +277,6 @@ class TurnRecord:
         *,
         discovery_event_ids: Sequence[str] = (),
         redacted_source_event_ids: Sequence[str] = (),
-        pending_redaction_cleanup_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
@@ -312,7 +306,6 @@ class TurnRecord:
             source_event_ids,
             discovery_event_ids=discovery_event_ids,
             redacted_source_event_ids=redacted_source_event_ids,
-            pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
             anchor_event_id=anchor_event_id,
             source_event_prompts=source_event_prompts,
             source_event_revisions=source_event_revisions,
@@ -342,7 +335,6 @@ class TurnRecord:
             source_event_ids=source.source_event_ids,
             discovery_event_ids=source.discovery_event_ids,
             redacted_source_event_ids=source.redacted_source_event_ids,
-            pending_redaction_cleanup_event_ids=source.pending_redaction_cleanup_event_ids,
             anchor_event_id=source.anchor_event_id,
             response_event_id=delivery.response_event_id,
             completed=completed,
@@ -439,7 +431,6 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     source_event_ids: Sequence[str]
     discovery_event_ids: Sequence[str]
     redacted_source_event_ids: Sequence[str]
-    pending_redaction_cleanup_event_ids: Sequence[str]
     anchor_event_id: str | None
     response_event_id: str | None
     completed: bool
@@ -475,7 +466,6 @@ def canonicalize_turn_record(
         candidate.source_event_ids,
         discovery_event_ids=candidate.discovery_event_ids,
         redacted_source_event_ids=candidate.redacted_source_event_ids,
-        pending_redaction_cleanup_event_ids=candidate.pending_redaction_cleanup_event_ids,
         anchor_event_id=candidate.anchor_event_id,
         response_event_id=candidate.response_event_id,
         completed=candidate.completed,
@@ -507,7 +497,6 @@ def _canonical_source_state(
     *,
     discovery_event_ids: Sequence[object],
     redacted_source_event_ids: Sequence[object],
-    pending_redaction_cleanup_event_ids: Sequence[object],
     anchor_event_id: object,
     source_event_prompts: Mapping[str, str] | None,
     source_event_revisions: Mapping[str, object] | None,
@@ -526,11 +515,6 @@ def _canonical_source_state(
         event_id for event_id in canonical_source_event_ids(redacted_source_event_ids) if event_id in indexed_ids
     )
     redacted_ids = set(canonical_redactions)
-    canonical_pending_cleanup = tuple(
-        event_id
-        for event_id in canonical_source_event_ids(pending_redaction_cleanup_event_ids)
-        if event_id in redacted_ids
-    )
     canonical_anchor = canonical_optional_string(anchor_event_id)
     if canonical_anchor is None and canonical_sources:
         canonical_anchor = canonical_sources[-1]
@@ -546,7 +530,6 @@ def _canonical_source_state(
         source_event_ids=canonical_sources,
         discovery_event_ids=canonical_discovery,
         redacted_source_event_ids=canonical_redactions,
-        pending_redaction_cleanup_event_ids=canonical_pending_cleanup,
         anchor_event_id=canonical_anchor,
         source_event_prompts=_immutable_prompt_map(
             canonical_sources,
@@ -863,18 +846,14 @@ def sanitize_revision_replay(  # noqa: C901
         if new is None or (old.redacted and not new.redacted):
             replay[event_id] = old
         elif old.redacted and new.redacted:
-            replay[event_id] = replace(
-                old,
-                cleanup_pending=old.cleanup_pending and new.cleanup_pending,
-                response_event_id=old.response_event_id or new.response_event_id,
-            )
+            replay[event_id] = replace(old, response_event_id=old.response_event_id or new.response_event_id)
         elif old.response_event_id is not None and new.response_event_id is None:
             replay[event_id] = replace(new, response_event_id=old.response_event_id)
         replay[event_id] = preserve_summary_provenance(replay[event_id], old)
     for event_id in tombstoned_event_ids:
         value = replay.get(event_id)
         if value is not None and not value.redacted:
-            replay[event_id] = replace(value, redacted=True, cleanup_pending=True)
+            replay[event_id] = replace(value, redacted=True)
     prompts = dict(candidate.source_event_prompts or {})
     revisions = dict(candidate.source_event_revisions or {})
     invalid_sources = {value.source_event_id for value in replay.values() if value.redacted}

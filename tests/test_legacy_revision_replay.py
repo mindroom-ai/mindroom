@@ -31,7 +31,6 @@ def test_preserve_summary_provenance_changes_only_the_historical_flag() -> None:
         "$source",
         10,
         redacted=True,
-        cleanup_pending=True,
         response_event_id="$response",
     )
 

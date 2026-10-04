@@ -757,9 +757,9 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
 
     lookups: list[tuple[str, ...]] = []
 
-    async def _redacted_event_ids(event_ids: tuple[str, ...]) -> frozenset[str]:
+    async def _redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
         lookups.append(event_ids)
-        return frozenset(event_ids) & {redacted_event_id}
+        return dict.fromkeys(set(event_ids) & {redacted_event_id})
 
     def _open_scope() -> AbstractContextManager[ScopeSessionContext]:
         return contextlib.nullcontext(
@@ -791,7 +791,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
         yield AttemptResolved(_record_history(run))
 
     log = _AdapterLog()
-    ctx = _ctx(redacted_event_ids=_redacted_event_ids)
+    ctx = _ctx(redacted_history_events=_redacted_history_events)
     for _turn in range(2):
         if streaming:
             await _collect(

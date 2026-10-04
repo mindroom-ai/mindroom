@@ -5729,7 +5729,7 @@ def _redaction_target_state(
     records: Mapping[str, TurnRecord],
     source_revision_markers: Mapping[str, Mapping[str, str]],
 ) -> tuple[bool, bool]:
-    """Join exact event invalidation and cleanup debt across every response owner."""
+    """Join exact event invalidation, and whether any registered owner has yet to reconcile it."""
     source_id = next((source for source, edits in source_revision_markers.items() if target_id in edits), None)
     physical = records.get(target_id)
     revisions = [
@@ -5741,11 +5741,8 @@ def _redaction_target_state(
     tombstoned = (physical is not None and target_id in physical.redacted_source_event_ids) or any(
         revision.redacted for revision in revisions
     )
-    # Reconciliation joins physical invalidation into every registered owner
-    # before locked cleanup acknowledges that owner's debt independently.
-    pending = (physical is not None and target_id in physical.pending_redaction_cleanup_event_ids) or any(
-        revision.cleanup_pending or (tombstoned and not revision.redacted) for revision in revisions
-    )
+    # Reconciliation joins physical invalidation into every registered owner.
+    pending = any(tombstoned and not revision.redacted for revision in revisions)
     return tombstoned, pending
 
 
@@ -5849,11 +5846,7 @@ class FinalStateAuditor:
         # discharge another live source's generation or mutation debt.
         for source, proof in tuple(proofs.items()):
             record = snapshot.records.get(source)
-            if record is not None and (
-                any(owned not in proofs for owned in record.replay_source_event_ids)
-                or record.pending_redaction_cleanup_event_ids
-                or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-            ):
+            if record is not None and any(owned not in proofs for owned in record.replay_source_event_ids):
                 proofs.pop(proof.source_event_id, None)
         # Removing one incomplete owner also invalidates every chain depending on it.
         for source in tuple(proofs):
@@ -5973,13 +5966,7 @@ class FinalStateAuditor:
     ) -> tuple[str, str] | None:
         """Require exact durable completion and visible current-source model consumption."""
         record = records.get(source)
-        if (
-            record is None
-            or not record.completed
-            or source not in record.source_event_ids
-            or record.pending_redaction_cleanup_event_ids
-            or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-        ):
+        if record is None or not record.completed or source not in record.source_event_ids:
             return None
         response = record.response_event_id
         if response is None or response not in self._visible_record_reply_ids(record, replies):

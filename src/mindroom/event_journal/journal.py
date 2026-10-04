@@ -1196,7 +1196,10 @@ def source_has_redaction_handoff(
     current: TurnRecord | None,
     redaction_target: Callable[[JournalEvent], str | None],
 ) -> bool:
-    """Prove exact replayable cleanup or its already-durable monotonic result."""
+    """Prove the source's redaction is durably tombstoned in the ledger or still owed by its callback.
+
+    Session history needs no handoff: each response removes history derived from tombstoned events.
+    """
     source = transaction.fetchone(
         "SELECT room_id FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
         (principal_id, event_id),
@@ -1205,26 +1208,8 @@ def source_has_redaction_handoff(
         return False
     if captured.conversation_target is not None and captured.conversation_target.room_id != source["room_id"]:
         return False
-    # A callback can recover the marker, but cannot recover lost session cleanup context.
-    if any(
-        expected is not None and (current is None or expected != actual)
-        for expected, actual in (
-            (captured.conversation_target, current.conversation_target if current else None),
-            (captured.history_scope, current.history_scope if current else None),
-            (captured.requester_id, current.requester_id if current else None),
-        )
-    ):
-        return False
     if current is not None and event_id in current.redacted_source_event_ids:
-        if current.conversation_target is not None and current.conversation_target.room_id != source["room_id"]:
-            return False
-        # An absent cleanup marker is the existing acknowledgement after cleanup;
-        # late registration rearms it monotonically. A pending marker needs its scope.
-        return event_id not in current.pending_redaction_cleanup_event_ids or (
-            current.conversation_target is not None
-            and current.history_scope is not None
-            and current.requester_id is not None
-        )
+        return current.conversation_target is None or current.conversation_target.room_id == source["room_id"]
     return _has_pending_redaction(transaction, principal_id, source["room_id"], event_id, redaction_target)
 
 

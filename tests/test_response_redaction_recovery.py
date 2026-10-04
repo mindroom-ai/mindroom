@@ -28,6 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
 from mindroom.turn_store import TurnStore
 from tests.journal_helpers import admit_dispatch_event
+from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _ReplayCaptureModel, _seeded_storage, _store, _store_with_storage
@@ -153,7 +154,6 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         assert redacted is not None
         assert not redacted.completed
         assert redacted.redacted_source_event_ids == (SOURCE,)
-        assert redacted.pending_redaction_cleanup_event_ids == (SOURCE,)
         assert not redacted.source_event_prompts
         assert not await principal.is_pending(REDACTION)
     finally:
@@ -224,6 +224,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         )
         recovered_storage = storage_factory()
         try:
+            await remove_redacted_history_like_next_response(reopened, target, recovered_storage, scope=scope)
             answer = await Agent(
                 id="agent",
                 db=recovered_storage,
@@ -265,7 +266,6 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     assert redacted is not None
     assert SOURCE in redacted.redacted_source_event_ids
     assert redacted.source_event_prompts == {"$survivor": "keep prompt"}
-    # A later callback may conservatively rearm cleanup; it remains durable and safe to repeat.
     assert not await reopened.prepare_pending_response_source(
         target=target,
         source_event_ids=("$next",),
@@ -284,12 +284,12 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     "fault",
     ["none", "unredacted_late", "missing_ledger", "corrupt_ledger", "wrong_room", "missing_context"],
 )
-async def test_completed_redaction_requires_current_cleanup_authority(
+async def test_completed_redaction_requires_current_tombstone_authority(
     journal_store: EventJournalStore,
     late_registration: bool,
     fault: str,
 ) -> None:
-    """The monotonic ledger retains authority before and after late response registration."""
+    """The ledger tombstone in the source's room proves the redaction before and after late registration."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
     bot = _response_recovery_bot(journal_store, store)
@@ -315,7 +315,6 @@ async def test_completed_redaction_requires_current_cleanup_authority(
     assert current is not None
     assert not current.completed
     assert current.redacted_source_event_ids == (SOURCE,)
-    assert current.pending_redaction_cleanup_event_ids == (SOURCE,)
     assert not current.source_event_prompts
     if fault == "missing_ledger":
         await journal_store.backend.write(
@@ -336,7 +335,8 @@ async def test_completed_redaction_requires_current_cleanup_authority(
                 (encoded, SOURCE),
             ),
         )
-    assert await bot._response_recovery_ready(turn) is (fault == "none")
+    # History cleanup no longer depends on the record's conversation context, so losing it changes nothing.
+    assert await bot._response_recovery_ready(turn) is (fault in {"none", "missing_context"})
 
 
 @pytest.mark.asyncio
