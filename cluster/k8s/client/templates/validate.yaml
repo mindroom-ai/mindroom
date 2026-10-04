@@ -67,7 +67,7 @@
 {{- end -}}
 {{- range .Values.bugReports.admins -}}
 {{- /* The client accepts any @localpart:server without whitespace; quotes, backslashes, $, <, > and & would break the nginx return body or its JSON. */ -}}
-{{- if or (not (regexMatch `^@[^\s:'"\\$<>&]+:[^\s'"\\$<>&]+$` (toString .))) (regexMatch `[[:cntrl:]]` (toString .)) -}}
+{{- if or (not (regexMatch `^@[^\s:'"\\$<>&]+:[^\s'"\\$<>&]+$` (toString .))) (regexMatch `\p{Cc}` (toString .)) -}}
 {{- fail (printf "bugReports.admins entries must be Matrix user IDs such as @admin:example.com, without whitespace, quotes, backslashes, $, <, > or &; got %q" (toString .)) -}}
 {{- end -}}
 {{- end -}}

@@ -177,6 +177,8 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_ad
         ('bugReports:\n  admins: "@admin:chat.example.com"\n', "bugReports.admins must be a list"),
         ('bugReports:\n  admins: ["admin"]\n', "bugReports.admins entries must be Matrix user IDs"),
         ('bugReports:\n  admins: ["@admin chat:example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        # A C1 control character would otherwise break the rendered ConfigMap YAML.
+        ('bugReports:\n  admins: ["@a\\x85b:chat.example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
         # A quote would end the nginx return body, nginx would unescape the JSON's backslash escapes,
         # and a $ would expand as an nginx variable.
         ('bugReports:\n  admins: ["@a\'b:chat.example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
@@ -196,6 +198,7 @@ def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_ad
         "not-a-list",
         "no-sigil",
         "whitespace",
+        "control",
         "quote",
         "double-quote",
         "backslash",
