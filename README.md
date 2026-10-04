@@ -159,6 +159,7 @@ brew install --cask mindroom-ai/tap/mindroom
 ```
 
 Open **MindRoom** from `/Applications` to set up local agents, manage computer access, or open chat and the configuration dashboard.
+**Run AI on this Mac** offers one-click local model setup; see the [hardware recommendations](docs/installation/macos-app.md#local-ai-models) for Qwen3.8 27B and smaller models matched to your Mac's memory.
 See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
 
 ### First steps
