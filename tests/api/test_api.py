@@ -2893,6 +2893,54 @@ def test_spotify_shared_scope_connect_uses_store_status_reads(test_client: TestC
     assert disconnected_status.json()["connected"] is False
 
 
+def test_spotify_connect_and_callback_keep_blocking_calls_off_the_event_loop(test_client: TestClient) -> None:
+    """Package setup, the token exchange, and the profile lookup run in worker threads, not on the event loop."""
+    on_event_loop: list[tuple[str, bool]] = []
+
+    def _record(step: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_event_loop.append((step, False))
+        else:
+            on_event_loop.append((step, True))
+
+    class _FakeSpotifyOAuth:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def get_authorize_url(self, state: str | None = None) -> str:
+            return f"https://accounts.spotify.com/authorize?state={state}"
+
+        def get_access_token(self, _code: str) -> dict[str, Any]:
+            _record("token")
+            return {"access_token": "spotify-token", "refresh_token": "spotify-refresh"}
+
+    class _FakeSpotify:
+        def __init__(self, auth: str) -> None:
+            self.auth = auth
+
+        def current_user(self) -> dict[str, str]:
+            _record("profile")
+            return {"display_name": "Spotify User"}
+
+    def _ensure_packages(_runtime_paths: constants.RuntimePaths) -> tuple[type, type]:
+        _record("packages")
+        return _FakeSpotify, _FakeSpotifyOAuth
+
+    _publish_spotify_shared_runtime(test_client.app)
+    with patch("mindroom.api.integrations._ensure_spotify_packages", side_effect=_ensure_packages):
+        connect_response = test_client.post("/api/integrations/spotify/connect?agent_name=general")
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+        callback_response = test_client.get(
+            f"/api/integrations/spotify/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+
+    assert callback_response.status_code in {302, 307}
+    assert on_event_loop == [("packages", False), ("packages", False), ("token", False), ("profile", False)]
+
+
 def test_spotify_status_renews_an_expiring_token(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Status renews a token that expires within a minute and saves it with Spotify's rotated refresh token."""
     runtime_paths = _publish_spotify_shared_runtime(test_client.app)

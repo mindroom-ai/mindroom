@@ -162,6 +162,9 @@ In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_pro
 A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
 Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
+Delegation records now keep their working state below `tracking/` and write the workspace `run.json`, `events.jsonl`, and `transcript.md` only as exports.
+A delegation still in flight at the upgrade, such as one awaiting approval, settles normally, but its workspace record keeps what it held before the upgrade and is not updated further.
+
 ### Compaction Archive
 
 See [History & Compaction](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) for the compaction archive.

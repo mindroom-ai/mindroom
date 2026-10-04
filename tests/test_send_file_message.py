@@ -814,7 +814,7 @@ class TestSendAudioMessage:
 
         with (
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client_delivery._upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
+            patch("mindroom.matrix.client_delivery.upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
         ):
             result = await send_audio_message(
                 client,

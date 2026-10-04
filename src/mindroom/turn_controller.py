@@ -25,7 +25,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SCHEDULED_MODEL_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -1944,7 +1944,7 @@ class TurnController:
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
         )
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         if existing_event_id is not None:
             edited = await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(

@@ -3658,7 +3658,9 @@ Abstentions, timeouts, missing credentials, a full judgment limit, and backend e
 The check runs between completed tool batches and never interrupts a running tool.
 The judge sees the active request, the earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
 Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
-The wrap-up notice is sent without a judgment when the conversation history is missing or incomplete, contains media, has more than 63 earlier messages, or exceeds 16 KB, when a message contains attachments or detected credentials, and for `thread_mode: room` turns.
+Long threads are trimmed to the judge's 16 KB limit: older messages drop out first, keeping at most the newest 63, and long earlier messages and reply snapshots are shortened to their first and last 1,000 characters, while the active request and queued messages are always sent whole.
+The wrap-up notice is sent without a judgment when the conversation history is missing or incomplete or contains media, when the active request and queued messages alone exceed the limit, when a message contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
+Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
 
 Queued messages stay queued and are handled after the active response finishes.
 A finish decision covers only the messages it saw, so a later message needs a new decision, and a wrap-up notice once sent is not reversed.
@@ -8054,7 +8056,7 @@ See [MindRoom-Managed OAuth Onboarding In Conversation](https://docs.mindroom.ch
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, Chat UI actions, low-level Matrix API access, and attachment-aware workflows.
-- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
+- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an interactive canvas in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
@@ -14474,7 +14476,7 @@ Send results include the conversation `thread_id` and delivered event IDs, inclu
 
 # Agent Chat UI Actions
 
-The `chat_ui` toolkit opens MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel, open Settings, or show room members.
+The `chat_ui` toolkit shows parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, which the user can answer), the Members panel, or a Settings section.
 It sends a normal Matrix notice with a readable fallback and bounded action metadata.
 The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
 
@@ -14495,19 +14497,34 @@ agents:
 ```
 
 The toolkit is opt-in and requires a live Matrix room context.
+Canvases are a separate opt-in inside it; see [Turning canvases on](#turning-canvases-on).
 It does not accept a URL, credential, API endpoint, DOM selector, Matrix identity, room ID, or thread ID from the model.
+The only identifiers it accepts are a canvas's own event ID, to update that canvas, and a workspace file path for a canvas page, read under the agent's `file_access`.
 MindRoom supplies the addressed requester, configured agent sender, current room, and canonical thread from the active turn.
 Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
 
 ## Actions
+
+Each action works on a different thing, and none of them touches the user's own computer or browser:
+
+| Call | What the user sees | What it works on | What comes back to the agent |
+| --- | --- | --- | --- |
+| `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
+| `show_canvas(...)`, opt-in with `enable_show_canvas` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
+| `open_settings(section=...)` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
+
+The Computer, Canvas, and Members panels share one place on the screen, so opening one replaces whichever is open.
+The toolkit adds the same map to the agent's instructions on every turn, listing only the functions the agent has after `include_tools` or `exclude_tools`.
 
 - `open_panel(panel="computer")` asks Chat to reveal the current agent's worker browser in the Computer panel in watch mode.
 - `open_panel(panel="members")` requests the room's Members side panel and remains the default when `panel` is omitted.
   `computer` and `members` are the only supported panel values; `browser` is not a panel value.
 - `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
 - `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
+- `show_canvas(title, html=None, path=None, canvas_event_id=None)` shows an agent-made web page, such as a dashboard, slides, or a form, in a side panel and receives the user's answer; see [Interactive canvases](#interactive-canvases). It is available only when `enable_show_canvas` is true for the agent; see [Turning canvases on](#turning-canvases-on).
 
-Each call sends an `m.room.message` notice in the current conversation.
+Each call sends an `m.room.message` notice in the current conversation; a canvas update sends an `m.replace` edit of the canvas's notice instead.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
 The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
 Both Computer entry points retain the existing `action: "show_computer"` transport metadata and result action for compatibility with existing clients.
@@ -14559,6 +14576,142 @@ Entries match the exact server name in the agent's Matrix ID, including any port
 The existing joined, same-homeserver `mindroom_` identity checks still apply.
 Operators must reserve and control the agent username namespace on any homeserver they allow, as `mindroom.chat` does.
 UI requests reveal only the bounded Chat surfaces described above; worker computer access remains independently authorized by the configured computer gateway.
+
+## Interactive canvases
+
+`show_canvas` lets an agent show a web page beside the conversation and read what the user chose.
+Use it when seeing or clicking beats reading or typing: dashboards, reports, charts, slides, menus, forms, pickers, and multi-step flows.
+It is off by default on both sides; see [Turning canvases on](#turning-canvases-on).
+
+```python
+chat_ui.show_canvas(
+    title="Choose a plan",
+    html="""
+<style>
+  .plans { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .plan { background: var(--mr-surface); border: 1px solid var(--mr-border);
+          border-radius: var(--mr-radius); padding: 16px; }
+  button { background: var(--mr-accent); color: var(--mr-accent-text); border: 0;
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+</style>
+<div class="plans">
+  <div class="plan"><h3>Basic</h3><p>For trying things out.</p>
+    <button onclick="mindroom.submit({plan: 'basic'}, {label: 'Basic plan'})">Choose Basic</button></div>
+  <div class="plan"><h3>Pro</h3><p>For daily work.</p>
+    <button onclick="mindroom.submit({plan: 'pro'}, {label: 'Pro plan'})">Choose Pro</button></div>
+</div>
+""",
+)
+```
+
+### Pages and files
+
+Pass the page as `html`, or as a workspace-relative `path` (for example `slides/deck.html`) to an HTML file in the agent's workspace.
+A path suits pages the agent builds and refines, such as a slide deck: edit the file, then call `show_canvas` again with the same `path` and the canvas ID to show the new version.
+Paths follow the agent's `file_access` setting, like [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/): with the default `workspace` access they must stay inside the workspace, and with `unrestricted` access any file the MindRoom process can read can be shown.
+The file is read by the MindRoom process, so `~` means that process's home rather than a worker's home; prefer workspace-relative paths.
+The page must be UTF-8 text and at most 4 MB.
+
+Agents should only show pages they wrote.
+A canvas always appears as the agent's own, so showing a downloaded page or a file from an untrusted source would present someone else's page, with the same risk that what the user types into it can leave the panel.
+
+### Design
+
+Canvases are full web pages, so agents can build polished dashboards and reports.
+Write self-contained HTML with inline CSS and JavaScript; external scripts, styles, fonts, images, and network requests are blocked, so draw charts with inline SVG (or a canvas element) and embed images as `data:` URLs.
+The user can resize the panel and expand it to the full width of the conversation, so use a responsive layout.
+
+MindRoom Chat exposes its current theme as CSS variables, so a page can match light and dark mode without guessing colors:
+
+| Variable | Use |
+|---|---|
+| `--mr-bg` | Page background (the default body background) |
+| `--mr-surface`, `--mr-surface-raised` | Cards and raised elements |
+| `--mr-border` | Borders and dividers |
+| `--mr-text`, `--mr-text-muted` | Text (the default body color) and secondary text |
+| `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
+| `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
+| `--mr-radius`, `--mr-font` | Corner radius and font family |
+
+### How the answer reaches the agent
+
+Everything the user does inside the canvas stays there: typing, toggling, dragging, and moving between steps send nothing.
+When the page calls `window.mindroom.submit(data, {label})`, or the user submits a `<form>` (its fields become the data and its `data-mindroom-label` attribute the label), MindRoom Chat shows what will be sent and the user confirms with **Send**.
+While an answer waits for confirmation, the page cannot change it; the user discards it to choose again.
+The answer is an ordinary threaded message from the user that mentions the agent, so it starts the agent's next turn like any reply:
+
+```text
+@mindroom_planner:example.org Canvas response ($canvas-event, revision $canvas-event): Pro plan
+{"plan":"pro"}
+```
+
+MindRoom Chat displays that message as a one-line receipt (expandable to the exact data) and carries the same values in `io.mindroom.canvas_response`; other Matrix clients show the text.
+`data` must be JSON-serializable and at most 8 KB.
+Numbers that are not whole (or are too large for a JSON integer) arrive as text, because homeservers refuse them in unencrypted events, and object keys arrive sorted.
+
+### Updating a canvas in place
+
+`show_canvas` returns the canvas `event_id`.
+To show the next step of the same flow, call `show_canvas` again with `canvas_event_id` set to that ID.
+MindRoom sends a Matrix edit of the original notice, so the timeline keeps one card and an open panel switches to the new page.
+If the user has been working in the panel and has not sent anything since, Chat asks before replacing it.
+An agent can update only its own canvases for the same person in the same room and thread.
+A canvas shown outside a thread can be updated from any thread of that room, because the user's answer to it starts a thread.
+
+### Size
+
+A page whose edit fits a Matrix event (27,000 bytes of serialized event, about 24,000 characters of plain ASCII HTML) travels inside the event.
+A larger page, up to 4 MB, is uploaded as Matrix media (encrypted in end-to-end encrypted rooms) and the event carries only a reference that MindRoom Chat downloads, decrypts, and caches.
+Every update of a large page uploads a new copy, and Matrix does not let users delete uploaded media, so iterate on large pages sparingly.
+The tool reports an error for pages above 4 MB or when the upload fails.
+
+### Sandbox and limits
+
+MindRoom Chat runs the page in a sandboxed frame with its own opaque origin:
+
+- It cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate Chat.
+- Its Content Security Policy blocks ordinary network requests (fetch, images, scripts, styles) and external resources; use inline CSS, inline JavaScript, inline SVG, and `data:` URLs.
+- Chat blocks the frame from navigating to other sites.
+- Nothing is posted to the conversation without the user's explicit **Send**.
+
+These protections do not make a canvas a safe place for secrets.
+Browsers do not let a page block WebRTC, so a malicious canvas could still leak what the user types into it.
+Chat therefore shows which agent made each canvas and reminds the user that what they enter may leave the panel.
+Chat does not run canvases during a call, because call frames listen to the page's messages.
+
+### Turning canvases on
+
+Canvases need two switches, and both are off by default.
+
+The agent gets `show_canvas` only when `enable_show_canvas` is true for it; otherwise it neither has the function nor sees it in its instructions.
+Set it in the agent's `chat_ui` entry:
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+```
+
+Like other tool options, it can also be set in the `chat_ui` tool's saved settings, which apply to every agent that uses `chat_ui`.
+An agent's own entry wins, so `enable_show_canvas: false` there keeps canvases away from that agent even when the saved setting is on.
+
+MindRoom Chat shows canvases only when the deployment enables them in its runtime `config.json`:
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true
+    }
+  }
+}
+```
+
+When they are off, the notice shows its text fallback and its button explains that interactive panels are turned off.
+Automatic opening follows the same `autoOpenFromHomeservers` rule as other UI requests; otherwise the user opens the canvas with the notice's **Open panel** button.
+
 
 ## Worker computer requirements
 
@@ -16492,15 +16645,11 @@ Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the reso
 `run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
 Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
-Because the workspace is writable by the child's worker, each record is capped: 1 MiB per event, 64 MiB and 65,536 events per event log, and 4 MiB for `run.json`.
+MindRoom keeps each record's working state, including a copy of its event log, below `MINDROOM_STORAGE_PATH/tracking/`, and the workspace files are audit exports of it that MindRoom never reads.
+Editing or deleting an export never affects the delegation: MindRoom rewrites `run.json` with every event, rewrites an `events.jsonl` whose size no longer matches its copy, and rewrites `run.json`, `events.jsonl`, and `transcript.md` when the delegation finishes.
+Each record is capped: 1 MiB per event, 64 MiB and 65,536 events per event log, and 4 MiB for `run.json`.
 A delegation whose task leaves no room in `run.json` for the output, error, and usage that finishing adds is refused before it starts.
 A running child whose record reaches a cap fails, so very long delegations that keep large tool results inline stop there; a child that has already finished still settles, because its terminal event keeps reserved room.
-A record already above these caps is unreadable, so a delegation that resumes with one fails.
-MindRoom keeps each record's state in memory and reads the whole event log only on the record's first use in a process and when it renders `transcript.md` at the finish.
-Only MindRoom writes `events.jsonl`, so while it keeps a record's state, a log whose size or modification time changed, or that was replaced, fails that delegation as tampered; changing its permissions or access time does not.
-Finished records leave memory first when kept states grow past 64 MiB, and a record that left is read again on its next use.
-A running or paused record stays in memory until it finishes, or until its start or finish fails or its log is refused as tampered, so only delegations MindRoom can still settle keep state.
-A failure to open or read a record, such as running out of file descriptors, fails only that attempt; a refusal of the record's content is remembered while the log stays unchanged.
 The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
 Completed task results include a reference to the child's record.
 
@@ -18554,8 +18703,9 @@ A workspace is mounted only when it is a real directory reached from the storage
 Docker resolves mount targets again on every container start, so before creating or restarting a worker the backend walks the targets inside the worker's own writable root without following links and refuses one that worker code replaced with a link.
 Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or create them exclusively; the few files appended to in place, call transcripts and delegation event logs, are refused when another hard link shares their inode, so a hard link an older worker planted never redirects a write.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or create them exclusively; the few files appended to in place, call transcripts and delegation event logs, are never written while another hard link shares their inode, so a hard link an older worker planted never redirects a write: such a call transcript is refused and such a delegation event log is replaced.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever; writers of one delegation record exclude each other within the primary process instead.
+Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary writes but never reads, so worker code that edits or deletes them changes nothing the primary relies on.
 Reads through those descriptors are capped per surface.
 
 | Surface | Cap | Above the cap |
@@ -18564,7 +18714,6 @@ Reads through those descriptors are capped per surface.
 | Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of `SKILL.md` files and listings and 256 skills per workspace, with each `SKILL.md` counted before it is parsed, even one that then fails to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined, and an archival pass whose `skills/` scan stopped there forgets no usage records |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
-| Delegation event logs and `run.json` | 1 MiB per event; 64 MiB and 65,536 events per log; 4 MiB per `run.json`, of which a new record leaves 192 KiB for what finish adds; 64 KiB per inline output, error, or usage value | An event or `run.json` that would exceed a cap is refused before it is written, and other events stop 1 MiB and one event short of the log caps so the terminal event still fits. A planted log or `run.json` above a cap, a `run.json` missing or mistyping a field, and a `run.json` or terminal event whose output, error, or usage exceeds 64 KiB, which the primary always moves to artifacts, make the record unreadable. The primary keeps each record's state in memory, with inline values as their compact JSON text, and reads the whole log only on the record's first use in a process, after it left memory, and when rendering `transcript.md` at the first finish in a process. Every write and render checks that the log it opened has the device, inode, size, and modification time the primary last left, a new record's log must be empty, and a mismatch is refused as tampered without being read; a log whose content was refused is refused again unread while it stays unchanged, while a failure to open or read it is not remembered. Kept states past 64 MiB drop finished records, least recently used first; a running or paused record keeps its state until it finishes, a start or finish attempt fails, its directory cannot be opened, or its log is refused as tampered. `run.json` keeps only its known fields, and it and the transcript's event data are written as compact JSON |
 | Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; 1 MiB of workspace template files read, from at most 1,024 entries of the template directory, per `list_templates` call; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file and stops listing workspace templates with a warning at the template that would exceed its read cap |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads | 64 MiB | The upload is refused with a tool error |
@@ -18618,7 +18767,7 @@ Every tool declares how its own file access relates to this setting.
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, deletes, and every file a `file` content search reads walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and the other searches check the resolved path and then walk it by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
@@ -18653,7 +18802,8 @@ Do not report or "fix" these; they are deliberate.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
-- With `file_access: workspace`, the browser, attachments, `matrix_message`, Gmail, and Google Drive may still use every file in the agent workspace.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
+- A `chat_ui` canvas shown from a path runs that file as an interactive page in MindRoom Chat's sandbox, so agents should only show pages they wrote; the sandbox keeps the page away from the Matrix session but cannot stop WebRTC from leaking what the user types into it.
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
@@ -23883,6 +24033,9 @@ In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_pro
 A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
 Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
 
+Delegation records now keep their working state below `tracking/` and write the workspace `run.json`, `events.jsonl`, and `transcript.md` only as exports.
+A delegation still in flight at the upgrade, such as one awaiting approval, settles normally, but its workspace record keeps what it held before the upgrade and is not updated further.
+
 ### Compaction Archive
 
 See [History & Compaction](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) for the compaction archive.
@@ -24361,10 +24514,9 @@ Create and privately save the dedicated local desktop Matrix device.
 │                                                                    homeserver.         │
 │ --login-method                                [auto|password|sso]  Matrix login        │
 │                                                                    method. Auto uses   │
-│                                                                    password when       │
+│                                                                    browser SSO when    │
 │                                                                    advertised,         │
-│                                                                    otherwise browser   │
-│                                                                    SSO.                │
+│                                                                    otherwise password. │
 │                                                                    [default: auto]     │
 │ --sso-idp                                     TEXT                 Matrix SSO          │
 │                                                                    identity-provider   │

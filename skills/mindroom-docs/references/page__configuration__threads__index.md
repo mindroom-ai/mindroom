@@ -239,7 +239,9 @@ Abstentions, timeouts, missing credentials, a full judgment limit, and backend e
 The check runs between completed tool batches and never interrupts a running tool.
 The judge sees the active request, the earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
 Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
-The wrap-up notice is sent without a judgment when the conversation history is missing or incomplete, contains media, has more than 63 earlier messages, or exceeds 16 KB, when a message contains attachments or detected credentials, and for `thread_mode: room` turns.
+Long threads are trimmed to the judge's 16 KB limit: older messages drop out first, keeping at most the newest 63, and long earlier messages and reply snapshots are shortened to their first and last 1,000 characters, while the active request and queued messages are always sent whole.
+The wrap-up notice is sent without a judgment when the conversation history is missing or incomplete or contains media, when the active request and queued messages alone exceed the limit, when a message contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
+Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
 
 Queued messages stay queued and are handled after the active response finishes.
 A finish decision covers only the messages it saw, so a later message needs a new decision, and a wrap-up notice once sent is not reversed.
