@@ -103,7 +103,6 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 Agents stream responses by progressively editing messages.
 When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
 When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
-See [Streaming Responses](streaming.md) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 

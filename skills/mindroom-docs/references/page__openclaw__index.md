@@ -92,7 +92,6 @@ agents:
 #### Notes
 
 - [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
-- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
 - If you only need one or two of the member tools, configure those tools directly instead of using the preset.
 
 ## Drop-in config

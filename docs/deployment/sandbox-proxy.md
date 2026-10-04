@@ -122,8 +122,6 @@ Explicit YAML worker lists take precedence over environment execution modes.
 Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
 Dedicated Docker and Kubernetes workers do not allow that fallback.
 
-See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
-
 > [!TIP]
 > For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
 
@@ -263,7 +261,7 @@ Plain `uvx mindroom run` runs the published PyPI release, so when testing unrele
 
 ### Optional: Docker worker isolation
 
-If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](sandbox-proxy.md).
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Dedicated Docker worker backend](#dedicated-docker-worker-backend).
 That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
 Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
 They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
@@ -341,7 +339,6 @@ When upgrading from a release before v2026.9.33, see [Requester-scoped worker ke
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
 The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
-Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment details and worker-scope behavior.
 
 ### Shared-Only Integrations
 
@@ -447,8 +444,6 @@ Settings use per-agent storage for `shared` and requester-scoped storage for `us
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described in [Per-Agent Tool Configuration](../tools/index.md#per-agent-tool-configuration).
 Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
-
-For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
 
 ## Shell env and PATH
 

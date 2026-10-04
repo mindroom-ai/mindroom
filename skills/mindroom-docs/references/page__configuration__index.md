@@ -13,6 +13,7 @@ MindRoom searches for the configuration file in this order (first match wins):
 
 Data storage (`mindroom_data/`) is placed next to the config file by default.
 `config.yaml` is watched at runtime, and edits are applied by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which need a restart.
+A reload first waits for active responses to finish, and after 600 seconds it is applied even if responses are still running.
 
 Validate a specific file with:
 

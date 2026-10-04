@@ -1579,7 +1579,6 @@ agents:
 #### Notes
 
 - [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
-- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
 - If you only need one or two of the member tools, configure those tools directly instead of using the preset.
 
 ## Drop-in config
@@ -1729,6 +1728,7 @@ MindRoom searches for the configuration file in this order (first match wins):
 
 Data storage (`mindroom_data/`) is placed next to the config file by default.
 `config.yaml` is watched at runtime, and edits are applied by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which need a restart.
+A reload first waits for active responses to finish, and after 600 seconds it is applied even if responses are still running.
 
 Validate a specific file with:
 
@@ -4248,7 +4248,7 @@ delete_memory("abc123")
 
 ### Notes
 
-- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/), not through tool-local options.
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through the backend settings on this page, not through tool-local options.
 - This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
 - The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
 
@@ -5224,8 +5224,6 @@ Schedules remain visible by default.
 
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
-See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
-
 ### Edit a Schedule
 
 ```
@@ -5356,7 +5354,6 @@ cancel_schedule("a1b2c3d4")
 - A silent schedule with `new_thread=True` posts any finding or failure as a room-level root because its hidden trigger cannot serve as a visible thread root.
 - Silent delivery controls room presentation only; the task body still travels through Matrix and remains subject to homeserver retention and MindRoom's durable recovery journal.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](https://docs.mindroom.chat/scheduling/) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
 ## Silent Delivery
 
@@ -5789,7 +5786,6 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 Agents stream responses by progressively editing messages.
 When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
 When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
-See [Streaming Responses](https://docs.mindroom.chat/streaming/) for the full feature documentation.
 
 Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
 
@@ -8792,7 +8788,7 @@ Switching modes does not create a second workspace or memory store.
 ### Conversation mode
 
 Standard mode is the default.
-An existing shell-enabled agent can select [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) per conversation with `!mode <agent> minimal`.
+An existing shell-enabled agent can select minimal mode per conversation with `!mode <agent> minimal`.
 Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
 It keeps the same identity, workspace, memory, history, and permissions.
 The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
@@ -10098,7 +10094,6 @@ Run these commands in a private Matrix room containing only the requester and on
 `!desktop status`, or `!desktop` alone, reports whether a Desktop target is configured for you and this agent.
 `!desktop disconnect` asks for confirmation, and `!desktop disconnect confirm` removes your Desktop target for this agent, so its `desktop` calls need setup again.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
-See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for the pairing steps, local access choices, and running the bridge.
 
 ## Current Limits
 
@@ -20747,7 +20742,7 @@ Missing or incorrect tokens receive the same not-found response.
 
 The request then follows the normal external-trigger readiness, authorization, room-membership, replay, Matrix-delivery, and failure-retry path.
 
-Use [External Triggers](https://docs.mindroom.chat/external-triggers/) directly for reusable integrations that need stable signed identities.
+Use external triggers directly for reusable integrations that need stable signed identities.
 
 # OpenAI-Compatible API
 
@@ -21760,8 +21755,6 @@ docker run -d \
 
 Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
 
-See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/) for the full single-container setup.
-
 ## Docker Compose
 
 Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
@@ -22336,8 +22329,6 @@ Explicit YAML worker lists take precedence over environment execution modes.
 Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
 Dedicated Docker and Kubernetes workers do not allow that fallback.
 
-See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
-
 > [!TIP]
 > For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
 
@@ -22477,7 +22468,7 @@ Plain `uvx mindroom run` runs the published PyPI release, so when testing unrele
 
 ### Optional: Docker worker isolation
 
-If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Dedicated Docker worker backend](#dedicated-docker-worker-backend).
 That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
 Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
 They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
@@ -22555,7 +22546,6 @@ When upgrading from a release before v2026.9.33, see [Requester-scoped worker ke
 
 Some tools default to running in a sandboxed worker container instead of the primary agent process.
 The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
-Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
 
 ### Shared-Only Integrations
 
@@ -22661,8 +22651,6 @@ Settings use per-agent storage for `shared` and requester-scoped storage for `us
 Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described in [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration).
 Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
-
-For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ## Shell env and PATH
 
@@ -23608,7 +23596,7 @@ Successful sync completion refreshes both liveness clocks and clears the ingesti
 After 90 seconds without sync or durable ingestion progress, `matrix_sync_stall_diagnostics` logs bounded await chains for that agent's sync, ingestion runner, ingestion pump, and delivery recovery tasks, including during first-sync and restarted-sync startup grace.
 Reports repeat at most every 90 seconds and include sync age, time without progress, and ingestion generation without changing watchdog or readiness behavior.
 Snapshots contain at most four tasks and 32 code locations per task, with strings capped at 240 characters; they exclude locals, message content, and source text, and stop at opaque Future or Task await boundaries.
-[Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/) lists this report's stable fields and a suggested alert condition.
+This page lists this report's stable fields and a suggested alert condition.
 Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
 
 ## Collecting the events
@@ -23731,8 +23719,6 @@ The primary then logs one `heap_type_probe` event per interval with the 25 most 
 Resident memory that grows while `arena_in_use_bytes` plus `mmap_bytes` and `python_allocated_blocks` stay flat suggests freed memory the allocator keeps, and growth in those suggests live objects, which the type histogram may not show because it counts only garbage-collected container objects, not strings, bytes, or numbers.
 Each probe briefly pauses the event loop, so prefer intervals of several minutes on large processes.
 Unset or `0` disables the probe (the default), and any other value below `60` fails startup.
-
-See [Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/) for stable log events to alert on.
 
 # Upgrade Notes
 

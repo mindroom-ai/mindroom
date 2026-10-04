@@ -485,7 +485,6 @@ Run these commands in a private Matrix room containing only the requester and on
 `!desktop status`, or `!desktop` alone, reports whether a Desktop target is configured for you and this agent.
 `!desktop disconnect` asks for confirmation, and `!desktop disconnect confirm` removes your Desktop target for this agent, so its `desktop` calls need setup again.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
-See [Matrix Desktop Bridge](desktop.md) for the pairing steps, local access choices, and running the bridge.
 
 ## Current Limits
 

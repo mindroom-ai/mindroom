@@ -59,8 +59,6 @@ docker run -d \
 
 Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
 
-See the [Docker deployment guide](docker.md) for the full single-container setup.
-
 ## Docker Compose
 
 Prepare the writable `mindroom_data` directory as described above before starting this Compose service.

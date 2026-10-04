@@ -387,7 +387,7 @@ delete_memory("abc123")
 
 ### Notes
 
-- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through [Memory System](https://docs.mindroom.chat/memory/), not through tool-local options.
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through the backend settings on this page, not through tool-local options.
 - This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
 - The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
 

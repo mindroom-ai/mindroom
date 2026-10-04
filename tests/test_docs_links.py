@@ -2,7 +2,7 @@
 
 Every relative Markdown link must reach an existing file, every fragment must name a heading id or an
 explicit `<a id>` anchor on its target page, no page may define the same id twice, no link may point
-at a redirect stub, and every redirect stub must point at an existing page and id.  Heading ids follow
+at a redirect stub or at its own page without a section, and every redirect stub must point at an existing page and id.  Heading ids follow
 Python-Markdown's toc rules (the slugs Zensical publishes), so the check runs without building the site.
 """
 
@@ -143,29 +143,35 @@ def _url_page(page: str, location: str) -> tuple[str | None, str]:
     return None, fragment
 
 
+def _link_problem(page: str, target: str) -> str | None:
+    """Why one relative link from a page is broken, or None when it resolves."""
+    resolved = _resolve(page, target)
+    if resolved is None or resolved[0].startswith(".."):
+        return None
+    file, fragment = resolved
+    if not (DOCS / file).exists():
+        return "missing file"
+    if not file.endswith(".md"):
+        return None
+    checks = (
+        (file == page and not fragment, "links to its own page without a section"),
+        (_is_stub(file), "links to a redirect stub"),
+        (bool(fragment) and fragment not in _ids(file)[0], f"no id {fragment!r} on {file}"),
+    )
+    return next((reason for failed, reason in checks if failed), None)
+
+
 def test_links_and_fragments_resolve() -> None:
-    """Relative links reach existing files and ids, and never a redirect stub."""
+    """Relative links reach existing files and ids, never a redirect stub, and never their own page without a section."""
     problems = []
     for path in _pages():
         page = _rel(path)
         if _is_stub(page):
             continue
         for number, target in _links(page):
-            resolved = _resolve(page, target)
-            if resolved is None:
-                continue
-            file, fragment = resolved
-            where = f"{page}:{number}: {target}"
-            if file.startswith("..") or not (DOCS / file).exists():
-                if not file.startswith(".."):
-                    problems.append(f"{where}: missing file")
-                continue
-            if not file.endswith(".md"):
-                continue
-            if _is_stub(file):
-                problems.append(f"{where}: links to a redirect stub")
-            elif fragment and fragment not in _ids(file)[0]:
-                problems.append(f"{where}: no id {fragment!r} on {file}")
+            problem = _link_problem(page, target)
+            if problem:
+                problems.append(f"{page}:{number}: {target}: {problem}")
     assert problems == []
 
 

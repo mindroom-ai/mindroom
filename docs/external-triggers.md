@@ -379,4 +379,4 @@ Missing or incorrect tokens receive the same not-found response.
 
 The request then follows the normal external-trigger readiness, authorization, room-membership, replay, Matrix-delivery, and failure-retry path.
 
-Use [External Triggers](external-triggers.md) directly for reusable integrations that need stable signed identities.
+Use external triggers directly for reusable integrations that need stable signed identities.

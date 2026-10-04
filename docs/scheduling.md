@@ -121,8 +121,6 @@ Schedules remain visible by default.
 
 Schedules use the timezone from `config.yaml` (defaults to UTC).
 
-See [Scheduling](scheduling.md) for full details.
-
 ### Edit a Schedule
 
 ```
@@ -253,7 +251,6 @@ cancel_schedule("a1b2c3d4")
 - A silent schedule with `new_thread=True` posts any finding or failure as a room-level root because its hidden trigger cannot serve as a visible thread root.
 - Silent delivery controls room presentation only; the task body still travels through Matrix and remains subject to homeserver retention and MindRoom's durable recovery journal.
 - Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
 
 ## Silent Delivery
 
