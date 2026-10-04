@@ -84,7 +84,7 @@ So agents are not limited to what Slack or WhatsApp can display:
 - Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](streaming.md)).
 - Approval cards and clickable questions sit right in the conversation ([Interactive Questions](interactive.md)).
 - An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](tools/worker-computer.md#watch-take-control-and-resume)).
-- An agent can use the apps and folders you select on your own computer, and runs shell commands only after you approve them ([Desktop Bridge](tools/desktop.md)).
+- An agent running on a server across the world can still use your laptop, or any computer you pair: the apps and folders you allow and the shell commands you approve, over end-to-end encrypted Matrix with no open ports ([Desktop Bridge](tools/desktop.md)).
 - An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](canvases.md)).
 - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](configuration/models.md#model-overrides-in-chat)).
 
