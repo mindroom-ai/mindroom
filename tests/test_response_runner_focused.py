@@ -2129,8 +2129,16 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
 
 
 @pytest.mark.asyncio
-async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Path) -> None:
-    """Restart recovery retires an uncertain claim without replacing its streamed body."""
+@pytest.mark.parametrize(
+    "failure_reason",
+    [None, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON],
+    ids=["stale_claim", "handoff_fence"],
+)
+async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
+    tmp_path: Path,
+    failure_reason: str | None,
+) -> None:
+    """An approved run a restart cut short ends its cards and leaves its reply and source for replay to continue."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -2149,62 +2157,54 @@ async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Pa
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
-    claimed = await store.claim_approval_continuation(
+    owned = await store.claim_approval_continuation(
         continuation.approval_id,
         runtime_generation="previous-runtime",
     )
-    assert claimed is not None
-    interrupted_body = f"committed partial\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}"
-
-    async def acknowledge_interruption_edit(request: EditTextRequest) -> bool:
-        await store.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            payload={"body": request.new_text},
-            edits_event_id="$waiting",
+    assert owned is not None
+    if failure_reason is not None:
+        owned = await store.request_approval_failure(
+            continuation.approval_id,
+            failure_reason,
+            expected_state="claimed",
+            expected_runtime_generation="previous-runtime",
         )
-        assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
-        await store.acknowledge_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            event_id="$waiting",
-            delivered_projections=(),
-        )
-        return True
-
-    edit_text = AsyncMock(side_effect=acknowledge_interruption_edit)
+        assert owned is not None
+    edit_text = AsyncMock()
+    expire_cards = AsyncMock(return_value=True)
 
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch(
-            "mindroom.response_runner.fetch_latest_visible_body",
-            new=AsyncMock(return_value="committed partial"),
-        ),
-        patch(
             "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+            return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        event_id = await runner._recover_claimed_approval_lifecycle(
-            claimed,
+        recovered, event_id = await runner._recover_nonready_approval(
+            owned,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
-    edit_request = edit_text.await_args.args[0]
-    assert edit_request.new_text == interrupted_body
-    assert edit_request.extra_content == {
-        STREAM_STATUS_KEY: STREAM_STATUS_ERROR,
-    }
+    assert recovered
+    assert event_id is None
+    edit_text.assert_not_awaited()
+    expire_cards.assert_awaited_once_with(continuation.approval_id)
     assert await store.approval_continuation(continuation.approval_id) is None
-    assert not await store.is_pending("$source")
+    assert await store.is_pending("$source")
 
 
 @pytest.mark.asyncio
-async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_path: Path) -> None:
-    """A restart cancellation stays recognizable after the claim is fenced."""
+@pytest.mark.parametrize(
+    ("handed_off", "failure_reason"),
+    [(True, response_runner._INTERRUPTED_APPROVAL_RECOVERY_REASON), (False, "sync_restart_cancelled")],
+    ids=["handed_to_successor", "cancelled_in_place"],
+)
+async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
+    tmp_path: Path,
+    handed_off: bool,
+    failure_reason: str,
+) -> None:
+    """A run handed to a successor runtime is fenced as restart-interrupted; any other cancellation keeps its provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -2228,25 +2228,31 @@ async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_pa
         runtime_generation="current-runtime",
     )
     assert claimed is not None
+    started = asyncio.Event()
+
+    async def run_until_cancelled(*_args: object, **_kwargs: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
 
     with (
-        patch.object(
-            runner,
-            "_run_claimed_approval_lifecycle",
-            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
-        ),
+        patch.object(runner, "_run_claimed_approval_lifecycle", new=run_until_cancelled),
         patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
-        pytest.raises(asyncio.CancelledError),
     ):
-        await runner._run_owned_approval_continuation(
-            claimed,
-            target=_target(thread_id="$thread", reply_to_event_id="$source"),
+        task = asyncio.create_task(
+            runner._run_owned_approval_continuation(
+                claimed,
+                target=_target(thread_id="$thread", reply_to_event_id="$source"),
+            ),
         )
+        await started.wait()
+        request_task_cancel(task, cancel_source="sync_restart", process_shutdown=handed_off)
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     failing = await store.approval_continuation(continuation.approval_id)
     assert failing is not None
     assert failing.state == "failing"
-    assert failing.failure_reason == "sync_restart_cancelled"
+    assert failing.failure_reason == failure_reason
 
 
 @pytest.mark.asyncio

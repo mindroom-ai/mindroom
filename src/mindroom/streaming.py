@@ -16,6 +16,7 @@ from nio.exceptions import SendRetryError
 
 from mindroom import interactive
 from mindroom.constants import (
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -345,7 +346,8 @@ def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> Unfinish
     ``body`` is the canonical visible body. Placeholder text shows nothing the
     turn did, so only a tool trace beside it is carried forward.
     """
-    if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES:
+    # An approved run a restart stopped before its first edit still shows its approval pause.
+    if content.get(STREAM_STATUS_KEY) not in {*_IN_PROGRESS_STREAM_STATUSES, STREAM_STATUS_APPROVAL_PENDING}:
         return None
     visible_text = clean_partial_reply_text(body)
     if visible_text == TEAM_PROGRESS_PLACEHOLDER:

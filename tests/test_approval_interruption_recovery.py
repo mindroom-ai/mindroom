@@ -44,9 +44,9 @@ if TYPE_CHECKING:
     from mindroom.runtime_shutdown import RuntimeShutdownIntent
 
 
-@pytest.fixture(params=["active_cancel", "stale_claim"])
+@pytest.fixture(params=["active_cancel"])
 def entry(request: pytest.FixtureRequest) -> str:
-    """Exercise both shared approval interruption entry paths."""
+    """Exercise the approval interruption that still settles in place; a stale claim is handed back to replay."""
     return request.param
 
 
@@ -243,25 +243,6 @@ async def test_terminal_ownership_blocks_approval_recovery(
     assert not bot.pending_sync_restart_retry_room_ids
     async with bot.response_recovery_scope("!room:localhost", "$waiting") as permitted:
         assert not permitted
-
-
-@pytest.mark.asyncio
-async def test_replacement_stale_claim_after_first_scan_retries_after_claim_release(
-    approval: tuple[AgentBot, ApprovalContinuation],
-    tmp_path: Path,
-) -> None:
-    """A replacement-born interruption must wake recovery after the reload scan and live claim."""
-    bot, _claimed = approval
-    assert not bot.pending_sync_restart_retry_room_ids
-    with _recovery_runtime(bot, tmp_path, "partial answer\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE) as (
-        fleet,
-        replacement,
-        client,
-    ):
-        await _settle_after_reload_scan(fleet, replacement, client)
-        fleet._capture_replacement_recovery_rooms({"general": replacement})
-        await fleet._recover_pending_replacement_rooms(fleet.config)
-        assert client.room_send.await_count == 1
 
 
 @pytest.mark.asyncio

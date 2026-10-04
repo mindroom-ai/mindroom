@@ -1536,6 +1536,17 @@ class PrincipalStore:
             ),
         )
 
+    async def release_approval_continuation(self, approval_id: str, *, expected_generation: int) -> bool:
+        """Hand an interrupted continuation's still-pending sources back to ordinary replay."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.release(
+                transaction,
+                self._principal_id,
+                approval_id=approval_id,
+                expected_generation=expected_generation,
+            ),
+        )
+
     async def finish_approval_continuation(self, approval_id: str) -> bool:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome."""
         return await self._backend.write(

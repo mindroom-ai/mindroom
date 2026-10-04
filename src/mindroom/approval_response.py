@@ -490,6 +490,28 @@ class ApprovalResponseCoordinator:
         )
         return delivered and await self.store.finish_approval_continuation(current.approval_id)
 
+    async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
+        """End an interrupted continuation's cards and hand its pending sources back to ordinary replay."""
+        manager = approval_manager.get_approval_store()
+        current = await prepare_approval_failure(
+            continuation,
+            reason,
+            request_failure=partial(self.request_failure, continuation),
+            expire_cards=None if manager is None else manager.expire_continuation_cards,
+        )
+        if current is None:
+            return False
+        await cancel_approval_delegations(
+            current,
+            config=self.config(),
+            runtime_paths=self.runtime_paths,
+            reason=reason,
+        )
+        return await self.store.release_approval_continuation(
+            current.approval_id,
+            expected_generation=current.generation,
+        )
+
     async def successful_final_delivery(
         self,
         continuation: ApprovalContinuation,

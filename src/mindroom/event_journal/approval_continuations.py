@@ -902,6 +902,41 @@ def finish(
     return True
 
 
+def release(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    expected_generation: int,
+) -> bool:
+    """Hand an interrupted continuation's still-pending sources back to ordinary replay.
+
+    A restart cut the approved run short before any FINAL, so its reply is still
+    the unfinished stream of one turn, which replay adopts and continues like
+    any reply a restart left streaming. The failure fence has already stopped
+    execution and the caller has ended the cards. The attempt identity goes
+    too: the replay is a fresh attempt that registers its own with its FINAL.
+    """
+    continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
+    if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:
+        return False
+    delivery_id = continuation.source_event_ids[0]
+    if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
+        return False
+    initial = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+    if initial is not None and initial.retired:
+        return False
+    transaction.execute(
+        "DELETE FROM response_attempts WHERE principal_id = ? AND driving_event_id = ?",
+        (principal_id, delivery_id),
+    )
+    transaction.execute(
+        "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
+        (principal_id, approval_id),
+    )
+    return True
+
+
 def retire_superseded_failure_for_source(
     transaction: Transaction,
     principal_id: str,

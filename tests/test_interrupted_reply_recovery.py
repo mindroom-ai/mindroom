@@ -121,7 +121,6 @@ def test_a_trace_beside_placeholder_text_is_still_carried(body: str) -> None:
     "status",
     [
         None,
-        STREAM_STATUS_APPROVAL_PENDING,
         STREAM_STATUS_CANCELLED,
         STREAM_STATUS_COMPLETED,
         STREAM_STATUS_ERROR,
@@ -129,8 +128,17 @@ def test_a_trace_beside_placeholder_text_is_still_carried(body: str) -> None:
     ],
 )
 def test_only_in_progress_streams_are_unfinished(status: str | None) -> None:
-    """Terminal, approval-owned and non-stream messages already have their own owners."""
+    """Terminal and non-stream messages show no stopped work."""
     assert unfinished_streamed_reply(PARTIAL, _content(status)) is None
+
+
+def test_a_reply_still_waiting_on_its_approval_is_unfinished() -> None:
+    """A restart can stop an approved run before its first edit, so the reply still shows the pause."""
+    reply = unfinished_streamed_reply(PARTIAL, _content(STREAM_STATUS_APPROVAL_PENDING))
+
+    assert reply is not None
+    assert reply.visible_text == PARTIAL
+    assert reply.tool_trace == TRACE
 
 
 def _streamed(

@@ -187,8 +187,6 @@ _INTERRUPTED_APPROVAL_RECOVERY_REASON = (
 
 def _approval_interruption_cancel_source(reason: str) -> Literal["sync_restart", "interrupted"] | None:
     """Recover the cancellation provenance persisted for an interrupted approval."""
-    if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
-        return "sync_restart"
     cancel_source = cancel_source_from_failure_reason(reason)
     if cancel_source == "user_stop" or cancel_failure_reason(cancel_source) != reason:
         return None
@@ -1901,12 +1899,32 @@ class ResponseRunner:
                 _INTERRUPTED_APPROVAL_RECOVERY_REASON,
             )
             return claimed.response_event_id if settled else None
-        settled = await self._settle_interrupted_approval_recovery(
-            claimed,
-            reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON,
-            cancel_source="sync_restart",
+        return await self._release_interrupted_approval(claimed, reason=_INTERRUPTED_APPROVAL_RECOVERY_REASON)
+
+    async def _release_interrupted_approval(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        reason: str,
+    ) -> str | None:
+        """Hand an approved run a restart cut short back to replay, which continues its reply.
+
+        Before a FINAL the reply is still the unfinished stream of one turn, so
+        the replayed turn adopts it like any reply a restart left streaming.
+        A deleted reply, or a FINAL already owed, settles the continuation as a failure instead.
+        """
+        initial = await self.deps.approval_store.load_matrix_delivery(
+            delivery_id=continuation.source_event_ids[0],
+            stage=DeliveryStage.INITIAL,
         )
-        return claimed.response_event_id if settled else None
+        # A deleted reply has nothing left to continue.
+        if (initial is None or not initial.retired) and await self._approval_responses.release_to_replay(
+            continuation,
+            reason,
+        ):
+            return None
+        settled = await self._approval_responses.settle_failure(continuation, reason)
+        return continuation.response_event_id if settled else None
 
     async def _settle_interrupted_approval_recovery(
         self,
@@ -2948,7 +2966,13 @@ class ResponseRunner:
         try:
             outcome = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError as error:
-            reason = cancel_failure_reason(classify_cancel_source(error))
+            # A shutdown that hands this run to a successor runtime records it as
+            # restart-interrupted, which that runtime hands back to replay.
+            reason = (
+                _INTERRUPTED_APPROVAL_RECOVERY_REASON
+                if current_task_is_process_shutdown()
+                else cancel_failure_reason(classify_cancel_source(error))
+            )
             owns_final, event_id, _failing = await run_coroutine_until_complete(
                 self._recover_or_request_claimed_failure(
                     claimed,
@@ -3102,6 +3126,8 @@ class ResponseRunner:
                 owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
                 return True, event_id if owns_final else None
             reason = owned.failure_reason or "Tool approval continuation failed safely."
+            if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
+                return True, await self._release_interrupted_approval(owned, reason=reason)
             cancel_source = _approval_interruption_cancel_source(reason)
             settled = (
                 await self._settle_interrupted_approval_recovery(
@@ -3622,7 +3648,12 @@ class ResponseRunner:
             instruction = "\n\n".join(
                 part for part in (_INTERRUPTED_ATTEMPT_INSTRUCTION, attempt, already_called) if part is not None
             )
-        elif message is None or message.stream_status in {None, STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        elif message is None or message.stream_status in {
+            None,
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+            STREAM_STATUS_APPROVAL_PENDING,
+        }:
             # Unreadable, or stopped before showing anything (an acknowledgement,
             # hidden or non-streamed tool calls): unknown work, not absent work.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
