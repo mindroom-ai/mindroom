@@ -9,7 +9,7 @@ Collecting that by hand (screenshots, room and message IDs, app diagnostics, ser
 Bug reports make it one click for the user and give the administrator both sides of the story: what MindRoom Chat saw and what the MindRoom backend did.
 
 This is meant for deployments with an administrator who can already read everything, such as a company or family install.
-Users keep their privacy from each other: a report is visible only to the person who sent it and the administrators.
+Users keep their privacy from each other: a report is visible only to the person who sent it and the administrators at the time it was sent, and an administrator removed later keeps the reports they already received.
 
 ## How it works
 
