@@ -11,10 +11,12 @@ import pytest
 import pytest_asyncio
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.delivery_gateway import EditTextRequest
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.stop import StopManager
@@ -329,6 +331,55 @@ async def test_resuming_after_an_interrupted_continuation_reads_what_it_already_
     reread = await held.runtime.wait("read", owner=held.owner, depth=0, timeout=0)
     assert reread.claim is not None
     await held.runtime.release_wait("read", reread.claim)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cut_short", [False, True], ids=["still_held", "cut_short"])
+async def test_a_continuation_a_restart_cut_short_continues_below_what_it_showed(
+    held: _Held,
+    *,
+    cut_short: bool,
+) -> None:
+    """A wake's re-run keeps what its interrupted run already streamed, below the restart note, like any reply."""
+    await held.start("ready")
+    await wait_for_status(held.runtime, "ready", "completed")
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    shown = held.edits[-1]
+    wake = held.runner._held_reply_request(
+        hold,
+        _wake_event_id(hold),
+        source_handoff=asyncio.Event(),
+        began=asyncio.Event(),
+    )
+    resumed = await held.runner.held_messages.resume(wake)
+    assert resumed is not None
+    body, content = (
+        ("Started.\n\nHalf of the list", {STREAM_STATUS_KEY: STREAM_STATUS_STREAMING})
+        if cut_short
+        else ("Started.", {"body": shown.new_text, **shown.extra_content})
+    )
+    visible = ResolvedVisibleMessage.synthetic(
+        event_id="$reply",
+        sender="@mindroom_general:localhost",
+        body=body,
+        timestamp=2,
+        thread_id=_THREAD,
+        content={"body": body, **content},
+    )
+    with patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)):
+        prepared = await held.runner._with_interrupted_attempt(
+            resumed,
+            resolved_target=resumed.response_envelope.target,
+        )
+    if cut_short:
+        assert prepared.resumed_reply == UnfinishedStreamedReply("Started.\n\nHalf of the list", ())
+        assert prepared.model_prompt is not None
+        assert '<item key="interrupted_attempt"' in prepared.model_prompt
+        assert prepared.held_continuation == resumed.held_continuation
+    else:
+        assert prepared == resumed
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    STREAM_WARMUP_SUFFIX_KEY,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -3804,9 +3805,12 @@ class ResponseRunner:
         account of the stopped attempt: its visible text and tool trace stay in
         the message with the new attempt streaming below them, and the same
         account goes into the new attempt's prompt, where later turns keep it.
+        A held message's wake stays pending the same way, so its re-run reads
+        the message too.
         """
         event_id = request.existing_event_id
-        if event_id is None or not request.existing_event_is_recovered:
+        hold = request.held_reply
+        if event_id is None or not (request.existing_event_is_recovered or hold is not None):
             return request
         try:
             message = await fetch_latest_visible_message(
@@ -3820,6 +3824,9 @@ class ResponseRunner:
             # not list, is answered with a warning rather than retried, since a
             # missing key or a refusing server may never change.
             message = None
+        if hold is not None and (message is None or message.content.get(STREAM_WARMUP_SUFFIX_KEY) == hold.notice):
+            # The message still shows its hold, so no earlier run of the wake left work in it.
+            return request
         unfinished = None if message is None else unfinished_streamed_reply(message.body, message.content)
         if unfinished is not None:
             completed_tools, interrupted_tools = _split_delivery_tool_trace(unfinished.tool_trace)
