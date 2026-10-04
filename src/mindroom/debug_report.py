@@ -10,7 +10,7 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, LiteralString, cast
 
 if TYPE_CHECKING:
@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 AI_RUN_KEY = "io.mindroom.ai_run"
 JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _AGNO_JSON_COLUMNS = frozenset({"run_data"})
+MAX_JSONL_RECORDS = 1000
+MAX_LOG_LINES = 2000
+MAX_LOG_LINE_CHARS = 4000
+_TOOL_CALL_ROTATIONS = 5
 
 Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
 
@@ -117,6 +121,7 @@ class SourceResult:
     items: list[Any] = field(default_factory=list)
     dropped: int = 0
     truncated: int = 0
+    error: str | None = None
 
 
 def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozenset()) -> dict[str, Any]:
@@ -249,3 +254,142 @@ def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
                     for row in rows
                 )
     return result
+
+
+def _record_matches(record: Mapping[str, Any], ids: DebugReportIds) -> bool:
+    return (
+        record.get("correlation_id") in ids.event_ids
+        or record.get("reply_to_event_id") in ids.event_ids
+        or record.get("session_id") in ids.session_ids
+    )
+
+
+def read_jsonl_records(paths: Sequence[Path], ids: DebugReportIds, *, location: Path) -> SourceResult:
+    """Read JSONL records whose correlation, reply target, or session matches, oldest file first."""
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        return SourceResult("missing", [str(location)])
+    result = SourceResult("ok", [str(path) for path in existing])
+    needles = tuple(ids.event_ids | ids.session_ids)
+    for path in existing:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                # Cheap prefilter: request logs embed whole prompts, so parse only candidate lines.
+                if not any(needle in line for needle in needles):
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or not _record_matches(record, ids):
+                    continue
+                if len(result.items) >= MAX_JSONL_RECORDS:
+                    result.dropped += 1
+                    continue
+                result.items.append(record)
+    return result
+
+
+def read_log_lines(paths: Sequence[Path], ids: DebugReportIds, *, location: Path) -> SourceResult:
+    """Read log lines that mention an event or run ID, bounded because lines can embed whole prompts.
+
+    Room IDs are not matched: every line about the room would match and bury the turn.
+    """
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
+        return SourceResult("missing", [str(location)])
+    result = SourceResult("ok", [str(path) for path in existing])
+    needles = tuple(ids.event_ids | ids.run_ids)
+    if not needles:
+        return result
+    for path in existing:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, start=1):
+                if not any(needle in line for needle in needles):
+                    continue
+                if len(result.items) >= MAX_LOG_LINES:
+                    result.dropped += 1
+                    continue
+                text = line.rstrip("\n")
+                if len(text) > MAX_LOG_LINE_CHARS:
+                    text = text[:MAX_LOG_LINE_CHARS]
+                    result.truncated += 1
+                result.items.append({"file": path.name, "line": number, "text": text})
+    return result
+
+
+@dataclass(frozen=True)
+class DebugReportSources:
+    """Where one install keeps the data a debug report reads."""
+
+    storage_root: Path
+    session_root: Path
+    journal_sqlite_path: Path | None
+    journal_postgres_url: str | None
+    llm_request_log_dir: Path
+
+
+def _failed(location: str, error: Exception) -> SourceResult:
+    return SourceResult("error", [location], error=f"{type(error).__name__}: {error}")
+
+
+def _read_journal_source(sources: DebugReportSources, ids: DebugReportIds) -> dict[str, SourceResult]:
+    """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
+    if sources.journal_postgres_url is not None:
+        import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
+
+        try:
+            with postgres_query(sources.journal_postgres_url) as query:
+                return read_journal(query, ids, "postgres")
+        except (psycopg.Error, OSError) as error:
+            return dict.fromkeys(JOURNAL_SOURCES, _failed("postgres", error))
+    path = sources.journal_sqlite_path
+    if path is None or not path.is_file():
+        return {name: SourceResult("missing", [str(path)]) for name in JOURNAL_SOURCES}
+    try:
+        with sqlite_query(path) as query:
+            return read_journal(query, ids, str(path))
+    except (sqlite3.Error, OSError) as error:
+        return dict.fromkeys(JOURNAL_SOURCES, _failed(str(path), error))
+
+
+def _read_guarded(read: Callable[[], SourceResult], location: Path) -> SourceResult:
+    """Run one file or SQLite source read; a locked or corrupt store must not abort the other sources."""
+    try:
+        return read()
+    except (sqlite3.Error, OSError) as error:
+        return _failed(str(location), error)
+
+
+def build_debug_report(sources: DebugReportSources, ids: DebugReportIds, *, generated_at: str) -> dict[str, Any]:
+    """Collect every backend source for the identifiers into one JSON-ready document."""
+    tracking = sources.storage_root / "tracking"
+    tool_call_logs = [tracking / f"tool_calls.jsonl.{n}" for n in range(_TOOL_CALL_ROTATIONS, 0, -1)]
+    tool_call_logs.append(tracking / "tool_calls.jsonl")
+    logs_dir = sources.storage_root / "logs"
+    results = _read_journal_source(sources, ids)
+    results["agno_runs"] = _read_guarded(lambda: read_agno_runs(sources.session_root, ids), sources.session_root)
+    results["tool_calls"] = _read_guarded(
+        lambda: read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
+        tracking / "tool_calls.jsonl",
+    )
+    results["llm_requests"] = _read_guarded(
+        lambda: read_jsonl_records(
+            sorted(sources.llm_request_log_dir.glob("llm-requests-*.jsonl")),
+            ids,
+            location=sources.llm_request_log_dir,
+        ),
+        sources.llm_request_log_dir,
+    )
+    results["log_lines"] = _read_guarded(
+        lambda: read_log_lines(sorted(logs_dir.glob("mindroom_*.log")), ids, location=logs_dir),
+        logs_dir,
+    )
+    return {
+        "type": "io.mindroom.debug_report",
+        "version": 1,
+        "generatedAt": generated_at,
+        "storageRoot": str(sources.storage_root),
+        "identifiers": ids.to_json(),
+        "sources": {name: asdict(result) for name, result in results.items()},
+    }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from contextlib import closing
@@ -12,8 +13,19 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 
+from mindroom import debug_report as debug_report_module
 from mindroom.agent_storage import create_state_storage
-from mindroom.debug_report import collect_ids, postgres_query, read_agno_runs, read_journal, sqlite_query
+from mindroom.debug_report import (
+    DebugReportSources,
+    build_debug_report,
+    collect_ids,
+    postgres_query,
+    read_agno_runs,
+    read_journal,
+    read_jsonl_records,
+    read_log_lines,
+    sqlite_query,
+)
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from tests.conftest import postgres_journal_schema_url, seed_session
 
@@ -212,3 +224,173 @@ def test_read_agno_runs_reports_missing_databases(tmp_path: Path) -> None:
     """A session root without databases is reported as missing."""
     result = read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
     assert result.status == "missing"
+
+
+def _seed_files(storage_root: Path) -> None:
+    tracking = storage_root / "tracking"
+    tracking.mkdir(parents=True, exist_ok=True)
+    (tracking / "tool_calls.jsonl.1").write_text(
+        json.dumps({"tool_name": "old", "correlation_id": "$user"}) + "\n",
+        encoding="utf-8",
+    )
+    (tracking / "tool_calls.jsonl").write_text(
+        json.dumps({"tool_name": "shell", "correlation_id": "$user", "result": "ok"})
+        + "\n"
+        + json.dumps({"tool_name": "other", "correlation_id": "$elsewhere"})
+        + "\n"
+        + "not json $user\n",
+        encoding="utf-8",
+    )
+    llm = storage_root / "logs" / "llm_requests"
+    llm.mkdir(parents=True, exist_ok=True)
+    (llm / "llm-requests-2026-10-03.jsonl").write_text(
+        json.dumps({"request_log_id": "r1", "session_id": f"{ROOM}:$root", "full_prompt": "p"})
+        + "\n"
+        + json.dumps({"record": "response", "request_log_id": "r1", "correlation_id": "$user"})
+        + "\n"
+        + json.dumps({"request_log_id": "r2", "session_id": ROOM})
+        + "\n",
+        encoding="utf-8",
+    )
+    (storage_root / "logs" / "mindroom_20261003_120000.log").write_text(
+        "2026 [info] Dispatching event_id=$user\n"
+        f"2026 [info] room heartbeat room_id={ROOM}\n"
+        "2026 [info] run started run_id=run-1 " + "x" * 5000 + "\n",
+        encoding="utf-8",
+    )
+
+
+def _sources(storage_root: Path, *, journal_postgres_url: str | None = None) -> DebugReportSources:
+    return DebugReportSources(
+        storage_root=storage_root,
+        session_root=storage_root,
+        journal_sqlite_path=storage_root / "tracking" / "event_journal.db",
+        journal_postgres_url=journal_postgres_url,
+        llm_request_log_dir=storage_root / "logs" / "llm_requests",
+    )
+
+
+def test_jsonl_and_log_readers_match_structured_fields_and_bound_output(tmp_path: Path) -> None:
+    """Records match by correlation, reply target, or session; log lines by event or run id, capped per line."""
+    _seed_files(tmp_path)
+    ids = dataclasses.replace(
+        collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root"),
+        run_ids=frozenset({"run-1"}),
+    )
+
+    tracking = tmp_path / "tracking"
+    tools = read_jsonl_records(
+        [tracking / "tool_calls.jsonl.1", tracking / "tool_calls.jsonl"],
+        ids,
+        location=tracking / "tool_calls.jsonl",
+    )
+    assert [item["tool_name"] for item in tools.items] == ["old", "shell"]
+
+    llm_dir = tmp_path / "logs" / "llm_requests"
+    llm = read_jsonl_records(sorted(llm_dir.glob("llm-requests-*.jsonl")), ids, location=llm_dir)
+    assert [item.get("record", "request") for item in llm.items] == ["request", "response"]
+
+    logs = read_log_lines(sorted((tmp_path / "logs").glob("mindroom_*.log")), ids, location=tmp_path / "logs")
+    assert [item["line"] for item in logs.items] == [1, 3]
+    assert logs.truncated == 1
+    assert len(logs.items[1]["text"]) == debug_report_module.MAX_LOG_LINE_CHARS
+
+
+def test_jsonl_reader_caps_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Records beyond the cap are counted as dropped instead of growing the report without bound."""
+    monkeypatch.setattr(debug_report_module, "MAX_JSONL_RECORDS", 1)
+    _seed_files(tmp_path)
+    tracking = tmp_path / "tracking"
+    result = read_jsonl_records(
+        [tracking / "tool_calls.jsonl.1", tracking / "tool_calls.jsonl"],
+        collect_ids(None, event_ids=["$user"]),
+        location=tracking / "tool_calls.jsonl",
+    )
+    assert len(result.items) == 1
+    assert result.dropped == 1
+
+
+def test_build_debug_report_combines_every_source(tmp_path: Path) -> None:
+    """One document carries the journal, Agno, tool call, LLM request, and log sources, and is JSON-serializable."""
+    _seed_journal(tmp_path / "tracking" / "event_journal.db")
+    _seed_agno(tmp_path)
+    _seed_files(tmp_path)
+    document = build_debug_report(_sources(tmp_path), collect_ids(_report()), generated_at="2026-10-03T12:00:00+00:00")
+    assert document["type"] == "io.mindroom.debug_report"
+    assert document["identifiers"]["threadId"] == "$root"
+    assert set(document["sources"]) == {
+        "turn_records",
+        "journal_events",
+        "delivery_outbox",
+        "agno_runs",
+        "tool_calls",
+        "llm_requests",
+        "log_lines",
+    }
+    assert document["sources"]["agno_runs"]["items"][0]["run_id"] == "run-1"
+    json.dumps(document)
+
+
+def test_build_debug_report_marks_missing_sources(tmp_path: Path) -> None:
+    """An install with no data at all reports every source as missing instead of failing."""
+    document = build_debug_report(_sources(tmp_path), collect_ids(None, event_ids=["$x"]), generated_at="now")
+    assert {name: source["status"] for name, source in document["sources"].items()} == dict.fromkeys(
+        document["sources"],
+        "missing",
+    )
+
+
+def test_build_debug_report_isolates_a_failing_agno_database(tmp_path: Path) -> None:
+    """A session database that cannot be read marks only agno_runs as an error; other sources still report."""
+    _seed_journal(tmp_path / "tracking" / "event_journal.db")
+    _seed_files(tmp_path)
+    broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"this is not a sqlite database" * 100)
+
+    document = build_debug_report(_sources(tmp_path), collect_ids(_report(), event_ids=["$user"]), generated_at="now")
+
+    sources = document["sources"]
+    assert sources["agno_runs"]["status"] == "error"
+    assert sources["agno_runs"]["error"]
+    healthy = {name: source["status"] for name, source in sources.items() if name != "agno_runs"}
+    assert healthy == dict.fromkeys(healthy, "ok")
+    assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
+    json.dumps(document)
+
+
+def test_build_debug_report_marks_every_journal_source_when_the_journal_cannot_be_read(tmp_path: Path) -> None:
+    """A journal missing its tables (an older install) marks all three journal sources as errors."""
+    journal = tmp_path / "tracking" / "event_journal.db"
+    journal.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(journal)) as db:
+        db.execute("CREATE TABLE unrelated (id INTEGER)")
+    _seed_files(tmp_path)
+
+    document = build_debug_report(_sources(tmp_path), collect_ids(_report()), generated_at="now")
+
+    sources = document["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert "no such table" in sources[name]["error"]
+    assert sources["tool_calls"]["status"] == "ok"
+
+
+def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(tmp_path: Path) -> None:
+    """A PostgreSQL journal that refuses the connection marks all three journal sources as errors."""
+    pytest.importorskip("psycopg")
+    _seed_files(tmp_path)
+
+    unreachable = "postgresql://nobody@127.0.0.1:1/none?connect_timeout=1"
+    document = build_debug_report(
+        _sources(tmp_path, journal_postgres_url=unreachable),
+        collect_ids(_report()),
+        generated_at="now",
+    )
+
+    sources = document["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert sources[name]["error"]
+        assert sources[name]["paths"] == ["postgres"]
+    assert sources["tool_calls"]["status"] == "ok"
