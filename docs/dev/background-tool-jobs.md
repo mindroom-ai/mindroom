@@ -115,6 +115,7 @@ A crash after a continuation's final edit but before its hold is saved leaves th
 An ad hoc team's message and its host agent's own message can both hold that agent's work; the first to continue retrieves it, and the other then shows its reply as finished.
 An ad hoc team's hold keeps its members but not the mode its reply chose, so its continuation runs in coordinate mode, and one whose member left the configuration releases the message instead.
 A team continuation streams below the held text the way a restarted team reply does, so it repeats the team header, and one that pauses for approval shows only its own part once approved.
+A Stop that lands while a newer reply takes the message's work over still stops that work, but the older message shows its reply as finished rather than stopped.
 Turning the feature off leaves held messages waiting until it is turned back on.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
