@@ -18,7 +18,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.stop import StopManager
-from mindroom.streaming import StreamingPresentation
+from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
 from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, ReplyBoundary
 from mindroom.tool_jobs.held_replies import (
     _APPROVAL_NOTICE,
@@ -285,7 +285,9 @@ async def test_resuming_a_held_message_retrieves_ready_work(held: _Held) -> None
     assert resumed.held_continuation is not None
     assert resumed.held_continuation.attempted_job_ids == frozenset({"ready"})
     assert resumed.held_continuation.joins == 2
-    assert resumed.held_continuation.presentation.response_text == "Started."
+    # The message's text stays above the continuation, which streams below it without a restart note.
+    assert resumed.resumed_reply == UnfinishedStreamedReply("Started.", (), interrupted=False)
+    assert resumed.existing_event_is_placeholder
 
 
 @pytest.mark.asyncio
@@ -322,7 +324,8 @@ async def test_resuming_after_an_interrupted_continuation_reads_what_it_already_
     assert 'job_id="read"' in resumed.prompt
     assert resumed.held_continuation is not None
     assert resumed.held_continuation.attempted_job_ids == frozenset({"read"})
-    assert resumed.held_continuation.presentation.response_text == "Started."
+    assert resumed.resumed_reply is not None
+    assert resumed.resumed_reply.visible_text == "Started."
     reread = await held.runtime.wait("read", owner=held.owner, depth=0, timeout=0)
     assert reread.claim is not None
     await held.runtime.release_wait("read", reread.claim)

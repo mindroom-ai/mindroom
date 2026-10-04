@@ -2500,7 +2500,6 @@ class ResponseRunner:
         restart_message: str,
         user_stop_message: str,
         interrupted_message: str,
-        held_continuation: HeldContinuation | None,
     ) -> FinalDeliveryOutcome:
         """Settle one blocking-mode cancellation through the visible note or a no-event outcome."""
         cancel_source = classify_cancel_source(exc)
@@ -2520,8 +2519,6 @@ class ResponseRunner:
                     existing_event_is_placeholder=existing_event_is_placeholder,
                     cancel_source=cancel_source,
                     identity=response_identity,
-                    # A blocking turn shows nothing until it finishes, so a continued held message still shows its reply.
-                    visible_presentation=held_continuation.presentation if held_continuation is not None else None,
                 ),
             )
         return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
@@ -3470,9 +3467,17 @@ class ResponseRunner:
                 prompt=prompt,
                 response_envelope=replace(envelope, body=prompt),
                 held_continuation=HeldContinuation(
-                    presentation=hold.presentation,
                     attempted_job_ids=hold.offered | {job.job_id for job in ready},
                     joins=hold.joins,
+                ),
+                # The message keeps its text and trace above the continuation, as a reply a restart cut short does.
+                existing_event_is_placeholder=hold.message_event_id is not None,
+                resumed_reply=None
+                if hold.message_event_id is None
+                else UnfinishedStreamedReply(
+                    visible_text=hold.presentation.response_text,
+                    tool_trace=hold.presentation.tool_trace,
+                    interrupted=False,
                 ),
             )
         if work.jobs and hold.joins < JOB_JOIN_LIMIT:
@@ -5134,7 +5139,6 @@ class ResponseRunner:
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
                             interrupted_message="Team non-streaming response interrupted — traceback for diagnosis",
-                            held_continuation=delivery_request.held_continuation,
                         ),
                     )
                     return
@@ -5691,7 +5695,6 @@ class ResponseRunner:
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
                     interrupted_message="Non-streaming response interrupted — traceback for diagnosis",
-                    held_continuation=request.held_continuation,
                 ),
             )
         except Exception as error:

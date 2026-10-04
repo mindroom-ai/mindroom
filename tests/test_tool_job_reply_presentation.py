@@ -16,13 +16,10 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
-from mindroom.response_runner import _EarlyPlaceholderState
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
-from mindroom.tool_jobs.completion import HeldContinuation, _JobJoin
+from mindroom.streaming import send_streaming_response
+from mindroom.tool_jobs.completion import _JobJoin
 from mindroom.tool_jobs.runtime import format_job_handle
 from mindroom.tool_system.events import (
-    ToolTraceEntry,
-    deserialize_tool_trace,
     format_tool_completed_event,
 )
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
@@ -175,78 +172,6 @@ async def test_blocking_cancellation_without_a_wait_matches_a_disabled_reply(
         delivered = edit.await_args.args[0]
         notes.append((outcome.delivery.terminal_status, delivered.new_text, delivered.tool_trace))
     assert notes[1] == notes[0]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
-async def test_blocking_continuation_cancellation_preserves_the_held_presentation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    cancel_source: str,
-) -> None:
-    """A blocking turn continuing a held message shows nothing new, so cancelling it keeps that message's text and tools."""
-    bot = _bot(tmp_path)
-    bot.config.memory.backend = "none"
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread")
-    trace = (ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result"),)
-    request = replace(
-        _plain_request(target),
-        existing_event_id="$response",
-        held_continuation=HeldContinuation(
-            presentation=StreamingPresentation("New analysis.\n\n🔧 `retrieve` [1]", tool_trace=trace),
-            attempted_job_ids=frozenset({"job"}),
-            joins=0,
-        ),
-    )
-    edits = []
-
-    async def edit(
-        _client: object,
-        _room_id: str,
-        event_id: str,
-        content: dict[str, object],
-        text: str,
-        *,
-        retry_sync_recovery: bool = False,  # noqa: ARG001
-    ) -> DeliveredMatrixEvent:
-        edits.append((event_id, content, text))
-        return DeliveredMatrixEvent(event_id=f"$edit-{len(edits)}", content_sent=dict(content))
-
-    async def events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-        raise asyncio.CancelledError(cancel_source)
-        yield
-
-    monkeypatch.setattr("mindroom.delivery_gateway.edit_message_outcome", edit)
-    monkeypatch.setattr("mindroom.ai.stream_response_turn", events)
-    outcomes = []
-
-    async def respond(_target: object, _state: object) -> str | None:
-        outcome = await runner._process_and_respond(request)
-        outcomes.append(outcome.delivery)
-        return outcome.delivery.event_id
-
-    result = await runner._run_unowned_response(
-        request,
-        target=target,
-        early_placeholder=_EarlyPlaceholderState(),
-        locked_operation=respond,
-    )
-    assert result == "$response"
-    assert len(outcomes) == 1
-    outcome = outcomes[0]
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.cancel_source == cancel_source
-    assert len(edits) == 1
-    assert outcome.final_visible_body is not None
-    assert outcome.final_visible_body.startswith("New analysis.\n\n🔧 `retrieve` [1]")
-    note = RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
-    assert outcome.final_visible_body.endswith(note)
-    assert outcome.tool_trace == trace
-    final_content = edits[-1][1]
-    assert deserialize_tool_trace(final_content["io.mindroom.tool_trace"]["events"]) == list(trace)
-    bot.client.room_redact.assert_not_called()
 
 
 @pytest.mark.asyncio

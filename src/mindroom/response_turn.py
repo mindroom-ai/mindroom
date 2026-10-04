@@ -691,12 +691,10 @@ class StreamingTurnAdapter[ChunkT]:
 
 
 def _turn_run_state(ctx: ResponseTurnContext) -> TurnRunState:
-    """Start a turn's run state, extending what a held message already shows when the turn continues one."""
+    """Start a turn's run state, counting the joins and offered outcomes of a held message the turn continues."""
     run = TurnRunState()
     held = ctx.held_continuation
     if held is not None:
-        run.prior_response_text = held.presentation.response_text
-        run.prior_response_tools = held.presentation.tool_trace
         run.attempted_job_outcomes.update(held.attempted_job_ids)
         run.job_joins = held.joins + 1
     return run
@@ -1393,9 +1391,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = _turn_run_state(ctx)
     try:
-        if ctx.held_continuation is not None:
-            # The held message keeps its text and trace, even if this turn fails before an attempt extends them.
-            yield StructuredStreamChunk(content=run.prior_response_text, tool_trace=list(run.prior_response_tools))
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)

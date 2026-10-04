@@ -43,8 +43,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.streaming import StreamingPresentation
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, HeldContinuation, _JobJoin
+from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, _JobJoin
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -1894,52 +1893,6 @@ def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
     )
 
     assert chunks == ["chunk", "notice:shaped: boom"]
-
-
-def test_streaming_held_continuation_keeps_its_message_when_the_scope_fails_to_open() -> None:
-    """A turn continuing a held message shows that message's text first, so a failure at scope open keeps it."""
-    log = _AdapterLog()
-
-    @contextlib.contextmanager
-    def failing_scope() -> Iterator[ScopeSessionContext | None]:
-        msg = "storage unavailable"
-        raise RuntimeError(msg)
-        yield None
-
-    async def _attempt(
-        _run: TurnRunState,
-        _c: DynamicContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
-        raise AssertionError
-        yield ""
-
-    trace = ToolTraceEntry("tool_call_completed", "retrieve", result_preview="ready")
-    chunks = asyncio.run(
-        _collect(
-            stream_response_turn(
-                _ctx(
-                    held_continuation=HeldContinuation(
-                        presentation=StreamingPresentation("Earlier answer.", tool_trace=(trace,)),
-                        attempted_job_ids=frozenset(),
-                        joins=0,
-                    ),
-                ),
-                _streaming_adapter(
-                    log,
-                    _attempt,
-                    open_scope=failing_scope,
-                    unexpected_error_text=lambda error: f"shaped: {error}",
-                ),
-                TurnSinks(),
-                continuation=_continuation(),
-            ),
-        ),
-    )
-
-    assert chunks == [
-        StructuredStreamChunk(content="Earlier answer.", tool_trace=[trace]),
-        "notice:shaped: storage unavailable",
-    ]
 
 
 def test_streaming_completed_response_text_is_emitted_after_settle() -> None:

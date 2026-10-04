@@ -331,6 +331,8 @@ class UnfinishedStreamedReply:
     # The visible text as the user saw it, tool markers included.
     visible_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
+    # False for a message that only waited on background work, which a continuation extends without a restart note.
+    interrupted: bool = True
 
     @property
     def partial_text(self) -> str:
@@ -339,8 +341,9 @@ class UnfinishedStreamedReply:
 
     @property
     def resumed_text(self) -> str:
-        """Return the text a continuation streams below: what was shown, then the restart note."""
-        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
+        """Return the text a continuation streams below: what was shown, then any restart note."""
+        shown = build_restart_interrupted_body(self.visible_text) if self.interrupted else self.visible_text.rstrip()
+        return f"{shown}\n\n"
 
 
 def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:

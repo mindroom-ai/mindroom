@@ -2208,7 +2208,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         if run.prior_response_text or run.turn_state.prior_assistant_text:
-            # Joined attempts, and the turns continuing a held message, append to the same visible agent response.
+            # Joined attempts append to the same visible agent response.
             yield RunContentEvent(content="\n\n")
         try:
             run_context = await _prepare_agent_run_context(

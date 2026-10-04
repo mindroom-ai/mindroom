@@ -41,7 +41,6 @@ from mindroom.tool_jobs.held_replies import (
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
@@ -505,18 +504,14 @@ async def test_boundary_does_not_hold_revoked_work(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_turn_continuing_a_held_message_extends_it(tmp_path: Path, *, streaming: bool) -> None:
-    """A continuation starts from the held message and asks once for the ready work it was woken for."""
+async def test_turn_continuing_a_held_message_retrieves_its_work_once(tmp_path: Path, *, streaming: bool) -> None:
+    """A continuation asks once for the ready work it was woken for; the message's own text stays with the stream."""
     owner = completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
     context = _job_context(tmp_path, owner)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     prompts: list[str] = []
-    prior = StreamingPresentation(
-        response_text="Started the report.",
-        tool_trace=(ToolTraceEntry("tool_call_completed", "report"),),
-    )
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "done")
@@ -528,10 +523,7 @@ async def test_turn_continuing_a_held_message_extends_it(tmp_path: Path, *, stre
     async def stream_attempt(run: TurnRunState, state: DynamicContinuationRunState) -> AsyncIterator[AttemptResolved]:
         yield AttemptResolved(await attempt(run, state))
 
-    ctx = replace(
-        _ctx(),
-        held_continuation=HeldContinuation(presentation=prior, attempted_job_ids=frozenset({"work"}), joins=3),
-    )
+    ctx = replace(_ctx(), held_continuation=HeldContinuation(attempted_job_ids=frozenset({"work"}), joins=3))
     try:
         await start_job(runtime, "work", tool_name="tool", depth=0, adapter={}, owner=owner, operation=operation)
         await wait_for_status(runtime, "work", "completed")
@@ -546,10 +538,7 @@ async def test_turn_continuing_a_held_message_extends_it(tmp_path: Path, *, stre
                         continuation=_continuation("Retrieve the work"),
                     )
                 ]
-                assert chunks[0] == StructuredStreamChunk(
-                    content="Started the report.",
-                    tool_trace=list(prior.tool_trace),
-                )
+                assert chunks == ["notice:The report is done."]
             else:
                 answer = await run_blocking_response_turn(
                     ctx,
@@ -557,7 +546,7 @@ async def test_turn_continuing_a_held_message_extends_it(tmp_path: Path, *, stre
                     TurnSinks(),
                     continuation=_continuation("Retrieve the work"),
                 )
-                assert answer == "Started the report.\n\nThe report is done."
+                assert answer == "The report is done."
         # The ready work is asked for once; its unread outcome is not asked for again within the turn.
         assert prompts == ["Retrieve the work"]
     finally:

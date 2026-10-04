@@ -11,7 +11,7 @@ import asyncio
 import itertools
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import patch
@@ -1070,6 +1070,7 @@ async def _run_resumed_stream(
     response_stream: AsyncIterator[object],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
+    resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -1080,7 +1081,7 @@ async def _run_resumed_stream(
         streaming_cls=streaming_cls,
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
-        resumed=_STOPPED_REPLY,
+        resumed=resumed,
     )
 
 
@@ -1111,6 +1112,25 @@ async def test_a_resumed_stream_continues_below_the_stopped_text(config: Config)
     assert final.display_text.startswith(f"{_RESUMED_PREFIX}The second half.")
     assert "🔧 `search_web` [2]" in final.display_text
     assert _trace_names(final.content) == ["counter", "search_web"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_held_message_continues_below_its_text_without_a_restart_note(config: Config) -> None:
+    """A message that held background work extends what it showed, with nothing between it and the continuation."""
+    gateway = _FakeGateway()
+
+    async def continuation() -> AsyncIterator[object]:
+        yield RunContentEvent(content="The job finished.")
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        await _run_resumed_stream(config, continuation(), resumed=replace(_STOPPED_REPLY, interrupted=False))
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text.startswith("🔧 `counter` [1]\n\nHalf of the report\n\nThe job finished.")
+    assert RESTART_INTERRUPTED_RESPONSE_NOTE not in final.display_text
+    assert _trace_names(final.content) == ["counter"]
 
 
 @pytest.mark.asyncio

@@ -16,7 +16,6 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
 
-    from mindroom.streaming import StreamingPresentation
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 
@@ -58,9 +57,8 @@ class _JobJoin:
 
 @dataclass(frozen=True)
 class HeldContinuation:
-    """A turn continuing a held message: what the message already shows and the ready work it retrieves first."""
+    """A turn continuing a held message: the ready work it retrieves first."""
 
-    presentation: StreamingPresentation
     # Outcomes this turn asks for first, with those the message already asked for, so neither is asked for again.
     attempted_job_ids: frozenset[str]
     # Ready results the message continued with before this turn; this turn's first retrieval adds one more.

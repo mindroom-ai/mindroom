@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
-from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -31,7 +30,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, ResponseTurnContext
-from mindroom.streaming import StreamingPresentation
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -42,7 +40,7 @@ from mindroom.teams import (
     team_response_stream,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.completion import HeldContinuation, ReplyBoundaryReport, _JobJoin, reply_boundary_report
+from mindroom.tool_jobs.completion import ReplyBoundaryReport, _JobJoin, reply_boundary_report
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.held_replies import _WAITING_NOTICE
@@ -623,80 +621,3 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_team_continuing_a_held_message_keeps_its_text_without_offered_outcomes(tmp_path: Path) -> None:
-    """A team turn continuing a held message extends its text, even when the message offered no outcomes yet."""
-    config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-        agents={"leader": AgentConfig(display_name="Leader")},
-    )
-    paths = _runtime_paths(tmp_path)
-    identities = entity_ids(config, paths)
-    context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test", responses=[ModelResponse(content="Continued answer.")])
-    storage_file = str(tmp_path / "team.db")
-    storage = SqliteDb(db_file=storage_file)
-    member = Agent(id="leader", name="Leader", model=model, telemetry=False)
-    team = Team(id="leader", model=model, members=[member], db=storage, telemetry=False)
-    members = ResolvedExactTeamMembers(["leader"], [member], ["Leader"], {"leader"}, [])
-    scope = ScopeSessionContext(
-        HistoryScope(kind="team", scope_id="leader"),
-        storage,
-        None,
-        session_id=context.session_id,
-        storage_factory=lambda: SqliteDb(db_file=storage_file),
-    )
-    ctx = replace(
-        make_turn_context(
-            entity_label="leader",
-            session_id=context.session_id,
-            room_id=owner.room_id,
-            thread_id=owner.resolved_thread_id,
-            requester_id=owner.requester_id,
-        ),
-        background_tool_jobs=True,
-        held_continuation=HeldContinuation(
-            presentation=StreamingPresentation("Earlier team answer."),
-            attempted_job_ids=frozenset(),
-            joins=0,
-        ),
-    )
-
-    async def prepare(*_args: object, **kwargs: object) -> _PreparedMaterializedTeamExecution:
-        return _PreparedMaterializedTeamExecution(
-            messages=(Message(role="user", content=str(kwargs["message"])),),
-            run_metadata={},
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-            runtime_model_name="default",
-        )
-
-    rendered = ""
-    try:
-        with (
-            tool_runtime_context(context),
-            patch("mindroom.teams._materialize_team_members", return_value=members),
-            patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-            patch("mindroom.teams.open_bound_scope_session_context", return_value=nullcontext(scope)),
-            patch("mindroom.teams.prepare_materialized_team_execution", new=prepare),
-        ):
-            async for chunk in team_response_stream(
-                agent_ids=[identities["leader"]],
-                message="Continue",
-                orchestrator=MagicMock(config=config, runtime_paths=paths),
-                execution_identity=owner,
-                ctx=ctx,
-                user_id=owner.requester_id,
-                turn_recorder=TurnRecorder(user_message="Continue"),
-            ):
-                rendered = chunk.content if isinstance(chunk, StructuredStreamChunk) else str(chunk)
-    finally:
-        await runtime.shutdown()
-    assert rendered.startswith("Earlier team answer.")
-    assert "Continued answer." in rendered
