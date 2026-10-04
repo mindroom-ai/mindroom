@@ -2583,15 +2583,40 @@ def _agent_vault_network_policies(tmp_path: Path, values: dict[str, Any]) -> lis
     ]
 
 
+_NODE_LOCAL_DNS_BLOCK = {"cidr": "169.254.20.10/32"}
+
+
 @pytest.mark.parametrize(
-    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy"),
+    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy", "dns", "dns_peers"),
     [
         # Vault-first: workers send tool egress to agentVault.proxyUrl directly.
-        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False),
+        # Without a worker egress policy the DNS setting is unused, so vault DNS stays port-only.
+        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False, {"ipBlocks": [_NODE_LOCAL_DNS_BLOCK]}, None),
         # Squid-first: only approved egress forwards token-bearing traffic to the proxy port.
-        (True, True, [_VAULT_API_PORT], True),
+        # Vault DNS uses the worker egress policy's default cluster DNS destination.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            None,
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                },
+            ],
+        ),
         # Approved egress with an external proxyUrl: nothing in the chart uses the proxy port.
-        (True, False, [_VAULT_API_PORT], False),
+        # Vault DNS follows a configured destination that replaces the default selectors.
+        (
+            True,
+            False,
+            [_VAULT_API_PORT],
+            False,
+            {"namespaceSelector": None, "podSelector": None, "ipBlocks": [_NODE_LOCAL_DNS_BLOCK]},
+            [{"ipBlock": _NODE_LOCAL_DNS_BLOCK}],
+        ),
     ],
     ids=["vault-first", "squid-first", "external-proxy"],
 )
@@ -2601,8 +2626,10 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
     parent_proxy: bool,
     worker_ports: list[dict[str, Any]],
     squid_reaches_proxy: bool,
+    dns: dict[str, Any] | None,
+    dns_peers: list[dict[str, Any]] | None,
 ) -> None:
-    """Workers, the control plane, and the vault Jobs reach the API; the proxy port follows the egress chain."""
+    """Workers, the control plane, and the vault Jobs reach the API; the proxy port and DNS follow the egress chain."""
     agent_vault: dict[str, Any] = {
         "enabled": True,
         "cliImage": "example.test/vault:test",
@@ -2639,6 +2666,8 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
             "image": {"tag": "v0.1.0"},
             "parentProxy": {"enabled": parent_proxy},
         }
+    if dns is not None:
+        values["egressProxy"] = {"networkPolicy": {"dns": dns}}
 
     [policy] = _agent_vault_network_policies(tmp_path, values)
 
@@ -2678,9 +2707,12 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
                 "ports": [_VAULT_PROXY_PORT],
             },
         )
+    dns_egress, web_egress = _VAULT_BASE_EGRESS
+    if dns_peers is not None:
+        dns_egress = {"to": dns_peers, **dns_egress}
     assert policy["metadata"]["name"] == "agent-vault"
     assert policy["spec"]["ingress"] == expected_ingress
-    assert policy["spec"]["egress"] == _VAULT_BASE_EGRESS
+    assert policy["spec"]["egress"] == [dns_egress, web_egress]
 
 
 @pytest.mark.parametrize("smtp_enabled", [False, True])

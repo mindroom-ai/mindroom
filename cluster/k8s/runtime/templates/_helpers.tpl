@@ -418,6 +418,26 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- /* NetworkPolicy peers for the egressProxy.networkPolicy.dns destination, shared by the worker and Agent Vault policies. */ -}}
+{{- define "mindroom-runtime.egressProxyDnsPeers" -}}
+{{- $dns := .Values.egressProxy.networkPolicy.dns -}}
+{{- $peers := list -}}
+{{- $selectorPeer := dict -}}
+{{- if kindIs "map" $dns.namespaceSelector -}}
+{{- $_ := set $selectorPeer "namespaceSelector" $dns.namespaceSelector -}}
+{{- end -}}
+{{- if kindIs "map" $dns.podSelector -}}
+{{- $_ := set $selectorPeer "podSelector" $dns.podSelector -}}
+{{- end -}}
+{{- if $selectorPeer -}}
+{{- $peers = append $peers $selectorPeer -}}
+{{- end -}}
+{{- range $dns.ipBlocks -}}
+{{- $peers = append $peers (dict "ipBlock" .) -}}
+{{- end -}}
+{{- toYaml $peers -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.egressProxyUrl" -}}
 {{- $namespace := include "mindroom-runtime.egressProxyNamespace" . -}}
 {{- $serviceName := include "mindroom-runtime.egressProxyServiceName" . -}}

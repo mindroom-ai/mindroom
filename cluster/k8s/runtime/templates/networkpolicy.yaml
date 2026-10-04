@@ -3,10 +3,6 @@
 {{- $proxyNamespace := include "mindroom-runtime.egressProxyNamespace" . -}}
 {{- $proxyPort := include "mindroom-runtime.egressProxyServicePort" . -}}
 {{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- $dnsNamespaceSelector := .Values.egressProxy.networkPolicy.dns.namespaceSelector -}}
-{{- $dnsPodSelector := .Values.egressProxy.networkPolicy.dns.podSelector -}}
-{{- $hasDnsNamespaceSelector := kindIs "map" $dnsNamespaceSelector -}}
-{{- $hasDnsPodSelector := kindIs "map" $dnsPodSelector -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -42,21 +38,7 @@ spec:
   {{- if $egressPolicyEnabled }}
   egress:
     - to:
-        {{- if or $hasDnsNamespaceSelector $hasDnsPodSelector }}
-        -
-          {{- if $hasDnsNamespaceSelector }}
-          namespaceSelector:
-            {{- toYaml $dnsNamespaceSelector | nindent 12 }}
-          {{- end }}
-          {{- if $hasDnsPodSelector }}
-          podSelector:
-            {{- toYaml $dnsPodSelector | nindent 12 }}
-          {{- end }}
-        {{- end }}
-        {{- range .Values.egressProxy.networkPolicy.dns.ipBlocks }}
-        - ipBlock:
-            {{- toYaml . | nindent 12 }}
-        {{- end }}
+        {{- include "mindroom-runtime.egressProxyDnsPeers" . | nindent 8 }}
       ports:
         - protocol: UDP
           port: 53

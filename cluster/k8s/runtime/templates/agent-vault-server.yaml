@@ -168,7 +168,8 @@ spec:
 {{- $squidProxyClients := and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
 {{- $workerProxyClients := and $workerClients (not .Values.approvedEgress.enabled) -}}
 {{- $accessGrantsJob := and $av.accessGrants.enabled (gt (len $av.accessGrants.grants) 0) -}}
-{{- $releaseApiClients := or $av.accessTool.enabled $av.bootstrap.enabled $accessGrantsJob }}
+{{- $releaseApiClients := or $av.accessTool.enabled $av.bootstrap.enabled $accessGrantsJob -}}
+{{- $workerEgressPolicy := and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -238,8 +239,15 @@ spec:
     {{- toYaml . | nindent 4 }}
     {{- end }}
   egress:
-    # Port-only DNS keeps cluster DNS and node-local DNS caches working; the vault already reaches any host on 80/443.
+    {{- if $workerEgressPolicy }}
+    # Same DNS destination as the worker egress policy.
+    - to:
+        {{- include "mindroom-runtime.egressProxyDnsPeers" . | nindent 8 }}
+      ports:
+    {{- else }}
+    # Without a worker egress policy, port-only DNS keeps cluster DNS and node-local DNS caches working.
     - ports:
+    {{- end }}
         - protocol: UDP
           port: 53
         - protocol: TCP
