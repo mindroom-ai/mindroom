@@ -467,7 +467,7 @@ ResponseResult(
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
-- For contexts that come from a message, the original human requester is carried along, so routing, permissions, and memory attribution use that human rather than the relaying bot.
+- For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.

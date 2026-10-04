@@ -111,7 +111,7 @@ class IngressValidator:
                 trusted_requester = requester_id_from_trusted_original_sender(
                     original_sender=original_sender,
                     original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                    original_sender_is_human=is_human_requester_id(
+                    original_sender_is_access_checked=is_access_checked_requester_id(
                         original_sender,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
@@ -224,24 +224,31 @@ class IngressValidator:
         if not isinstance(content, dict):
             return None
         source_kind = self.event_source_kind(event, content)
-        return self._trusted_human_original_sender(
+        original_sender = self._trusted_original_sender(
             sender=event.sender,
             content=content,
             source_kind=source_kind,
         )
+        if original_sender is None or not is_human_requester_id(
+            original_sender,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ):
+            return None
+        return original_sender
 
-    def _trusted_human_original_sender(
+    def _trusted_original_sender(
         self,
         *,
         sender: str,
         content: dict[str, Any],
         source_kind: str | None,
     ) -> str | None:
-        """Return trusted original-sender metadata only when it names a human requester."""
+        """Return trusted original-sender metadata only when it names a human or configured bot-account requester."""
         original_sender = content.get(ORIGINAL_SENDER_KEY)
         if not isinstance(original_sender, str) or not original_sender:
             return None
-        if not is_human_requester_id(
+        if not is_access_checked_requester_id(
             original_sender,
             self.deps.runtime.config,
             self.deps.runtime_paths,
@@ -289,14 +296,14 @@ class IngressValidator:
         return reply_to_event_id_from_content(content)
 
     def is_trusted_router_visible_voice_echo_content(self, sender: str, content: object) -> bool:
-        """Return whether replay history content is a display-only router voice echo."""
+        """Return whether content is the router's display-only transcript of human or bot-account audio."""
         if self.managed_entity_name_for_sender(sender) != ROUTER_AGENT_NAME:
             return False
         if not is_visible_router_voice_echo_content(content) or not isinstance(content, dict):
             return False
         content_dict = cast("dict[str, Any]", content)
         return (
-            self._trusted_human_original_sender(
+            self._trusted_original_sender(
                 sender=sender,
                 content=content_dict,
                 source_kind=source_kind_from_content(content_dict),
@@ -307,7 +314,12 @@ class IngressValidator:
     def is_display_only_router_voice_echo(self, event: DispatchEvent) -> bool:
         """Return whether one ingress event is the router's display-only voice transcript echo."""
         content = event.source.get("content") if isinstance(event.source, dict) else None
-        return is_visible_router_voice_echo_content(content) and self._is_trusted_router_relay_event(event)
+        return (
+            is_text_dispatch_event(event)
+            and isinstance(content, dict)
+            and self.event_source_kind(event, content) == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+            and self.is_trusted_router_visible_voice_echo_content(event.sender, content)
+        )
 
     def should_use_trusted_router_relay_context(
         self,

@@ -10336,7 +10336,7 @@ matrix_message(action="react", event_id="$message", message="✅")
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.
-Only the chosen recipient responds, even if the text mentions other agents, and without `recipient` no agent is started.
+Only the chosen recipient responds, even if the text or a sent file's name mentions other agents, and without `recipient` no agent is started.
 An unknown or unavailable name returns `Recipient '<name>' is not available in this room. Available recipients: ...`.
 Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.
@@ -12790,6 +12790,7 @@ Upgrading from the retired access fields is covered in [Membership Access Migrat
 
 `bot_accounts` lists non-MindRoom bots, such as bridge bots, that MindRoom treats like agents rather than people when deciding whether to respond, so they do not trigger [multi-human thread protection](https://docs.mindroom.chat/configuration/threads/#bot-accounts).
 They still need `access` to talk to a responder.
+A bot account's message that the router hands to an agent, or a task it scheduled, runs as that bot account, so the agent and every agent or team its reply mentions apply their own `access` to it.
 
 ```yaml
 bot_accounts:
@@ -14653,7 +14654,7 @@ ResponseResult(
 
 **`await ctx.send_message(room_id, text, *, thread_id=None, extra_content=None, trigger_dispatch=False)`** sends a Matrix message and returns its event ID, or `None` when no sender is available.
 
-- For contexts that come from a message, the original human requester is carried along, so routing, permissions, and memory attribution use that human rather than the relaying bot.
+- For contexts that come from a message, the original human or configured bot-account requester is carried along, so routing, permissions, and memory attribution use that requester rather than the relaying bot.
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
