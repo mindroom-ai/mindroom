@@ -21,6 +21,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UI_ACTION_CONTENT_KEY,
 )
 from mindroom.execution_preparation import (
     _build_unseen_context_messages,
@@ -451,6 +452,19 @@ class TestUnseenMessagesPartialReplies:
                     sender=agent_id,
                     body="💾 Skill review: created `deploy-checks`",
                     content={SKILL_REVIEW_NOTICE_CONTENT_KEY: {"changes": {"deploy-checks": "created"}}},
+                ),
+                # A Chat UI request is a tool call's fallback text, from this agent or another one.
+                _make_visible_message(
+                    event_id="e1c",
+                    sender=agent_id,
+                    body="Interactive panel: Plans. Open it in MindRoom Chat to respond.",
+                    content={UI_ACTION_CONTENT_KEY: {"version": 1, "action": "show_canvas"}},
+                ),
+                _make_visible_message(
+                    event_id="e1d",
+                    sender="@mindroom_other:localhost",
+                    body="Interactive panel: Seats. Open it in MindRoom Chat to respond.",
+                    content={UI_ACTION_CONTENT_KEY: {"version": 1, "action": "show_canvas"}},
                 ),
                 _make_visible_message(
                     event_id="e2",

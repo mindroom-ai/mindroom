@@ -865,6 +865,42 @@ async def test_canvas_update_edits_the_agents_own_canvas_in_place(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_canvas_update_without_a_title_keeps_the_first_title(tmp_path: Path) -> None:
+    """An update may omit the title; a new canvas may not."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>"))
+
+    assert result["status"] == "ok"
+    replacement = _sent_content(context)["m.new_content"]
+    assert replacement["body"] == CANVAS_BODY
+    assert replacement["io.mindroom.ui_action"]["canvas"] == {"title": "Plans", "html": "<p>2</p>"}
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_without_a_title_needs_a_valid_first_title(tmp_path: Path) -> None:
+    """A canvas whose first title is unusable needs a title on every update."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, canvas={"title": "", "html": "<p>1</p>"}))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        given = json.loads(await ChatUITools().show_canvas(title="Seats", html="<p>2</p>", canvas_event_id="$canvas"))
+
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+    assert given["status"] == "ok"
+    assert _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["canvas"]["title"] == "Seats"
+
+
+@pytest.mark.asyncio
 async def test_room_level_canvas_can_be_updated_from_the_thread_its_answer_started(tmp_path: Path) -> None:
     """The user's reply to a room-level canvas starts a thread; the edit keeps the canvas room-level."""
     context = _context(tmp_path)
