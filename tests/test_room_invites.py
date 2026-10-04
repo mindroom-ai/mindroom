@@ -151,6 +151,15 @@ def _router_user() -> AgentMatrixUser:
     )
 
 
+@pytest.mark.asyncio
+async def test_member_lookup_raced_by_a_membership_change_counts_as_a_failed_fetch() -> None:
+    """A config reload's room setup must skip the room, not abort, when the member list went stale mid-lookup."""
+    client = MagicMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(side_effect=nio.LocalProtocolError("room membership changed during lookup"))
+
+    assert await client_room_admin.get_room_members(client, "!room:localhost") is None
+
+
 @pytest.mark.parametrize(
     ("policy", "sender_id", "expected"),
     [
