@@ -4203,168 +4203,175 @@ class ResponseRunner:
         stop_button_event_id: str | None = None
         # A turn on a held message, such as one continuing it or an edit regenerating it, reuses its Stop button.
         held = request.held_reply or await self.held_messages.on_message(request.existing_event_id)
+        with self.held_messages.running_on(held):
 
-        def keep_stop_button(reaction_event_id: str | None) -> bool:
-            """Keep the Stop button of a message that goes on holding outstanding work after its reply."""
-            nonlocal stop_button_event_id
-            outcome = progress.delivery_outcome
-            boundary = report.boundary
-            if boundary is None or boundary.notice is None or outcome is None or outcome.terminal_status != "completed":
-                return False
-            stop_button_event_id = reaction_event_id
-            return True
-
-        try:
-            with reply_boundary_report(report):
-                # The attempt runs against the event the turn already adopted, which
-                # `progress` was seeded with, so it has no new event to report back.
-                await self._run_cancellable_response(
-                    target=target,
-                    response_function=response_function,
-                    existing_event_id=request.existing_event_id,
-                    user_id=user_id,
-                    run_id=run_id,
-                    on_cancelled=progress.note_task_cancelled,
-                    show_stop_button=not _is_silent_schedule_response(request),
-                    stop_button_event_id=held.stop_button_event_id if held is not None else None,
-                    keep_stop_button=keep_stop_button,
-                    released_before_start=None if held is None else partial(self.held_messages.released, held),
-                )
-        except ResponsePausedForApproval as error:
-            if approval_suspension_handler is None:
-                raise
-            frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
-            try:
-                progress.settle(
-                    await approval_suspension_handler(
-                        _paused_with_committed_presentation(
-                            error,
-                            show_tool_calls=frozen_show_tool_calls,
-                        ),
-                    ),
-                )
-            except Exception as suspension_error:
-                self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
-                progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
-                progress.settle(
-                    await self._finalize_failed_approval_handoff(
-                        target=target,
-                        request=request,
-                        progress=progress,
-                        failure_reason=progress.failure_reason,
-                    ),
-                )
-        except asyncio.CancelledError as error:
-            if current_task_is_process_shutdown():
-                raise
-            progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
-            await self._settle_missing_delivery_outcome(
-                target=target,
-                request=request,
-                identity=lifecycle.identity,
-                progress=progress,
-                terminal_status="cancelled",
-                failure_reason=progress.failure_reason or "interrupted",
-            )
-            deferred_error = error
-        except Exception as error:
-            if current_task_is_process_shutdown():
-                if isinstance(error, StreamingDeliveryError) and isinstance(
-                    error.error,
-                    asyncio.CancelledError,
+            def keep_stop_button(reaction_event_id: str | None) -> bool:
+                """Keep the Stop button of a message that goes on holding outstanding work after its reply."""
+                nonlocal stop_button_event_id
+                outcome = progress.delivery_outcome
+                boundary = report.boundary
+                if (
+                    boundary is None
+                    or boundary.notice is None
+                    or outcome is None
+                    or outcome.terminal_status != "completed"
                 ):
-                    raise error.error from error
-                raise
-            if (
-                not progress.stage_started
-                and progress.delivery_outcome is None
-                and not (
-                    isinstance(error, StreamingDeliveryError) and error.transport_outcome.terminal_status == "cancelled"
-                )
-                and (skipped := _skip_unapproved_response(participation)) is not None
-            ):
-                self.deps.logger.exception("Response skipped before participation", error=str(error))
-                progress.settle(skipped)
-            elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
-                progress.settle(await streaming_delivery_error_handler(error))
-            elif progress.stage_started or progress.delivery_outcome is not None:
-                # Do not touch a tracked event after delivery starts: an adopted
-                # thinking-message stream can already hold the full reply.
-                self._log_delivery_failure(response_kind=lifecycle.identity.response_kind, error=error)
-                if progress.delivery_outcome is None:
-                    progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
-            else:
-                progress.failure_reason = str(error) or "delivery_failed_before_start"
-                progress.settle(
-                    await self._finalize_pre_delivery_terminal(
+                    return False
+                stop_button_event_id = reaction_event_id
+                return True
+
+            try:
+                with reply_boundary_report(report):
+                    # The attempt runs against the event the turn already adopted, which
+                    # `progress` was seeded with, so it has no new event to report back.
+                    await self._run_cancellable_response(
                         target=target,
-                        request=request,
-                        identity=lifecycle.identity,
-                        progress=progress,
-                        terminal_status="error",
-                        failure_reason=progress.failure_reason,
-                    ),
+                        response_function=response_function,
+                        existing_event_id=request.existing_event_id,
+                        user_id=user_id,
+                        run_id=run_id,
+                        on_cancelled=progress.note_task_cancelled,
+                        show_stop_button=not _is_silent_schedule_response(request),
+                        stop_button_event_id=held.stop_button_event_id if held is not None else None,
+                        keep_stop_button=keep_stop_button,
+                        released_before_start=None if held is None else partial(self.held_messages.released, held),
+                    )
+            except ResponsePausedForApproval as error:
+                if approval_suspension_handler is None:
+                    raise
+                frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
+                try:
+                    progress.settle(
+                        await approval_suspension_handler(
+                            _paused_with_committed_presentation(
+                                error,
+                                show_tool_calls=frozen_show_tool_calls,
+                            ),
+                        ),
+                    )
+                except Exception as suspension_error:
+                    self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
+                    progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
+                    progress.settle(
+                        await self._finalize_failed_approval_handoff(
+                            target=target,
+                            request=request,
+                            progress=progress,
+                            failure_reason=progress.failure_reason,
+                        ),
+                    )
+            except asyncio.CancelledError as error:
+                if current_task_is_process_shutdown():
+                    raise
+                progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
+                await self._settle_missing_delivery_outcome(
+                    target=target,
+                    request=request,
+                    identity=lifecycle.identity,
+                    progress=progress,
+                    terminal_status="cancelled",
+                    failure_reason=progress.failure_reason or "interrupted",
                 )
                 deferred_error = error
+            except Exception as error:
+                if current_task_is_process_shutdown():
+                    if isinstance(error, StreamingDeliveryError) and isinstance(
+                        error.error,
+                        asyncio.CancelledError,
+                    ):
+                        raise error.error from error
+                    raise
+                if (
+                    not progress.stage_started
+                    and progress.delivery_outcome is None
+                    and not (
+                        isinstance(error, StreamingDeliveryError)
+                        and error.transport_outcome.terminal_status == "cancelled"
+                    )
+                    and (skipped := _skip_unapproved_response(participation)) is not None
+                ):
+                    self.deps.logger.exception("Response skipped before participation", error=str(error))
+                    progress.settle(skipped)
+                elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
+                    progress.settle(await streaming_delivery_error_handler(error))
+                elif progress.stage_started or progress.delivery_outcome is not None:
+                    # Do not touch a tracked event after delivery starts: an adopted
+                    # thinking-message stream can already hold the full reply.
+                    self._log_delivery_failure(response_kind=lifecycle.identity.response_kind, error=error)
+                    if progress.delivery_outcome is None:
+                        progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
+                else:
+                    progress.failure_reason = str(error) or "delivery_failed_before_start"
+                    progress.settle(
+                        await self._finalize_pre_delivery_terminal(
+                            target=target,
+                            request=request,
+                            identity=lifecycle.identity,
+                            progress=progress,
+                            terminal_status="error",
+                            failure_reason=progress.failure_reason,
+                        ),
+                    )
+                    deferred_error = error
 
-        if progress.delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
-            await self._settle_missing_delivery_outcome(
-                target=target,
-                request=request,
-                identity=lifecycle.identity,
-                progress=progress,
-                terminal_status="cancelled" if progress.cancelled else "error",
-                failure_reason=progress.failure_reason or "interrupted",
-            )
+            if progress.delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
+                await self._settle_missing_delivery_outcome(
+                    target=target,
+                    request=request,
+                    identity=lifecycle.identity,
+                    progress=progress,
+                    terminal_status="cancelled" if progress.cancelled else "error",
+                    failure_reason=progress.failure_reason or "interrupted",
+                )
 
-        final_delivery_outcome = progress.delivery_outcome
-        if final_delivery_outcome is None:
-            msg = "Response generation did not settle a delivery outcome"
-            raise RuntimeError(msg)
-        final_outcome = await self._finalize_locked_outcome(
-            lifecycle,
-            final_delivery_outcome,
-            post_response_outcome=build_post_response_outcome(final_delivery_outcome),
-            post_response_deps=post_response_deps,
-        )
-        if final_outcome.suppressed and final_outcome.final_visible_event_id is None:
-            on_suppressed = (
-                request.on_source_turn_suppressed
-                if final_outcome.failure_reason == "source_deleted"
-                else request.on_no_response_handled
+            final_delivery_outcome = progress.delivery_outcome
+            if final_delivery_outcome is None:
+                msg = "Response generation did not settle a delivery outcome"
+                raise RuntimeError(msg)
+            final_outcome = await self._finalize_locked_outcome(
+                lifecycle,
+                final_delivery_outcome,
+                post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+                post_response_deps=post_response_deps,
             )
-            if on_suppressed is not None:
-                await on_suppressed()
-        if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
-            request.source_handoff.set()
-        cancel_source = final_outcome.resolved_cancel_source
-        source_handled = final_outcome.mark_handled and (
-            request.on_deferred_outcome_handled is None
-            or cancel_source is None
-            or cancel_source == "user_stop"
-            or _interruption_note_landed(final_outcome)
-        )
-        await self._record_user_stop_handled(
-            request,
-            final_outcome,
-            cancel_source=cancel_source,
-            source_handled=source_handled,
-        )
-        # Last, so a failure to hold or release leaves the turn's own settlement complete.
-        await self.held_messages.settle(
-            request,
-            final_outcome,
-            report.boundary,
-            continued=held,
-            stop_button_event_id=stop_button_event_id,
-        )
-        if deferred_error is not None:
-            if source_handled and request.on_deferred_outcome_handled is not None:
-                response_event_id = final_outcome.final_visible_event_id
-                assert response_event_id is not None
-                await request.on_deferred_outcome_handled(response_event_id)
-            raise deferred_error
-        return final_outcome.final_visible_event_id if source_handled else None
+            if final_outcome.suppressed and final_outcome.final_visible_event_id is None:
+                on_suppressed = (
+                    request.on_source_turn_suppressed
+                    if final_outcome.failure_reason == "source_deleted"
+                    else request.on_no_response_handled
+                )
+                if on_suppressed is not None:
+                    await on_suppressed()
+            if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
+                request.source_handoff.set()
+            cancel_source = final_outcome.resolved_cancel_source
+            source_handled = final_outcome.mark_handled and (
+                request.on_deferred_outcome_handled is None
+                or cancel_source is None
+                or cancel_source == "user_stop"
+                or _interruption_note_landed(final_outcome)
+            )
+            await self._record_user_stop_handled(
+                request,
+                final_outcome,
+                cancel_source=cancel_source,
+                source_handled=source_handled,
+            )
+            # Last, so a failure to hold or release leaves the turn's own settlement complete.
+            await self.held_messages.settle(
+                request,
+                final_outcome,
+                report.boundary,
+                continued=held,
+                stop_button_event_id=stop_button_event_id,
+            )
+            if deferred_error is not None:
+                if source_handled and request.on_deferred_outcome_handled is not None:
+                    response_event_id = final_outcome.final_visible_event_id
+                    assert response_event_id is not None
+                    await request.on_deferred_outcome_handled(response_event_id)
+                raise deferred_error
+            return final_outcome.final_visible_event_id if source_handled else None
 
     def _build_lifecycle(
         self,

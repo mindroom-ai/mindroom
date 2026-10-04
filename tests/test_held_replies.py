@@ -578,6 +578,22 @@ async def test_stop_on_a_held_message_a_continuation_began_on_leaves_the_message
 
 
 @pytest.mark.asyncio
+async def test_stop_on_a_held_message_leaves_it_to_a_turn_that_cannot_be_stopped(held: _Held) -> None:
+    """A turn on the message that is not tracked for Stop, before its attempt or after its reply, settles the message."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    edits = len(held.edits)
+    with held.runner.held_messages.running_on(hold):
+        assert await held.runner.held_messages.stop("$reply", 7)
+    stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
+    assert stopped.user_stop_receipt_order == 7
+    assert await held.hold() is None
+    assert len(held.edits) == edits
+
+
+@pytest.mark.asyncio
 async def test_a_continuation_holding_under_another_key_ends_the_hold_it_ran_on(held: _Held) -> None:
     """A continuation whose boundary holds under a new key, such as after a roster change, retires its old hold."""
     await held.start("running", asyncio.Event())

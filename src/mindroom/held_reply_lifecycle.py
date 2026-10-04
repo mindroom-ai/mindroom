@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
@@ -21,7 +22,7 @@ from mindroom.tool_jobs.held_replies import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     import nio
     import structlog
@@ -48,6 +49,8 @@ class HeldReplyLifecycle:
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
+    # Messages a turn runs on, from before that turn can be stopped until it settles them.
+    _turns: set[str] = field(default_factory=set, init=False, repr=False)
 
     def read(self, saved: SavedHeldReply) -> HeldReply | None:
         """Read one saved hold; an unreadable one holds nothing this runtime can continue."""
@@ -165,6 +168,19 @@ class HeldReplyLifecycle:
                 else ended_edit(continued, cancel_source=final_outcome.resolved_cancel_source or "interrupted"),
             )
 
+    @contextmanager
+    def running_on(self, hold: HeldReply | None) -> Iterator[None]:
+        """Leave a held message to the turn running on it, so a Stop does not edit it under that turn."""
+        message_id = hold.message_event_id if hold is not None else None
+        if message_id is None:
+            yield
+            return
+        self._turns.add(message_id)
+        try:
+            yield
+        finally:
+            self._turns.discard(message_id)
+
     async def released(self, hold: HeldReply) -> bool:
         """Whether a hold is gone, such as after a Stop released its message before a turn on it could be stopped."""
         saved = await self.store.load(hold.key.hold_id)
@@ -212,9 +228,10 @@ class HeldReplyLifecycle:
         await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
         if self.stop_manager.can_handle_stop_reaction(message_id, hold.key.room_id):
             return False
-        if released is not None:
-            # No turn edits the message after this: a takeover or wake finds the hold gone, and a continuation that
-            # began before it could be stopped stops itself.
+        # A turn running on the message settles it instead: one that cannot be stopped yet stops itself once it can,
+        # and one already past its reply keeps that reply.
+        if released is not None and message_id not in self._turns:
+            # No later turn edits the message: a takeover or wake finds the hold gone.
             await self.release(hold, stopped=True)
         return True
 
