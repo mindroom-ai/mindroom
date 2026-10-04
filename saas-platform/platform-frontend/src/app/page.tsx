@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
@@ -24,6 +24,7 @@ import {
   Server,
   Shield,
   Smartphone,
+  SquareTerminal,
   TabletSmartphone,
   type LucideIcon,
 } from 'lucide-react'
@@ -47,10 +48,42 @@ type PricePlan = {
 const docsUrl = 'https://docs.mindroom.chat/'
 const githubUrl = 'https://github.com/mindroom-ai/mindroom'
 const installGuideUrl = `${docsUrl}getting-started/`
+const macAppUrl = `${docsUrl}installation/macos-app/`
+
+type InstallOption = {
+  label: string
+  icon: LucideIcon
+  command: string
+  steps: [title: string, body: string][]
+  guide: { href: string; label: string }
+}
+
+const installOptions: InstallOption[] = [
+  {
+    label: 'Terminal',
+    icon: SquareTerminal,
+    command: 'uvx mindroom run',
+    steps: [
+      ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
+      ['Approve the pairing link', 'Connect it to your MindRoom Chat account in the browser.'],
+    ],
+    guide: { href: installGuideUrl, label: 'Read the install guide' },
+  },
+  {
+    label: 'macOS app',
+    icon: Laptop,
+    command: 'brew install --cask mindroom-ai/tap/mindroom',
+    steps: [
+      ['Open the MindRoom app', 'It installs MindRoom and runs your agents on your Mac in the background. Needs an Apple silicon Mac with macOS 14 or later.'],
+      ['Connect your chat account', 'Approve the pairing link without leaving the app.'],
+    ],
+    guide: { href: macAppUrl, label: 'Read the macOS app guide' },
+  },
+]
 
 const chatApps: { label: string; href?: string; icon: LucideIcon; beta?: boolean }[] = [
   { label: 'Web', href: 'https://chat.mindroom.chat', icon: Globe },
-  { label: 'Mac', href: `${docsUrl}installation/macos-app/`, icon: Laptop },
+  { label: 'Mac', href: macAppUrl, icon: Laptop },
   { label: 'iPhone & iPad', href: 'https://apps.apple.com/us/app/mindroom-ai/id6760272172', icon: TabletSmartphone },
   { label: 'Android', icon: Smartphone, beta: true },
 ]
@@ -217,9 +250,7 @@ function SectionHeading({
   )
 }
 
-const installCommand = 'uvx mindroom run'
-
-function CopyCommand() {
+function CopyCommand({ command }: { command: string }) {
   const [copied, setCopied] = useState(false)
   const commandRef = useRef<HTMLSpanElement>(null)
 
@@ -231,7 +262,7 @@ function CopyCommand() {
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(installCommand)
+      await navigator.clipboard.writeText(command)
       setCopied(true)
     } catch {
       // Browsers can refuse clipboard access, so select the command for a manual copy instead.
@@ -241,10 +272,18 @@ function CopyCommand() {
 
   return (
     <div className="flex items-center justify-between gap-3 rounded-md bg-gray-950 py-2 pl-4 pr-2 dark:bg-black">
-      <pre className="overflow-x-auto font-mono text-sm text-gray-100">
+      <pre className="min-w-0 overflow-x-auto whitespace-pre-wrap font-mono text-sm text-gray-100">
         <code>
           <span className="select-none text-emerald-400">$ </span>
-          <span ref={commandRef}>{installCommand}</span>
+          <span ref={commandRef}>
+            {/* Wrap long commands only between words, never at a hyphen. */}
+            {command.split(' ').map((word, index) => (
+              <Fragment key={index}>
+                {index > 0 && ' '}
+                <span className="whitespace-nowrap">{word}</span>
+              </Fragment>
+            ))}
+          </span>
         </code>
       </pre>
       <button
@@ -296,12 +335,8 @@ function ChatAppLinks() {
 }
 
 function RunItYourself() {
-  const steps = [
-    ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
-    ['Approve the pairing link', 'Connect it to your MindRoom Chat account in the browser.'],
-    ['Talk to your agents', 'In MindRoom Chat on the web or in the native apps.'],
-  ]
-
+  const [option, setOption] = useState(installOptions[0])
+  const steps = [...option.steps, ['Talk to your agents', 'In MindRoom Chat on the web or in the native apps.']]
   const glass = useLiquidGlass<HTMLDivElement>()
 
   return (
@@ -315,7 +350,27 @@ function RunItYourself() {
         <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Run it yourself</span>
       </div>
       <div className="p-5 sm:p-6">
-        <CopyCommand />
+        <div role="group" aria-label="Install with" className="mb-4 inline-flex rounded-lg bg-gray-950/5 p-1 dark:bg-white/8">
+          {installOptions.map((item) => {
+            const Icon = item.icon
+            const selected = item === option
+            return (
+              <button
+                key={item.label}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setOption(item)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  selected ? 'bg-white text-gray-950 shadow-sm dark:bg-white/14 dark:text-white' : 'text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+        <CopyCommand key={option.label} command={option.command} />
         <ol className="mt-6 space-y-5">
           {steps.map(([title, body], index) => (
             <li key={title} className="flex gap-4">
@@ -330,8 +385,8 @@ function RunItYourself() {
             </li>
           ))}
         </ol>
-        <a href={installGuideUrl} className={`mt-6 ${textLinkClass}`}>
-          Read the install guide
+        <a href={option.guide.href} className={`mt-6 ${textLinkClass}`}>
+          {option.guide.label}
           <ArrowRight className="h-4 w-4" />
         </a>
       </div>
