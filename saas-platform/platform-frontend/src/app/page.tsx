@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
@@ -16,12 +16,15 @@ import {
   Cloud,
   Copy,
   GitBranch,
+  Globe,
   Laptop,
   Lock,
   MessageSquare,
   Network,
   Server,
   Shield,
+  Smartphone,
+  TabletSmartphone,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -44,6 +47,13 @@ type PricePlan = {
 const docsUrl = 'https://docs.mindroom.chat/'
 const githubUrl = 'https://github.com/mindroom-ai/mindroom'
 const installGuideUrl = `${docsUrl}getting-started/`
+
+const chatApps: { label: string; href?: string; icon: LucideIcon; beta?: boolean }[] = [
+  { label: 'Web', href: 'https://chat.mindroom.chat', icon: Globe },
+  { label: 'Mac', href: `${docsUrl}installation/macos-app/`, icon: Laptop },
+  { label: 'iPhone & iPad', href: 'https://apps.apple.com/us/app/mindroom-ai/id6760272172', icon: TabletSmartphone },
+  { label: 'Android', icon: Smartphone, beta: true },
+]
 
 const navLinks = [
   { href: '#why', label: 'Why MindRoom' },
@@ -98,7 +108,7 @@ const reasons: IconItem[] = [
   },
   {
     title: 'A chat app built for agents',
-    body: 'MindRoom builds its own client for web, iPhone, iPad, and Mac, so agents can show live tool traces, ask for approval, join voice calls, and work in a browser you can take over.',
+    body: 'MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, join voice calls, and work in a browser you can take over.',
     icon: MessageSquare,
     href: `${docsUrl}#a-chat-app-built-for-agents`,
   },
@@ -211,11 +221,22 @@ const installCommand = 'uvx mindroom run'
 
 function CopyCommand() {
   const [copied, setCopied] = useState(false)
+  const commandRef = useRef<HTMLSpanElement>(null)
+
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 2000)
+    return () => clearTimeout(timer)
+  }, [copied])
 
   const copy = async () => {
-    await navigator.clipboard.writeText(installCommand)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    try {
+      await navigator.clipboard.writeText(installCommand)
+      setCopied(true)
+    } catch {
+      // Browsers can refuse clipboard access, so select the command for a manual copy instead.
+      if (commandRef.current) window.getSelection()?.selectAllChildren(commandRef.current)
+    }
   }
 
   return (
@@ -223,18 +244,54 @@ function CopyCommand() {
       <pre className="overflow-x-auto font-mono text-sm text-gray-100">
         <code>
           <span className="select-none text-emerald-400">$ </span>
-          {installCommand}
+          <span ref={commandRef}>{installCommand}</span>
         </code>
       </pre>
       <button
         type="button"
         onClick={copy}
         aria-label={copied ? 'Copied' : 'Copy command'}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
+        className={`inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition active:scale-95 ${
+          copied ? 'bg-emerald-400/15 text-emerald-300' : 'text-gray-300 hover:bg-white/10 hover:text-white'
+        }`}
       >
-        {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+        {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+        <span aria-live="polite">{copied ? 'Copied' : 'Copy'}</span>
       </button>
     </div>
+  )
+}
+
+function ChatAppLinks() {
+  const chipClass = 'inline-flex items-center gap-1.5 rounded-md border border-gray-950/10 bg-white/50 px-2.5 py-1 text-xs font-medium text-gray-700 dark:border-white/12 dark:bg-white/5 dark:text-gray-200'
+
+  return (
+    <ul className="mt-3 flex flex-wrap gap-2" aria-label="MindRoom Chat apps">
+      {chatApps.map(({ label, href, icon: Icon, beta }) => {
+        const content = (
+          <>
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+            {beta && (
+              <span className="rounded bg-orange-100 px-1 text-[10px] font-semibold uppercase text-orange-700 dark:bg-orange-500/15 dark:text-orange-300">
+                Beta
+              </span>
+            )}
+          </>
+        )
+        return (
+          <li key={label}>
+            {href ? (
+              <a href={href} className={`${chipClass} transition-colors hover:border-gray-950/20 hover:text-gray-950 dark:hover:border-white/24 dark:hover:text-white`}>
+                {content}
+              </a>
+            ) : (
+              <span className={chipClass}>{content}</span>
+            )}
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 
@@ -242,7 +299,7 @@ function RunItYourself() {
   const steps = [
     ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
     ['Approve the pairing link', 'Connect it to your MindRoom Chat account in the browser.'],
-    ['Talk to your agents', 'On the web, on iPhone and iPad, or on the Mac.'],
+    ['Talk to your agents', 'In MindRoom Chat on the web or in the native apps.'],
   ]
 
   const glass = useLiquidGlass<HTMLDivElement>()
@@ -268,6 +325,7 @@ function RunItYourself() {
               <div>
                 <div className="text-sm font-semibold text-gray-950 dark:text-white">{title}</div>
                 <p className="mt-1 text-sm leading-6 text-gray-600 dark:text-gray-300">{body}</p>
+                {index === steps.length - 1 && <ChatAppLinks />}
               </div>
             </li>
           ))}
