@@ -5083,11 +5083,23 @@ The first ID is the canvas and the second is the version the user answered; when
 MindRoom Chat shows the answer as a one-line receipt that expands to the exact data.
 An answer can carry up to 512 KB of JSON data, enough for a long document the user edited in the canvas; larger or non-JSON data is ignored, so no **Send** prompt appears.
 
+When the page throws an error, fails to load a file, or tries to load something Chat blocks, the panel lists up to five of those errors with a **Tell** *agent* button.
+Nothing is sent unless the user chooses it; the report reaches the agent like an answer:
+
+```text
+@mindroom_planner:example.org Canvas error ($canvas-event, revision $canvas-event):
+Uncaught ReferenceError: drawChart is not defined (line 12)
+Blocked https://unpkg.com/chart.js (script-src-elem)
+```
+
 ## Update a canvas
 
 `show_canvas` returns the canvas `event_id`.
 Calling `show_canvas` again with `canvas_event_id` set to that ID replaces the page in place, for the next step of a flow or a new version of a file the agent edited, and the conversation keeps one card.
+An update may leave out `title` to keep the title the canvas was first shown with.
 An open panel switches to the new page at once, unless the user has been working in it; then Chat shows "*agent* updated this panel." with a **Load update** button, so unsent work is not lost.
+Every update stays available: once a canvas has more than one version, the panel header shows *Version n of m* with buttons to go back and forward, and an earlier version offers **Show latest**.
+The user can answer an earlier version, and switching waits while an answer is pending.
 An agent can update only canvases it showed to the same user in the same room and thread, or at room level; otherwise the call fails and the agent shows a new canvas instead.
 
 ## Write a page
@@ -5134,6 +5146,8 @@ Chat exposes its current theme as CSS variables, so a page can match light and d
 | `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
 | `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
 | `--mr-radius`, `--mr-font` | Corner radius and font family |
+
+For choices the variables cannot make, such as a chart palette, `window.mindroom.colorScheme` is `light` or `dark`.
 
 ## Privacy and safety
 
