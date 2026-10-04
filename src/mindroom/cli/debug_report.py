@@ -14,12 +14,13 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from mindroom.cli.config import activate_cli_runtime
+from mindroom.constants import resolve_session_state_root
+from mindroom.debug_report import DebugReportSources, build_debug_report, collect_ids
 
 if TYPE_CHECKING:
     from typing import NoReturn
 
     from mindroom.constants import RuntimePaths
-    from mindroom.debug_report import DebugReportSources
 
 _BUG_REPORT_TYPE = "io.mindroom.bug_report"
 
@@ -80,8 +81,6 @@ def _llm_request_log_dir(config_source: dict[str, Any], storage_root: Path) -> P
 
 def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
     from mindroom.config.matrix import EventJournalConfig  # noqa: PLC0415
-    from mindroom.constants import resolve_session_state_root  # noqa: PLC0415
-    from mindroom.debug_report import DebugReportSources  # noqa: PLC0415
 
     storage_root = runtime_paths.storage_root
     config_source = _read_config_source(runtime_paths)
@@ -131,11 +130,6 @@ def debug_report(
     output: Path | None = typer.Option(None, "--output", "-o", help="Write the JSON here instead of stdout."),  # noqa: B008
 ) -> None:
     """Collect everything the backend stored about a reported conversation, as JSON."""
-    from mindroom.debug_report import (  # noqa: PLC0415 - keeps readers out of CLI import time
-        build_debug_report,
-        collect_ids,
-    )
-
     ids = collect_ids(
         _read_report(report) if report is not None else None,
         event_ids=event or (),
