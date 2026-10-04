@@ -1,62 +1,42 @@
 # OpenAI-Compatible API
 
-MindRoom exposes an OpenAI-compatible chat completions API so any chat frontend can use MindRoom agents as selectable "models". LibreChat, Open WebUI, LobeChat, ChatBox, BoltAI, and anything else that speaks the OpenAI protocol works out of the box.
-
-## How It Works
-
-The frontend calls `GET /v1/models` and sees your agents in the model picker. The user picks an agent and chats. The frontend sends standard OpenAI requests; MindRoom routes them to the selected agent with all its tools, instructions, and memory. The frontend doesn't know it's talking to an agent — it's transparent.
-
-```
-Chat Frontend (LibreChat, Open WebUI, etc.)
-│
-│  GET  /v1/models           → returns your agents as "models"
-│  POST /v1/chat/completions → routes to the selected agent
-│
-└──→ MindRoom API ──→ ai_response() / stream_agent_response()
-                         │
-                         └──→ agents, tools, memory, knowledge bases
-```
-
-No Matrix auth dependency. You can run the OpenAI-compatible API standalone or alongside the Matrix bot.
+MindRoom serves an OpenAI-compatible chat completions API at `/v1`, so any chat frontend that speaks the OpenAI protocol (LibreChat, Open WebUI, LobeChat, ChatBox, BoltAI, and others) can use MindRoom agents and teams as selectable models.
+Each request runs the selected agent with its configured tools, instructions, memory, and knowledge bases, without Matrix.
 
 ## Setup
 
-### 1. Set API keys
+### 1. Choose authentication
 
-Add to your `.env`:
+Add one of these to `.env`:
 
 ```bash
-# Option A: Set API keys (recommended for production)
+# Require API keys (recommended)
 OPENAI_COMPAT_API_KEYS=sk-my-secret-key-1,sk-my-secret-key-2
 
-# Option B: Allow unauthenticated access (local dev only)
+# Or allow unauthenticated access (local development only)
 OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 ```
 
-Without either of these, the API returns 401 on all requests.
-Unauthenticated access only answers requests addressed to a loopback name, an IP address, the hosts of `MINDROOM_PUBLIC_URL`, `MINDROOM_BASE_URL`, `MINDROOM_URL`, and `MINDROOM_SCRIPT_GATEWAY_URL`, or a host listed in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`, and refuses browser requests from other sites.
-A client that reaches an unauthenticated `/v1` by another host name, such as `http://host.docker.internal:8765/v1`, needs that name in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`; with `OPENAI_COMPAT_API_KEYS` set, any host name works.
+With neither set, every `/v1` request returns 401.
+Unauthenticated access answers only requests addressed to allowed host names and refuses cross-site browser requests; see [Unauthenticated dashboard host names](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names).
+A client that reaches an unauthenticated `/v1` by another host name, such as LibreChat in Docker using `http://host.docker.internal:8765/v1`, needs that name in `MINDROOM_DASHBOARD_ALLOWED_HOSTS`; with `OPENAI_COMPAT_API_KEYS` set, any host name works.
 
 ### 2. Start MindRoom
 
 ```bash
-# Full MindRoom runtime (Matrix bot + API server + dashboard)
 uv run mindroom run
-
-# Or via just
-just start-mindroom-dev
 ```
 
-The API is available at `http://localhost:8765/v1/`.
+The API is served by the bundled dashboard/API server at `http://localhost:8765/v1/`; change the port with `--api-port`, and note that `--no-api` turns the API off.
 
 > [!IMPORTANT]
-> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`).
-> Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
+> If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime as well as `/api/*`.
+> Otherwise OpenAI-compatible requests reach the dashboard and fail.
 
 ### 3. Verify
 
 ```bash
-# List available agents
+# List available models
 curl -H "Authorization: Bearer sk-my-secret-key-1" \
   http://localhost:8765/v1/models
 
@@ -75,9 +55,12 @@ curl -N -H "Authorization: Bearer sk-my-secret-key-1" \
 
 ## Client Configuration
 
+Any OpenAI-compatible client works: set the base URL to `http://localhost:8765/v1` and the API key to one of `OPENAI_COMPAT_API_KEYS`.
+MindRoom implements `GET /v1/models` and `POST /v1/chat/completions`.
+
 ### LibreChat
 
-Add to your `librechat.yaml`:
+Add to `librechat.yaml`:
 
 ```yaml
 endpoints:
@@ -93,147 +76,124 @@ endpoints:
       titleModel: "general"
       dropParams: ["stop", "frequency_penalty", "presence_penalty", "top_p"]
       headers:
-        # Highest-priority session key used by MindRoom
         X-Session-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
-        # Backward-compatible fallback used by MindRoom
-        X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
 
-`X-Session-Id` is recommended when you want deterministic MindRoom session continuity.
-This is especially important for tools that keep long-lived sessions inside the MindRoom runtime.
-`X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
+The `X-Session-Id` header keeps each LibreChat conversation in one MindRoom session; see [Session continuity](#session-continuity).
 
 ### Open WebUI
 
-1. Go to **Admin Settings > Connections > OpenAI > Manage**
-2. Set API URL to `http://localhost:8765/v1`
-3. Set API Key to one of your `OPENAI_COMPAT_API_KEYS`
-4. Agents appear automatically in the model picker
+1. Go to **Admin Settings > Connections > OpenAI > Manage**.
+2. Set API URL to `http://localhost:8765/v1`.
+3. Set API Key to one of your `OPENAI_COMPAT_API_KEYS`.
+4. Agents appear in the model picker.
 
-### Any OpenAI-compatible client
+## Model selection
 
-Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom implements the OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions` endpoints.
+Each available agent appears in `/v1/models` with its config name as the model ID (for example `code`), its `display_name` as the name, and its `role` as the description.
+Only shared agents that are unscoped or use `worker_scope: shared` are available.
+Agents with `private`, `worker_scope: user`, or `worker_scope: user_agent` are not listed, and neither is any agent whose `delegate_to` targets, directly or transitively, include such an agent.
+Requesting one of them returns HTTP 400 with code `unsupported_worker_scope`, and the message names the agents that block the request.
 
-## Features
+## Auto-routing
 
-### Model selection
+Select the `auto` model to let the router pick the best available agent for each message.
+`auto` considers agents only; select `team/<team_name>` to run a team.
+The response's `model` field names the chosen agent, and the session belongs to that agent.
+When a [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) finds no suitable agent, the request fails with HTTP 400 and code `no_suitable_responder`; choose a model explicitly or rephrase.
+When routing itself fails, the request goes to the first available agent.
+`auto` is listed only when at least one agent is available.
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
-Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`.
-Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
-Agents whose `delegate_to` closure reaches an isolating agent are also excluded, because an OpenAI-compatible request cannot safely materialize that delegated target.
-An OpenAI-compatible run can expose fewer tool functions than the same agent in Matrix when `tool_approval` hides approval-gated functions from `/v1` or tool metadata hides functions that require live room context.
+## Teams
 
-### Auto-routing
+Teams appear as `team/<team_name>` models, and selecting one runs the team in its configured `coordinate` or `collaborate` mode.
+A team is not listed when any member agent, or any agent a member delegates to, uses a requester-private scope (see [Model selection](#model-selection)).
+For mapped callers, the team's own `access` decides whether they can use it, and that grant covers its member agents for the request.
 
-Select the `auto` model to let MindRoom's router pick the best OpenAI-compatible agent for each message.
-Auto-routing on `/v1` considers agents only; use explicit `team/<team_name>` models to run teams.
-Once routing resolves a specific agent, session continuity and streamed identity bind to that resolved agent name, not the literal `auto` label.
+## Session continuity
 
-### Teams
+MindRoom picks the session for each request from its headers:
 
-Teams are exposed as `team/<team_name>` models. Selecting `team/super_team` runs the full team collaboration or coordination workflow.
+1. `X-Session-Id`, when present.
+2. `X-LibreChat-Conversation-Id`, combined with the selected model.
+3. Otherwise a new session for every request.
 
-### Streaming
+Requests with the same session keep the agent's conversation history and long-lived tool sessions, such as a [`claude_agent`](https://docs.mindroom.chat/tools/agent-orchestration/#claude_agent) coding session, so set `X-Session-Id` for continuity.
+Sessions are separate per API key and per mapped requester, so two keys sending the same `X-Session-Id` never share a session.
+With unauthenticated access, all callers share one set of sessions.
 
-`stream: true` returns Server-Sent Events in the standard OpenAI format: role chunk, content chunks, finish chunk, `[DONE]`.
+## Messages and parameters
 
-Tool calls appear inline as text in the stream (not as native OpenAI `tool_calls` deltas).
-MindRoom currently emits tool events in stream chunks as inline `<tool id="N" state="start|done">...</tool>` content.
+The last `user` message is the prompt, and earlier `user` and `assistant` messages are passed as conversation history; `tool` messages are ignored.
+Client `system` and `developer` messages are prepended to the prompt and add to the agent's own instructions rather than replacing them.
+When `content` is an array of parts, only the `text` parts are used; images and other parts are ignored.
 
-### Multimodal messages
-
-When a message's `content` is an array of content parts (the OpenAI multimodal format), MindRoom extracts only the `text` parts and concatenates them as the prompt.
-Non-text parts such as `image_url` are silently ignored by the current implementation.
-Agents still process the text normally with all their configured tools and instructions.
-
-### Session continuity
-
-Session IDs are derived from request headers:
-
-1. `X-Session-Id` header (explicit control)
-2. `X-LibreChat-Conversation-Id` header (automatic with LibreChat)
-3. Random UUID fallback
-
-Agent memory and conversation history persist across requests with the same session ID.
-For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
-
-Session IDs are namespaced internally with the full SHA-256 digest of the validated API key to prevent cross-key session collision.
-Two different API keys using the same `X-Session-Id` value will not share a session, and differently spaced `Authorization` headers carrying the same key share that key's sessions.
-Without configured API keys, the `Authorization` header authenticates nothing, so every caller shares one unauthenticated namespace.
-
-### Claude Agent tool sessions
-
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns.
-This lets a user continue one long coding flow instead of starting a fresh Claude process on every request.
-See the `claude_agent` section in [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) for configuration details.
-
-Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
-
-- Same `session_label`: one shared Claude session (serialized by a per-session lock)
-- Different `session_label`: independent Claude sessions that can run concurrently
-
-### Knowledge bases
-
-Agents with configured `knowledge_bases` in `config.yaml` get RAG support automatically. No additional API configuration needed.
-For Git-backed knowledge bases, missing or stale published indexes schedule the same per-binding refresh flow used by the Matrix runtime.
-Explicit dashboard/API reindex runs Git sync first and then rebuilds a candidate index.
-
-## What's ignored
-
-The API accepts but ignores these OpenAI parameters (the agent's own config controls them):
+The API accepts but ignores these OpenAI parameters, because the agent's configuration controls them:
 
 - `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`
 - `tools`, `tool_choice` (agents use their configured tools)
 - `n`, `stop`, `frequency_penalty`, `presence_penalty`, `seed`
 - `response_format`, `logprobs`, `logit_bias`
 - `stream_options` (streaming responses never include a usage chunk)
-- `user` (agent and team runs belong to the key's mapped requester, or to no user for unmapped keys, so the field never selects another user's memory, learning, or usage attribution)
+- `user` (it never selects another user's identity, memory, or usage attribution; see [Requester identities and delegation](#requester-identities-and-delegation))
 
-Client `system` / `developer` messages are prepended to the prompt. They augment the agent's built-in instructions, not replace them.
+## Streaming and tool output
+
+`stream: true` returns standard OpenAI Server-Sent Events: a role chunk, content chunks, a finish chunk, and `[DONE]`.
+Tool calls appear inline in the content as `<tool id="N" state="start|done">...</tool>` text, not as native OpenAI `tool_calls`.
+Tool-call text is always included on `/v1`, even when the agent sets `show_tool_calls: false`.
 
 ## Authentication
 
 | `OPENAI_COMPAT_API_KEYS` | `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | Behavior |
 |---|---|---|
-| Set | (any) | Bearer token required, must match one of the comma-separated keys |
+| Set | (any) | `Authorization: Bearer <key>` required, matching one of the comma-separated keys |
 | Unset | `true` | No authentication required |
-| Unset | Unset/`false` | All requests return 401 (locked) |
+| Unset | Unset/`false` | All requests return 401 |
 
-The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
+`/v1` authentication is independent of the dashboard: `MINDROOM_API_KEY` protects `/api/*` and the dashboard, while `OPENAI_COMPAT_API_KEYS` protects `/v1/*`.
 
 ### Requester identities and delegation
 
-Bind selected API keys to Matrix user IDs with a JSON object in `.env`:
+Bind API keys to Matrix user IDs with a JSON object in `.env`:
 
 ```dotenv
 OPENAI_COMPAT_API_KEYS=sk-astrbot,sk-legacy
 OPENAI_COMPAT_API_KEY_REQUESTERS='{"sk-astrbot":"@alice:example.org"}'
 ```
 
-The key must still appear in `OPENAI_COMPAT_API_KEYS`; a mapping alone never authenticates a caller.
-Restart MindRoom after changing these environment settings.
-Mapped identities must be concrete human Matrix user IDs, and `authorization.aliases` resolves bridge identities to their canonical requester.
-The request body's `user` field and requester headers cannot override this identity.
+Restart MindRoom after changing these settings.
+The key must also appear in `OPENAI_COMPAT_API_KEYS`; a mapping alone never authenticates a caller.
+Mapped identities must be concrete human Matrix user IDs, and [bridge aliases](https://docs.mindroom.chat/authorization/#bridge-aliases) resolve to their canonical requester.
+The request's `user` field and headers cannot override the mapped identity.
 
-Mapped callers only see and invoke models allowed by the existing responder access policy; a team model is decided by the team's own `access`, which grants its member agents for that request.
-Auto-routing uses the same permitted agents.
-`run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
-Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
-There is no current Matrix room for `/v1`, so `current_room_members` cannot grant access, and missing or stale room membership fails closed.
+A mapped caller sees and can use only the agents and teams whose [responder access](https://docs.mindroom.chat/authorization/#responder-access) admits that user, and `auto` routes only among those agents.
+Grant access with `access.users`, administrator membership, or `members_of_rooms`; `current_room_members` never applies because `/v1` requests have no room.
+Mapped callers can use `run_subagent`, which requires both the calling agent's `delegate_to` and the requester's access to the target.
 
-Unmapped keys retain their existing model access but cannot delegate.
-Mapped sessions also include the canonical requester in their namespace, preventing a reassigned key from inheriting the previous requester's session.
-Room-context tools and approval-gated tools remain unavailable in delegated API runs.
+Unmapped keys and unauthenticated callers can use every available model but cannot delegate to subagents.
 
 ## Limitations
 
-- **Token usage is partial** — only non-streaming responses report `usage`, and it covers the final model run of the turn (summed over the leader and members for teams, with cached input counted in `prompt_tokens` on every provider), so tokens spent by dynamic-tool continuations or empty-run retries before it are not included
-- **No native `tool_calls` format** — tool results appear inline in content text
-- **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
-- **No room memory** — only agent-scoped memory (no `room_id` in API requests)
-- **No requester-private instances** — `/v1` currently supports only shared agents that are unscoped or configured with `worker_scope=shared`, so `agents.<name>.private` and other isolating execution scopes are not available there
-- **Tool approval is Matrix-only** — `/v1` hides tool functions matched by required-approval rules, including script-based rules, because approval cards need a live Matrix room, thread, and runtime process
-- **Room-context tools are Matrix-only** — `/v1` hides tools marked `requires_room_context` because requests do not have a live Matrix room or thread context
-- **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
-- **Request bodies are limited to 16 MiB** — the dashboard API, including `/v1`, answers larger requests with HTTP 413; knowledge uploads are exempt and keep their own per-file limit
+- **Fewer tools than in Matrix**: `/v1` hides tool functions matched by a required [tool approval](https://docs.mindroom.chat/tool-approval/#tools-that-cannot-pause-for-approval) rule, including script rules, because approval cards need a Matrix room.
+  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, `attachments`, and `todo`.
+- **No requester-private agents**: see [Model selection](#model-selection).
+- **Partial token usage**: only non-streaming responses report `usage`.
+  It counts the turn's final model run, summed over the leader and members for teams, with cached input included in `prompt_tokens`, so tokens spent on earlier internal attempts in the same turn are not counted.
+- **Request size**: request bodies over 16 MiB are rejected with HTTP 413.
+
+## Errors
+
+Errors use the OpenAI error format with an HTTP status, message, and `code`.
+
+| Status | Message or code | Fix |
+|---|---|---|
+| 401 | `OpenAI-compatible API keys are not configured` | Set `OPENAI_COMPAT_API_KEYS` or `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true` |
+| 401 | `Missing or invalid Authorization header`, `Invalid API key` | Send `Authorization: Bearer <key>` with a configured key |
+| 400 | `Host '<host>' is not allowed without a credential; ...` | Add the host to `MINDROOM_DASHBOARD_ALLOWED_HOSTS` or configure API keys |
+| 403 | `This requester is not authorized for the model`, `No agents are authorized for this requester` | Grant the mapped user [responder access](https://docs.mindroom.chat/authorization/#responder-access) |
+| 403 | `API requester must be a human identity` | Map the key to a human user, not an agent, bot account, or MindRoom's internal user |
+| 404 | `model_not_found` | Use an ID from `/v1/models` |
+| 400 | `unsupported_worker_scope` | See [Model selection](#model-selection) |
+| 400 | `no_suitable_responder` | See [Auto-routing](#auto-routing) |
+| 503 | `Invalid API requester configuration` | Make `OPENAI_COMPAT_API_KEY_REQUESTERS` a JSON object mapping keys to full Matrix user IDs |

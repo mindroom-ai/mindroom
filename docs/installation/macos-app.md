@@ -1,22 +1,18 @@
 # macOS App
 
-MindRoom provides a native macOS window with a small menu bar companion.
-Open the app from Applications or Spotlight to manage two independent roles:
+The MindRoom macOS app is a native window with a menu bar companion for two independent roles:
 
 - **Local agents** run MindRoom on this Mac and connect to your Matrix chat account.
 - **Computer access** lets a paired agent running elsewhere observe or control selected applications, read selected folders, and request shell commands that you approve on this Mac.
 
-Use either role, or both.
-Starting local agents does not enable computer access, and starting computer access does not start local agents.
-The app bundles the official M SVG from `assets/logo/logo-mark.svg` and its generated PNG companion for native display.
+Use either role, or both; starting one does not start the other.
 
 ## Requirements
 
-- macOS 14 Sonoma or later, on an Apple silicon Mac.
-  Intel Macs are not supported because the MindRoom runtime depends on packages that no longer publish Intel macOS wheels.
-- Network access to install the MindRoom runtime and connect to your Matrix server.
-- For local agents, a configured model provider credential, local model, or supported provider login.
-- For computer access, an existing Desktop-enabled MindRoom agent; application access also needs the macOS permissions described in the [Desktop guide](../tools/desktop.md).
+- macOS 14 Sonoma or later on an Apple silicon Mac; Intel Macs are not supported.
+- Network access to install the MindRoom runtime and reach your Matrix server.
+- For local agents, a model provider credential, local model, or supported provider login.
+- For computer access, a Desktop-enabled MindRoom agent; application access also needs the macOS permissions in the [Desktop guide](../tools/desktop.md).
 
 ## Install
 
@@ -25,215 +21,148 @@ brew install --cask mindroom-ai/tap/mindroom
 ```
 
 Open **MindRoom** from Applications or Spotlight.
-The window has **Overview**, **Chat**, **Dashboard**, **Local agents**, **Computer access**, and **Settings** sections.
-Overview explains the two roles and shows their status separately.
+The window has **Overview**, **Chat**, **Dashboard**, **Local agents**, **Computer access**, and **Settings** sections, and Overview shows the status of each role.
 
 ## Chat in the App
 
-Select **Chat** to use MindRoom without leaving the app.
-Sign in once; the app remembers that session, and switching sections keeps your open conversation and draft.
-Your browser's sign-in session is separate.
-For a self-hosted chat client, change **Chat website** in **Settings**.
-The default is `https://chat.mindroom.chat`.
-Use **Open in Browser** if you prefer your existing browser session or a sign-in provider requires a browser.
-**Reload** returns to your configured Chat website, or reloads the approval page while connecting local agents.
+**Chat** opens your chat client inside the app.
+Sign in once; the app remembers that session separately from your browser, and switching sections keeps your conversation and draft.
+The default chat website is `https://chat.mindroom.chat`; for a self-hosted client, enter an HTTPS URL or a loopback HTTP URL in **Settings** > **Chat website** and select **Save Chat Website**.
+Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
+**Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
 ## Set Up Local Agents
 
-Open **Local agents** for four numbered steps.
-Each step shows its own status, and only the selected panel is displayed.
-The app detects the command-line runtime separately from the background service: **Runtime installed · Background service not installed** means step 1 is already done.
+**Local agents** has four numbered steps, each with its own status.
+The app opens at the first step that needs attention: **Install** when the runtime needs installing or updating, **Check** when configuration exists without a service, and **Start** when a service is installed.
 
-1. **Install** detects an existing `mindroom` executable, including terminal installations, and shows its location.
-   If it is missing, **Install MindRoom** uses bundled `uv` to install the runtime release that matches the app version.
-   If the installed runtime is a different release, for example after an app update, **Install** shows **Update needed** and **Update MindRoom** installs the matching release.
-   Configuring, pairing, checking, and installing the background service, including **Apply Runtime to Service…**, wait until the runtime matches, because the app uses command options from its own release and the service keeps the runtime version it was installed with.
-   Starting, stopping, and restarting an installed service stay available.
+1. **Install** finds an existing `mindroom` executable, including a terminal installation, or installs the runtime release that matches the app version with **Install MindRoom**.
+   When the installed runtime is a different release, for example after an app update, it shows **Update needed** and **Update MindRoom**.
+   Configuring, pairing, checking, and installing the service wait until the runtime matches; starting, stopping, and restarting an installed service stay available.
    Installing the runtime does not install the background service.
-2. **Configure** detects the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service.
-   The configuration path is shown in the panel.
+2. **Configure** uses the installed service's saved configuration, or `~/.mindroom/config.yaml` for a new service, and shows the path.
    **Prepare Configuration** creates missing files and keeps existing configuration and credentials.
-   Expand **Connect or reconnect your chat account** and choose **Connect Account** to open the approval page in the app's **Chat** tab, using its existing sign-in.
-   Compare the code above Chat with the code on the approval page, check the signed-in account, then click **Approve**.
-   If needed, sign in there or use the secondary **Open in Browser** option.
-   **Cancel** stops the waiting connection without saving new credentials and returns to **Connect Account**.
-   If approval is already being collected or saved, the app finishes connecting and shows the result.
-   On success, the app shows the connection result and refreshes service status.
-   An unapproved code expires after 10 minutes.
-   If this Mac is already connected, the app asks before pairing again, because reconnecting creates a new connection and a new agent namespace.
-   Add AI provider credentials to the adjacent `.env`, or configure a local model, using **Open Config Folder**.
-3. **Check** runs `mindroom doctor` against the displayed configuration and the installed service's saved storage path.
-   It checks configuration, providers, Matrix connectivity, and storage.
-   **Files found** only confirms configuration exists; **Passed last check** records a check with no failures or warnings in this app session.
-   Warnings stay on **Check** with **Needs attention** and a visible summary; expand **Command output** for details.
-   Changes detected in the root configuration or adjacent `.env` clear that check.
-   Run checks again after editing included files or changing external services.
-4. **Start** offers **Install and Start Agents** when the launchd service is missing, **Start Agents** when it is stopped, and stop/restart/chat/dashboard controls when running.
-   A check is recommended, but existing working configuration can be started without rerunning Doctor.
-   Already installed services use their saved configuration path, including a custom path chosen in the terminal.
-   If the service starts before your account is connected, Local agents shows **Waiting for your chat account** until you choose **Connect Account** and approve.
+   Under **Connect or reconnect your chat account**, **Connect Account** opens the approval page in the **Chat** section.
+   Check that the code above Chat matches the page and that the signed-in account is yours, then click **Approve**; **Cancel** stops waiting without saving credentials.
+   An unapproved code expires after 10 minutes; choose **Connect Account** again for a new one.
+   Pairing a Mac that is already connected asks first, because it creates a new connection and a new agent namespace while existing agents keep working.
+   Use **Open Config Folder** to add AI provider credentials to the adjacent `.env` or configure a local model in `config.yaml`.
+3. **Check** (**Check Setup**) runs `mindroom doctor` on the displayed configuration and the service's storage path, covering configuration, providers, Matrix connectivity, and storage.
+   **Files found** only means configuration exists; **Passed last check** means a check in this app session had no failures or warnings.
+   Warnings show **Needs attention** with a summary, and **Command output** has details.
+   Editing `config.yaml` or `.env` clears the result; rerun the check after editing included files or changing external services.
+4. **Start** offers **Install and Start Agents** when the launchd service is missing, **Start Agents** when it is stopped, and stop, restart, chat, and dashboard controls when it runs.
+   A check is recommended but not required.
+   An installed service always uses its saved configuration path, including a custom path chosen in the terminal.
+   If the service starts before your account is connected, the section shows **Waiting for your chat account** until you choose **Connect Account** and approve.
 
-A runtime that needs an update opens at **Install**.
-Otherwise, an existing running or stopped service opens directly at **Start**.
-Existing configuration without a service opens at **Check**.
-Commands show progress and results directly above the selected panel.
 **Refresh Status** rereads the runtime, configuration, and service state, including changes made in a terminal.
-These controls manage this Mac's launchd service; they do not inspect systemd services on another computer.
-Once the service is running, **Open Dashboard** opens the local dashboard inside the app for agent and model configuration.
-The app reads `MINDROOM_API_KEY` from `~/.mindroom/.env` and signs in automatically; you do not need to copy the key.
-It uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
-Automatic sign-in is limited to HTTP loopback URLs (`localhost`, `127.0.0.1`, or `[::1]`) with an explicit port.
-The key is sent only when this Mac's MindRoom launchd service is the only program listening on that port, so another app or user that takes the port first cannot receive it; if the dashboard reports it cannot connect while the service is starting, select **Reload**.
-The dashboard session stays separate from Chat and is not saved after the app quits.
-**Open Chat** opens the Chat section in the app.
+These controls manage only this Mac's launchd service.
+**Service running** means the process is running; use Chat or the dashboard to confirm agents are ready.
 
-### Where do my agents run?
+### Where Do My Agents Run?
 
 Your agents run on this Mac.
-The hosted `mindroom.chat` Matrix server relays their chat messages.
-Signing in to `chat.mindroom.chat` creates your hosted Matrix account; it does not move the agent runtime into the cloud.
+The hosted `mindroom.chat` Matrix server only relays their chat messages, and signing in to `chat.mindroom.chat` creates your hosted Matrix account without moving agents to the cloud.
+For pairing details, see [Hosted Matrix](../deployment/hosted-matrix.md).
 
-### Your own Matrix server
+### Your Own Matrix Server
 
-Under **Use your own Matrix server**, choose **Prepare Self-Hosted Configuration**, then edit `config.yaml` and `.env` for that server and your model provider.
-Start and manage the Matrix server separately from this app.
-The initialization actions target the installed service's saved configuration path, or `~/.mindroom` for a new service.
+Under **Use your own Matrix server**, choose **Prepare Self-Hosted Configuration**, then edit `config.yaml` and `.env` for your server and model provider.
+Run the Matrix server separately from this app.
+
+### Open the Dashboard
+
+While the service runs, **Open Dashboard** opens the local dashboard in the app for agent and model configuration.
+The app signs in with `MINDROOM_API_KEY` from `~/.mindroom/.env` and uses `MINDROOM_URL` from the same file, defaulting to `http://127.0.0.1:8765`.
+`MINDROOM_URL` must be an HTTP loopback URL (`localhost`, `127.0.0.1`, or `[::1]`) with an explicit port; otherwise the app reports `Local dashboard address is invalid. Check MINDROOM_URL and retry.`
+The key is sent only to this Mac's MindRoom service, so if the dashboard cannot connect while the service is starting, select **Reload**.
+After changing `MINDROOM_URL` or `MINDROOM_API_KEY`, select **Reload** in Dashboard.
+The dashboard session is separate from Chat and ends when the app quits.
 
 ## Computer Access
 
-Computer access uses the bundled Desktop Helper and does not require the local-agent runtime or background service.
-Open **Computer access** to manage its session independently.
-
-The connection summary and four steps stay at the top of the section: **Connect**, **Access**, **Permissions**, and **Start**.
-Each step shows a green check when complete and a short status below its name.
-Unsaved access choices, nothing saved, or missing permissions for saved applications show an amber indicator.
-Start is checked only while access is running.
-A new setup shows **Not connected**.
-A saved setup shows **Connection saved · Access off** and opens the next incomplete step; **Connected** means computer access is running.
+Computer access uses the Desktop Helper bundled with the app and does not need the local-agent runtime or service.
+The **Computer access** section has a summary and four steps: **Connect**, **Access**, **Permissions**, and **Start**.
+The summary shows **Not connected**, **Connection saved · Access off**, or **Connected**, and always names the next required action.
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
 2. In **Connect**, paste it into **Setup data** and select **Import Setup**.
-3. Review the homeserver, Matrix account, controller fingerprint, requester, and agent, and confirm them before signing in, because pasted setup data chooses which server receives your sign-in.
-   The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser**, or expand the password option.
-   Replacing a saved login names both the saved and the new homeserver before it signs in.
-4. Confirm the displayed values again if signing in changed the saved login, and select **Save and Connect**.
-5. Copy the displayed confirmation command into the same agent chat. After the agent confirms pairing, select **I’ve Confirmed in Chat**.
+3. Check the homeserver, Matrix account, controller fingerprint, requester, and agent before signing in, because the setup data chooses which server receives your sign-in.
+   The app reuses a matching saved Matrix login; otherwise choose **Sign In with Browser** or the password option.
+4. Confirm the values again and select **Save and Connect**.
+5. Copy the displayed confirmation command into the same agent chat, and after the agent confirms pairing, select **I’ve Confirmed in Chat**.
+   If the app closes before this step, request fresh setup data and repeat **Connect**; the saved login is kept.
 6. In **Access**, choose **Applications**, **Read-only folders**, or **Shell commands**, and save each choice.
-   For applications, search and check the applications to allow, then select **Save App Access** above the list.
-   Search accepts partial names and reordered words, such as `chr goo` for Google Chrome.
-   For folders and shell commands, see [Folders and Shell Commands](#folders-and-shell-commands) and select **Save Folder and Shell Access**.
-7. If you saved applications, allow Accessibility and Screen Recording for this copy of MindRoom in **Permissions**.
-   Each missing permission offers **Request** and **Open Settings**, which opens its System Settings pane.
-   Restart the app if macOS requires it, then select **Check Again**.
-   Folder and shell access need neither permission, so **Permissions** shows **Not needed** without saved applications.
+   For applications, search and check the ones to allow, then select **Save App Access**; search accepts partial and reordered words, such as `chr goo` for Google Chrome.
+   The list shows running apps and apps in standard folders; use **Add App…** to choose an application from another location.
+   For folders and shell commands, see [Folders and Shell Commands](#folders-and-shell-commands).
+7. If you saved applications, allow Accessibility and Screen Recording in **Permissions** with **Request** or **Open Settings**, restart the app if macOS requires it, and select **Check Again**.
+   Without saved applications, **Permissions** shows **Not needed**.
 8. Select **Start Observe Only**, or **Start Access** when folders or shell commands are saved.
-   The summary changes to **Connected** and offers **Stop Access**.
 
-Setup stays disabled until you acknowledge the chat confirmation. If the app closes before that step, request fresh setup data and repeat Connect; the saved login remains available.
-For homeservers behind Cloudflare Access, the app opens the organization sign-in flow when needed. This requires `cloudflared` installed on the Mac; missing-helper errors explain how to install it.
+Start needs at least one saved application, folder, or shell choice.
+**Save App Access** and **Save Folder and Shell Access** each update their own choices without changing the other.
+For homeservers behind Cloudflare Access, install `cloudflared`; see [Homeservers Behind an Identity-Aware Proxy](../tools/desktop.md#homeservers-behind-an-identity-aware-proxy).
 
-The terminal `mindroom desktop setup` command saves the same connection used by the app.
-An already open app refreshes that setup automatically while computer access is stopped, preserving unsaved edits.
-After confirming pairing in chat, choose and save access here, or save folders and shell access with `mindroom desktop access`, then start from either the app or `mindroom desktop run`.
-Stop the bridge in the interface that started it before starting it in the other interface.
-Terminal setup can also save app choices with repeated `--allow-app` options; omitting them preserves choices for the same controller.
-Both interfaces default to `~/.mindroom`; a terminal `--config` or `--storage-path` override creates a separate setup.
-The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
+### Control Applications
 
-The summary always names the next required action. The **Start** step explains any remaining blocker and links to its step.
-You can inspect any step without scrolling through the other steps.
-Access choices made before connecting are retained through setup.
-Once setup is saved, **Save App Access** updates app selections, and **Save Folder and Shell Access** updates folders and shell requests, each without changing the other.
-A saved browser setting alone does not enable Start; save an application, folder, or shell choice first.
-
-Permission status applies to the running copy of MindRoom.
-If System Settings already shows MindRoom enabled but the app reports **Not allowed yet**, quit and reopen MindRoom first.
-Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
-In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
-
-MindRoom itself is never offered in the application list, because its windows grant shell auto-approval and control leases.
-Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you hands the agent your own authority; see [Security Model](../tools/desktop.md#security-model).
-Application observation and control are separate choices.
-**Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.
-**Revoke Now** immediately removes input authority while observation continues; **Stop Access** ends the bridge session.
-Control expires according to the helper's bounded lease and is never renewed automatically at app launch or restart.
-The menu also provides an immediate control-revoke action while a lease is active, and **Revoke Shell Access** while shell auto-approval or a shell command is active.
-Optional browser settings and redacted diagnostics are available in expandable sections.
-See the [Desktop guide](../tools/desktop.md) for macOS permissions, pairing recovery, and browser-extension setup.
+Applications start observe-only.
+**Grant Control…** shows the identities, allowed applications, and duration for confirmation, and control ends when that lease expires; it is never renewed at launch or restart.
+**Revoke Now** removes input authority while observation continues, and **Stop Access** ends the session.
+Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you gives the agent your own authority; see [Security Model](../tools/desktop.md#security-model).
+Optional browser settings and redacted diagnostics are in expandable sections; see the [Desktop guide](../tools/desktop.md#use-the-signed-in-browser-profile) for browser-extension setup.
 
 ### Folders and Shell Commands
 
-In **Access**, **Read-only folders** lists the folders an agent may list and read; **Add Folder…** chooses more and **Remove** drops one.
-Agents cannot create, change, or delete files there.
-macOS may still ask before MindRoom reads protected folders such as Desktop, Documents, or Downloads, and MindRoom never requests Full Disk Access.
+In **Access**, **Read-only folders** lists the folders agents may list and read; **Add Folder…** adds one and **Remove** drops one.
 **Shell commands** has one switch, **Allow shell command requests**.
-Save both with **Save Folder and Shell Access**; while access is running, **Stop and Save…** stops it first after confirmation.
+Save both with **Save Folder and Shell Access**; while access runs, **Stop and Save…** stops it first after confirmation.
+Approved shell commands run with your full macOS account access; read [Shell Commands](../tools/desktop.md#shell-commands) before enabling them.
 
-!!! warning "Shell commands run with your full macOS account access"
-    An approved command can use the network and every file your account can read or change, including files outside the read-only folders.
-    The working folder does not confine it.
-
-While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
-Each request also opens a separate approval window that does not take keyboard focus from your current app; closing it or choosing **Later** leaves the command waiting until it expires.
-The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and each line kept left to right.
-If any of them contains a non-ASCII character, the card warns that it can look like ASCII and repeats each such field, labeled, with every non-ASCII character escaped.
-**Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.
-Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**.
-Without a waiting request, **Allow Without Asking…** offers the same durations.
-**Approve & Allow…** and **Allow Without Asking…** ask for confirmation first and list the agents and requesters the choice covers.
-
-!!! warning "Auto-approval covers every allowed agent and requester"
-    While auto-approval lasts, every shell command from all locally allowed agents and requesters runs without asking.
-    It is never saved, so restarting MindRoom or its computer access asks for each command again.
-
+While access runs with shell requests allowed, each request appears, unless auto-approval is active, on an approval card in the window and in a separate approval window that does not take keyboard focus.
+Closing that window or choosing **Later** leaves the request waiting until it expires.
+**Approve Once** and **Approve & Allow…** become available one second after a request appears.
+Choose **Reject**, **Approve Once**, or **Approve & Allow…** with **5 Minutes**, **15 Minutes**, **60 Minutes**, or **Until I Stop**; without a waiting request, **Allow Without Asking…** offers the same durations.
+Both auto-approval choices ask for confirmation and list the agents and requesters they cover; see [Local Approval](../tools/desktop.md#local-approval) for what auto-approval allows.
+While a command waits, every window section shows a **Review Command** bar and the menu bar shows **Command waiting** with **Review Command…**, which opens the card but never approves.
 **Revoke Shell Access** ends auto-approval, rejects a waiting request, and stops running commands.
-**Background commands** lists commands that kept running after their first reply, with their agent, requester, elapsed time, and state, and a **Kill** button for each running one.
-While a command waits, a **Review Command** bar appears in every window section, and the menu bar shows **Command waiting** with **Review Command…**.
-The menu only opens the card; it never approves a command.
-Stopping computer access or quitting MindRoom also revokes auto-approval and stops every shell command.
-See [Shell Commands](../tools/desktop.md#shell-commands) for handles, output limits, the login-shell environment, and what the model provider receives.
+**Background commands** lists commands still running after their first reply, with a **Kill** button for each.
+
+### Use the Terminal with the App
+
+The app and `mindroom desktop setup` share the same saved setup in `~/.mindroom`; an open app picks up terminal setup while access is stopped.
+You can save folders and shell access with `mindroom desktop access` and start from either the app or `mindroom desktop run`.
+Stop the bridge in the interface that started it before starting it in the other.
+A terminal `--config` or `--storage-path` override creates a separate setup that the app does not use.
+
+### Fix Computer Access Problems
+
+- **Permission shows Not allowed yet although System Settings shows MindRoom enabled**: quit and reopen MindRoom.
+  If you replaced the signed release with a local build, reinstall the signed release or remove the old permission entry and approve the current copy, then select **Check Again**.
+- **Access fails to start**: **View Details** shows the full error, recovery advice, and redacted diagnostics to copy for support.
+- **Connection or TLS certificate errors**: your saved setup is kept, so check the network or update the app and select **Start Access** again; you do not need to sign in or pair again.
+
+See the [Desktop guide](../tools/desktop.md) for pairing recovery and device rotation.
 
 ## Window, Menu Bar, and Login
 
-Opening MindRoom presents its window and Dock icon.
-Closing the window leaves the app available in the menu bar and keeps its background work running.
-Reopen the window with **Open MindRoom…** in the menu or by opening the application again.
+Closing the window keeps the app and its background work running in the menu bar; reopen it with **Open MindRoom…** or by opening the app again.
+The menu shows local-agent and computer-access status as shortcuts to their sections, plus chat, dashboard, start and stop, **Revoke Computer Control** while a control lease is active, **Revoke Shell Access** while shell auto-approval or a command is active, settings, and quit actions.
 
-The menu shows local-agent and computer-access status as clickable shortcuts to their app sections, plus chat, dashboard, start/stop, settings, and quit actions.
-**Service running** reports the local process state; use Chat or the dashboard to confirm that agents are ready.
+**Settings** > **Open menu bar app at login** launches the menu app at login.
+Local agents start at login through their own launchd service, while computer access always needs an explicit start in the app.
 
-In **Settings**, **Open menu bar app at login** launches the menu app quietly.
-Local agents use their own launchd service and start independently at login.
-Computer access always requires an explicit start in the app.
+**Quit MindRoom** stops computer access but leaves the local-agent service running; use **Stop Local Agents** to stop it.
+Let a running runtime action finish before quitting.
 
-**Quit MindRoom** stops computer access owned by the app and closes its menu.
-Hover over that item for a reminder of its effect on background work.
-The local-agent launchd service keeps running after the app quits.
-Use **Stop Local Agents** when you want to stop that service.
-If a runtime action is still in progress, let it finish before quitting.
+## Updates
 
-## Updates and Troubleshooting
+**Settings** separates app updates from runtime updates:
 
-**Settings** separates app updates from runtime updates.
-**Check App Updates…** uses Sparkle for signed releases configured with an update feed.
-**Update Local Runtime** installs the CLI release that matches the app version, and Settings notes when the installed runtime differs.
-Installs and updates use an arm64 managed Python 3.13, so an update also replaces a runtime that was installed with an Intel Python.
-Because `uv` records that exact version, `uv tool upgrade mindroom` in a terminal keeps it; after the next app update, the app asks for the new matching runtime.
-Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd service and starts or restarts local agents after confirmation.
-App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
-
-If computer access fails to start, **View Details** opens the full error, recovery advice, and redacted diagnostics that you can copy for support.
-Connection and TLS certificate failures keep your saved setup; check the network or update the app before trying **Start Access** again.
-They do not by themselves mean you need to sign in or pair again.
-
-**Open Logs Folder** opens `~/Library/Logs/mindroom`.
-Background services disable terminal colors; redirected output and runtime log files use plain text unless JSON logging is configured.
-The service appends to its existing logs, so records written by older versions may still contain terminal escape codes.
-**Open Config Folder** opens `~/.mindroom`, which is shared with the CLI.
-Failed local-agent actions show their output in the window with a copy action.
-If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.
-After changing its URL or API key in `.env`, select **Reload** in Dashboard to read the updated values.
-Pairing codes expire after 10 minutes; the background service shows a new link in its logs automatically, or click **Connect Account** again.
+- **Check App Updates…** updates the app, including the bundled Desktop Helper.
+- **Update Local Runtime** installs the runtime release that matches the app version; `uv tool upgrade mindroom` does not move the runtime off that version.
+- **Apply Runtime to Service…** reinstalls the background service on the updated runtime and starts or restarts local agents after confirmation.
 
 Homebrew users can also update the app with:
 
@@ -242,6 +171,12 @@ brew update
 brew upgrade --cask mindroom
 ```
 
+## Logs and Troubleshooting
+
+**Open Logs Folder** opens `~/Library/Logs/mindroom`, and **Open Config Folder** opens the folder holding the local agents' configuration, `~/.mindroom` by default, which the CLI shares.
+Failed local-agent actions show their output in the window with a copy action.
+If the dashboard does not open, start the service and check its logs for missing provider credentials or startup errors.
+
 ## Uninstall
 
 ```bash
@@ -249,6 +184,4 @@ brew uninstall --cask mindroom
 ```
 
 Use `brew uninstall --zap --cask mindroom` to also remove app preferences and logs.
-Uninstall and zap preserve `~/.mindroom` and the uv-installed runtime.
-Remove configuration, credentials, and agent data only when you intend to delete them.
-Use `uv tool uninstall mindroom` to remove the CLI separately.
+Neither removes `~/.mindroom`, which holds configuration, credentials, and agent data, or the runtime; remove the runtime with `uv tool uninstall mindroom`.

@@ -1,98 +1,93 @@
 # Security Posture
 
-This page records MindRoom's security model and the behaviors that are intentional.
-Reviewers and agents must check a suspected vulnerability against this page before reporting or fixing it.
-If a finding contradicts an intentional behavior below, do not change the code.
-Raise the posture itself with the maintainers instead, and explain which scenario the current posture fails to protect.
+This page records MindRoom's security model, the `file_access` setting, and the behaviors that are intentional.
+Use it to explain what an agent's tools can reach and to check a suspected vulnerability before reporting or fixing it.
+If a finding contradicts an intentional behavior below, do not change the code; raise the posture with the maintainers and explain which scenario it fails to protect.
 
 ## Trust model
 
 A worker container, reached through the sandbox proxy, is the only security boundary between an agent and the MindRoom runtime.
-Everything else in this page follows from that rule.
 
-Tools that run arbitrary programs cannot be confined inside the process that runs them.
-A shell or Python tool can start any program, and that program ignores any path or command check MindRoom applies in-process.
-MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure.
-They are isolated only by routing them to a worker with `worker_tools`.
+Tools that run arbitrary programs cannot be confined inside their own process, because a program started by a shell or Python tool ignores any in-process path or command check.
+MindRoom therefore never filters the paths, commands, or imports of code-execution tools as a security measure; it isolates them only by routing them to a worker with `worker_tools`.
 
-An agent whose code-execution tools run in the primary process is trusted with everything that process can reach.
-Restricting that agent's other tools protects nothing, because its shell can already read, write, and upload the same files.
+An agent whose code-execution tools run in the primary process is trusted with everything that process can reach, so restricting its other tools protects nothing.
 
 An agent whose code-execution tools run in a worker must not reach more through its primary-process tools than its worker can.
-Several tools run in the primary process by default even when code tools use workers, for example `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive`.
-Those tools follow the agent's `file_access` setting, so the default keeps them inside the agent workspace.
+Tools such as `browser`, `attachments`, `matrix_message`, `gmail`, and `google_drive` run in the primary process by default even then, so they follow the agent's [`file_access`](#file-access) setting, which by default keeps them inside the agent workspace.
+
+Which Matrix user may drive an agent, act in a room, or approve a change is a separate question governed by access policy and requester authorization.
+An agent or team mentioned in another entity's reply acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
+
+## Protecting the primary from worker code
 
 Hardening that protects the primary runtime and other tenants from untrusted worker code is always in scope.
 Examples are symlinks or files planted in shared workspaces that the primary later follows, worker-writable metadata the primary trusts, Git config the primary executes, and secrets mounted or passed into workers.
+
+### Config and state kept out of workers
+
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
-The config the primary sends to runners with each request, and the config file it projects into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
+The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve, such as agent execution scopes, file access, workspace and knowledge paths, tool names, and plugin paths.
 Models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Dedicated Docker and Kubernetes workers mount only agent workspaces, never the agent state roots around them, so sessions, memory, learning, Mem0 data, and private-instance identity records stay out of every worker.
-The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so the records the primary acts on as authority live below the primary-only `tracking/` directory instead: invited-room and pending-invite ledgers, personal-room records, and conversation modes, each at its state root's storage-relative path, and the primary's copy of each private-instance owner record at its scope's path.
-The thread exporter writes into a private instance only for the requester that copy names, so an owner record planted in `private_instances` gets no export.
-Their locks and the lock that serializes private-instance owner records live outside both directories too, and startup stops scanning `private_instances` once the private-storage migration has finished its verified moves, leaving any invalid entry there untouched instead of failing.
-The session recovery lock stays beside the sessions it guards, so it is opened without following links or blocking, and a holder that keeps it past SQLite's busy timeout fails session storage creation instead of stalling it.
-Which workspaces a worker mounts follows its scope.
-Only private workspaces separate requesters: a non-private agent's workspace, `agents/<agent>/workspace`, is the same directory in every requester's worker that mounts it.
+The Kubernetes `static_runner` sidecar still mounts `agents` and `private_instances` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead.
+These are the invited-room and pending-invite ledgers, personal-room records, conversation modes, and the primary's copy of each private-instance owner record, together with their locks.
+The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 
-- A `shared` or unscoped worker mounts only its agent's workspace.
-- A `user_agent` worker runs per requester and agent and mounts one agent's workspace: for a non-private agent that shared directory, and for a private agent only that requester's private workspace.
-- A `user` worker runs per requester, not per agent: it mounts the workspace of every non-private agent whose worker scope is `user` and that requester's private workspace of every `private.per: user` agent, so code working in one of them can read and write the others.
+### Workspace mounts by worker scope
+
+[Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) lists the workspaces each dedicated worker mounts.
+A `user` worker mounts several agents' workspaces, so code working in one of them can read and write the others.
+
 A workspace is mounted only when it is a real directory reached from the storage root without links.
-Docker resolves mount targets again on every container start, so before creating or restarting a worker the backend walks the targets inside the worker's own writable root without following links and refuses one that worker code replaced with a link.
-Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write: Kubernetes mounts it read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
+Because Docker resolves mount targets again on every container start, the backend walks the targets inside the worker's writable root without following links before creating or restarting a worker, and refuses one that worker code replaced with a link.
+Assigned knowledge outside the workspace reaches a worker only when its configured path is a real directory or file, reached without links, outside every directory other workers write.
+Kubernetes mounts such knowledge read-only, because kubelet follows links inside the volume when it mounts, and Docker copies it into the worker's read-only config snapshot through no-follow descriptors.
+
+### Workspace files the primary reads and writes
+
 The primary treats everything inside a mounted workspace as worker-controlled.
-Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root, which refuse links, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or create them exclusively; the few files appended to in place, call transcripts and delegation event logs, are never written while another hard link shares their inode, so a hard link an older worker planted never redirects a write: such a call transcript is refused and such a delegation event log is replaced.
-The primary never takes a file lock inside a workspace, because worker code could hold it forever; writers of one delegation record exclude each other within the primary process instead.
-Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary writes but never reads, so worker code that edits or deletes them changes nothing the primary relies on.
-Reads through those descriptors are capped per surface.
-
-| Surface | Cap | Above the cap |
-|---|---|---|
-| Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
-| Workspace `SKILL.md`, skill references and scripts | 1 MiB each; names 64 characters; descriptions 1024 characters; 256 listed scripts and references each; 8 MiB of `SKILL.md` files and listings and 256 skills per workspace, with each `SKILL.md` counted before it is parsed, even one that then fails to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | The file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined, and an archival pass whose `skills/` scan stopped there forgets no usage records |
-| Call transcripts sent to Mem0 | 64 MiB | Truncated |
-| Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
-| Workspace todo templates | 64 KiB per file; 64 KiB of template text read, 65,536 characters rendered within 5 seconds, and 100 todos per `apply_template` call, sub-templates included; 1 MiB of workspace template files read, from at most 1,024 entries of the template directory, per `list_templates` call; each render runs in a child process limited to 128 MiB of address space and the call's remaining CPU time; outside Linux, which is the only platform that enforces that limit, workspace templates may only substitute `{{ NAME }}` | `apply_template` refuses it with an error, and `list_templates` leaves out an oversized file and stops listing workspace templates with a warning at the template that would exceed its read cap |
-| Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
-| `e2b` uploads | 64 MiB | The upload is refused with a tool error |
-| Thread-export files | 64 MiB per file for the room index; the unchanged-content comparison reads at most the new export's size | A larger file is indexed from its header before its messages, and an existing file larger than the new export counts as changed and is replaced |
-| Thread-export files one room index rebuild reads | 256 MiB in total, newest file first, each file counted before it is parsed | Older thread files are listed under `unindexed_files` in that room's `index.json` instead of indexed, with a warning, and stay on disk |
-| Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
-| `browser` upload snapshots, which stay in the browser's temp directory until their tab closes | 256 MiB in total per browser | The upload is refused with a tool error |
-| `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails with an error before staging more than the cap |
-
-Workspace `SKILL.md` frontmatter, todo templates, and thread-export files that use YAML aliases, nest collections more than 64 levels deep, or hold more than 250,000 YAML nodes are refused before any node is composed.
-A few aliases can describe a tree far larger than the file, the YAML composer recurses in C once per nesting level, and each composed node costs a few hundred bytes of the primary's memory.
-The same files are refused when one mapping holds more than 64 `<<` merge keys or more than 1,024 integer or float keys, or when a base-60 integer such as `1:30:00` is longer than 64 characters, because PyYAML can take time that grows with the square of their size to build them.
-Numeric keys are counted because they can be chosen to share one hash, and a `!!set` counts as a mapping.
-They are also refused when more than 16 lines start with `%`, as YAML directives do, because libyaml compares each `%TAG` directive with every earlier one before the event checks see any of them.
-A value PyYAML cannot build, such as a year-0 date, is handled like any other YAML error in that file.
-The thread exporter decides whether a file changed by comparing its text rather than parsing it, reading no more of the existing file than the new export's size, and indexes a thread file too large to read or parse whole from the thread header before its messages.
-While it reads a thread, the exporter keeps only the message content it writes and stops once that passes 128 MiB as compact JSON, twice the read cap so every thread whose file fits that cap still exports; it then reports the thread as failed and leaves its previous file in place.
-Workspace todo templates may use any sandboxed Jinja expression, filter, or loop, so they never render in the primary: a short-lived child process with no inherited environment renders each one under the memory, CPU, time, and output limits above, and only one render runs at a time because children share the primary's CPU and memory quota.
+Files it reads or writes there, such as skills, context files, delegation records, knowledge sources, call transcripts, callback scripts, script-run snapshots, todo templates, scheduled-run receipts, workspace knowledge links, and thread exports, are reached through `path_confinement` descriptors walked from the workspace root.
+Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
+The primary never takes a file lock inside a workspace, because worker code could hold it forever.
+Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
 `file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.
 No-follow applies to the workspace's final path component only, so a replaced parent such as `agents/<name>` is not refused.
-With the default workspace names that is not exploitable in the hosted layout today, because no primary-only directory there contains an entry named `workspace` for such a link to reach; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
+With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
-Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment so programs named in workspace Git config never run.
+Git commands the primary runs in a workspace, for knowledge checkouts and the `coding` tool's ignore check, use the hardened Git command and environment, so programs named in workspace Git config never run.
 
-Which Matrix user may drive an agent, act in a room, or approve a change is a separate question.
-Access policy and requester authorization govern it, independently of the tool trust model.
-An agent or team that another entity's reply mentions acts for the human or configured bot account that requested that reply, so neither can reach an entity whose `access` excludes them by asking a different entity to mention it.
+### Read limits on workspace files
+
+Reads of worker-controlled files are capped per surface.
+
+| Surface | Cap | Above the cap |
+|---|---|---|
+| Context files | 1 MiB | Truncated with a warning; context preload truncation shortens them further |
+| Workspace `SKILL.md`, skill references and scripts | 1 MiB per file; names 64 characters; descriptions 1024 characters; 256 listed scripts and 256 references; per workspace 256 skills and 8 MiB of `SKILL.md` files and listings, including files that fail to load; 1,024 examined entries per `skills/`, `scripts/`, `references/`, or `skills/.history/<skill>/` directory, for skill loading and skill learning alike | An oversized file or a skill with a longer name is refused, a longer description or listing is truncated, and skills beyond the budget or count are skipped, each with a warning; entries past the first 1,024 in directory order are not examined |
+| Call transcripts sent to Mem0 | 64 MiB | Truncated |
+| Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
+| Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
+| `e2b` uploads | 64 MiB | Refused with a tool error |
+| Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
+| `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
+| `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
+
+Thread-export files are read and built under the per-file, per-thread, and per-room limits documented in [Thread Exports](https://docs.mindroom.chat/thread-exports/).
+Workspace todo templates have the size, render, and listing limits documented in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo), and they render in a short-lived, memory-limited child process instead of the primary, because sandboxed Jinja alone does not bound their cost.
+
+Workspace `SKILL.md` frontmatter, todo templates, and thread-export files are refused before parsing when their YAML uses aliases, deep nesting, or other structures that would let a small file cost the primary unbounded memory, stack depth, or parse time; [Skills](https://docs.mindroom.chat/skills/#skillmd-format-openclaw-compatible) lists the exact limits.
 
 ## Hosted tenant isolation
 
 Hosted tenants share the `mindroom-instances` namespace, and a tenant can run code in its own primary and sandbox-runner sidecar by design.
 The boundary between tenants is the cluster configuration around those pods.
 
-- No tenant pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers, because RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in a shared namespace.
-- The namespace enforces the Pod Security `baseline` profile, so tenant pods cannot be privileged or use host namespaces, `hostPath` volumes, or capabilities beyond the default set; Terraform creates it with that label, the provisioner reapplies it and refuses to deploy when it cannot, and a direct install must add it.
-- Tenant pods reach TCP 80 and 443 only on public addresses and the ingress controller, never metadata services, private networks including private node addresses, or other pods.
-- Every tenant container has an ephemeral-storage limit and the sandbox runner's workspace `emptyDir` a 1 GiB size limit, so tool code filling the disk gets only its own pod evicted instead of the shared node running out of space.
+[Multi-Tenant Architecture](https://docs.mindroom.chat/deployment/saas-platform/#multi-tenant-architecture) lists those controls.
+The instance chart refuses dedicated Kubernetes workers because RBAC cannot confine a worker manager to one tenant's Deployments, Services, PVCs, and Secrets in a shared namespace.
 
 ## File access
 
@@ -103,19 +98,20 @@ The boundary between tenants is the cluster configuration around those pods.
 | `workspace` (default) | Files inside the agent workspace and attachments available in the conversation |
 | `unrestricted` | Any file the tool's process can reach; on a worker that is the worker container |
 
-Every tool declares how its own file access relates to this setting.
+Every tool, including plugin tools, must declare one of these file access classes when it registers, so no tool silently defaults to taking no paths.
 
 | Tool class | Tools | Behavior |
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and read through no-follow descriptors, so replaced workspace roots and swapped files are refused; `airflow` and `moviepy_video_tools` also write by atomic replacement without following links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
-| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, deletes, and every file a `file` content search reads walk to the checked path through no-follow descriptors, and writes replace the file atomically, while listing and the other searches check the resolved path and then walk it by path, as the known gap below describes |
+| Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, chunk edits, deletes, and every file a `file` content search reads go through no-follow descriptors, and writes replace the file atomically; listing and the other searches walk by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
+[`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
+
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
-Every tool, including plugin tools, must declare its class when it registers, so a tool cannot silently default to taking no paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
-A worker isolates unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
+A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
 The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
@@ -124,36 +120,32 @@ The model sees the effective file access and the unconfined tools in its tool ex
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The other unconfined non-code tools listed above (`composio`, `postgres`, `redshift`, `browserbase`, and `slack`) do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
-- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the directory the toolkit pinned and paths that lead outside it, but then walk and read by path.
-  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`: code that swaps the workspace, a checked directory, or a file for a link in the window between that check and the walk can make that one call list or return the contents of any file the primary process can read, including other workspaces and primary-owned state, and a planted FIFO can stall a `coding` content search.
-  They run in a worker by default, where they see only what the worker already mounts.
-  The `file` tool's `search_content` also walks by path, but resolves each file it finds like `read_file` and reads it through no-follow descriptors, so under `file_access: workspace` it returns only workspace content.
-- `tests/test_file_access_contract.py` holds every tool that follows `file_access` to the confinement scenarios and the descriptor-based path tools also to the link-swap scenarios; a tool must be added there before it can be declared, and `file` and `coding` cover their descriptor-based reads with their own link-swap test there.
-- Knowledge Git commands refuse a worktree whose path goes through a link, but Git itself then reopens that worktree by path. For a Git-backed knowledge base inside a workspace a worker writes, code that swaps the knowledge folder for a link in the short window between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
+- The unconfined non-code tools `composio`, `postgres`, `redshift`, `browserbase`, and `slack` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
+- The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
+  This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`.
+  Code that swaps the workspace, a checked directory, or a file for a link between that check and the walk can make that one call list or return any file the primary process can read, and a planted FIFO can stall a `coding` content search.
+  By default these tools run in a worker, where they see only what the worker already mounts.
+  The `file` tool's `search_content` reads each file it finds through no-follow descriptors, so under `file_access: workspace` it returns only workspace content.
+- Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
+  For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 
 ## Intentional behaviors
 
 Do not report or "fix" these; they are deliberate.
 
-- Code-execution tools in the primary process can read, write, and upload anything the MindRoom process can reach.
-- No in-process path, command, or import filter is added to `shell`, `python`, or any other code-execution tool.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
-- A `chat_ui` canvas shown from a path runs that file as an interactive page in MindRoom Chat's sandbox, so agents should only show pages they wrote; the sandbox keeps the page away from the Matrix session but cannot stop WebRTC from leaking what the user types into it.
+- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, so agents should only show pages they wrote; see [Sandbox and limits](https://docs.mindroom.chat/tools/chat-ui/#sandbox-and-limits).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `register_attachment` copies the file's current bytes into managed attachment storage, so later edits or replacement of the source file never change what the attachment sends.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
-- A skill review forks the request the reviewed agent's model just processed and resends it unredacted to the same provider.
-  A digest replay, used for another review model or a request that cannot be forked, redacts the conversation on a best-effort basis.
+- A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
-- Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills it could already change itself.
-  Every learner read and write goes through no-follow descriptors, and the primary takes no lock inside the workspace, so worker code cannot stall it through learned skills.
-- `skill_manage`, which agents that list it or learn skills use in chat and the review writes with, runs in the primary process and writes only below the agent's workspace `skills/` directory through the same no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
+- Automatic skill learning trusts the `metadata.mindroom` frontmatter flags and the provenance and usage in `skills/.usage.json` inside the workspace, which worker code can change; that only lets it make the learner edit or archive skills worker code could already change itself.
+- `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response ends; code that shares a worker already shares its trust.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
@@ -163,7 +155,7 @@ Do not report or "fix" these; they are deliberate.
 - A shared knowledge base whose path lies inside an agent workspace, such as that agent's thread exports, is bound without following links below the workspace, so even an operator-made link there is refused; shared knowledge outside every agent workspace still follows operator links.
 - A team approval continuation checks only that each approved call keeps the arguments its card showed, not whether the saved team run holds other calls ready to run, because team runs live below `teams/`, which no worker mounts.
 - The Kubernetes `static_runner` sidecar mounts `agents` and `private_instances` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
-- After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the check in the migration guide.
+- After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
 

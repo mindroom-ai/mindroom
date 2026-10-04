@@ -1,14 +1,16 @@
 # Google Services OAuth For Local Installs
 
-Paired local installations automatically retrieve MindRoom's Google desktop OAuth client from the provisioning service.
-You do not need to create a Google Cloud project, register callback URLs, or copy a client secret.
-The client configuration is not bundled in the package or committed to the source repository.
-The local runtime uses OAuth PKCE and a callback on `localhost`, `127.0.0.1`, or `::1`.
-Run `mindroom connect` (or `mindroom run` for automatic pairing) before connecting Google, or configure a custom Google OAuth client for an unpaired self-hosted installation.
+This page explains how to connect Google Drive, Docs, Calendar, Sheets, Tasks, and Gmail on a paired local installation.
+Paired installations use MindRoom's Google OAuth client, so you do not need a Google Cloud project, callback URLs, or a client secret.
+Pair first with `mindroom connect`, or let `mindroom run` pair automatically on first run (see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/)).
+The provisioned client works only when MindRoom is opened on a loopback address (`localhost`, `127.0.0.1`, or `::1`).
+For an unpaired install, a remote or public address, organization-specific Google policies, or your own consent-screen branding, set up a custom client instead (see [Custom Google Cloud Setup](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup)).
+That page also lists the scopes each Google tool requests and how to restrict which Google accounts may connect.
 
 ## Choose Providers
 
 Add only the Google tools your agents need.
+Each tool connects and asks for Google approval separately.
 
 ```yaml
 agents:
@@ -25,71 +27,37 @@ agents:
       - gmail
 ```
 
+`worker_scope` decides whose Google account the agent uses.
+With `user_agent`, each Matrix user connects their own account for this agent.
+With `shared`, everyone allowed to use the agent acts through one connected account and may receive its Google data in replies.
+See [Where Connections Are Stored](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored) for every scope.
+
 ## Connect
 
-When `config_manager` enables a Google provider tool, use the direct connect URL in its result when one is returned for the updated agent and requester scope.
-Do not ask the configuring agent to invoke a newly added tool in the same run, because the current provider-visible tool schema may not include it.
-Once a Google tool is available to the target agent, ask that agent to perform an appropriate safe status, read, or list operation with the tool.
-If the tool is disconnected, its result contains structured `OAuthConnectionRequired` data with `oauth_connection_required: true` and, when available, the exact `connect_url` for that provider, requester, agent, and execution scope.
-When `connect_url` is provided, the agent should present it directly instead of sending you to the dashboard.
-If the result includes `requires_host_browser: true`, open the loopback URL (`localhost`, `127.0.0.1`, or `::1`) in a browser on the computer where the MindRoom process is running, not on a phone or another computer.
-If you made the request from another device, open the conversation on the MindRoom computer or copy the complete URL into a browser there.
-Google asks you to choose an account and approve only that provider's scopes.
-After the browser flow completes, have the target agent retry the operation and the integration is ready for the selected agent and execution scope.
-As a manual alternative, open the dashboard and select **Connect** for the Google integration only when neither `config_manager` nor a tool result provides a `connect_url`.
-The dashboard explains which installation and credential scope will receive the connection before you continue.
+1. Ask the agent to do something safe with the Google tool, such as listing files or upcoming events.
+   If the account is not connected, the agent replies with a connect link.
+   When `config_manager` has just added the Google tool to an agent, use the connect link it returns instead.
+2. Open the link in a browser on the computer where MindRoom runs, not on a phone or another computer, because the link points to `localhost`.
+   If you are chatting from another device, open the conversation on the MindRoom computer or copy the complete link into a browser there.
+3. Choose a Google account and approve the scopes for that one service.
+4. Ask the agent to retry the request.
 
-OAuth tokens are stored under provider token services such as `google_drive_oauth` and `google_docs_oauth`.
-Editable tool settings are stored separately under services such as `google_drive`, `google_docs`, `google_calendar`, `google_sheets`, `google_tasks`, and `gmail`.
-MindRoom does not mirror Google OAuth tokens into worker containers.
+Without a connect link, open the dashboard **Tools** tab, choose the agent in the selector, and select **Connect** on the Google integration.
+Only agents with a worker scope appear in the selector; for an agent without one, keep **Shared deployment credentials** selected.
+The dashboard shows how Google data is handled before you continue.
+For personal connections from the dashboard, the dashboard must know your Matrix identity; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account).
+Link lifetime, who may connect, disconnecting, and resetting a connection are covered in the [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
-## Privacy and Access Scope
+## Privacy
 
-For a local installation, the MindRoom project maintainers do not automatically receive your OAuth tokens or Google data.
-The paired provisioning service sends the Google desktop app client configuration to the local runtime but does not receive the Google authorization code, access token, refresh token, or Google API data.
-Google returns the authorization response directly to the local loopback callback, and the local runtime performs the token exchange and stores the resulting connection.
-The software running on your machine stores the connection, while the Google API, your configured AI model provider, and your Matrix homeserver process the data sent to each of them.
-The installation operator and anyone with administrative or filesystem access to its storage may be able to access locally stored credentials and data.
+On a local installation, the provisioning service only supplies the OAuth client configuration.
+Google sends the authorization response straight to your MindRoom process, which exchanges and stores the tokens, so the provisioning service does not receive your authorization code, tokens, or Google API data.
+Google data an agent reads goes to your configured AI model provider and Matrix homeserver as part of the conversation.
+Anyone with administrative or filesystem access to the installation's storage may be able to read the stored credentials and data.
+See the [Privacy Policy](https://docs.mindroom.chat/privacy/#google-api-services) for the complete data-handling disclosure.
 
-The example above uses `worker_scope: user_agent`, which keeps each authenticated Matrix requester's connection separate for that agent.
-In general, the saved effective execution scope comes from `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope.
-With effective scope `user`, one requester can reuse the connection across that requester's user-scoped agents.
-With effective scope `shared`, any user authorized to invoke the selected agent can cause it to use the connected Google Account and may receive Google data in its response.
-Only with no private, per-agent, or inherited scope is the connection stored at the installation level without requester isolation.
+## Troubleshooting
 
-Being signed in to the computer does not itself determine access.
-MindRoom uses authenticated Matrix requester identity, agent authorization, and the configured credential scope, while operating-system and storage permissions remain the installation operator's responsibility.
-See the [Privacy Policy](https://docs.mindroom.chat/privacy/) for the complete data-handling disclosure.
-
-## Custom Google OAuth App
-
-A custom Google OAuth app is optional for a paired local installation and required for an unpaired self-hosted installation.
-Use one when you operate a public MindRoom origin, need organization-specific Google policies, or want your own consent-screen branding.
-
-Select **Use custom client** in the dashboard and enter the client ID and client secret from a Google Cloud **Web application** OAuth client.
-Enable the APIs for the tools you use and add the matching callback URLs.
-
-```text
-http://localhost:8765/api/oauth/google_drive/callback
-http://localhost:8765/api/oauth/google_docs/callback
-http://localhost:8765/api/oauth/google_calendar/callback
-http://localhost:8765/api/oauth/google_sheets/callback
-http://localhost:8765/api/oauth/google_tasks/callback
-http://localhost:8765/api/oauth/google_gmail/callback
-```
-
-Replace the origin when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` points to a public deployment.
-For a shared custom client, store the configuration under `google_oauth_client`.
-Provider-specific services such as `google_drive_oauth_client` override the shared client.
-
-Google Docs requires the Google Docs API and the sensitive `https://www.googleapis.com/auth/documents` scope in the OAuth consent configuration.
-That scope authorizes viewing, editing, creating, and deleting Google Docs across the connected account, although MindRoom exposes create, read, insert, and replace operations rather than document deletion.
-Use a separate testing project while a production OAuth verification request is already under review, then submit a deliberate production verification follow-up after that review completes.
-
-Google Tasks requires the Google Tasks API and the sensitive `https://www.googleapis.com/auth/tasks` scope in the OAuth consent configuration.
-That scope authorizes viewing, creating, editing, and deleting all tasks and task lists in the connected account, although MindRoom exposes task operations rather than task-list management.
-The same testing-project and verification follow-up applies to the `tasks` scope.
-
-When using standalone dashboard API-key auth, also set `MINDROOM_OWNER_USER_ID` to your Matrix user ID, such as `@alice:matrix.example.com`.
-Do not use `MINDROOM_OWNER_USER_ID` as the identity model for hosted multi-user private agents.
-Use [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) for those deployments.
+- **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
+  Run `mindroom connect`, or configure a [custom client](https://docs.mindroom.chat/deployment/google-services-oauth/#custom-google-cloud-setup).
+- **`The provisioned OAuth client is available only when MindRoom is opened on localhost...`**: open MindRoom on `localhost`, or configure a custom client for remote access.

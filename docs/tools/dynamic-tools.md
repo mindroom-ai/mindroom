@@ -1,16 +1,17 @@
 # Dynamic Tools
 
-Dynamic tools let an agent keep rarely used tools out of the provider-visible schema list until it needs them.
-The loading unit is one authored entry in the agent's `tools:` list.
-On providers with server-side tool search the gating happens inside the provider API; everywhere else MindRoom performs the schema gating in its runtime.
+Dynamic tools keep an agent's rarely used tools out of the model's tool list until the agent needs them, which saves context on every request.
+Use them for agents with many optional tools.
+Each authored entry in an agent's `tools:` list loads or unloads as one unit.
 
 ## Configuration
 
-Add `defer: true` to a tool entry to make it lazy.
-Add `initial: true` with `defer: true` when the tool should start loaded for every new session and remain sticky.
-The `initial` flag is rejected unless `defer` is also true.
-Lazy loading is per-agent, so `defaults.tools` does not accept `defer` or `initial`.
-Tool presets such as `openclaw_compat` also do not accept `defer` or `initial`; configure the individual member tools directly when they need lazy loading.
+| Field | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `defer` | bool | `false` | Hide the tool until the agent loads it for the current session. |
+| `initial` | bool | `false` | Load a deferred tool at session start and keep it loaded; requires `defer: true`. |
+
+A tool with neither flag is eager and appears in every request.
 
 ```yaml
 agents:
@@ -26,44 +27,42 @@ agents:
         overrides: {num_results: 10}
 ```
 
-No flags means the tool is eager and appears in every request.
-`defer: true` hides the tool schema until the agent loads that authored tool for the current session.
-`defer: true, initial: true` loads the tool at session start and prevents unloading.
+These configurations fail validation:
+
+- `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
+- Lazy loading is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
+- Presets such as [`openclaw_compat`](../openclaw.md) cannot be deferred; set the flags on the individual member tools instead.
+- The control-plane tools `delegate`, `dynamic_tools`, `external_trigger_manager`, `invite_router`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
-Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers use the provider's server-side tool search automatically.
-GPT models 5.4 or newer on `openai`, `codex`, and `openai_codex` use native search on their first-party Responses endpoints.
-For `openai` only, an explicit `api: chat_completions` selects MindRoom's runtime gating instead.
-For `openai`, the effective base URL is the non-empty `extra_kwargs.base_url` value, falling back to `OPENAI_BASE_URL` when that override is absent or empty.
-A non-official effective base URL uses runtime gating; an unset URL or an explicit `https://api.openai.com/v1` (with optional trailing slashes) remains eligible for native search.
-On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
-Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
-The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
-MindRoom adds a compact system-prompt hint listing the deferred toolkit names and tells the model to search those capability domains before concluding that a tool is unavailable.
-`defer: true, initial: true` tools stay in the rendered schema list as plain non-deferred tools.
-Instructions attached to a toolkit or its functions remain inline when any function in that toolkit is initially active.
-MindRoom omits those instructions only when every function is deferred and non-initial because native tool search cannot extend the already-sent system prompt when it discovers a tool.
+Standard-mode agents on these models use the provider's own tool search instead of MindRoom's loading tools:
 
-## Runtime Tools
+- Claude Opus 4.5, Sonnet 4.5, Haiku 4.5, and newer on the `anthropic` and `vertexai_claude` providers.
+- GPT 5.4 and newer on `openai`, `codex`, and `openai_codex`.
 
-On providers without native tool search, when an agent has at least one deferred tool and a stable session id, MindRoom injects the `dynamic_tools` manager.
-The manager exposes `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
-Search is plain keyword and exact-name lookup only.
-A newly loaded tool becomes callable once it appears in the agent's available tools, never in the same parallel tool-call batch as `load_tool()`.
-A standalone agent continues the same task in a later tool-call step within the same response, because its run loop rebuilds the agent with the updated schema and resumes the turn without waiting for another user message.
-Standalone agents and normal team turns continue the same task after loading or unloading a tool.
-Embedded callers without a continuation-capable response-turn driver apply changes on the next request in the same session.
-Rebuilding the agent after a tool load also makes that toolkit's instructions available in the new system prompt.
+For `openai`, an explicit `api: chat_completions` or a custom endpoint selects runtime loading instead.
+The endpoint is a non-empty `extra_kwargs.base_url`, otherwise `OPENAI_BASE_URL`; native search applies only when it is unset or `https://api.openai.com/v1`.
 
-## State Scope
+On this path, deferred tools stay out of the model's context until the model searches for them, and discovering a tool does not invalidate the prompt cache.
+The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
+Discovered tools are called directly, so there is nothing to load or unload.
+Tools with `initial: true` are ordinary always-visible tools.
+Toolkit instructions are omitted from the system prompt when every function in the toolkit is deferred and not `initial`.
 
-Loaded state is keyed by the exact `(agent, session_id)` pair.
-Two agents in the same Matrix thread do not share loaded tools.
-Native tool-search sessions neither read nor write this state.
+## Runtime Loading
 
-## Minimal mode
+On other models, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `list_tools()`, `tool_search(query)`, `load_tool(tool_name)`, and `unload_tool(tool_name)`.
+`tool_search` matches keywords and exact names only.
+Tools with `initial: true` cannot be unloaded.
 
-[Minimal mode](agent-cli.md) keeps configured tool authorization separate from provider schema presentation.
-Every minimal request exposes one Bash tool; the agent discovers and calls authorized tools through `mindroom-agent`.
-Loading or unloading a toolkit retains the existing session state and continuation timing while the next minimal request still exposes only Bash.
+A loaded tool becomes callable in the agent's next tool-call step, not in the same parallel batch as `load_tool()`.
+The agent continues the same response with the updated tools and the loaded toolkit's instructions, without waiting for another message.
+
+Loaded tools are tracked per agent and per conversation session, so two agents in the same Matrix thread do not share them.
+This state is held in memory, so a restart returns each session to its `initial` tools.
+
+## Minimal Mode
+
+In [minimal mode](agent-cli.md), every request still exposes only Bash.
+The agent lists and calls its deferred tools through `mindroom-agent` like its other tools.

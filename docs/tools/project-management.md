@@ -4,70 +4,41 @@ icon: lucide/wrench
 
 # Project Management
 
-Use these tools to work with source hosts, issue trackers, knowledge bases, kanban boards, task managers, and support help centers.
-
-## What This Page Covers
-
-This page documents the built-in tools in the `project-management` group.
-Use these tools when you need repository context, issue tracking, documentation updates, board workflows, personal task management, or support article search.
+This page covers the built-in tools for source hosts, issue trackers, wikis, kanban boards, task managers, help centers, and MindRoom's own per-thread work plans.
+Use it to choose a tool, connect its account, and understand its limits.
 
 ## Tools On This Page
 
 - [`github`] - GitHub repositories, issues, pull requests, files, branches, code search, and review requests.
-- [`bitbucket`] - Bitbucket workspace and repository inspection for repositories, commits, pull requests, and issues.
+- [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, templates, and automatic nudges for idle agents.
+- [`bitbucket`] - One Bitbucket repository's details, commits, pull requests, and issues.
 - [`atlassian`](atlassian.md) - Jira and Confluence Cloud as each requester through per-user OAuth, documented on its own page.
-- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs.
-- [`linear`] - Linear GraphQL access for viewer info, teams, issues, and issue updates.
-- [`clickup`] - ClickUp space, list, task, and task-lifecycle operations.
-- [`confluence`] - Confluence page lookup, space discovery, page creation, and page updates.
-- [`notion`] - Notion database page creation, page appends, and tag-based search.
+- [`jira`] - Jira issue lookup, creation, JQL search, comments, and worklogs with one shared account.
+- [`linear`] - Linear teams, issues, and issue updates.
+- [`clickup`] - ClickUp spaces, lists, and tasks.
+- [`confluence`] - Confluence spaces and page lookup, creation, and updates with one shared account.
+- [`notion`] - Pages in one Notion database.
 - [`trello`] - Trello boards, lists, cards, and card moves.
-- [`todo`] - Per-thread MindRoom work plans with priorities, dependencies, assignments, and templates.
-- [`todoist`] - Todoist task creation, updates, completion, deletion, and project discovery.
+- [`todoist`] - Todoist tasks and projects.
 - [`zendesk`] - Zendesk Help Center article search.
 
-## Common Setup Notes
+## Setup
 
-The `todo` tool is available without credentials.
-The other tools on this page are registered as `status=requires_config`, so they stay unavailable in the dashboard until their required credentials or connection fields are present.
-GitHub supports requester-scoped OAuth through MindRoom's built-in `github` provider, and [`atlassian`](atlassian.md) does the same for Jira and Confluence Cloud, while the remaining project-management tools use stored tool credentials or environment variables.
-Password and token fields should be stored through the dashboard or credential store instead of inline YAML.
-Most upstream SDKs also read environment variables, including `GITHUB_ACCESS_TOKEN`, `BITBUCKET_USERNAME`, `BITBUCKET_PASSWORD`, `BITBUCKET_TOKEN`, `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_PASSWORD`, `JIRA_TOKEN`, `LINEAR_API_KEY`, `CLICKUP_API_KEY`, `MASTER_SPACE_ID`, `CONFLUENCE_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_KEY`, `CONFLUENCE_PASSWORD`, `NOTION_API_KEY`, `NOTION_DATABASE_ID`, `TRELLO_API_KEY`, `TRELLO_API_SECRET`, `TRELLO_TOKEN`, `TODOIST_API_TOKEN`, `ZENDESK_USERNAME`, `ZENDESK_PASSWORD`, and `ZENDESK_COMPANY_NAME`.
-Several registry fields on this page are marked optional in metadata even though the upstream tool effectively requires them at runtime, so the notes below call out the practical requirement level for each tool.
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+`todo` works without credentials.
+The dashboard shows every other tool on this page as needing configuration until its credentials are saved, except that `github` is also ready when `GITHUB_ACCESS_TOKEN` is set.
+Most tools also read the environment variables named in their sections.
+Connect GitHub per requester through OAuth, and use [`atlassian`](atlassian.md) for per-requester Jira and Confluence Cloud access.
+The other tools use one shared set of credentials, saved on the dashboard's Tools page or in the credential store rather than as inline YAML.
+Missing Python dependencies are installed at first use, as described in [Automatic Dependency Installation](index.md#automatic-dependency-installation).
 
 ## [`github`]
 
-`github` is the broadest repository-hosting tool on this page, covering repository search, repository stats, issues, pull requests, files, branches, and code search.
-
-### What It Does
-
-`github` exposes repository discovery methods such as `search_repositories()`, `list_repositories()`, `get_repository()`, `get_repository_with_stats()`, `list_branches()`, `get_repository_languages()`, and `get_repository_stars()`.
-It also exposes issue and pull request workflows such as `list_issues()`, `get_issue()`, `comment_on_issue()`, `edit_issue()`, `get_pull_request()`, `get_pull_request_comments()`, `create_pull_request()`, `create_pull_request_comment()`, and `create_review_request()`.
-The file-management surface includes `create_file()`, `get_file_content()`, `update_file()`, `delete_file()`, `get_directory_content()`, and `get_branch_content()`.
-`base_url` lets the same tool talk to GitHub Enterprise, but it must point at the API root rather than the normal web UI root.
-
-### Configuration
+`github` covers repository search and stats, branches, files, issues, labels, pull requests, review requests, and code search.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `access_token` | `password` | `no` | `null` | Optional explicit GitHub access token; takes precedence over OAuth when non-blank. |
-| `base_url` | `url` | `no` | `null` | Optional GitHub Enterprise API base URL such as `https://github.example.com/api/v3`. |
-
-### OAuth Setup
-
-Choose **Connect with GitHub** on the Tools dashboard to use requester-scoped GitHub App user OAuth.
-For a self-hosted installation, configure the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the callback URL.
-MindRoom requests no classic OAuth scopes because GitHub App user tokens use the app's fine-grained permissions.
-Managed GitHub credentials follow the requester independently of the agent's worker scope and stay in the primary MindRoom runtime.
-When a requester has not connected GitHub, tool calls return a structured `OAuthConnectionRequired` result containing that requester's connect URL.
-MindRoom refreshes expiring access tokens through the existing scoped OAuth refresh flow and persists rotated access and refresh tokens.
-
-Choose **Use access token** instead to save an explicit token, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
-A non-blank saved `access_token` takes precedence over a non-blank `GITHUB_ACCESS_TOKEN`, which takes precedence over requester-scoped OAuth credentials.
-Whitespace-only token values are treated as absent.
-
-### Example
+| `access_token` | `password` | `no` | `null` | Explicit GitHub token; takes precedence over OAuth. |
+| `base_url` | `url` | `no` | `null` | GitHub Enterprise API root such as `https://github.example.com/api/v3`, not the web UI root. |
 
 ```yaml
 agents:
@@ -77,68 +48,22 @@ agents:
           base_url: https://github.example.com/api/v3
 ```
 
-```python
-get_repository("mindroom-ai/mindroom")
-list_issues("mindroom-ai/mindroom", state="open", page=1, per_page=20)
-get_pull_request("mindroom-ai/mindroom", 123)
-```
+### OAuth Setup
 
-### Notes
+Choose **Connect with GitHub** on the Tools dashboard to connect your own GitHub account through GitHub App user OAuth.
+For a self-hosted installation, save the GitHub App client ID and client secret under the `github_oauth_client` credential service and register `/api/oauth/github/callback` on the installation's public URL as the app's callback URL.
+MindRoom requests no classic OAuth scopes, so the token has the GitHub App's fine-grained permissions.
+Each requester's GitHub connection is their own, regardless of the agent's worker scope, and `github` always runs in the primary MindRoom runtime.
+Until a requester connects, `github` calls return an `OAuthConnectionRequired` result containing that requester's connect link.
 
-- The tool can start without credentials; its functions return a requester-bound OAuth connection link until GitHub is connected or an explicit token is configured.
-- Use `base_url` only for GitHub Enterprise, and set it to the API endpoint such as `/api/v3` rather than the human-facing site root.
-- `github` is the best fit on this page when you need repository file operations or rich pull-request inspection in addition to issue tracking.
+To use one token for everyone instead, choose **Use access token** and save it, or set `GITHUB_ACCESS_TOKEN` in the runtime environment.
+A saved `access_token` wins over `GITHUB_ACCESS_TOKEN`, which wins over a requester's OAuth connection, and blank or whitespace-only values count as unset.
 
 ## [`todo`]
 
-`todo` is MindRoom's built-in per-thread work-plan tool.
-
-### What It Does
-
-`todo` exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`.
-Todo items are scoped to the current Matrix room and resolved thread, so separate threads can carry independent plans.
-Each item can have a priority, dependency list, status, and assigned agent name.
-Assigning work to an agent, or changing work assigned to an agent, is refused unless the requester may address that agent in the current room under its `access` policy.
-Each item records the requester who wrote its title, human or agent, and other changes keep that attribution.
-Items written before requesters were recorded have no attribution until their next change, which records the current requester.
-Reassigning an item without rewriting its title also requires that its recorded requester may address the new agent.
-State is stored under `mindroom_data/todo/` and survives restarts.
-Built-in templates live with the package, and agents can add workspace-local templates under `todo/templates`.
-Templates are YAML with inline Jinja inside values, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and filters like `{{ BRANCH | default('main') }}`; YAML aliases and collections nested more than 64 levels deep are refused.
-Workspace templates render with Jinja's sandbox in a short-lived child process limited to 128 MiB of memory, while built-in templates render in MindRoom itself.
-Only one workspace template renders at a time, and a call that arrives while another renders waits for it within its own time limit.
-Outside Linux, which is the only platform that enforces that memory limit, workspace templates may only substitute `{{ NAME }}`.
-A workspace template file holds at most 64 KiB, and one `apply_template` call reads at most 64 KiB of template text, renders at most 65,536 characters within 5 seconds, and expands to at most 100 todos, sub-templates included.
-One `list_templates` call examines at most 1,024 entries of `todo/templates`, reads at most 1 MiB of workspace template files, and stops listing workspace templates with a warning when the next file would exceed that.
-Any workspace template file hides the built-in template of the same name, even one the call skips or cannot read, because `apply_template` uses the workspace file.
-Each workspace template render starts a process, so one call fits roughly 80 workspace sub-template renders in those 5 seconds.
-
-### Native Auto-Poke
-
-MindRoom scans native todo state in the background and wakes an idle configured agent when that agent has assigned, open, dependency-unblocked work.
-The scanner waits for the quiet period measured from the newest update among the agent's actionable items in the thread; an item unblocked by a completed dependency keeps its old timestamp, so it becomes eligible as soon as the rest of that agent's actionable work in the thread is quiet.
-Future item timestamps beyond one quiet window are treated as already quiet so clock skew cannot disable a scope indefinitely.
-A pending schedule for the same room and existing thread suppresses the poke, while schedules that create a new thread do not suppress room-main work.
-Work fingerprints are persisted under `mindroom_data/todo/poke_state.json`, so changed work observes a cooldown and unchanged work receives at most three one-hour anti-stall retries.
-A failed send is recorded like any other attempt, so the retry waits out the changed-work cooldown instead of tracking a separate failure counter.
-Future persisted timestamps beyond the relevant cooldown or backstop window are treated as elapsed so clock skew cannot mute valid work indefinitely.
-Each scan sends at most one poke to a given agent even when that agent has actionable work in multiple scopes.
-Todo titles are rendered as literal text, and only the assigned agent is mentioned for dispatch.
-Work written by a human is poked on that human's behalf, with one poke per human, so the assigned agent applies its normal reply access and tool authorization to that human.
-Work written by an agent, team, router, or the internal user, which access policies never restrict, shares one poke that dispatches as the assigned agent's own internal turn.
-Work from a human the assigned agent may not currently reply to in that room, or from any other requester such as a configured bot account, is not poked, and each such item is logged once.
-Items written before requesters were recorded are not poked either, and each is logged once with `todo_poke_requester_unrecorded`, until an update by someone allowed to address the assigned agent records them as that requester's work.
-
-| Environment variable | Default | Behavior |
-| --- | --- | --- |
-| `MINDROOM_TODO_POKE_INTERVAL_SECONDS` | `120` | Sets the scan interval in seconds, `0` disables the worker, and enabled values must be at least `1`. |
-| `MINDROOM_TODO_POKE_QUIET_SECONDS` | `300` | Sets the minimum quiet period for actionable assigned work. |
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
+`todo` keeps a work plan for the current Matrix room and thread, so separate threads carry independent plans.
+It exposes `plan()`, `add_todo()`, `list_todos()`, `update_todo()`, `apply_template()`, and `list_templates()`, and has no configuration fields.
+Plans are stored under `mindroom_data/todo/` and survive restarts.
 
 ```yaml
 agents:
@@ -150,43 +75,88 @@ agents:
 ```python
 plan("[high] Inspect issue\nWrite failing test\nImplement fix")
 add_todo("Run focused regression test", depends_on="a1b2c3d4", priority="high")
-list_todos(show_all=True)
 update_todo("a1b2c3d4", status="done")
 apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 ```
 
-### Notes
+- `plan()` creates one item per non-empty line, with optional `[low]`, `[medium]`, `[high]`, or `[critical]` prefixes.
+- Each item has a priority, a dependency list, a status of `open`, `done`, or `cancelled`, and an optional assigned agent.
+- An open item stays blocked until each of its dependencies is `done` or `cancelled`, so cancelling a prerequisite also unblocks the items that depend on it.
+- `plan()`, `add_todo()` without an assignee, and template items without an assignee assign the work to the calling agent, so that agent is [auto-poked](#auto-poke) about it.
+- `update_todo()` changes the title, priority, status, dependencies, or assignee, and `list_todos(show_all=True)` includes finished items.
+- Assigning work to an agent, or changing work already assigned to one, is refused unless the requester may address that agent in this room under its [`access`](../authorization.md#responder-access) policy.
+- Each item remembers the requester, human or agent, who wrote its title.
+- Reassigning an item without rewriting its title also requires that the title's author may address the new agent.
 
-- `plan()` creates one item per non-empty line and supports `[low]`, `[medium]`, `[high]`, and `[critical]` prefixes.
-- `update_todo()` can change title, priority, status, dependency list, and assignee.
-- `apply_template(..., dry_run=True)` previews template expansion before writing state.
-- The built-in `mindroom-dev` template includes a nested `parallel-review-loop` template.
-- Auto-poke scheduling, deduplication, and idle checks are built into the orchestrator and require no plugin.
+### Templates
+
+`list_templates()` shows the available templates and `apply_template(name, params, dry_run=True)` previews an expansion without writing it.
+MindRoom ships a `mindroom-dev` template, which includes a nested `parallel-review-loop` template.
+Agents can add their own templates under `todo/templates` in their workspace, and a workspace template hides a built-in template of the same name.
+A template file is named `<name>.yaml.j2` and needs a matching `name`, a string `version`, a `description`, and a nonempty `todos` list.
+Each entry has a `title` with optional `priority`, `depends_on`, and `assigned_agent`, or a `sub_template` with optional `params` and `depends_on`.
+`depends_on` lists one-based entry numbers within the same template.
+
+```yaml
+# todo/templates/release.yaml.j2
+name: release
+version: "1.0"
+description: Cut a release.
+todos:
+  - title: "Update changelog for {{ VERSION }}"
+  - title: "Tag {{ VERSION }} on {{ BRANCH | default('main') }}"
+    depends_on: [1]
+    priority: high
+```
+
+Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
+Outside Linux, workspace templates may only substitute `{{ NAME }}`.
+YAML aliases and collections nested more than 64 levels deep are refused.
+
+Workspace templates have these limits:
+
+| Limit | Value |
+| --- | --- |
+| Size of one template file | 64 KiB |
+| Template text read by one `apply_template` call, sub-templates included | 64 KiB |
+| Rendered output of one `apply_template` call | 65,536 characters |
+| Rendering time of one `apply_template` call | 5 seconds |
+| Todos created by one `apply_template` call | 100 |
+
+### Auto-Poke
+
+MindRoom wakes an idle agent that has open, unblocked work assigned to it, with no plugin or configuration needed.
+An agent is poked once its actionable work in a thread has been quiet for the quiet period, and each scan pokes a given agent at most once.
+A pending scheduled task for the same thread suppresses the poke.
+Changed work is poked again after a cooldown, and unchanged work gets at most three more pokes, one hour apart.
+The poke mentions only the assigned agent and quotes todo titles as plain text.
+
+Work written by a human is poked on that human's behalf, so the agent applies its normal reply access and tool authorization to that human.
+Work written by an agent, team, or the router is poked as the assigned agent's own turn.
+Work is not poked when its author is a human the assigned agent may not currently reply to, or a non-agent account such as a configured bot account.
+Items whose author was never recorded are skipped and logged once as `todo_poke_requester_unrecorded` until someone allowed to address the assigned agent updates them.
+
+| Environment variable | Default | Behavior |
+| --- | --- | --- |
+| `MINDROOM_TODO_POKE_INTERVAL_SECONDS` | `120` | Scan interval in seconds; `0` disables auto-poke, and enabled values must be at least `1`. |
+| `MINDROOM_TODO_POKE_QUIET_SECONDS` | `300` | Minimum quiet period in seconds before assigned work is poked. |
 
 ## [`bitbucket`]
 
-`bitbucket` is the Bitbucket repository tool for a configured workspace and repository slug.
-
-### What It Does
-
-`bitbucket` exposes `list_repositories()`, `get_repository_details()`, `create_repository()`, `list_repository_commits()`, `list_all_pull_requests()`, `get_pull_request_details()`, `get_pull_request_changes()`, and `list_issues()`.
-The tool always uses HTTP Basic authentication with `username` and either `token` or `password`, with `token` taking precedence.
-It scopes most operations to the configured `workspace` and `repo_slug`.
-If `server_url` has no scheme, the upstream tool normalizes it to `https://<server_url>/<api_version>`.
-
-### Configuration
+`bitbucket` works on one configured repository: its details, commits, pull requests, pull request changes, and issues.
+`list_repositories()` lists the whole workspace.
+It authenticates with HTTP Basic using `username` plus `token`, or `username` plus `password` when no token is set.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `username` | `text` | `yes` | `null` | Atlassian account email for Bitbucket Cloud; the deployment's Basic-auth username otherwise. |
-| `password` | `password` | `no` | `null` | Basic-auth password for deployments that support it, used when `token` is not supplied. |
-| `token` | `password` | `no` | `null` | Scoped Bitbucket Cloud API token, stored through the dashboard or credential store. |
+| `username` | `text` | `yes` | `null` | Atlassian account email for Bitbucket Cloud; the Basic-auth username for other deployments. Also read from `BITBUCKET_USERNAME`. |
+| `password` | `password` | `no` | `null` | Basic-auth password for deployments that support it. Also read from `BITBUCKET_PASSWORD`. |
+| `token` | `password` | `no` | `null` | Scoped Bitbucket Cloud API token; takes precedence over `password`. Also read from `BITBUCKET_TOKEN`. |
 | `workspace` | `text` | `yes` | `null` | Bitbucket workspace name. |
-| `repo_slug` | `text` | `yes` | `null` | Repository slug used by most repository-scoped calls. |
-| `server_url` | `url` | `no` | `api.bitbucket.org` | Bitbucket host or full base URL. |
-| `api_version` | `text` | `no` | `2.0` | Bitbucket REST API version appended to `server_url`. |
-
-### Example
+| `repo_slug` | `text` | `yes` | `null` | Repository that every repository-scoped call uses. |
+| `server_url` | `url` | `no` | `api.bitbucket.org` | Bitbucket host or full base URL; a bare host gets `https://`. |
+| `api_version` | `text` | `no` | `2.0` | REST API version appended to `server_url`. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
 ```yaml
 agents:
@@ -199,85 +169,48 @@ agents:
           repo_slug: docs
 ```
 
-```python
-get_repository_details()
-list_all_pull_requests(state="OPEN")
-list_repository_commits(count=10)
-```
-
-### Notes
-
-- For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`, following [Atlassian's REST API authentication instructions](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/).
-- For a non-Cloud deployment, use credentials accepted by that deployment's Basic-auth API; this toolkit does not implement a separate bearer-token flow.
-- `repo_slug` is not just a default, because most methods are hard-scoped to that repository and the current `create_repository()` call path also posts through the configured `repo_slug` endpoint on this branch.
-- `list_repositories()` is the workspace-wide overview method, while the pull-request, commit, and issue methods all use the configured repository context.
+- For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`.
+- Other deployments must accept the credentials through Basic authentication, because the tool has no bearer-token mode.
+- `create_repository()` creates the repository at the configured `repo_slug`, so set `repo_slug` to the new repository's slug first.
 
 ## [`jira`]
 
-`jira` is the issue-tracking toolkit for issue lookup, issue creation, JQL search, comments, and worklogs.
-
-### What It Does
-
-`jira` can expose `get_issue()`, `create_issue()`, `search_issues()`, `add_comment()`, and `add_worklog()` through individual enable flags.
-`server_url` is required at runtime, and the upstream client authenticates with `username` plus `token` when both are present, falls back to `username` plus `password`, and otherwise attempts anonymous access.
-`search_issues()` uses plain JQL, which makes it the main entry point for filtered issue lists and backlog queries.
-
-### Configuration
+`jira` provides `get_issue()`, `create_issue()`, `search_issues()` with JQL, `add_comment()`, and `add_worklog()` through one shared Jira account.
+For per-requester Jira Cloud access, use [`atlassian`](atlassian.md) instead.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`. |
-| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. |
-| `password` | `password` | `no` | `null` | Jira password for self-hosted deployments. |
-| `token` | `password` | `no` | `null` | Jira or Atlassian API token, preferred over `password` for cloud deployments. |
+| `server_url` | `url` | `no` | `null` | Jira base URL such as `https://example.atlassian.net`; required unless `JIRA_SERVER_URL` is set. |
+| `username` | `text` | `no` | `null` | Jira username or Atlassian account email. Also read from `JIRA_USERNAME`. |
+| `password` | `password` | `no` | `null` | Password for self-hosted Jira. Also read from `JIRA_PASSWORD`. |
+| `token` | `password` | `no` | `null` | Jira or Atlassian API token; used instead of `password` when both are set. Also read from `JIRA_TOKEN`. |
 | `enable_get_issue` | `boolean` | `no` | `true` | Enable `get_issue()`. |
 | `enable_create_issue` | `boolean` | `no` | `true` | Enable `create_issue()`. |
 | `enable_search_issues` | `boolean` | `no` | `true` | Enable `search_issues()`. |
 | `enable_add_comment` | `boolean` | `no` | `true` | Enable `add_comment()`. |
 | `enable_add_worklog` | `boolean` | `no` | `true` | Enable `add_worklog()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream Jira tool surface regardless of the per-method flags. |
-
-### Example
+| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
 
 ```yaml
 agents:
   delivery:
     tools:
       - jira:
-          server_url: https://mindroom.atlassian.net
+          server_url: https://example.atlassian.net
           username: bot@example.com
           enable_add_worklog: false
 ```
 
-```python
-get_issue("PROJ-123")
-search_issues("project = PROJ AND status != Done", max_results=20)
-add_comment("PROJ-123", "Reviewed and ready for testing.")
-```
-
-### Notes
-
-- `server_url` is marked optional in metadata, but the upstream client raises if neither `server_url` nor `JIRA_SERVER_URL` is available.
-- For Atlassian Cloud, use `username` plus `token` instead of `password`.
-- If your Jira deployment allows anonymous API access, the tool can still work without credentials, but most hosted installations do not permit that.
+- For Atlassian Cloud, use `username` plus `token`.
+- Without `username` and a `token` or `password`, the tool connects anonymously, which most Jira sites reject.
 
 ## [`linear`]
 
-`linear` is the GraphQL-backed issue tracker tool for viewer info, teams, issues, and issue updates.
-
-### What It Does
-
-`linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`.
-All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`.
-For `create_issue()`, obtain a `team_id` with `get_teams_details()` and, to assign the issue to yourself, use the current-user ID from `get_user_details()` as `assignee_id`.
-
-### Configuration
+`linear` reads the current user, teams, issues, assigned issues, workflow-state issues, and high-priority issues, and creates and updates issues.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Linear API key. |
-
-### Example
+| `api_key` | `password` | `no` | `null` | Linear API key; required unless `LINEAR_API_KEY` is set. |
 
 ```yaml
 agents:
@@ -286,38 +219,18 @@ agents:
       - linear
 ```
 
-```python
-get_user_details()
-get_teams_details()
-get_issue_details("BLA-123")
-get_high_priority_issues()
-```
-
-### Notes
-
-- `api_key` is marked optional in metadata, but the upstream client raises if neither `api_key` nor `LINEAR_API_KEY` is present.
-- `get_issue_details(issue_id)` accepts an issue UUID or a human-readable issue key such as `BLA-123`, matching [Linear's issue query](https://linear.app/developers/graphql).
-- `linear` is the best fit on this page when your workflow is already centered on Linear IDs, teams, and workflow states rather than repository-native pull requests.
+- `get_issue_details()` accepts an issue UUID or a key such as `BLA-123`.
+- `create_issue()` needs a `team_id` from `get_teams_details()`; to assign an issue to yourself, pass the ID from `get_user_details()` as `assignee_id`.
 
 ## [`clickup`]
 
-`clickup` is the ClickUp task-management tool for spaces, lists, tasks, and task lifecycle operations.
-
-### What It Does
-
-`clickup` exposes `list_tasks()`, `create_task()`, `get_task()`, `update_task()`, `delete_task()`, `list_spaces()`, and `list_lists()`.
-The tool uses `master_space_id` to call ClickUp's `team/{id}/space` endpoints, so this field is effectively the team or workspace identifier used to discover spaces.
-Name-based space and list lookup is case-insensitive and also supports regex-style matching in the current upstream implementation.
-`list_tasks()` aggregates tasks across all lists in a space, while `create_task()` creates into the first list returned for the matched space.
-
-### Configuration
+`clickup` lists spaces, lists, and tasks, and creates, reads, updates, and deletes tasks.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | ClickUp API key. |
-| `master_space_id` | `text` | `yes` | `null` | ClickUp team or workspace ID used to enumerate spaces. |
-
-### Example
+| `api_key` | `password` | `yes` | `null` | ClickUp API key from ClickUp Settings > Apps. Also read from `CLICKUP_API_KEY`. |
+| `master_space_id` | `text` | `yes` | `null` | ClickUp team (workspace) ID whose spaces the tool works with. Also read from `MASTER_SPACE_ID`. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
 ```yaml
 agents:
@@ -327,86 +240,49 @@ agents:
           master_space_id: "90123456"
 ```
 
-```python
-list_spaces()
-list_lists("Engineering")
-create_task("Engineering", "ISSUE-075", "Draft the project-management tool page")
-```
-
-### Notes
-
-- The runtime also checks `CLICKUP_API_KEY` and `MASTER_SPACE_ID`, so you can keep both values in stored credentials or environment instead of YAML.
-- `create_task()` always uses the first list returned for the matching space on this branch, so use `list_lists()` first if list placement matters.
-- `update_task()` passes arbitrary keyword updates through to the ClickUp API, which makes it the most flexible write method once you have a task ID.
+- Spaces and lists are matched by name, case-insensitively.
+- `list_tasks()` returns tasks from every list in a space.
+- `create_task()` always creates the task in the first list of the matched space, so check `list_lists()` when placement matters.
+- `update_task()` passes any field updates through to the ClickUp API.
 
 ## [`confluence`]
 
-`confluence` is the Atlassian wiki tool for space discovery and page retrieval, creation, and updates.
-
-### What It Does
-
-`confluence` exposes `get_page_content()`, `get_space_key()`, `create_page()`, `update_page()`, `get_all_space_detail()`, and `get_all_page_from_space()`.
-The tool resolves a space by human-readable name or by key, and other space-scoped methods depend on that resolution step.
-`get_page_content()` defaults to `expand="body.storage"`, and `create_page()` and `update_page()` pass raw body content to the Confluence API.
-At runtime the tool accepts either `api_key` or `password`, with the current implementation preferring `api_key` or `CONFLUENCE_API_KEY` when both are present.
-
-### Configuration
+`confluence` lists spaces and their pages, and reads, creates, and updates pages through one shared account.
+Spaces can be named by title or key.
+For per-requester Confluence Cloud access, use [`atlassian`](atlassian.md) instead.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `url` | `url` | `no` | `null` | Confluence base URL. |
-| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email. |
-| `password` | `password` | `no` | `null` | Confluence password for self-hosted deployments. |
-| `api_key` | `password` | `no` | `null` | Confluence API key, preferred over `password` for cloud deployments. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates when connecting to Confluence. |
-
-### Example
+| `url` | `url` | `no` | `null` | Confluence base URL; required unless `CONFLUENCE_URL` is set. |
+| `username` | `text` | `no` | `null` | Confluence username or Atlassian account email; required unless `CONFLUENCE_USERNAME` is set. |
+| `password` | `password` | `no` | `null` | Password for self-hosted Confluence. Also read from `CONFLUENCE_PASSWORD`. |
+| `api_key` | `password` | `no` | `null` | Confluence API key; used instead of `password` when both are set. Also read from `CONFLUENCE_API_KEY`. |
+| `verify_ssl` | `boolean` | `no` | `true` | Verify TLS certificates; disable only for self-signed internal deployments. |
 
 ```yaml
 agents:
   docs:
     tools:
       - confluence:
-          url: https://mindroom.atlassian.net/wiki
+          url: https://example.atlassian.net/wiki
           username: docs@example.com
 ```
 
-```python
-get_all_space_detail()
-get_page_content("Engineering", "Runbook")
-create_page("Engineering", "Release Notes", "<p>Initial draft</p>")
-```
-
-### Notes
-
-- `url`, `username`, and one of `api_key` or `password` are all required in practice even though the registry marks them optional.
-- For Atlassian Cloud, use `username` plus `api_key`, and reserve `password` for self-hosted or older installations.
-- Set `verify_ssl: false` only for self-signed or internal deployments where you understand the TLS tradeoff.
+- One of `api_key` or `password` is required; use `api_key` for Atlassian Cloud.
+- Page bodies are read and written in Confluence storage format, such as `<p>Initial draft</p>`.
 
 ## [`notion`]
 
-`notion` is the Notion database tool for page creation, content appends, and tag-based search.
-
-### What It Does
-
-`notion` can expose `create_page()`, `update_page()`, and `search_pages()` through individual enable flags.
-The current upstream implementation assumes the target database has a title property named `Name` and a select property named `Tag`.
-`create_page()` creates a page with a title, a tag, and one initial paragraph block.
-`update_page()` appends a paragraph block to an existing page instead of rewriting the whole page.
-`search_pages()` queries the database directly over HTTP and filters by the `Tag` select value.
-
-### Configuration
+`notion` creates pages in one database, appends a paragraph to an existing page, and searches the database by tag.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Notion integration token. |
-| `database_id` | `text` | `yes` | `null` | Notion database ID. |
+| `api_key` | `password` | `yes` | `null` | Notion internal integration token. Also read from `NOTION_API_KEY`. |
+| `database_id` | `text` | `yes` | `null` | Notion database ID. Also read from `NOTION_DATABASE_ID`. |
 | `enable_create_page` | `boolean` | `no` | `true` | Enable `create_page()`. |
 | `enable_update_page` | `boolean` | `no` | `true` | Enable `update_page()`. |
 | `enable_search_pages` | `boolean` | `no` | `true` | Enable `search_pages()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream Notion tool surface regardless of the per-method flags. |
-
-### Example
+| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flags above. |
 
 ```yaml
 agents:
@@ -417,38 +293,19 @@ agents:
           enable_update_page: false
 ```
 
-```python
-search_pages("docs")
-create_page("ISSUE-075", "docs", "Draft the project-management tool page")
-update_page("PAGE_ID", "Added rollout notes")
-```
-
-### Notes
-
-- The integration must be shared with the target database before the tool can create or search pages.
-- The database schema must include a `Name` title property and a `Tag` select property, because those names are hard-coded in the current upstream implementation.
-- `all: true` overrides the individual enable flags when you want the full Notion surface.
+- Create the integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it, or the tool cannot create or find pages.
+- The database must have a title property named `Name` and a select property named `Tag`.
+- `create_page()` sets a title, a tag, and one paragraph, and `update_page()` appends a paragraph rather than rewriting the page.
 
 ## [`trello`]
 
-`trello` is the board-management tool for boards, lists, cards, and card moves.
-
-### What It Does
-
-`trello` exposes `create_card()`, `get_board_lists()`, `move_card()`, `get_cards()`, `create_board()`, `create_list()`, and `list_boards()`.
-`create_card()` looks up the target list by case-insensitive `list_name` within a board and then creates the card there.
-`move_card()` works by card ID and destination list ID, which makes `get_board_lists()` and `get_cards()` the normal discovery helpers before edits.
-If the Trello client cannot initialize, the current upstream methods return `"Trello client not initialized"` instead of structured JSON.
-
-### Configuration
+`trello` lists, creates, and inspects boards, lists, and cards, and moves cards between lists.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Trello API key. |
-| `api_secret` | `password` | `no` | `null` | Trello API secret. |
-| `token` | `password` | `no` | `null` | Trello user token. |
-
-### Example
+| `api_key` | `password` | `no` | `null` | Trello API key. Also read from `TRELLO_API_KEY`. |
+| `api_secret` | `password` | `no` | `null` | Trello API secret. Also read from `TRELLO_API_SECRET`. |
+| `token` | `password` | `no` | `null` | Trello user token. Also read from `TRELLO_TOKEN`. |
 
 ```yaml
 agents:
@@ -457,36 +314,17 @@ agents:
       - trello
 ```
 
-```python
-list_boards(board_filter="open")
-get_board_lists("BOARD_ID")
-create_card("BOARD_ID", "To Do", "Write docs", "Draft the new tool page")
-```
-
-### Notes
-
-- The registry marks all three fields optional, but a working Trello client effectively needs `api_key`, `api_secret`, and `token`.
-- `list_boards()` accepts filters such as `all`, `open`, `closed`, `organization`, `public`, and `starred`.
-- Use `get_board_lists()` first when you need list IDs for `move_card()` or when you want to confirm the exact list names present on a board.
+- All three credentials are needed; if any is missing, Trello rejects the calls with an authentication error.
+- `create_card()` finds the target list by name, case-insensitively, while `move_card()` needs the card ID and destination list ID from `get_cards()` and `get_board_lists()`.
+- `list_boards()` accepts the filters `all`, `open`, `closed`, `organization`, `public`, and `starred`.
 
 ## [`todoist`]
 
-`todoist` is the personal task-management tool for creating, updating, completing, deleting, and listing tasks and projects.
-
-### What It Does
-
-`todoist` exposes `create_task()`, `get_task()`, `update_task()`, `close_task()`, `delete_task()`, `get_active_tasks()`, and `get_projects()`.
-`create_task()` supports optional `project_id`, natural-language `due_string`, `priority`, and `labels`.
-`update_task()` is the richest write method, with support for content, description, labels, priority, `due_string`, `due_date`, `due_datetime`, `due_lang`, `assignee_id`, and `section_id`.
-`close_task()` marks a task complete, while `delete_task()` permanently removes it.
-
-### Configuration
+`todoist` creates, reads, updates, completes, and deletes tasks, and lists active tasks and projects.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_token` | `password` | `no` | `null` | Todoist API token. |
-
-### Example
+| `api_token` | `password` | `no` | `null` | Todoist API token; required unless `TODOIST_API_TOKEN` is set. |
 
 ```yaml
 agents:
@@ -495,40 +333,24 @@ agents:
       - todoist
 ```
 
-```python
-create_task("Write project-management docs", due_string="tomorrow", priority=4)
-get_active_tasks()
-close_task("TASK_ID")
-```
-
-### Notes
-
-- `api_token` is marked optional in metadata, but the upstream client raises if neither `api_token` nor `TODOIST_API_TOKEN` is present.
-- Use `get_projects()` first when you want to target a specific project with `project_id`.
-- `priority` follows Todoist's `1` to `4` scale, where `4` is the highest priority.
+- `create_task()` accepts an optional `project_id` from `get_projects()`, a natural-language `due_string` such as `tomorrow`, a `priority`, and `labels`.
+- `update_task()` can also change the description, due date or time, due language, assignee, and section.
+- `priority` runs from `1` to `4`, where `4` is the highest.
+- `close_task()` marks a task complete, while `delete_task()` removes it permanently.
 
 ## [`zendesk`]
 
-`zendesk` is the help-center search tool on this page.
-
-### What It Does
-
-`zendesk` can expose `search_zendesk()` through the `enable_search_zendesk` flag.
-The current upstream implementation calls the Zendesk Help Center articles search endpoint at `https://<company_name>.zendesk.com/api/v2/help_center/articles/search.json`.
-Search results are reduced to cleaned article body text with HTML tags removed.
-This tool does not expose ticket lookup or ticket updates on this branch.
-
-### Configuration
+`zendesk` searches Help Center articles with `search_zendesk()` and returns their body text without titles, URLs, or HTML.
+It cannot read or update tickets.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `username` | `text` | `no` | `null` | Zendesk username. |
-| `password` | `password` | `no` | `null` | Zendesk password. |
-| `company_name` | `text` | `no` | `null` | Zendesk subdomain used to build the API URL. |
+| `username` | `text` | `no` | `null` | Zendesk username; required unless `ZENDESK_USERNAME` is set. |
+| `password` | `password` | `no` | `null` | Zendesk password; required unless `ZENDESK_PASSWORD` is set. |
+| `company_name` | `text` | `no` | `null` | Zendesk subdomain, as in `<company_name>.zendesk.com`, not the display name; required unless `ZENDESK_COMPANY_NAME` is set. |
 | `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `search_zendesk()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream Zendesk tool surface regardless of the per-method flags. |
-
-### Example
+| `all` | `boolean` | `no` | `false` | Enable every function regardless of the flag above. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
 ```yaml
 agents:
@@ -538,16 +360,6 @@ agents:
           username: support@example.com
           company_name: acme
 ```
-
-```python
-search_zendesk("Matrix onboarding")
-```
-
-### Notes
-
-- `username`, `password`, and `company_name` are all required in practice even though the registry marks them optional.
-- `company_name` is the Zendesk subdomain, not the human-readable company display name.
-- Because the current tool returns cleaned article body text without titles or URLs, it is better for knowledge lookup than for navigational link retrieval.
 
 ## Related Docs
 

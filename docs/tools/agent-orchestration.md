@@ -4,169 +4,36 @@ icon: lucide/wrench
 
 # Agent Orchestration
 
-Use these tools and presets to recover scoped OAuth connections, coordinate other agents, save reusable Dynamic Workflows, change runtime configuration, import OpenClaw-style workspaces, and keep long-lived Claude coding sessions alive across turns.
-
-## What This Page Covers
-
-This page documents the built-in tools in the `agent-orchestration` group.
-Use these tools when you need OAuth recovery, multi-agent coordination, reusable workflow runs, runtime config changes, config-only presets, persistent Claude Agent SDK sessions, or retained usage statistics.
+These built-in tools let an agent hand tasks to other agents, build and run reusable Dynamic Workflows, publish reports through public links, change MindRoom's configuration from chat, and keep Claude Code sessions alive across turns.
 
 ## Tools On This Page
 
-- [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one authorized OAuth connection.
-- [`delegate`] - Run a configured agent as a fresh subagent and wait for its answer.
-- [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
-- [`report_publishing`] - Publish authorized report artifacts through revocable public links.
-- [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
-- [`self_config`] - Let an agent read and update only its own configuration.
+- [`delegate`](#delegate) - Run a configured agent as a fresh subagent and wait for its answer.
+- [`dynamic_workflow`](#dynamic_workflow) - Create, update, run, and inspect saved Dynamic Workflows.
+- [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
+- [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
+- [`self_config`](#self_config) - Let an agent read and update only its own configuration.
+- [`claude_agent`](#claude_agent) - Run persistent Claude Agent SDK coding sessions.
+
+Related tools documented elsewhere:
+
+- [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
-- [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
-- [`usage_stats`](../usage.md#usage_stats) - Local, read-only summaries of retained Agno run usage.
-
-## Common Setup Notes
-
-All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
-[`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
-Only [`claude_agent`] has tool-specific credential fields.
-[`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
-`agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
-`agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
-[`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
-[`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
-[`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
-[`openclaw_compat`] is a config preset, not a runtime toolkit.
-`Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
-For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
-
-See [`oauth_connections`](../oauth-framework.md#oauth_connections) and [`usage_stats`](../usage.md#usage_stats).
-
-## Matrix Conversations
-
-Use [matrix_message](matrix-message.md#agent-conversations) to start and continue conversations with agents in Matrix.
-Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents.
-`matrix_room(action="agents")` lists agents and teams eligible to answer this requester in the selected room, including the caller when eligible.
-Send `matrix_message(recipient="agent_name", message="...")` to request a response in the current conversation.
-For a separate conversation with a thread-mode agent, add `new_thread=True` and keep the returned `thread_id` for later reads and messages.
-Room-mode agents use the room timeline and reject requests for separate threads.
-Messages return immediately and the conversation remains visible in Matrix.
-Use `run_subagent` below when you need a fresh child's result before continuing.
+- [`usage_stats`](../usage.md#usage_stats) - Read-only summaries of retained usage.
+- [`matrix_message`](matrix-message.md#agent-conversations) - Start and continue visible Matrix conversations with other agents; messages return immediately instead of waiting for an answer.
 
 ## [`delegate`]
 
-`delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Both return the child's response inline.
-When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
-Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
-
-### What It Does
-
-```python
-run_subagent(task: str, agent_name: str | None = None, model: str | None = None, minimal: bool = False) -> str
-continue_subagent(subagent_id: str, message: str) -> str
-```
-The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
-Fresh execution still uses the target agent's configured workspace, memory, requester scope, and tool policy.
-Set `model` to an alias from `models:` to override the child's model without changing its agent identity.
-The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
-Unknown model aliases are rejected before the child starts, with available aliases included in the error.
-Set `minimal` to `True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), with a short prompt and one Bash tool instead of its full system prompt and tool schemas.
-The tool description recommends this for self-contained tasks whose child does not need that context and lists the allowed subagents whose shell can run minimal mode; when none can, the `minimal` parameter is not offered.
-The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
-Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
-Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
-Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
-MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background.
-Interactive questions are disabled for delegated runs.
-`run_subagent` does not create a Matrix conversation thread.
-If a delegated Matrix run requests approval, MindRoom posts the native approval request to the source room and thread while durably retaining the paused parent-child continuation.
-Detached OpenAI-compatible runs retain their existing restriction on approval-gated and room-context tools.
-If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
-Empty tasks and follow-up messages are rejected.
-
-Use `continue_subagent` after the child returns to retain its own conversation history.
-The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
-Follow-ups preserve the child session, selected model and mode, and nesting depth, recheck current permissions, and require the original storage scope.
-The model choice also survives approval pauses and restarts.
-Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
-Calls wait for a result and do not queue messages into a running child or one awaiting approval.
-Finish that child's current turn before sending another message.
-After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
-Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
-
-Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
-`run.json` and `events.jsonl` are updated with every event, while `transcript.md` is rendered when the delegation finishes.
-The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
-Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
-MindRoom keeps each record's working state, including a copy of its event log, below `MINDROOM_STORAGE_PATH/tracking/`, and the workspace files are audit exports of it that MindRoom never reads.
-Editing or deleting an export never affects the delegation: MindRoom rewrites `run.json` with every event, rewrites an `events.jsonl` whose size no longer matches its copy, and rewrites `run.json`, `events.jsonl`, and `transcript.md` when the delegation finishes.
-Each record is capped: 1 MiB per event, 64 MiB and 65,536 events per event log, and 4 MiB for `run.json`.
-A delegation whose task leaves no room in `run.json` for the output, error, and usage that finishing adds is refused before it starts.
-A running child whose record reaches a cap fails, so very long delegations that keep large tool results inline stop there; a child that has already finished still settles, because its terminal event keeps reserved room.
-The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
-Completed task results include a reference to the child's record.
+`delegate` gives an agent `run_subagent` and `continue_subagent`, which run another configured agent in a fresh session and return its answer inside the same tool call.
+Use it when the caller needs a specialist's result before continuing; use [`matrix_message`](matrix-message.md#agent-conversations) for a conversation that should be visible in Matrix.
 
 ### Agent Delegation
 
-Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
-The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None, minimal: bool = False)` and `continue_subagent(subagent_id: str, message: str)`.
-When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
-
-The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
-Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
-An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
-Unknown model aliases are rejected before execution.
-The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
-Pass `minimal: true` to run the child in [minimal mode](../tools/agent-cli.md#minimal-subagents), which saves tokens when the child's full system prompt is not needed; follow-ups keep that mode.
-The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
-Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
-The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
-Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
-The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
-Listing the caller itself allows a fresh copy with the same configured capabilities.
-Omitting `agent_name` or passing `None` selects the caller itself; the same `delegate_to` allowlist still applies.
-For an ongoing Matrix conversation, use [matrix_message](../tools/matrix-message.md#agent-conversations).
-Each child writes redacted execution records under `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in its resolved workspace, and the caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
-Approval-gated child calls use the native Matrix approval flow in the source room and thread while the parent-child continuation remains durable.
-
-```yaml
-agents:
-  leader:
-    display_name: Leader
-    role: Orchestrate tasks by delegating to specialist agents
-    model: sonnet
-    delegate_to: [leader, code, research]
-    rooms: [lobby]
-
-  code:
-    display_name: CodeAgent
-    role: Generate code, manage files
-    model: sonnet
-    tools: [file, shell]
-    delegate_to: [research]  # can further delegate
-    rooms: [lobby]
-
-  research:
-    display_name: ResearchAgent
-    role: Research topics and provide summaries
-    model: sonnet
-    tools: [duckduckgo]
-    rooms: [lobby]
-```
-
-**Constraints:**
-
-- Targets must reference existing agent names in the config
-- An agent may delegate to itself only when its own name appears in `delegate_to`
-- Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-Enable it by setting `delegate_to` on the agent config (the dashboard calls this **Allowed subagents**).
-MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing `delegate` in `tools:` is usually unnecessary.
-
-### Example
+Set `delegate_to` on the calling agent to the agent names it may run as subagents; the dashboard labels this list **Allowed subagents**.
+MindRoom adds the `delegate` tool automatically when `delegate_to` is non-empty, so you do not list it in `tools:`.
+Every target must be a configured agent, or the config fails to load.
+An agent may run a fresh copy of itself only when its own name is in `delegate_to`.
+Subagents may delegate further through their own `delegate_to`, up to a maximum depth of 3.
 
 ```yaml
 agents:
@@ -174,26 +41,46 @@ agents:
     display_name: Lead
     role: Coordinate specialist agents
     model: sonnet
-    delegate_to:
-      - lead
-      - code
-      - research
+    delegate_to: [lead, code, research]
 
   code:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    tools:
-      - coding
-      - shell
+    tools: [coding, shell]
+    delegate_to: [research]  # can delegate further
 
   research:
     display_name: Research
     role: Gather sources and summarize findings
     model: sonnet
-    tools:
-      - duckduckgo
+    tools: [duckduckgo]
 ```
+
+### Running Subagents
+
+```python
+run_subagent(task: str, agent_name: str | None = None, model: str | None = None, minimal: bool = False) -> str
+continue_subagent(subagent_id: str, message: str) -> str
+```
+
+The child starts with no history from the caller's conversation but keeps its own configured tools, workspace, memory, and tool policy.
+Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
+Omitting `agent_name` selects the caller itself, which still requires its own name in `delegate_to`.
+Set `model` to an alias from `models:` to override the child's model for that session; it takes precedence over thread and room model choices, and omitting it uses normal model selection.
+Set `minimal=True` to run the child in [minimal mode](agent-cli.md#minimal-subagents), which saves tokens when the child does not need its full system prompt.
+The caller waits for the child to finish and receives its answer, a stable `Subagent ID`, and an audit reference.
+Delegated runs do not create a Matrix thread and cannot ask the user interactive questions.
+When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
+In Matrix conversations, a parent runs its subagents one at a time.
+Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](../openai-api.md).
+When the caller has a workspace, both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](execution-and-coding.md#workspace-and-tool-output-files).
+
+Use `continue_subagent` with the returned ID to send a follow-up into the same child session after its previous turn returns.
+The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
+Follow-ups keep the child's history, model, and mode, and recheck current permissions.
+A follow-up sent while the child is still running or awaiting approval is refused; finish that turn first.
+If MindRoom restarts during a child turn, that turn is reported as interrupted instead of being rerun, and a pending approval stays pending.
 
 ```python
 run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
@@ -210,35 +97,28 @@ continue_subagent(
 )
 ```
 
-### Notes
+Common errors:
 
-- `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
-- Recursive delegation is supported, but only up to a maximum depth of 3.
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
-- Use `continue_subagent` for another answer from an existing child; use [matrix_message](matrix-message.md#agent-conversations) for a conversation visible in Matrix.
-- Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+- `Cannot delegate to '<name>'. Allowed subagents: ...` - the target is not in the caller's `delegate_to`.
+- `Cannot delegate to '<name>': that agent is not allowed to reply to you.` - the requester is not allowed to use the target agent under its [access settings](../authorization.md).
+- `Cannot delegate: Unknown model '<model>'. Available models: ...` - `model` is not an alias in `models:`.
+- `Cannot delegate: the maximum delegation depth was reached.` - the chain of subagents is already 3 deep.
+- `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
+- `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
+
+### Delegation Records
+
+Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
+`run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
+The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
+Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
+Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
+These files are audit exports that MindRoom never reads, so editing or deleting them does not affect the delegation.
 
 ## [`dynamic_workflow`]
 
-`dynamic_workflow` lets an agent save a reusable workflow, publish immutable revisions, run the active revision, and inspect stored run records.
-
-### What It Does
-
-`dynamic_workflow` exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`.
-All calls return JSON strings with a `status` field and operation-specific payload data.
-Saved specs live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
-Each update creates a new immutable `revisions/<revision>.yaml` file and updates the small `workflow.yaml` pointer file.
-Each run pins the active revision at start time, writes a `runs/<run_id>.json` record, and writes `report.md`, `report.html`, and `step_outputs.json` under that run's artifact directory.
-If `MINDROOM_PUBLIC_URL` is set, successful and failed run payloads include a private report URL under `/reports/private/...`.
-Private report routes authorize the dashboard requester against the run's `requested_by` identity.
-Use [`report_publishing`] to publish a completed Dynamic Workflow run report through a revocable public URL under `/reports/public/<slug>`.
-If `MINDROOM_PUBLIC_URL` is unset, the report artifacts are still persisted on disk and listed in the run payload.
-
-### Configuration
-
-Enable the tool by adding `dynamic_workflow` to the agent that should be allowed to create and run workflows.
-The current implementation supports agent-scoped workflows from agent tools.
-Room and tenant scopes are reserved for a future approval policy, so tool calls with `scope="room"` or `scope="tenant"` return an error today.
+`dynamic_workflow` lets an agent save a reusable multi-step workflow, publish new revisions, run it, and inspect run records.
+Add it to the `tools:` of each agent that should create and run workflows.
 
 ```yaml
 agents:
@@ -250,31 +130,42 @@ agents:
       - dynamic_workflow
 ```
 
+The tool exposes `create_workflow()`, `validate_workflow()`, `update_workflow()`, `run_workflow()`, `get_workflow_run()`, `list_workflows()`, and `list_workflow_revisions()`, each returning JSON with a `status` field.
+`validate_workflow()` reports every validation error in a spec without saving it.
+Workflows belong to the calling agent; `scope="agent"` is the default and the only scope agent tools can use, and `room` or `tenant` returns an error.
+`update_workflow(workflow_id, patch, reason)` merges `patch` into the current spec: nested objects merge, but a list such as `workflow` or `participants` replaces the old list, so pass the complete list when changing one entry.
+Each `update_workflow()` publishes a new immutable revision, and each run uses the revision active when it starts.
+Saved workflows and run records live under `MINDROOM_STORAGE_PATH/dynamic_workflows/`.
+A run completes inside the tool call and writes `report.md`, `report.html`, and `step_outputs.json`, which the run payload lists.
+Only the user who requested a run can read its record, publish it, or open its private report.
+When `MINDROOM_PUBLIC_URL` is set, run payloads include a private report URL under `/reports/private/...` that opens for that user in the dashboard.
+Use [`report_publishing`](#report_publishing) to share a completed run's report through a public link.
+
 ### Spec Shape
 
-Workflow specs are declarative JSON/YAML objects with `schema_version: 1`.
-The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`.
-`kind` must be `workflow`.
-`inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
-Participants can be `ephemeral_agent` or `room_agent`.
-An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`).
-Every participant tool must also be listed in `permissions.tools`.
-Dynamic Workflow participants cannot suspend and resume a model run for human approval.
-A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
-The [participant approval rules below](#allowing-participant-tools) describe operator-rule precedence, automatic grants, and tool eligibility.
-A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
-Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
-Step types are `transform_step`, `agent_step`, and `report_step`.
-`transform_step` renders a template without calling a model.
-`agent_step` renders a prompt and sends it to the selected participant.
-`report_step` renders Markdown report content from input and prior step outputs.
-Outputs declare `id`, `type`, and `from_step`.
-Output `type` may be `text`, `markdown`, `json`, or `html_report`.
-Permissions support runtime caps, model caps, and tool grants.
-`permissions.data` must keep `matrix_history`, `attachments`, and `knowledge_bases` disabled until approval-backed data grants exist.
+Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: workflow`.
+The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
 
-### Example
+- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
+- **`participants`**: Up to 8 entries with `kind` set to `ephemeral_agent` (the default) or `room_agent`.
+  - An `ephemeral_agent` declares `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
+    Its `model`, given as an alias or model ID, defaults to the caller's current model and must be that model; when `permissions.models` is set, it must also list it.
+    Its `tools` may include any registered tool except `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, and `invite_router`, and each tool must also appear in `permissions.tools`.
+    Granted tools run with the caller's credentials, worker routing, and plugin hooks.
+  - A `room_agent` declares `id` and `agent` and reuses a configured agent that the requester can already use in the current room.
+    It runs with its configured model and without tools, skills, knowledge, durable state, or context files.
+- **`workflow`**: Up to 64 steps, each with a unique `id` and a `type`, run one at a time in order.
+  - `agent_step` sends its rendered `prompt` to the named `participant`.
+  - `transform_step` renders a `template` without calling a model.
+  - `report_step` renders Markdown from `body_template` or copies a prior step via `from_step`, with an optional `title`.
+  - Templates can reference `{input.<field>}` and earlier steps as `{steps.<step-id>}`.
+- **`outputs`**: Entries with `id`, `type`, and `from_step`, where `type` is `text`, `markdown`, `json`, or `html_report`.
+- **`permissions`**: Run limits and grants.
+  - `max_runtime_seconds` is 1 to 3600 and defaults to 3600; a run that exceeds it fails.
+  - `max_total_agents` is 1 to 16, defaults to 16, and caps the number of `agent_step` entries.
+  - `max_concurrent_agents` is 1 to 8 and is only validated, because steps never run in parallel.
+  - `models` lists the models participants may use, and `tools` lists the tools participants may be granted.
+  - `data` must keep `matrix_history: none`, `attachments: none`, and `knowledge_bases: []`, because direct workflow data grants are not supported yet; participants can still reach such data through granted tools such as `matrix_message`.
 
 ```python
 create_workflow(
@@ -325,7 +216,9 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to add automatic approval grants for embedded participants after operator-authored approval rules.
+Workflow participants cannot pause for human approval, so a workflow is rejected when any function of a granted tool would require approval.
+Inside a workflow, a function that no approval rule matches requires approval, even when `tool_approval.default` is `auto_approve`.
+Set `allowed_tools` on the caller's `dynamic_workflow` entry to auto-approve the functions of listed toolkits for participants, or use `["*"]` for every eligible toolkit.
 
 ```yaml
 agents:
@@ -336,53 +229,16 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to generate automatic approval grants for all otherwise eligible granted toolkits.
-Operator-authored rules remain first and use the normal first-match function-name policy.
-A first matching `auto_approve` rule can authorize a function outside `allowed_tools`; a matching `require_approval` or script rule makes it unavailable to embedded participants.
-Unmatched functions default to requiring approval and are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
-`claude_agent`, `config_manager`, and `scheduler` receive no generated grant from `allowed_tools`, including `"*"`, but an explicit operator rule can authorize otherwise eligible functions from those toolkits.
-Native-confirming functions remain unavailable even under an operator auto-approval rule.
-Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, `self_config`, and `skill_manage`) are always excluded.
-Participant tools must still be granted in the workflow's `permissions.tools`, resolve through the caller's tool routing, and satisfy their runtime authority checks.
-A function name shared by several granted toolkits receives a generated grant only when every owner is eligible.
-
-### Notes
-
-- Dynamic Workflow runs execute synchronously on the current tool call path today.
-- Long-running background workflow management, workflow-activation approval cards, Matrix history grants, attachment grants, and knowledge-base grants are future work.
-- Ephemeral agents can only use models allowed by both the workflow permissions and the caller's current model policy.
-- Granted tools run with the calling agent's tool routing (credentials, worker sandboxing, and egress proxying), and the tool-hook bridge applies plugin gating.
-- Room-agent participants can reuse only agents that normal room routing would expose to the requester.
-- Runtime caps are enforced for sync and async runs, and async runs are marked failed at the deadline even if participant cancellation is delayed.
+Operator-authored [`tool_approval`](../tool-approval.md) rules are checked first and the first match wins.
+A matching `auto_approve` rule makes a function usable even outside `allowed_tools`, and a matching `require_approval` or script rule makes it unavailable.
+`allowed_tools`, including `"*"`, never auto-approves `claude_agent`, `config_manager`, or `scheduler`, but an explicit operator `auto_approve` rule can.
+Functions that ask for their own confirmation stay unavailable even under an operator `auto_approve` rule.
+A function name shared by several granted toolkits is auto-approved only when every owning toolkit is eligible.
 
 ## [`report_publishing`]
 
-`report_publishing` lets an agent intentionally publish authorized report artifacts through revocable public links.
-
-### What It Does
-
-`report_publishing` exposes `publish_report()` and `revoke_public_report(slug)`.
-All calls return JSON strings with a `status` field and operation-specific payload data.
-The tool does not accept arbitrary filesystem paths.
-It publishes only registered source references that the current Matrix requester is authorized to read.
-The current source types are `dynamic_workflow_run` and `static_site`.
-Use `dynamic_workflow_run` to publish a completed Dynamic Workflow HTML report.
-Use `static_site` to publish a copied workspace directory that contains `index.html` and optional CSS, JavaScript, images, fonts, or JSON assets.
-A `static_site` source path may also point at one workspace HTML file, which is copied and served as `index.html`.
-The static site source path is workspace-relative and the published copy is stored under `MINDROOM_STORAGE_PATH/report_publishing/artifacts/<slug>/`.
-A static site snapshot may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB of total data, and publishing fails with an explanatory error beyond any of those limits.
-The snapshot copies only regular files, reading every entry through no-follow directory descriptors below the workspace root, so a symlink, a special file, or an entry swapped while the copy runs fails the publish instead of leaking the link target.
-Static site links serve under the trailing-slash form `/reports/public/<slug>/`, and the slash-less form redirects there so relative asset URLs resolve.
-JavaScript is allowed for static sites, but the public route serves static sites with a sandbox CSP that omits `allow-same-origin` and sets `connect-src 'none'`.
-That means scripts can drive local page interactivity, but they cannot act as logged-in MindRoom dashboard code or call MindRoom APIs.
-Published link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
-Public report links serve the registered artifact without dashboard authentication until `revoke_public_report(slug)` revokes the slug.
-The `slug` is the public-report identifier returned by `publish_report()`.
-If `MINDROOM_PUBLIC_URL` is set, successful publish payloads include the absolute public URL.
-
-### Configuration
-
-Enable the tool by adding `report_publishing` to any agent that should be allowed to publish report artifacts.
+`report_publishing` lets an agent publish a completed Dynamic Workflow report or a workspace static site through a revocable public link.
+Add it to the agent's `tools:`; it is often enabled next to `dynamic_workflow`.
 
 ```yaml
 agents:
@@ -395,7 +251,23 @@ agents:
       - report_publishing
 ```
 
-### Example
+The tool exposes `publish_report(source_type, source, confirm_public)` and `revoke_public_report(slug)`, each returning JSON with a `status` field.
+`confirm_public=True` is required, so an accidental call publishes nothing.
+A successful publish returns a `slug` and the public path `/reports/public/<slug>`, plus an absolute `public_url` when `MINDROOM_PUBLIC_URL` is set.
+Anyone with the link can open it without signing in until it is revoked.
+Only the user who requested the source run or published the link can revoke it.
+The tool never accepts arbitrary filesystem paths; it publishes only these sources, and only when the current requester may read them:
+
+- **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
+- **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
+  The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
+  The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
+  Publishing copies the site, so later workspace edits need a new `publish_report()` call.
+  A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
+  Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.
+  Scripts can make the page interactive but cannot act as the signed-in dashboard user or call MindRoom APIs.
+  Scripts, stylesheets, and fonts must be bundled in the site, while images may also load from external HTTPS URLs.
+  Pages cannot use `fetch()` or other API connections, even for the site's own JSON files, so embed data in the HTML or a bundled script.
 
 ```python
 publish_report(
@@ -411,52 +283,14 @@ publish_report(
 revoke_public_report("pub_...")
 ```
 
-### Notes
-
-- `confirm_public=True` is required so accidental publish calls fail closed.
-- Dynamic Workflow source references default to `scope="agent"` and may include an explicit `scope`.
-- Static site publishing requires an agent workspace and publishes an immutable copy, so later workspace edits need a new `publish_report()` call.
-- An agent has a workspace when it uses `memory_backend: file` or a `private:` workspace configuration, and the source path resolves against that canonical workspace root.
-- Only the run requester or the user who published the link may revoke it.
-- Additional registered report sources can be added without changing Dynamic Workflow storage.
-- No extra proxy route is needed when `/reports/public/*` already reaches the MindRoom backend.
-- If the dashboard frontend and Python backend are split across upstreams, route `/reports/public/*` to the Python backend and do not put dashboard-login middleware on that path.
-- Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.lab.mindroom.chat`, so publish payloads include clickable absolute URLs.
+Published copies and link records live under `MINDROOM_STORAGE_PATH/report_publishing/`.
+Set `MINDROOM_PUBLIC_URL` to the externally reachable dashboard origin, such as `https://mindroom.example.com`, so results include clickable absolute URLs.
+If the dashboard frontend and the Python backend sit behind separate upstreams, route `/reports/public/*` to the backend without dashboard-login middleware.
 
 ## [`config_manager`]
 
-`config_manager` is the full configuration control plane: it inspects and patches any authored `Config` field and creates or updates agents and teams through curated helpers.
-
-### What It Does
-
-`config_manager` exposes `get_info()`, `manage_config()`, `manage_agent()`, and `manage_team()`.
-`get_info(info_type, name=None)` supports `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, and `agent_template`.
-`tool_details` requires `name` and reads from live `TOOL_METADATA`, so it includes real config fields and statuses from the current worktree.
-`agent_config` returns the redacted authored YAML for a specific agent.
-`agent_template` generates starter YAML for one of the built-in template types: `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity`.
-`manage_config(operation, path, changes, dry_run)` addresses the authored document written to `config.yaml` with RFC 6901 JSON Pointer paths.
-`manage_config(operation="inspect", path=...)` returns one authored subtree as YAML with secret-bearing values redacted at every pointer depth.
-Redaction masks every value inside a field the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, whatever its key names, except `${NAME}` environment references, which are shown as written.
-Other typed fields keep their values, entries in free-form maps such as tool overrides are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
-In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
-Inspection, `agent_config`, and every write require a requester listed in `administrators`; other requesters, and calls without a requester, receive an authorization error instead of configuration content.
-A patch value, or a `display_name`, `role`, or `instructions` value given to `manage_agent()`, that contains the `***redacted***` marker or a URL password masked as `user:***@host` is refused, so copying redacted output back never replaces a hidden real value.
-`manage_config(operation="patch", changes=[...])` applies an atomic batch of RFC 6902 `add`, `replace`, and `remove` entries across the full `Config` schema, validates the result against the active runtime, and persists only when validation passes.
-`dry_run=True` validates a patch and returns its receipt without writing.
-Patch receipts report the config path, changed paths, and validation and persistence status without echoing changed values.
-When the configuration is composed from multiple files via `!include`, inspection still works but structured patching is refused so source files are never flattened.
-`manage_agent()` supports `create`, `update`, and `validate`.
-Agent creates and updates validate tool names against the live registry and validate knowledge base IDs against the current config.
-When a plain string tool list replaces an existing tool list, `config_manager` preserves inline overrides for retained tools instead of flattening them away.
-On create, `include_default_tools` falls back to `true` when you omit it.
-`manage_team()` creates a new team with `coordinate` or `collaborate` mode and rejects unknown member agents or duplicate team names.
-All writes go through full runtime config validation before `config.yaml` is saved.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
+`config_manager` is the full configuration control plane: it reads and patches any authored config field and creates or updates agents and teams.
+It can change every agent and team, so give it only to agents that administrators drive; use [`self_config`](#self_config) for narrow self-tuning.
 
 ```yaml
 agents:
@@ -468,8 +302,25 @@ agents:
       - config_manager
 ```
 
+The tool exposes four functions:
+
+- **`get_info(info_type, name=None, agent_scope="current_room")`**: `info_type` is `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, or `agent_template`.
+  `agents` lists agents in the current room unless `agent_scope="all"`.
+  `tool_details` takes a tool name and shows its config fields and status.
+  `agent_config` returns one agent's redacted YAML.
+  `agent_template` takes `researcher`, `developer`, `social`, `communicator`, `analyst`, or `productivity` and returns starter YAML.
+- **`manage_config(operation, path="", changes=None, dry_run=False)`**: Works on the authored document in `config.yaml`, without unset defaults, using RFC 6901 JSON Pointer paths where `""` is the root.
+  `operation="inspect"` returns one subtree as redacted YAML; a subtree too large to return asks for a narrower path.
+  `operation="patch"` applies a batch of RFC 6902 `add`, `replace`, and `remove` changes all at once, using `-` as the last token to append to a list.
+  `dry_run=True` validates a patch without saving it.
+  The receipt lists the changed paths without echoing their values.
+  When `config.yaml` uses `!include`, inspection works but patching is refused; edit the source files instead.
+- **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, `markdown`, `learning`, and `learning_mode`.
+  Creating requires `display_name`, takes a lowercase name of letters, digits, and underscores, defaults `model` to `default`, and defaults `include_default_tools` to `true`.
+  Tool names and knowledge base IDs must exist.
+- **`manage_team(team_name, display_name, role, agents, mode="coordinate")`**: Creates a new team in `coordinate` or `collaborate` mode; it rejects unknown member agents and existing team names, and it cannot update a team.
+
 ```python
-get_info("available_tools")
 get_info("tool_details", name="claude_agent")
 manage_config(operation="inspect", path="/authorization")
 manage_config(
@@ -497,42 +348,23 @@ manage_team(
 )
 ```
 
-### Notes
+### Access, Redaction, and Saving
 
-- [`config_manager`] is broader and more privileged than [`self_config`] because it can inspect and modify other agents and teams.
-- `manage_team()` creates teams, but it does not expose a separate update operation on this branch.
-- Use [Agent Configuration](../configuration/agents.md) for the full authored schema outside the tool's curated helper surface.
+These rules apply to both `config_manager` and `self_config`.
+Reading configuration (`manage_config` inspection, `get_info("agent_config")`, `get_own_config()`) and every write require a requester listed in `administrators`; other requesters get an authorization error.
+Redacted output masks every value inside fields the config schema marks secret, such as MCP server `env` and `headers`, plugin `settings`, and model `extra_kwargs`, except `${NAME}` environment references, which are shown as written.
+It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL passwords and bearer tokens in any text.
+A write whose value contains the `***redacted***` marker or a masked URL password such as `user:***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
+Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
+Saved changes take effect through the normal config hot reload after the current response.
+When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.
 
 ## [`self_config`]
 
-`self_config` lets an agent inspect and update only its own config entry.
-
-### What It Does
-
-`self_config` exposes `get_own_config()` and `update_own_config()`.
-`get_own_config()` returns the current agent's authored YAML block, redacted like `config_manager` inspection.
-`update_own_config()` refuses a `display_name`, `role`, or `instructions` value that contains the `***redacted***` marker or a URL password masked as `user:***@host`, so copying that redacted output back never replaces a hidden real value.
-Reads and writes both require a requester listed in `administrators`.
-`update_own_config()` only changes fields that you pass explicitly.
-On this branch, `update_own_config()` can modify `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
-`update_own_config()` requires a requester listed in `administrators`, like [`config_manager`], and every call raises an approval card even when `tool_approval.default` is `auto_approve`.
-The update path validates tool names against the live registry and validates knowledge base IDs against the current config.
-It also preserves inline tool overrides for retained tools when a string-only tool list is provided.
-Updates are validated through `AgentConfig.model_validate()` before the file is saved.
-Only the current agent can be changed.
-There is no path to modify other agents or teams through this tool.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-The normal way to enable it is `agents.<name>.allow_self_config: true` or `defaults.allow_self_config: true`.
-
-### Example
+`self_config` lets an agent read and update only its own entry under `agents:`.
+Enable it with `allow_self_config: true` on the agent, or for all agents with `defaults.allow_self_config: true`; MindRoom then adds the tool automatically.
 
 ```yaml
-defaults:
-  allow_self_config: false
-
 agents:
   research:
     display_name: Research
@@ -543,6 +375,12 @@ agents:
       - duckduckgo
       - wikipedia
 ```
+
+`get_own_config()` returns the agent's redacted YAML.
+`update_own_config()` changes only the fields you pass: `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+Every `update_own_config()` call shows an approval card, even when `tool_approval.default` is `auto_approve`.
+An agent cannot give itself `config_manager`, and `include_default_tools=True` is refused when `defaults.tools` contains `config_manager`.
+Access, redaction, and saving follow the [shared rules above](#access-redaction-and-saving).
 
 ```python
 get_own_config()
@@ -557,54 +395,39 @@ update_own_config(
 )
 ```
 
-### Notes
-
-- `self_config` blocks privileged self-escalation by rejecting `config_manager` in its `tools` update list.
-- `include_default_tools=True` is also rejected when `defaults.tools` contains blocked privileged tools such as `config_manager`.
-- Use [`self_config`] for narrow self-tuning at runtime and [`config_manager`] for full config-authoring workflows.
-
-See [`openclaw_compat`](../openclaw.md#openclaw_compat).
-
 ## [`claude_agent`]
 
-`claude_agent` keeps persistent Claude Agent SDK coding sessions alive across turns and exposes explicit session lifecycle controls.
+`claude_agent` keeps Claude Agent SDK coding sessions alive across turns, so an agent can hand multi-step coding work to Claude Code and keep talking to the same session.
+It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](../architecture/security-posture.md#file-access).
 
-### What It Does
+The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
+`claude_send()` creates the session if needed, so `claude_start_session()` is optional.
+Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
+Calls to the same session run one after another.
+`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
+`claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+Errors from the Claude SDK include the last lines of Claude CLI stderr to help debug gateway or CLI problems.
+Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](../openai-api.md#session-continuity).
 
-`claude_agent` exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
-`claude_send()` automatically creates the session if it does not already exist, so `claude_start_session()` is optional.
-Session keys are namespaced by agent identity and Agno run session ID, with optional `session_label` suffixes for parallel sub-sessions.
-The same session key is serialized by an `asyncio.Lock`, so concurrent calls to one label run one after the other.
-Different `session_label` values create distinct Claude sessions that can proceed independently.
-Idle sessions expire after `session_ttl_minutes`, which defaults to 60 minutes.
-The process-wide session manager keeps at most `max_sessions` active sessions per agent namespace, defaulting to 200.
-`resume` and `fork_session` only apply when creating a new session.
-`fork_session=True` requires a non-empty `resume` session ID.
-If a session already exists for the computed key, passing `resume` or `fork_session` returns an error instead of silently changing the live session.
-`claude_session_status()` reports age, idle time, and the underlying Claude session ID once Claude has returned a result.
-On SDK failures, the tool includes recent Claude CLI stderr lines in its error output to help debug gateway or CLI issues.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | password | `null` | Anthropic API key or gateway key; usually set in the dashboard or credentials rather than inline YAML. |
+| `anthropic_base_url` | url | `null` | Anthropic-compatible gateway root URL, without a `/v1` suffix, because the Claude client appends its own API path. |
+| `anthropic_auth_token` | password | `null` | Bearer token for Anthropic-compatible gateways. |
+| `disable_experimental_betas` | boolean | `false` | Sets `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` for gateways that reject Claude beta headers. |
+| `cwd` | text | `null` | Working directory for Claude. |
+| `model` | text | `null` | Claude model; defaults to the agent's own model ID. |
+| `permission_mode` | text | `default` | `default`, `acceptEdits`, `plan`, or `bypassPermissions`; other values fall back to `default`. |
+| `continue_conversation` | boolean | `false` | Continue the same Claude conversation context across queries in one session. |
+| `allowed_tools` | text | `null` | Comma-separated Claude Code tool names to allow. |
+| `disallowed_tools` | text | `null` | Comma-separated Claude Code tool names to deny. |
+| `max_turns` | number | `null` | Maximum Claude turns per query; minimum 1. |
+| `system_prompt` | text | `null` | Extra system prompt passed to Claude. |
+| `cli_path` | text | `null` | Path to the Claude CLI executable. |
+| `session_ttl_minutes` | number | `60` | Idle sessions close after this many minutes; minimum 1. |
+| `max_sessions` | number | `200` | Maximum live sessions per agent; at the limit, the least recently used idle session closes. Minimum 1. |
 
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Anthropic API key or gateway-compatible key material. Usually stored in credentials JSON or dashboard setup instead of inline YAML. |
-| `anthropic_base_url` | `url` | `no` | `null` | Optional Anthropic-compatible gateway root URL. Use the host root, not a `/v1` suffix. |
-| `anthropic_auth_token` | `password` | `no` | `null` | Optional bearer token for Anthropic-compatible gateways. |
-| `disable_experimental_betas` | `boolean` | `no` | `false` | Sets `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` for gateway compatibility. |
-| `cwd` | `text` | `no` | `null` | Working directory passed to the Claude Agent SDK client. |
-| `model` | `text` | `no` | `null` | Claude model override. When omitted, the tool falls back to the current agent model ID when one is available. |
-| `permission_mode` | `text` | `no` | `default` | One of `default`, `acceptEdits`, `plan`, or `bypassPermissions`. Invalid values fall back to `default`. |
-| `continue_conversation` | `boolean` | `no` | `false` | Continue the same Claude conversation context across queries in one session. |
-| `allowed_tools` | `text` | `no` | `null` | Comma-separated Claude Code tool names to allow. |
-| `disallowed_tools` | `text` | `no` | `null` | Comma-separated Claude Code tool names to deny. |
-| `max_turns` | `number` | `no` | `null` | Maximum Claude turns per query. Values below 1 are normalized up to 1. |
-| `system_prompt` | `text` | `no` | `null` | Extra system prompt passed directly to the Claude Agent SDK. |
-| `cli_path` | `text` | `no` | `null` | Optional path to the Claude CLI executable. |
-| `session_ttl_minutes` | `number` | `no` | `60` | Idle-session expiration window in minutes. Values below 1 are normalized up to 1. |
-| `max_sessions` | `number` | `no` | `200` | Maximum live sessions per agent namespace. Values below 1 are normalized up to 1. |
-
-### Example
+Credentials set in the dashboard and in `mindroom_data/credentials/claude_agent_credentials.json` fill the same fields.
 
 ```yaml
 agents:
@@ -622,16 +445,7 @@ agents:
           max_sessions: 20
 ```
 
-```json
-{
-  "api_key": "sk-ant-or-proxy-key",
-  "model": "claude-sonnet-5-5",
-  "permission_mode": "default",
-  "continue_conversation": true,
-  "session_ttl_minutes": 60,
-  "max_sessions": 200
-}
-```
+Credentials for an Anthropic-compatible gateway such as LiteLLM:
 
 ```json
 {
@@ -651,18 +465,3 @@ claude_session_status(session_label="bugfix")
 claude_interrupt(session_label="bugfix")
 claude_end_session(session_label="bugfix")
 ```
-
-### Notes
-
-- Dashboard setup and `mindroom_data/credentials/claude_agent_credentials.json` both feed the same tool credential fields, because runtime credentials are stored as `<service>_credentials.json`.
-- For Anthropic-compatible gateways, set `anthropic_base_url` to the gateway root without `/v1`, because the Claude client appends its own API path.
-- Some gateways reject Claude beta headers, so `disable_experimental_betas: true` is the compatibility switch for that case.
-- When you use MindRoom's OpenAI-compatible API, keep the same `X-Session-Id` across requests so the same Claude session key is reused.
-- See [OpenAI-Compatible API](../openai-api.md) for request-level session continuity details.
-
-## Related Docs
-
-- [Tools Overview](index.md)
-- [Agent Configuration](../configuration/agents.md)
-- [OpenClaw Workspace Import](../openclaw.md)
-- [OpenAI-Compatible API](../openai-api.md)

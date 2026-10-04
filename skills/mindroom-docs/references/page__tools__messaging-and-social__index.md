@@ -1,245 +1,155 @@
 # Messaging & Social
 
-Use these tools to read and send email, post into chat systems, deliver SMS or WhatsApp messages, work with social platforms, and schedule or inspect meetings.
+This page covers the built-in tools that read and send email, post into team chats, send SMS and WhatsApp messages, work with X and Reddit, and manage Zoom meetings.
+Use it to pick a tool, configure its credentials, and understand why a tool is unavailable or a send failed.
 
-## What This Page Covers
+## Choosing a Tool
 
-This page documents the built-in tools in the `messaging-and-social` group.
-Use these tools when you need outbound communication, mailbox access, team-chat delivery, social/community lookups, or Zoom meeting management.
+| Tool | Use it for | Setup |
+| --- | --- | --- |
+| [`gmail`](#gmail) | Reading, searching, drafting, sending, and labeling mail in a Gmail mailbox | Google Gmail OAuth |
+| [`slack`](#slack) | Slack messages, threaded replies, channel and user lookups, history, search, and files | Bot or user token |
+| [`discord`](#discord) | Discord channel messages, channel info and history, and message deletion | Bot token |
+| [`telegram`](#telegram) | Text and media sent by a Telegram bot to one fixed chat | Bot token and chat ID |
+| [`whatsapp`](#whatsapp) | WhatsApp Business text, template, interactive, and media messages | Access token and phone number ID |
+| [`twilio`](#twilio) | SMS sends, call lookups, and recent message listing | Account SID plus auth token or API key |
+| [`webex`](#webex) | Webex room messages and room listing | Access token |
+| [`resend`](#resend) | Transactional HTML email through Resend | API key and sender |
+| [`email`](#email) | Plain-text mail to one fixed recipient through Gmail SMTP | Gmail address and app password |
+| [`x`](#x) | X posts, replies, DMs, profile lookups, home timeline, and recent-post search | Bearer token or OAuth user credentials |
+| [`reddit`](#reddit) | Reddit user and subreddit reads, plus optional posts and replies | App client ID and secret |
+| [`zoom`](#zoom) | Scheduling, listing, inspecting, and deleting Zoom meetings and reading recordings | Server-to-Server OAuth app |
 
-## Tools On This Page
+For Amazon SES email, see `aws_ses` in [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/).
 
-- [`gmail`] - Gmail mailbox access and message composition through the Google Gmail OAuth provider.
-- [`slack`] - Slack channel messaging, threaded replies, channel listing, and history reads.
-- [`discord`] - Discord bot messaging, channel inspection, history reads, and message deletion.
-- [`telegram`] - Telegram bot delivery to one configured chat.
-- [`whatsapp`] - WhatsApp Business API text and template messaging.
-- [`twilio`] - Twilio SMS delivery, call lookup, and recent message listing.
-- [`webex`] - Webex room messaging and room listing.
-- [`resend`] - Transactional email delivery through Resend.
-- [`email`] - Simple SMTP email sending through Gmail SMTP.
-- [`x`] - X posting, replying, DMs, profile lookup, timeline reads, and recent-post search.
-- [`reddit`] - Reddit read access plus optional posting and replies with user auth.
-- [`zoom`] - Zoom Server-to-Server OAuth meeting scheduling and management.
+## Credentials
 
-## Common Setup Notes
-
-`gmail` uses `auth_provider="google_gmail"` and connects through the generic `/api/oauth/google_gmail/*` flow.
-Its OAuth tokens are stored separately from editable Gmail tool settings.
-Password fields should be stored through the dashboard or credential store instead of inline YAML.
-Several metadata fields on this page are marked `required: false`, but the installed SDKs still need the corresponding token or secret in practice.
-Useful environment fallbacks on this page include `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
-The generic-looking `email` tool is not a fully configurable SMTP client on this branch.
-Its installed upstream implementation is hard-wired to Gmail SMTP over `smtp.gmail.com:465` and does not expose SMTP host, port, or TLS configuration fields.
+Set fields of type `password` through the dashboard or credential store; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
+Many credential fields below are optional in the dashboard but required in practice, and the tool fails to load or errors on its first call without them.
+Instead of stored fields, these tools also read the environment variables `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+`gmail` instead connects through Google OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
+Most tools enable or disable individual functions with `enable_<function>` flags, and `all: true` enables every function; `include_tools` and `exclude_tools` filter further, as described in [Filtering Toolkit Functions](https://docs.mindroom.chat/tools/#filtering-toolkit-functions).
 
 ## [`gmail`]
 
-`gmail` is the mailbox-oriented tool for reading, searching, drafting, sending, and labeling Gmail messages through the Google Gmail OAuth provider.
+`gmail` reads, searches, drafts, sends, replies to, stars, and labels mail in the connected Gmail account.
+Connect the account through the `google_gmail` OAuth provider; when no usable connection exists, the tool replies with a link to connect.
+To use a Google Workspace service account instead, set `GOOGLE_SERVICE_ACCOUNT_FILE` to the key file path and `GOOGLE_DELEGATED_USER` to the mailbox to impersonate through domain-wide delegation.
+`gmail` always runs in the primary MindRoom runtime, even for agents whose other tools run in a worker, so workers never receive Google credentials.
 
-### What It Does
+Its functions are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
+Archiving, trashing, attachment downloads, and sending existing drafts are not available.
+`send_email_to_self(subject, body)` always sends to the connected account's own address, so an approval rule can allow it while still requiring approval for `send_email`; see [Tool Approval](https://docs.mindroom.chat/tool-approval/).
 
-MindRoom wraps Agno's `GmailTools` with `ScopedOAuthClientMixin`, so Gmail credentials are loaded from MindRoom's scoped OAuth credential store instead of a local `token.json` file.
-The wrapper refreshes stored Google tokens when needed and raises `OAuthConnectionRequired` with a connect URL when no usable stored OAuth credentials are available.
-It does not fall back to Agno's local OAuth flow when MindRoom credentials are missing.
-It only bypasses MindRoom OAuth when configured for Google service-account auth.
-The default MindRoom Gmail toolkit exposes 26 functions for stars, drafts, message and thread retrieval, search, label mutation, sending, and replies.
-Its exact function names are `apply_label()`, `create_draft_email()`, `delete_custom_label()`, `get_draft()`, `get_emails_by_context()`, `get_emails_by_date()`, `get_emails_by_thread()`, `get_emails_from_user()`, `get_latest_emails()`, `get_message()`, `get_starred_emails()`, `get_thread()`, `get_unread_emails()`, `list_custom_labels()`, `list_drafts()`, `mark_email_as_read()`, `mark_email_as_unread()`, `remove_label()`, `search_emails()`, `search_threads()`, `send_email()`, `send_email_reply()`, `send_email_to_self()`, `star_email()`, `unstar_email()`, and `update_draft()`.
-`send_email_to_self(subject, body)` derives its sole recipient from the connected Gmail profile and accepts no recipient, CC, BCC, or attachment arguments.
-The function follows the configured tool approval policy, so operators can match `send_email_to_self` separately from other send functions.
-Draft and send operations accept attachment file paths that the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting allows: inside the agent workspace by default, or any readable file when it is `unrestricted`.
-Relative attachment paths resolve from the workspace root; with `workspace` file access, paths that resolve outside it, including through symlinks, are rejected before any file is read or Gmail request is made, and an agent without a workspace cannot attach files.
-Attachments are read through no-follow file descriptors, so a path component swapped for a symlink after validation is refused.
-Attachments are limited to 25 MiB in total per message.
-With `unrestricted` file access, attachments work without a workspace; relative paths then resolve from the MindRoom process working directory.
+Draft and send functions accept attachment file paths, not Matrix attachment IDs.
+Allowed paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, attachments must be files inside the agent workspace, and an agent without a workspace cannot attach files.
+With `unrestricted`, any file MindRoom can read is allowed.
+Relative paths resolve from the workspace root, or from the MindRoom working directory when an `unrestricted` agent has no workspace.
+Attachments may total at most 25 MiB per message; larger sets fail with `Gmail attachments exceed the 25 MiB limit`.
 
-### Configuration
+Each option below defaults to `true`, and setting it to `false` removes the matching function.
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `get_latest_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_emails_from_user` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_unread_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `get_starred_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `search_emails` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `create_draft_email` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `send_email` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
-| `send_email_reply` | `boolean` | `no` | `true` | Declared in MindRoom's registry metadata as a capability flag. |
+| Option | Type | Default | Controls |
+| --- | --- | --- | --- |
+| `get_latest_emails` | `boolean` | `true` | `get_latest_emails()` |
+| `get_emails_from_user` | `boolean` | `true` | `get_emails_from_user()` |
+| `get_unread_emails` | `boolean` | `true` | `get_unread_emails()` |
+| `get_starred_emails` | `boolean` | `true` | `get_starred_emails()` |
+| `search_emails` | `boolean` | `true` | `search_emails()` |
+| `create_draft_email` | `boolean` | `true` | `create_draft_email()` |
+| `send_email` | `boolean` | `true` | `send_email()` |
+| `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
 
-### Example
-
-```yaml
-agents:
-  assistant:
-    worker_scope: shared
-    tools:
-      - gmail
-```
-
-```python
-get_latest_emails(10)
-search_emails("label:unread from:billing@example.com", 10)
-send_email("alice@example.com", "Project update", "Here is the latest status.")
-send_email_to_self("Automation finished", "The scheduled report is ready.")
-send_email_reply("thread_id", "message_id", "alice@example.com", "Re: Project update", "Thanks for the update.")
-apply_label("is:unread category:promotions", "Needs Review", count=10)
-```
-
-### Notes
-
-- Connect Gmail through the `google_gmail` OAuth provider rather than storing a Gmail-specific API key.
-- The Gmail provider requests `gmail.modify`, which is the narrowest single scope that preserves mailbox reading, drafting, sending, labeling, and organization.
-- `gmail` always runs in the primary MindRoom runtime so worker runtimes do not receive Google OAuth secrets.
-- The configuration flags listed above can disable their corresponding methods; `include_tools` and `exclude_tools` can further filter the constructed toolkit.
-- Agno's optional archive, trash, attachment-download, raw label-modification, label-listing, and draft-send methods are not exposed through MindRoom's authored selector fields.
-- `include_tools` filters existing functions and cannot enable those additional SDK methods.
-- Attachment arguments are agent-workspace file paths in the primary runtime, not Matrix attachment IDs.
+Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
 
 ## [`slack`]
 
-`slack` is the Slack toolkit for messaging, threaded replies, channel and user inspection, history and thread reads, optional search, and file transfer.
+`slack` sends messages and threaded replies, lists channels and users, reads channel history and threads, searches messages, and uploads or downloads files.
+Use channel IDs rather than names, especially for threaded replies and history reads.
+`get_channel_history()` returns only top-level messages; to read a thread's replies, enable `get_thread()` and pass the parent message's timestamp.
+`slack` always runs in the primary runtime, and its file uploads and downloads are not confined by the agent's `file_access`, so enable it only for agents trusted with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 
-### What It Does
+To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
+A user token stored as the primary `token` also works for search.
+`search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
 
-The installed upstream tool exposes `send_message()`, `send_message_thread()`, `list_channels()`, `get_channel_history()`, `upload_file()`, `download_file()`, `search_messages()`, `search_workspace()`, `get_thread()`, `list_users()`, `get_user_info()`, and `get_channel_info()`.
-It uses Slack's `WebClient` from `slack_sdk`.
-`markdown` maps to the `mrkdwn` flag on `chat_postMessage()`.
-Channel-history responses are normalized into a smaller JSON structure instead of returning the full Slack API payload.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `token` | `password` | `no` | `null` | Primary Slack bot or user token, or use `SLACK_TOKEN`. Required in practice. |
-| `user_token` | `password` | `no` | `null` | User token for `search_messages()`, or use `SLACK_USER_TOKEN`; requires `search:read`. |
-| `markdown` | `boolean` | `no` | `true` | Enable Slack markdown rendering on sent messages. |
-| `output_directory` | `text` | `no` | `null` | Directory for saved downloads. |
-| `save_downloads` | `boolean` | `no` | `false` | Save downloaded files instead of returning base64-only content. |
-| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
-| `enable_send_message_thread` | `boolean` | `no` | `true` | Enable `send_message_thread()`. |
-| `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
-| `enable_get_channel_history` | `boolean` | `no` | `true` | Enable `get_channel_history()`. |
-| `enable_upload_file` | `boolean` | `no` | `true` | Enable `upload_file()`. |
-| `enable_download_file` | `boolean` | `no` | `true` | Enable `download_file()`. |
-| `enable_search_messages` | `boolean` | `no` | `false` | Enable `search_messages()` when a user token is available. |
-| `enable_search_workspace` | `boolean` | `no` | `false` | Enable `search_workspace()`; the installed SDK also requires an action token at call time. |
-| `enable_get_thread` | `boolean` | `no` | `false` | Enable `get_thread()`. |
-| `enable_list_users` | `boolean` | `no` | `false` | Enable `list_users()`. |
-| `enable_get_user_info` | `boolean` | `no` | `false` | Enable `get_user_info()`. |
-| `enable_get_channel_info` | `boolean` | `no` | `false` | Enable `get_channel_info()`. |
-| `all` | `boolean` | `no` | `false` | Enable all function flags; `search_messages()` still requires a user token. |
-| `max_file_size` | `number` | `no` | `1073741824` | Maximum upload or download size in bytes. |
-| `thread_message_limit` | `number` | `no` | `20` | Maximum messages returned by `get_thread()`. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `token` | `password` | `null` | Bot or user token, or `SLACK_TOKEN`; required. |
+| `user_token` | `password` | `null` | User token for `search_messages()`, or `SLACK_USER_TOKEN`. |
+| `markdown` | `boolean` | `true` | Render Slack markdown in sent messages. |
+| `output_directory` | `text` | `null` | Directory for saved downloads; setting it also enables saving. |
+| `save_downloads` | `boolean` | `false` | Save downloads to disk instead of returning their content; without `output_directory`, files go to the current working directory. |
+| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
+| `enable_send_message_thread` | `boolean` | `true` | Enable `send_message_thread()`. |
+| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
+| `enable_get_channel_history` | `boolean` | `true` | Enable `get_channel_history()`. |
+| `enable_upload_file` | `boolean` | `true` | Enable `upload_file()`. |
+| `enable_download_file` | `boolean` | `true` | Enable `download_file()`. |
+| `enable_search_messages` | `boolean` | `false` | Enable `search_messages()`; needs a user token. |
+| `enable_search_workspace` | `boolean` | `false` | Enable `search_workspace()`. |
+| `enable_get_thread` | `boolean` | `false` | Enable `get_thread()`. |
+| `enable_list_users` | `boolean` | `false` | Enable `list_users()`. |
+| `enable_get_user_info` | `boolean` | `false` | Enable `get_user_info()`. |
+| `enable_get_channel_info` | `boolean` | `false` | Enable `get_channel_info()`. |
+| `all` | `boolean` | `false` | Enable every function. |
+| `max_file_size` | `number` | `1073741824` | Maximum upload or download size in bytes. |
+| `thread_message_limit` | `number` | `20` | Maximum messages returned by `get_thread()`. |
 
 ```yaml
 agents:
   support:
     tools:
       - slack:
-          markdown: true
-          enable_get_channel_history: true
+          enable_get_thread: true
+          enable_search_messages: true
 ```
-
-```python
-list_channels()
-send_message("C0123456789", "Deployment finished.")
-send_message_thread("C0123456789", "Following up in the same thread.", "1743112345.678900")
-get_channel_history("C0123456789", limit=25)
-```
-
-### Notes
-
-- Although `token` is marked optional in metadata, the installed Slack toolkit raises if no token or `SLACK_TOKEN` is present.
-- For `search_messages()`, enable `enable_search_messages` and store a user token with [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) in the dashboard's `user_token` password field or credential store; `SLACK_USER_TOKEN` is the environment fallback.
-- A bot token alone does not register `search_messages()`; a user token supplied as the primary `token` can also satisfy its user-token requirement.
-- With the pinned Agno SDK, `search_workspace()` requires `run_context.metadata.action_token` before making a request, and ordinary Matrix turns do not supply it; use `search_messages()` with a user token for those turns.
-- This unconditional action-token guard belongs to the SDK integration: the [Slack API](https://docs.slack.dev/reference/methods/assistant.search.context/) requires an action token for bot-token requests but permits user-token requests without one.
-- Use channel IDs for the most reliable calls, especially for threaded replies and history reads.
-- `get_channel_history()` returns a simplified JSON view rather than the raw Slack response.
 
 ## [`discord`]
 
-`discord` is the Discord bot toolkit for channel messaging, channel metadata, channel history, server channel listing, and message deletion.
+`discord` sends messages, reads channel messages and info, lists a server's channels, and deletes messages through the Discord REST API with a bot token.
+It does not run a live Discord bot, so it cannot receive messages, handle slash commands, or set presence.
+Functions take Discord IDs such as channel, server, and message IDs, not names.
+Deletion is enabled by default; set `enable_delete_message: false` for read and send access only.
 
-### What It Does
-
-The installed upstream tool exposes `send_message()`, `get_channel_messages()`, `get_channel_info()`, `list_channels()`, and `delete_message()`.
-It talks directly to `https://discord.com/api/v10` with a bot token in the `Authorization` header.
-This is a raw REST wrapper rather than a gateway-connected real-time bot runtime.
-Most functions expect Discord IDs such as `channel_id`, `guild_id`, and `message_id`, not display names.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `bot_token` | `password` | `no` | `null` | Discord bot token, or use `DISCORD_BOT_TOKEN`. Required in practice. |
-| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
-| `enable_get_channel_messages` | `boolean` | `no` | `true` | Enable `get_channel_messages()`. |
-| `enable_get_channel_info` | `boolean` | `no` | `true` | Enable `get_channel_info()`. |
-| `enable_list_channels` | `boolean` | `no` | `true` | Enable `list_channels()`. |
-| `enable_delete_message` | `boolean` | `no` | `true` | Enable `delete_message()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
-
-```yaml
-agents:
-  community:
-    tools:
-      - discord:
-          enable_delete_message: false
-```
-
-```python
-list_channels("123456789012345678")
-get_channel_info("123456789012345678")
-get_channel_messages("123456789012345678", limit=25)
-send_message("123456789012345678", "Hello from MindRoom.")
-```
-
-### Notes
-
-- `bot_token` is effectively required even though the metadata marks it optional.
-- This tool uses ordinary Discord REST calls and does not manage slash commands, presence, or gateway subscriptions.
-- Deletion is enabled by default, so disable `enable_delete_message` if you only want read and send access.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `bot_token` | `password` | `null` | Discord bot token, or `DISCORD_BOT_TOKEN`; required. |
+| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
+| `enable_get_channel_messages` | `boolean` | `true` | Enable `get_channel_messages()`. |
+| `enable_get_channel_info` | `boolean` | `true` | Enable `get_channel_info()`. |
+| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
+| `enable_delete_message` | `boolean` | `true` | Enable `delete_message()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`telegram`]
 
-`telegram` sends text and media to one configured chat, with optional message management, chat details, and file downloads.
-
-### What It Does
-
+`telegram` sends messages from a Telegram bot to the one chat or channel set in `chat_id` or `TELEGRAM_CHAT_ID`, so calls never choose a destination.
+For several Telegram destinations, configure the tool separately per agent or credential scope.
 Only `send_message()` is enabled by default.
-Optional functions are `send_photo()`, `send_document()`, `send_video()`, `send_audio()`, `send_animation()`, `send_sticker()`, `edit_message()`, `delete_message()`, `react_with_emoji()`, `pin_message()`, `get_chat()`, and `get_file()`.
-Enable individual functions with the flags below, or set `all: true` to enable all 13 functions.
-Sends use the configured `chat_id`, so callers do not pass a destination per send.
-`send_message()` returns normalized JSON with `status: "success"` and `message_id`, or `status: "error"` and `message` for Telegram API errors.
-
-### Configuration
+Optional functions send photos, documents, video, audio, animations, and stickers, edit, delete, and pin messages, react with emoji, read chat details with `get_chat()`, and download files with `get_file()`.
+`get_file()` returns file content unless `save_downloads` or `output_directory` is set, in which case it saves the file and returns its path.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `chat_id` | `text` | `yes` | `null` | Telegram chat or channel ID that this tool instance will target. |
-| `token` | `password` | `no` | `null` | Telegram bot token, or use `TELEGRAM_TOKEN`. Required in practice. |
-| `output_directory` | `text` | `no` | `null` | Directory for downloaded files; setting it also enables saving. |
-| `save_downloads` | `boolean` | `no` | `false` | Save downloads to disk; without `output_directory`, use the current working directory. |
-| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
-| `enable_send_photo` | `boolean` | `no` | `false` | Enable `send_photo()`. |
-| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
-| `enable_send_video` | `boolean` | `no` | `false` | Enable `send_video()`. |
-| `enable_send_audio` | `boolean` | `no` | `false` | Enable `send_audio()`. |
-| `enable_send_animation` | `boolean` | `no` | `false` | Enable `send_animation()`. |
-| `enable_send_sticker` | `boolean` | `no` | `false` | Enable `send_sticker()`. |
-| `enable_edit_message` | `boolean` | `no` | `false` | Enable `edit_message()`. |
-| `enable_delete_message` | `boolean` | `no` | `false` | Enable `delete_message()`. |
-| `enable_react_with_emoji` | `boolean` | `no` | `false` | Enable `react_with_emoji()`. |
-| `enable_pin_message` | `boolean` | `no` | `false` | Enable `pin_message()`. |
-| `enable_get_chat` | `boolean` | `no` | `false` | Enable `get_chat()`. |
-| `enable_get_file` | `boolean` | `no` | `false` | Enable `get_file()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
+| `chat_id` | `text` | yes | `null` | Chat or channel ID every call targets, or `TELEGRAM_CHAT_ID`. |
+| `token` | `password` | no | `null` | Bot token, or `TELEGRAM_TOKEN`; required in practice. |
+| `output_directory` | `text` | no | `null` | Directory for downloaded files; setting it also enables saving. |
+| `save_downloads` | `boolean` | no | `false` | Save downloads to disk; without `output_directory`, files go to the current working directory. |
+| `enable_send_message` | `boolean` | no | `true` | Enable `send_message()`. |
+| `enable_send_photo` | `boolean` | no | `false` | Enable `send_photo()`. |
+| `enable_send_document` | `boolean` | no | `false` | Enable `send_document()`. |
+| `enable_send_video` | `boolean` | no | `false` | Enable `send_video()`. |
+| `enable_send_audio` | `boolean` | no | `false` | Enable `send_audio()`. |
+| `enable_send_animation` | `boolean` | no | `false` | Enable `send_animation()`. |
+| `enable_send_sticker` | `boolean` | no | `false` | Enable `send_sticker()`. |
+| `enable_edit_message` | `boolean` | no | `false` | Enable `edit_message()`. |
+| `enable_delete_message` | `boolean` | no | `false` | Enable `delete_message()`. |
+| `enable_react_with_emoji` | `boolean` | no | `false` | Enable `react_with_emoji()`. |
+| `enable_pin_message` | `boolean` | no | `false` | Enable `pin_message()`. |
+| `enable_get_chat` | `boolean` | no | `false` | Enable `get_chat()`. |
+| `enable_get_file` | `boolean` | no | `false` | Enable `get_file()`. |
+| `all` | `boolean` | no | `false` | Enable every function. |
 
 ```yaml
 agents:
@@ -247,227 +157,103 @@ agents:
     tools:
       - telegram:
           chat_id: "-1001234567890"
+          enable_send_document: true
 ```
-
-```python
-send_message("Nightly backup completed.")
-```
-
-### Notes
-
-- Set both `chat_id` and `token` for a usable configuration.
-- `get_file()` returns base64 content by default; `save_downloads: true` or a configured `output_directory` saves the file and returns `local_path` instead.
-- Because the destination chat is fixed in config, this tool is best for one bot-to-room delivery path rather than general multi-room Telegram automation.
-- If you need different Telegram destinations, configure different agents or different tool credentials per scope.
 
 ## [`whatsapp`]
 
-`whatsapp` is the WhatsApp Business API toolkit for text, template, interactive, image, document, location, and reaction messages through Meta's Graph API.
+`whatsapp` sends messages through the WhatsApp Business (Meta Graph) API.
+Text and template messages are enabled by default; reply buttons, list messages, images, documents, locations, and reactions are opt-in.
+Template sends need a template name approved in WhatsApp Business.
+Set `recipient_waid` or `WHATSAPP_RECIPIENT_WAID` to give calls a default recipient; otherwise, every call must name one.
 
-### What It Does
-
-The installed upstream tool exposes `send_text_message()` and `send_template_message()` by default.
-Optional functions include `send_reply_buttons()`, `send_list_message()`, `send_image()`, `send_document()`, `send_location()`, and `send_reaction()`.
-It posts to `https://graph.facebook.com/<version>/<phone_number_id>/messages`.
-`recipient_waid` sets a default recipient so callers can omit the `recipient` argument.
-If no default recipient is configured, every send call must provide one.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `access_token` | `password` | `no` | `null` | WhatsApp Business API token, or use `WHATSAPP_ACCESS_TOKEN`. Required in practice. |
-| `phone_number_id` | `text` | `no` | `null` | WhatsApp Business phone number ID, or use `WHATSAPP_PHONE_NUMBER_ID`. Required in practice. |
-| `version` | `text` | `no` | `v22.0` | Graph API version prefix. |
-| `recipient_waid` | `text` | `no` | `null` | Default recipient phone number or WhatsApp ID. |
-| `enable_send_text_message` | `boolean` | `no` | `true` | Enable `send_text_message()`. |
-| `enable_send_template_message` | `boolean` | `no` | `true` | Enable `send_template_message()`. |
-| `enable_send_reply_buttons` | `boolean` | `no` | `false` | Enable `send_reply_buttons()`. |
-| `enable_send_list_message` | `boolean` | `no` | `false` | Enable `send_list_message()`. |
-| `enable_send_image` | `boolean` | `no` | `false` | Enable `send_image()`. |
-| `enable_send_document` | `boolean` | `no` | `false` | Enable `send_document()`. |
-| `enable_send_location` | `boolean` | `no` | `false` | Enable `send_location()`. |
-| `enable_send_reaction` | `boolean` | `no` | `false` | Enable `send_reaction()`. |
-| `all` | `boolean` | `no` | `false` | Enable every WhatsApp function. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `access_token` | `password` | `null` | Business API access token, or `WHATSAPP_ACCESS_TOKEN`; required. |
+| `phone_number_id` | `text` | `null` | Business phone number ID, or `WHATSAPP_PHONE_NUMBER_ID`; required. |
+| `version` | `text` | `v22.0` | Graph API version, or `WHATSAPP_VERSION`. |
+| `recipient_waid` | `text` | `null` | Default recipient phone number or WhatsApp ID. |
+| `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
+| `enable_send_text_message` | `boolean` | `true` | Enable `send_text_message()`. |
+| `enable_send_template_message` | `boolean` | `true` | Enable `send_template_message()`. |
+| `enable_send_reply_buttons` | `boolean` | `false` | Enable `send_reply_buttons()`. |
+| `enable_send_list_message` | `boolean` | `false` | Enable `send_list_message()`. |
+| `enable_send_image` | `boolean` | `false` | Enable `send_image()`. |
+| `enable_send_document` | `boolean` | `false` | Enable `send_document()`. |
+| `enable_send_location` | `boolean` | `false` | Enable `send_location()`. |
+| `enable_send_reaction` | `boolean` | `false` | Enable `send_reaction()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
 agents:
   pager:
     tools:
       - whatsapp:
-          version: v22.0
           recipient_waid: "+15551234567"
           enable_send_reply_buttons: true
 ```
 
-```python
-send_text_message("The deployment finished.")
-send_template_message(template_name="deployment_notice", language_code="en_US")
-```
-
-### Notes
-
-- Set both `access_token` and `phone_number_id` even though the metadata marks them optional.
-- Plain-text and template sends are enabled by default, while interactive and media functions are opt-in unless `all: true` is set.
-- Template sends expect a preapproved WhatsApp template name and, optionally, template `components`.
-
 ## [`twilio`]
 
-`twilio` is the telecom-oriented toolkit for SMS sends, call lookups, and recent message history.
+`twilio` sends SMS with `send_sms()`, looks up calls with `get_call_details()`, and lists recent messages with `list_messages()`.
+Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair.
+`send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
-### What It Does
-
-The installed upstream tool exposes `send_sms()`, `get_call_details()`, and `list_messages()`.
-It supports two auth modes: `account_sid` plus `auth_token`, or `account_sid` plus `api_key` and `api_secret`.
-Optional `region` and `edge` are passed into the Twilio client for regional routing.
-`send_sms()` validates that both `to` and `from_` are in E.164 format before sending.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `account_sid` | `text` | `no` | `null` | Twilio account SID, or use `TWILIO_ACCOUNT_SID`. Required in practice. |
-| `auth_token` | `password` | `no` | `null` | Twilio auth token for the simpler auth mode. |
-| `api_key` | `password` | `no` | `null` | Twilio API key for key-and-secret auth. |
-| `api_secret` | `password` | `no` | `null` | Twilio API secret for key-and-secret auth. |
-| `region` | `text` | `no` | `null` | Optional Twilio region such as `au1`. |
-| `edge` | `text` | `no` | `null` | Optional Twilio edge such as `sydney`. |
-| `debug` | `boolean` | `no` | `false` | Enable Twilio HTTP client logging. |
-| `enable_send_sms` | `boolean` | `no` | `true` | Enable `send_sms()`. |
-| `enable_get_call_details` | `boolean` | `no` | `true` | Enable `get_call_details()`. |
-| `enable_list_messages` | `boolean` | `no` | `true` | Enable `list_messages()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
-
-```yaml
-agents:
-  phone_ops:
-    tools:
-      - twilio:
-          region: au1
-          edge: sydney
-          enable_list_messages: true
-```
-
-```python
-send_sms("+15551234567", "+15557654321", "Build passed.")
-get_call_details("CA1234567890abcdef")
-list_messages(limit=10)
-```
-
-### Notes
-
-- `account_sid` is required in both supported auth modes.
-- Use either `auth_token` or the `api_key` plus `api_secret` pair, not both as separate independent auth methods.
-- `send_sms()` rejects non-E.164 numbers before it reaches Twilio's API.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `account_sid` | `text` | `null` | Account SID, or `TWILIO_ACCOUNT_SID`; required. |
+| `auth_token` | `password` | `null` | Auth token, or `TWILIO_AUTH_TOKEN`. |
+| `api_key` | `password` | `null` | API key, or `TWILIO_API_KEY`; used with `api_secret`. |
+| `api_secret` | `password` | `null` | API secret, or `TWILIO_API_SECRET`; used with `api_key`. |
+| `region` | `text` | `null` | Twilio region, such as `au1`. |
+| `edge` | `text` | `null` | Twilio edge location, such as `sydney`. |
+| `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
+| `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
+| `enable_get_call_details` | `boolean` | `true` | Enable `get_call_details()`. |
+| `enable_list_messages` | `boolean` | `true` | Enable `list_messages()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`webex`]
 
-`webex` is the Cisco Webex toolkit for room messaging and room listing.
+`webex` sends messages to Webex rooms with `send_message()` and lists rooms with `list_rooms()`.
+It does not manage meetings.
+Send to room IDs, not room titles.
 
-### What It Does
-
-The installed upstream tool exposes `send_message()` and `list_rooms()`.
-It authenticates with `webexpythonsdk.WebexAPI` using one access token.
-Despite the broader description in the registry, the current tool surface is messaging-centric and does not manage meetings.
-Responses are returned as JSON strings built from the SDK result objects.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_send_message` | `boolean` | `no` | `true` | Enable `send_message()`. |
-| `enable_list_rooms` | `boolean` | `no` | `true` | Enable `list_rooms()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `access_token` | `password` | `no` | `null` | Webex access token, or use `WEBEX_ACCESS_TOKEN`. Required in practice. |
-
-### Example
-
-```yaml
-agents:
-  meetings:
-    tools:
-      - webex:
-          enable_list_rooms: true
-```
-
-```python
-list_rooms()
-send_message("Y2lzY29zcGFyazovL3VzL1JPT00v...", "Agenda is ready.")
-```
-
-### Notes
-
-- Set `access_token` even though metadata marks it optional.
-- The current tool surface is room messaging and room discovery only.
-- Use room IDs, not room titles, when sending messages.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `access_token` | `password` | `null` | Webex access token, or `WEBEX_ACCESS_TOKEN`; required. |
+| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
+| `enable_list_rooms` | `boolean` | `true` | Enable `list_rooms()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`resend`]
 
-`resend` is the transactional-email API toolkit for HTML email delivery through Resend.
+`resend` sends transactional email through Resend with `send_email()`, using the message body as HTML.
+Every message comes from `from_email`, which usually must be a sender verified in Resend.
+Use `gmail` instead when the agent needs to read or reply within a mailbox.
 
-### What It Does
-
-The installed upstream tool exposes one function, `send_email()`.
-It sets `resend.api_key` on each call and sends email through `resend.Emails.send()`.
-The current implementation passes the message body as HTML, not plain text.
-`from_email` is stored on the tool instance and reused for every call.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Resend API key, or use `RESEND_API_KEY`. Required in practice. |
-| `from_email` | `text` | `no` | `null` | Sender identity used for every call. Usually required by the provider in practice. |
-| `enable_send_email` | `boolean` | `no` | `true` | Enable `send_email()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
-
-```yaml
-agents:
-  mailer:
-    tools:
-      - resend:
-          from_email: no-reply@example.com
-```
-
-```python
-send_email("alice@example.com", "Welcome", "<p>Your account is ready.</p>")
-```
-
-### Notes
-
-- `from_email` is not marked required in metadata, but most Resend setups need a verified sender.
-- The `body` argument is sent as HTML.
-- Use `resend` when you want provider-managed transactional delivery rather than Gmail mailbox access.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Resend API key, or `RESEND_API_KEY`; required. |
+| `from_email` | `text` | `null` | Sender address for every message. |
+| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`email`]
 
-`email` is the simplest SMTP mailer on this page, but on this branch it is specifically wired for Gmail SMTP rather than generic SMTP.
+`email` sends plain-text mail with `email_user(subject, body)` to the single address in `receiver_email`; calls cannot choose another recipient.
+It always signs in to Gmail SMTP (`smtp.gmail.com:465`), so the sender must be a Gmail or Google Workspace account, usually with an app password, and other SMTP servers cannot be configured.
+All four fields are required; a missing one makes the call return an error such as `error: No receiver email provided`.
+Use `gmail` for mailbox access or `resend` for HTML transactional mail.
 
-### What It Does
-
-The installed upstream tool exposes one function, `email_user()`.
-It builds an `EmailMessage`, then logs in with `smtplib.SMTP_SSL("smtp.gmail.com", 465)`.
-That means the sender account must be a Gmail account or a Google Workspace account compatible with Gmail SMTP.
-The current implementation sends plain-text bodies only.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `receiver_email` | `text` | `no` | `null` | Default recipient for all `email_user()` calls. |
-| `sender_name` | `text` | `no` | `null` | Display name shown in the `From` header. |
-| `sender_email` | `text` | `no` | `null` | Gmail sender address used for SMTP login. |
-| `sender_passkey` | `password` | `no` | `null` | Gmail app password or equivalent SMTP passkey. Required in practice. |
-| `enable_email_user` | `boolean` | `no` | `true` | Enable `email_user()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `receiver_email` | `text` | `null` | Recipient of every message. |
+| `sender_name` | `text` | `null` | Display name in the `From` header. |
+| `sender_email` | `text` | `null` | Gmail address used to sign in and send. |
+| `sender_passkey` | `password` | `null` | Gmail app password. |
+| `enable_email_user` | `boolean` | `true` | Enable `email_user()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
 agents:
@@ -479,156 +265,61 @@ agents:
           sender_email: alerts@gmail.com
 ```
 
-```python
-email_user("Nightly report", "The report finished successfully.")
-```
-
-### Notes
-
-- Despite the generic tool name, there are no host, port, TLS, or auth-mechanism overrides in the current implementation.
-- This tool is best for simple Gmail-based outbound mail, not arbitrary SMTP providers.
-- If you need mailbox reads, drafts, replies, or labels, use `gmail` instead.
-- If you need provider-managed transactional delivery with HTML bodies, use `resend` instead.
-
 ## [`x`]
 
-`x` is the X or Twitter toolkit for recent-post search, user lookup, timeline access, posting, replying, and DMs.
+`x` creates posts, replies to posts, sends DMs, looks up users, reads the home timeline, and searches recent posts.
+A bearer token is enough for search and lookups, but posting, replying, DMs, and the home timeline generally need the four OAuth user credentials.
+`search_posts()` accepts a result limit of 10 to 100, and may return fewer matches.
 
-### What It Does
-
-The installed upstream tool exposes `create_post()`, `reply_to_post()`, `send_dm()`, `get_user_info()`, `get_home_timeline()`, and `search_posts()`.
-It uses `tweepy.Client` and passes through `wait_on_rate_limit`.
-`search_posts()` calls `search_recent_tweets()` and, when `include_post_metrics` is enabled, augments each returned post with reply, retweet, like, and quote counts.
-The implementation clamps `max_results` for search to the Twitter API's supported `10` to `100` range.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `bearer_token` | `password` | `no` | `null` | Bearer token, or use `X_BEARER_TOKEN`. |
-| `consumer_key` | `password` | `no` | `null` | OAuth consumer key, or use `X_CONSUMER_KEY`. |
-| `consumer_secret` | `password` | `no` | `null` | OAuth consumer secret, or use `X_CONSUMER_SECRET`. |
-| `access_token` | `password` | `no` | `null` | OAuth access token, or use `X_ACCESS_TOKEN`. |
-| `access_token_secret` | `password` | `no` | `null` | OAuth access token secret, or use `X_ACCESS_TOKEN_SECRET`. |
-| `include_post_metrics` | `boolean` | `no` | `false` | Include public metrics in `search_posts()` output. |
-| `wait_on_rate_limit` | `boolean` | `no` | `false` | Let Tweepy wait for rate limits instead of failing immediately. |
-
-### Example
-
-```yaml
-agents:
-  social:
-    tools:
-      - x:
-          include_post_metrics: true
-          wait_on_rate_limit: true
-```
-
-```python
-search_posts("mindroom matrix", max_results=10)
-get_user_info("mindroom_ai")
-create_post("MindRoom now supports another release.")
-reply_to_post("1890123456789012345", "Thanks for the feedback.")
-```
-
-### Notes
-
-- A bearer token can support read-style endpoints such as search, but posting, replying, DMs, and home-timeline access generally need full OAuth user credentials.
-- `reply_to_post()` builds a `twitter.com` URL in its response, while `create_post()` builds an `x.com` URL, so response formatting is currently inconsistent upstream.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `bearer_token` | `password` | `null` | Bearer token, or `X_BEARER_TOKEN`. |
+| `consumer_key` | `password` | `null` | OAuth consumer key, or `X_CONSUMER_KEY`. |
+| `consumer_secret` | `password` | `null` | OAuth consumer secret, or `X_CONSUMER_SECRET`. |
+| `access_token` | `password` | `null` | OAuth access token, or `X_ACCESS_TOKEN`. |
+| `access_token_secret` | `password` | `null` | OAuth access token secret, or `X_ACCESS_TOKEN_SECRET`. |
+| `include_post_metrics` | `boolean` | `false` | Add reply, repost, like, and quote counts to search results. |
+| `wait_on_rate_limit` | `boolean` | `false` | Wait out rate limits instead of failing. |
 
 ## [`reddit`]
 
-`reddit` is the Reddit toolkit for reading user and subreddit data, listing trending communities, and optionally posting or replying with user credentials.
+`reddit` reads user profiles, top posts, subreddit info and stats, and trending subreddits, and can create posts and reply to posts and comments.
+`client_id` and `client_secret` are enough for reads; posting and replying also need `username` and `password`.
+A nonempty `allowed_subreddits` list limits posts and replies to those subreddits, named without `r/` and matched case-insensitively; reads are unaffected.
 
-### What It Does
-
-The installed upstream tool exposes `get_user_info()`, `get_top_posts()`, `get_subreddit_info()`, `get_trending_subreddits()`, `get_subreddit_stats()`, `create_post()`, `reply_to_post()`, and `reply_to_comment()`.
-With only `client_id` and `client_secret`, the tool initializes a read-only `praw.Reddit` client.
-If `username` and `password` are also configured, the tool enables posting and replying with authenticated user actions.
-`reddit_instance` is an advanced programmatic injection point for an existing `praw.Reddit` object rather than a normal YAML value.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `reddit_instance` | `text` | `no` | `null` | Advanced programmatic Reddit client injection, not normal YAML authoring. |
-| `client_id` | `text` | `no` | `null` | Reddit app client ID, or use `REDDIT_CLIENT_ID`. Required in practice. |
-| `client_secret` | `password` | `no` | `null` | Reddit app client secret, or use `REDDIT_CLIENT_SECRET`. Required in practice. |
-| `user_agent` | `text` | `no` | `null` | Optional custom user agent, with `RedditTools v1.0` as the upstream fallback. |
-| `username` | `text` | `no` | `null` | Reddit username for posting and replying. |
-| `password` | `password` | `no` | `null` | Reddit password for posting and replying. |
-| `allowed_subreddits` | `string[]` | `no` | `null` | Optional subreddit names permitted for posts and replies; matching is case-insensitive. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `client_id` | `text` | `null` | Reddit app client ID, or `REDDIT_CLIENT_ID`; required. |
+| `client_secret` | `password` | `null` | Reddit app client secret, or `REDDIT_CLIENT_SECRET`; required. |
+| `user_agent` | `text` | `null` | Custom user agent, or `REDDIT_USER_AGENT`; defaults to `RedditTools v1.0`. |
+| `username` | `text` | `null` | Reddit username for posts and replies. |
+| `password` | `password` | `null` | Reddit password for posts and replies. |
+| `allowed_subreddits` | `string[]` | `null` | Subreddits permitted for posts and replies; `null` or `[]` allows all. |
+| `reddit_instance` | `text` | `null` | Programmatic only: an existing PRAW `Reddit` client, not settable from YAML. |
 
 ```yaml
 agents:
-  research:
+  community:
     tools:
       - reddit:
-          user_agent: MindRoomResearchBot/1.0
+          user_agent: MindRoomCommunityBot/1.0
           allowed_subreddits: [matrixdotorg]
 ```
 
-```python
-get_top_posts("matrixdotorg", time_filter="week", limit=10)
-get_subreddit_info("python")
-get_trending_subreddits()
-get_user_info("spez")
-```
-
-### Notes
-
-- `client_id` and `client_secret` are enough for read-only operations.
-- `create_post()`, `reply_to_post()`, and `reply_to_comment()` additionally require `username` and `password`.
-- A nonempty `allowed_subreddits` list restricts only those three write methods, using case-insensitive community names without the `r/` prefix.
-- Reads are unaffected; `null` or `[]` leaves writes unrestricted by this optional guard.
-- The current MindRoom metadata treats `reddit_instance` as text, but the upstream constructor expects an already constructed `praw.Reddit` object.
-
 ## [`zoom`]
 
-`zoom` is the Zoom meeting-management toolkit for scheduling, listing, inspecting, deleting, and reading recordings through Zoom's Server-to-Server OAuth flow.
+`zoom` schedules, lists, inspects, and deletes Zoom meetings and reads meeting recordings.
+It uses the credentials of a Zoom Server-to-Server OAuth app, so there is no browser connect step.
+Meetings are scheduled for the app account's own user with fixed settings: automatic recording is off, and participants cannot join before the host.
 
-### What It Does
-
-The installed upstream tool exposes `get_access_token()`, `schedule_meeting()`, `get_upcoming_meetings()`, `list_meetings()`, `get_meeting_recordings()`, `delete_meeting()`, and `get_meeting()`.
-It exchanges `account_id`, `client_id`, and `client_secret` against `https://zoom.us/oauth/token` with `grant_type=account_credentials`.
-The generated access token is cached in process until shortly before expiry.
-Meeting creation always targets `users/me/meetings` and applies a fixed set of default meeting settings in the upstream implementation.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `account_id` | `text` | `no` | `null` | Zoom account ID from a Server-to-Server OAuth app, or use `ZOOM_ACCOUNT_ID`. Required in practice. |
-| `client_id` | `text` | `no` | `null` | Zoom client ID, or use `ZOOM_CLIENT_ID`. Required in practice. |
-| `client_secret` | `password` | `no` | `null` | Zoom client secret, or use `ZOOM_CLIENT_SECRET`. Required in practice. |
-
-### Example
-
-```yaml
-agents:
-  coordinator:
-    tools:
-      - zoom:
-          account_id: your_account_id
-          client_id: your_client_id
-```
-
-```python
-schedule_meeting("Weekly sync", "2026-04-02T16:00:00Z", 30, timezone="America/Los_Angeles")
-get_upcoming_meetings()
-list_meetings(type="scheduled")
-get_meeting("81234567890")
-```
-
-### Notes
-
-- Although MindRoom marks `zoom` as `setup_type: oauth`, the current implementation is not an interactive browser OAuth flow.
-- The installed tool expects Server-to-Server OAuth credentials and exchanges them directly for an access token on demand.
-- `get_meeting_recordings()` can request a download token and TTL per call, but those are call arguments rather than config fields.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `account_id` | `text` | `null` | Account ID of the Server-to-Server OAuth app, or `ZOOM_ACCOUNT_ID`; required. |
+| `client_id` | `text` | `null` | Client ID, or `ZOOM_CLIENT_ID`; required. |
+| `client_secret` | `password` | `null` | Client secret, or `ZOOM_CLIENT_SECRET`; required. |
+| `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - For `aws_ses` when you want an alternative outbound-email provider.
+- [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - `aws_ses` for Amazon SES email.
