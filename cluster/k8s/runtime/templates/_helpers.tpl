@@ -386,6 +386,11 @@ matchLabels:
 {{- if or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
 {{- end -}}
 
+{{- /* Whether the worker NetworkPolicy fences worker egress; the Agent Vault policy follows the same gate. */ -}}
+{{- define "mindroom-runtime.workerEgressPolicyEnabled" -}}
+{{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create -}}true{{- end -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.egressProxyNamespace" -}}
 {{- if .Values.approvedEgress.enabled -}}
 {{- .Release.Namespace -}}
