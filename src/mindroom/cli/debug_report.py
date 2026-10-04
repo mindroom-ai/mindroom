@@ -1,4 +1,7 @@
-"""`mindroom debug-report`: collect the backend side of a MindRoom Chat bug report."""
+"""`mindroom debug-report`: collect the backend side of a MindRoom Chat bug report.
+
+The config is only read: it is parsed with its includes but never validated, migrated, or written.
+"""
 
 from __future__ import annotations
 

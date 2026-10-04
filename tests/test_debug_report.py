@@ -197,7 +197,7 @@ def test_read_journal_without_thread_matches_event_ids_only(tmp_path: Path) -> N
 
 
 def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
-    """The reader opens the database read-only, so inspecting an install cannot change it."""
+    """The reader opens the database read-only, so it cannot change the stored data."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     with _sqlite_query(path) as query, pytest.raises(sqlite3.OperationalError):
@@ -737,7 +737,7 @@ def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A postgres journal without a DSN in this shell is an error, never a silent read of the SQLite file."""
+    """A postgres journal whose DSN resolves from nowhere is an error, never a silent read of the SQLite file."""
     monkeypatch.delenv("MINDROOM_EVENT_CACHE_DATABASE_URL", raising=False)
     config = tmp_path / "config.yaml"
     _write_config(config)

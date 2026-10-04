@@ -1,7 +1,7 @@
 """Collect everything the backend stored about one reported conversation.
 
-Every reader is read-only. The runtime's own openers create or migrate schema,
-so they are never used here: inspecting an install must not change it.
+Databases are opened read-only, and the runtime's own openers, which create or migrate schema, are never used.
+A read-only open of a SQLite database in WAL mode can still create its -wal and -shm sidecar files.
 """
 
 from __future__ import annotations
@@ -395,7 +395,8 @@ class DebugReportSources:
     journal_sqlite_path: Path | None
     journal_postgres_url: str | None
     llm_request_log_dir: Path
-    # Why the journal could not be located (for example no PostgreSQL URL in this shell).
+    # Why the journal could not be located (for example no PostgreSQL URL resolved from the config, its .env, or the
+    # environment).
     # It is reported instead of falling back to the SQLite path, which would read the wrong database.
     journal_error: str | None = None
 

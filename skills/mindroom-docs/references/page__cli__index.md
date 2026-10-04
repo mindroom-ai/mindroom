@@ -974,16 +974,21 @@ mindroom journal adopt --storage-path mindroom_data --yes
 Collect everything the backend stored about one conversation into a single JSON document.
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 
-The command reads the event journal (turn records, admitted events, and outbound deliveries), every Agno session database's runs, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The command reads the event journal (turn records, admitted events, and outbound deliveries), the runs in the Agno session databases of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error`.
 A source that cannot be read, such as a locked or corrupt database, is reported with `"status": "error"` and its message under `error`, while the other sources are still collected.
 A source that reads several files can be `ok` with an `error` naming the files it could not read, for example one locked session database among many.
-A PostgreSQL event journal whose connection URL is not set in the current shell is reported the same way, never replaced by the SQLite file.
-The event journal and the Agno session databases are opened read-only.
+When the config selects the PostgreSQL event journal, its URL is resolved from `event_journal.database_url`, the config directory's `.env`, or the environment.
+If no URL resolves, or the `postgres` extra is not installed, the three journal sources are reported with `"status": "error"`, never replaced by the SQLite file.
+Databases are opened read-only, although a read-only open of a SQLite database in WAL mode can still create its `-wal` and `-shm` sidecar files.
+The config is only read: it is never validated, migrated, or written, so a config the runtime would reject still locates the data.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
-Nothing is redacted; JSONL sources are capped at 1,000 records and log lines at 2,000 lines of 4,000 characters each.
+Nothing is redacted, and the newest matches are kept: up to 100 Agno runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each.
+`dropped` counts the older matches left out, and `truncated` counts the shortened log lines.
 
 Run it on the MindRoom host, with the same `--config` and `--storage-path` the service uses, and hand both JSON files to a coding agent.
+A relative `debug.llm_request_log_dir` is relative to the working directory, as it is for the runtime, so run the command from the service's working directory in that case.
+A `--config` that does not exist is an error, and without `--config` a missing default config means the default storage locations, with a note on stderr.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
