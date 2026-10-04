@@ -361,15 +361,7 @@ class ApprovalManager:
                 status="denied",
                 reason="Approval card could not be published in this room.",
             )
-        try:
-            await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-        except Exception:
-            logger.warning(
-                "approval_card_initial_delivery_deferred",
-                delivery_id=delivery_id,
-                exc_info=True,
-            )
-        self._ensure_deadline_sweep()
+        await self._publish_reserved_cards([delivery_id])
         deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
         while True:
             decision = await cards.background_approval_decision(run_id=origin.run_id, call_id=origin.call_id)
@@ -441,11 +433,7 @@ class ApprovalManager:
         )
         if not await cards.reserve_scheduled_call_approval(binding=binding, card=reservation):
             return False
-        try:
-            await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
-        except Exception:
-            logger.warning("approval_card_initial_delivery_deferred", delivery_id=delivery_id, exc_info=True)
-        self._ensure_deadline_sweep()
+        await self._publish_reserved_cards([delivery_id])
         return True
 
     async def arm_scheduled_call_approval(
@@ -590,18 +578,22 @@ class ApprovalManager:
         )
         if not reserved:
             return False
+        await self._publish_reserved_cards([card.delivery_id for card in cards])
+        return True
+
+    async def _publish_reserved_cards(self, delivery_ids: list[str]) -> None:
+        """Send reserved cards now, leaving any failed send to the delivery worker's retries."""
         worker = self._worker()
-        for card in cards:
+        for delivery_id in delivery_ids:
             try:
-                await worker.flush(delivery_id=card.delivery_id, stage=DeliveryStage.INITIAL)
+                await worker.flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
             except Exception:
                 logger.warning(
                     "approval_card_initial_delivery_deferred",
-                    delivery_id=card.delivery_id,
+                    delivery_id=delivery_id,
                     exc_info=True,
                 )
         self._ensure_deadline_sweep()
-        return True
 
     def _worker(self) -> MatrixDeliveryWorker:
         if self.cards is None or self.send_delivery is None:
