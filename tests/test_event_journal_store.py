@@ -10101,7 +10101,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     journal_store: EventJournalStore,
     ended_by: str,
 ) -> None:
-    """History cannot create resume authority, and old memberships cannot retain it."""
+    """History cannot create response ownership, and old memberships cannot retain it."""
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.enqueue_matrix_delivery(
         delivery_id="$turn",
@@ -10112,7 +10112,7 @@ async def test_resume_response_ownership_requires_current_attempted_delivery(
     )
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.claim_matrix_delivery(delivery_id="$turn", stage=DeliveryStage.INITIAL)
-    # An unknown send result stays with outbox recovery, not a fresh resume relay.
+    # An unknown send result stays with outbox recovery until the send is acknowledged.
     assert not await alice.owns_matrix_response(room_id=ROOM, event_id="$response")
     await alice.acknowledge_matrix_delivery(
         delivery_id="$turn",

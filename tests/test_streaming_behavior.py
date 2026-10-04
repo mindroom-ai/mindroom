@@ -3250,11 +3250,10 @@ class TestStreamingBehavior:
                 client: nio.AsyncClient,
                 *,
                 cancelled: bool = False,
-                restart_interrupted: bool = False,
                 cancel_source: CancelSource | None = None,
                 error: Exception | None = None,
             ) -> StreamTransportOutcome:
-                del client, cancelled, restart_interrupted, cancel_source
+                del client, cancelled, cancel_source
                 finalize_calls.append(error)
                 return StreamTransportOutcome(
                     last_physical_stream_event_id=self.event_id,

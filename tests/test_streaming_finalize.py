@@ -364,7 +364,7 @@ async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behi
         patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=None)) as mock_edit,
         patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
     ):
-        outcome = await streaming.finalize(_client(), restart_interrupted=True)
+        outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
 
     assert mock_edit.await_count == 1
     sleep_mock.assert_not_awaited()
@@ -389,7 +389,7 @@ async def test_transport_restart_interrupted_terminal_update_reports_committed(t
             ),
         ),
     ):
-        outcome = await streaming.finalize(_client(), restart_interrupted=True)
+        outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
 
     assert outcome.terminal_status == "cancelled"
     assert outcome.terminal_update_committed is True
@@ -465,7 +465,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         "mindroom.streaming.edit_message_result",
         new=AsyncMock(return_value=None),
     ):
-        transport_outcome = await streaming.finalize(_client(), restart_interrupted=True)
+        transport_outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
 
     response_hooks = SimpleNamespace(
         _apply_before_response=AsyncMock(),

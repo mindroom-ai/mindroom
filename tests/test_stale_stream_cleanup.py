@@ -1270,14 +1270,12 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
         "$first": stale_stream_cleanup_module._MessageState(
             latest_body="First partial",
             latest_timestamp=NOW_MS - STALE_AGE_MS,
-            latest_event_id="$first",
             stream_status="streaming",
             bot_user_id=BOT_USER_ID,
         ),
         "$second": stale_stream_cleanup_module._MessageState(
             latest_body="Second partial",
             latest_timestamp=NOW_MS - STALE_AGE_MS + 1,
-            latest_event_id="$second",
             stream_status="streaming",
             bot_user_id=OTHER_BOT_USER_ID,
         ),

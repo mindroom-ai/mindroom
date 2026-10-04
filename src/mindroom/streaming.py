@@ -819,27 +819,19 @@ class StreamingResponse:
     def _prepare_terminal_text_and_status(
         self,
         *,
-        cancelled: bool,
-        restart_interrupted: bool,
         cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None,
         error: Exception | None,
     ) -> _TerminalStreamStatus:
         """Apply terminal text adjustments and return the terminal stream status."""
-        resolved_cancel_source = cancel_source
-        if resolved_cancel_source is None:
-            if restart_interrupted:
-                resolved_cancel_source = "sync_restart"
-            elif cancelled:
-                resolved_cancel_source = "user_stop"
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
             error_note = format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
-        if resolved_cancel_source is not None:
+        if cancel_source is not None:
             self.accumulated_text, stream_status = build_cancelled_response_update(
                 self.accumulated_text,
-                cancel_source=resolved_cancel_source,
+                cancel_source=cancel_source,
             )
             return stream_status
         return STREAM_STATUS_COMPLETED
@@ -864,7 +856,6 @@ class StreamingResponse:
         client: nio.AsyncClient,
         *,
         cancelled: bool = False,
-        restart_interrupted: bool = False,
         cancel_source: Literal["user_stop", "sync_restart", "interrupted"] | None = None,
         error: Exception | None = None,
     ) -> StreamTransportOutcome:
@@ -874,11 +865,8 @@ class StreamingResponse:
         if canonical_final_body_candidate is None and self.accumulated_text.strip():
             canonical_final_body_candidate = self.accumulated_text
         resolved_cancel_source = cancel_source
-        if resolved_cancel_source is None:
-            if restart_interrupted:
-                resolved_cancel_source = "sync_restart"
-            elif cancelled:
-                resolved_cancel_source = "user_stop"
+        if resolved_cancel_source is None and cancelled:
+            resolved_cancel_source = "user_stop"
         if (
             self.event_id is None
             and self.allow_new_terminal_message is not None
@@ -912,9 +900,7 @@ class StreamingResponse:
             )
         had_body_before_terminal = bool(self.accumulated_text.strip())
         final_stream_status = self._prepare_terminal_text_and_status(
-            cancelled=cancelled,
-            restart_interrupted=restart_interrupted,
-            cancel_source=cancel_source,
+            cancel_source=resolved_cancel_source,
             error=error,
         )
         terminal_status = "cancelled" if resolved_cancel_source is not None else final_stream_status
@@ -999,9 +985,7 @@ class StreamingResponse:
         try:
             retry_terminal_update = final_stream_status == STREAM_STATUS_COMPLETED
             retry_terminal_update_immediately = (
-                final_stream_status != STREAM_STATUS_COMPLETED
-                and not restart_interrupted
-                and cancel_source != "sync_restart"
+                final_stream_status != STREAM_STATUS_COMPLETED and resolved_cancel_source != "sync_restart"
             )
             send_succeeded = await self._send_or_edit_message(
                 client,

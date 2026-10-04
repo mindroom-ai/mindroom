@@ -1230,8 +1230,8 @@ async def test_a_resumed_stream_that_adds_nothing_shows_the_stopped_text_once(co
     gateway = _FakeGateway()
 
     async def nothing() -> AsyncIterator[object]:
-        return
-        yield
+        if False:
+            yield None
 
     with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
         await _run_resumed_stream(config, nothing())

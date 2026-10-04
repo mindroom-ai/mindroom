@@ -75,7 +75,6 @@ class _MessageState:
 
     latest_body: str | None = None
     latest_timestamp: int = 0
-    latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
     stream_status: str | None = None
     bot_user_id: str | None = None
@@ -450,7 +449,6 @@ async def _load_recovery_message_states(
         # edited seconds before a restart would read as older than the cleanup window and be
         # skipped, leaving it displaying ``streaming`` forever.
         state.latest_timestamp = message.edited_timestamp or message.timestamp
-        state.latest_event_id = message.visible_event_id
         state.latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
         state.stream_status = message.stream_status
         state.bot_user_id = message.sender
@@ -692,16 +690,14 @@ def _is_at_or_after_startup_cutoff(timestamp_ms: int, *, startup_cutoff_ms: int 
     return startup_cutoff_ms is not None and timestamp_ms >= startup_cutoff_ms
 
 
-def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
+def _is_recent_timestamp(timestamp_ms: int, *, now_ms: int) -> bool:
     """Return whether a timestamp is still within the startup recency guard."""
-    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return current_time_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
+    return now_ms - timestamp_ms < _STALE_STREAM_RECENCY_GUARD_MS
 
 
-def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int | None = None) -> bool:
+def _is_older_than_cleanup_window(timestamp_ms: int, *, now_ms: int) -> bool:
     """Return whether a timestamp is older than the restart cleanup lookback window."""
-    current_time_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return current_time_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
+    return now_ms - timestamp_ms > _STALE_STREAM_LOOKBACK_MS
 
 
 def _agent_name_for_bot_user_id(
