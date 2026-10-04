@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -746,6 +747,33 @@ async def test_schedule_tool_call_cancels_the_task_when_its_card_cannot_be_poste
         )
 
     assert [status for status, _record in _persisted_workflows(context)] == ["pending", "cancelled"]
+    start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_card_request_cancels_the_task_and_withdraws_its_card() -> None:
+    """A stop while the card is being delivered leaves neither a runnable task nor an actionable card."""
+    config = _gated_config()
+    context = _tool_context(config)
+    withdraw = AsyncMock()
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+        patch("mindroom.scheduling._start_scheduled_task") as start,
+        tool_runtime_context(context),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    [(_status, record), (cancelled_status, _cancelled)] = _persisted_workflows(context)
+    assert cancelled_status == "cancelled"
+    withdraw.assert_awaited_once_with(record.task_id, reason="Schedule cancelled.")
     start.assert_not_called()
 
 

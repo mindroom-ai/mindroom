@@ -165,14 +165,8 @@ def arm(
 
 def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
     """Withdraw a cancelled or edited task's approval for good and deny its card if still pending."""
-    transaction.execute(
-        """
-        UPDATE scheduled_call_approvals SET revoked_at_ns = ?
-        WHERE principal_id = ? AND task_id = ? AND revoked_at_ns IS NULL
-        """,
-        (time.time_ns(), principal_id, task_id),
-    )
-    return background_approvals.resolve_call(
+    # Lock the card's row before the binding, in the same order as a card decision.
+    recorded = background_approvals.resolve_call(
         transaction,
         principal_id,
         run_id=background_approvals.scheduled_call_run_id(task_id),
@@ -180,6 +174,14 @@ def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reaso
         requested_status="denied",
         reason=reason,
     )
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET revoked_at_ns = ?
+        WHERE principal_id = ? AND task_id = ? AND revoked_at_ns IS NULL
+        """,
+        (time.time_ns(), principal_id, task_id),
+    )
+    return recorded
 
 
 def apply_armed(

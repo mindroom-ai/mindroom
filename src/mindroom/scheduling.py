@@ -2028,6 +2028,8 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
                 created_at=created_at,
                 matrix_admin=runtime.matrix_admin,
             )
+            # A stop can land after the card was reserved but before the request returned.
+            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     if not card_posted:
         return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
