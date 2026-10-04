@@ -98,7 +98,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | J14 | Current behavior | [`sync_restart_retry.py`][restart-retry] and [`visible_response_reconciliation.py`][visible-recovery] keep current replay and visible-response safety. |
 | J15 | Isolated | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] recognizes approvals stranded by historical INITIAL retirement; current owners retain consent, failure handling, and settlement. |
 | J16 | Current behavior | [`turn_store.py`][turn-store] does not migrate ledger tombstones that carry no room, so one that v2026.10.30 or earlier wrote for a redaction delivered in another room still marks its event handled and blocks replies in threads that contain it until ledger retention drops it. |
-| J17 | Current behavior | [`handled_turns.py`][handled] ignores the redaction cleanup obligations that v2026.10.140 or earlier stored in turn records; responses derive history cleanup from the ledger tombstones those records still carry. |
+| J17 | Current behavior | [`handled_turns.py`][handled] ignores the redaction cleanup obligations that v2026.10.142 or earlier stored in turn records; responses derive history cleanup from the ledger tombstones those records still carry. |
 
 ## Agent state, history, memory, and knowledge
 

@@ -4526,8 +4526,8 @@ def read_ledger_records(
     audits use strict mode and reject every unreadable, malformed, or
     non-terminal entry instead of letting corruption look like an empty ledger.
     A fully redacted record is a durable tombstone even when ``completed``
-    remains false. Session cleanup may remain pending until the next response;
-    explicit cleanup probes audit that separate obligation.
+    remains false. Session history is cleaned when a response next opens it;
+    explicit cleanup probes audit that separately.
     Live tombstone observation may include unfinished owners; strict final
     audits still reject their unfinished live sources.
     """
@@ -4588,7 +4588,7 @@ def _decode_ledger_rows(
     strict: bool,
     include_incomplete: bool = False,
 ) -> dict[str, TurnRecord]:
-    """Retain completed turns and durable tombstones, including deferred session cleanup."""
+    """Retain completed turns and durable tombstones."""
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
@@ -4598,9 +4598,9 @@ def _decode_ledger_rows(
             continue
         decoded_records[event_id] = record
         fully_redacted = not record.replay_source_event_ids
-        # Redaction callbacks commit tombstones; the next response in this
-        # session removes the saved run and clears pending cleanup. An idle
-        # tombstoned session is therefore settled without eager cleanup.
+        # Redaction callbacks commit tombstones; the next response that opens
+        # an affected history removes the saved run. An idle tombstoned
+        # session is therefore settled without eager cleanup.
         if not record.completed and not fully_redacted and (strict or not include_incomplete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
             continue

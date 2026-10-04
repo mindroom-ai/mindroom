@@ -41,6 +41,7 @@ from mindroom.handled_turns import (
 )
 from mindroom.history import archive
 from mindroom.history.storage import (
+    archive_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
     update_scope_seen_event_ids,
@@ -3986,11 +3987,13 @@ async def test_edit_snapshot_rechecks_after_awaited_source_preparation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("explicit_revision_replay", "historical_summary_owner"),
+    ("explicit_revision_replay", "historical_summary_owner", "later_run_names_revision"),
     [
-        pytest.param(None, True, id="historical-summary-only"),
+        pytest.param(None, True, False, id="historical-summary-only"),
+        pytest.param(None, True, True, id="historical-summary-and-later-run"),
         pytest.param(
             RevisionReplay("$user_msg", 10, response_event_id="$reply"),
+            False,
             False,
             id="modern-per-revision",
         ),
@@ -4001,6 +4004,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     tmp_path: Path,
     explicit_revision_replay: RevisionReplay | None,
     historical_summary_owner: bool,
+    later_run_names_revision: bool,
 ) -> None:
     """Only legacy summaries lacking physical IDs use retained source ownership."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
@@ -4024,14 +4028,40 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
 
     storage = storage_factory()
+    later_run = RunOutput(
+        run_id="later",
+        agent_id="agent",
+        session_id=target.session_id,
+        metadata={
+            constants.MATRIX_EVENT_ID_METADATA_KEY: "$later",
+            constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [10, "$physical-edit"]},
+        },
+    )
     session = AgentSession(
         session_id=target.session_id,
         agent_id="agent",
         summary=SessionSummary(summary="DELETED_EDIT_MARKER"),
+        runs=[later_run] if later_run_names_revision else [],
     )
     update_scope_seen_event_ids(session, scope, ["$user_msg"])
     storage.upsert_session(session)
+    for run in session.runs or []:
+        storage.upsert_run(run, session_id=session.session_id)
     storage.close()
+    if later_run_names_revision:
+        # A modern compaction archives the later run on top of the legacy summary.
+        storage = storage_factory()
+        reopened_session = get_agent_session(storage, target.session_id)
+        assert reopened_session is not None
+        archive_compaction_chunk(
+            storage=storage,
+            session=reopened_session,
+            scope=scope,
+            summary=SessionSummary(summary="DELETED_EDIT_MARKER and later"),
+            summary_model="summary-model",
+            archived_runs=list(reopened_session.runs or []),
+        )
+        storage.close()
     _reset_handled_turn_ledger_runtime()
     store = await _store(journal_store)
     store.deps.state_writer.create_storage.side_effect = storage_factory

@@ -297,7 +297,7 @@ It no longer sends messages, runs AI, or writes persistence state.
 Command handling now records terminal outcomes through `TurnStore` as well.
 Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
-Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by an unsettled journal row.
+Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining conversation redaction tombstones, replayable incomplete turns, and every group referenced by an unsettled journal row.
 Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
 Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
@@ -373,6 +373,7 @@ Physical edits register on the owning turn before prompt retention or generation
 Exact edit tombstones invalidate those revisions while preserving the original source, completed response identity, and any unrelated surviving revision.
 Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
 Registration and tombstone reconciliation share ledger conflict keys, and unsettled physical edits pin their owners through retention.
+Retention also keeps every turn record that carries a redaction tombstone for a conversation, because history cleanup derives from it once a departure has dropped the journal's tombstone or for history older than the journal.
 Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
 The revision map remains ledger-owned; model runs carry consumption provenance.
 Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
@@ -384,7 +385,7 @@ Coalesced regeneration refills invalidated slots through strict paginated reads 
 An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
 The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
 The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
-Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
+Physical snapshot validation follows awaited tombstone reconciliation and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
 Redacted replay may remain in local session storage until the history scope holding it next serves a response; responses do not receive it, while approval continuations, manual compaction, and voice-call turns do not run the check.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 

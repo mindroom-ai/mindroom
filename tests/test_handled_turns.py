@@ -128,7 +128,6 @@ async def test_scoped_lookup_tracks_updates_and_retention(journal_store: EventJo
     await ledger.record_handled_turn(
         TurnRecord.create(
             ["$one", "$two"],
-            redacted_source_event_ids=["$one"],
             conversation_target=original,
             completed=False,
         ),
@@ -1588,6 +1587,44 @@ async def test_discovery_alias_persists_without_becoming_a_coalesced_source(
     assert question_record.source_event_ids == ("$question",)
     assert question_record.discovery_event_ids == ("$selection",)
     assert not question_record.is_coalesced
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retention", ["age", "count"])
+async def test_retention_keeps_conversation_redaction_tombstones(
+    journal_store: EventJournalStore,
+    retention: str,
+) -> None:
+    """History cleanup derives from these tombstones when the journal no longer has them."""
+    tracker = await _open_ledger(journal_store, f"tombstone_retention_{retention}")
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
+    old_timestamp = time.time() - (40 * 24 * 60 * 60) if retention == "age" else time.time() - 10
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$source"],
+            redacted_source_event_ids=["$source"],
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(
+            ["$edited"],
+            response_event_id="$edited-reply",
+            revision_replay={"$edit": RevisionReplay("$edited", 100, redacted=True)},
+            conversation_target=target,
+            timestamp=old_timestamp,
+        ),
+    )
+    await tracker.record_handled_turn(
+        TurnRecord.create(["$ordinary"], conversation_target=target, timestamp=old_timestamp),
+    )
+
+    await tracker._cleanup_old_events(max_events=100 if retention == "age" else 0, max_age_days=30)
+
+    assert tracker.get_turn_record("$source") is not None
+    assert tracker.get_turn_record("$edited") is not None
+    assert tracker.get_turn_record("$ordinary") is None
 
 
 @pytest.mark.asyncio

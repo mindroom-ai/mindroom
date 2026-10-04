@@ -197,7 +197,7 @@ class TurnRecordCodec:
         # LEGACY_COMPAT: Ledger records carrying redaction cleanup obligations.
         # Legacy format: A stored record with pending_redaction_cleanup_event_ids, and revision replay
         # entries with cleanup_pending, naming session cleanup still owed for its tombstoned sources.
-        # Last legacy release: v2026.10.140; replacement: the next release derives session cleanup at
+        # Last legacy release: v2026.10.142; replacement: the next release derives session cleanup at
         # each response from the history's own event ids against the journal and ledger tombstones.
         # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
         # also a ledger tombstone, so the next response of each affected history finds and removes it.
@@ -1041,9 +1041,21 @@ def _response_group_requires_retention(
     group: _ResponseGroup,
     unsettled_source_event_ids: frozenset[str],
 ) -> bool:
-    """Return whether one group still owns unfinished durable work."""
+    """Return whether one group still owns unfinished durable work or redaction evidence.
+
+    A conversation's ledger tombstones are what history cleanup derives from when the
+    journal no longer has them, so they stay as long as some history might still hold the event.
+    """
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)
+        or any(
+            record.conversation_target is not None
+            and (
+                bool(record.redacted_source_event_ids)
+                or any(revision.redacted for revision in (record.revision_replay or {}).values())
+            )
+            for record in group.records.values()
+        )
         or any(
             not unsettled_source_event_ids.isdisjoint(record.revision_replay or {}) for record in group.records.values()
         )

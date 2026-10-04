@@ -816,17 +816,17 @@ class TurnStore:
             for revision_id, revision in (record.revision_replay or {}).items():
                 if not revision.redacted:
                     continue
-                if revision_id in candidates:
-                    redacted.setdefault(revision_id, None)
                 # LEGACY_COMPAT: Revisions consumed only through a source-level summary.
                 # Legacy format: A revision whose replay carries legacy_summary_provenance, which a
                 # pre-v2026.9.43 compacted summary owns through its source rather than by revision id.
                 # Last legacy release: v2026.9.42; replacement: v2026.9.43 records per-revision provenance.
-                # Handling: When the source is in the history, the revision is reported with that source so
-                # removal clears the legacy summary that depends on it; ledger retention retires these records.
+                # Handling: When the source is in the history, the revision is reported with that source, even
+                # if later history also names the revision, so removal clears the legacy summary as well.
                 # Coverage: tests/test_turn_store.py::test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen.
-                elif (source_event_id := summary_source_id(revision)) is not None and source_event_id in candidates:
+                if (source_event_id := summary_source_id(revision)) is not None and source_event_id in candidates:
                     redacted[revision_id] = source_event_id
+                elif revision_id in candidates:
+                    redacted.setdefault(revision_id, None)
         return redacted
 
     async def _prepare_response_for_redactions(
@@ -843,7 +843,7 @@ class TurnStore:
         return self._any_source_redacted(source_event_ids)
 
     async def _reconcile_journal_redactions(self, target: MessageTarget) -> None:
-        """Recover admitted cleanup before an earlier FIFO source can consume its context."""
+        """Record redactions the journal admitted before an earlier FIFO source can consume their context."""
         event_ids = {
             event_id
             for record in self._ledger.turn_records_for_conversation(session_id=target.session_id)
@@ -869,7 +869,7 @@ class TurnStore:
         consumed_revision_ids: tuple[str, ...] = (),
         thread_history: Sequence[ResolvedVisibleMessage] = (),
     ) -> bool | EditPreparation:
-        """Check an immutable edit snapshot after cleanup under the response lock."""
+        """Check an immutable edit snapshot after tombstone reconciliation under the response lock."""
         assert record.conversation_target is not None
         await self._register_context_revisions(record.source_event_ids[0], thread_history)
         if await self._prepare_edit_response_source(
@@ -917,7 +917,7 @@ class TurnStore:
         terminal_source_event_ids: tuple[str, ...],
         thread_history: Sequence[ResolvedVisibleMessage] = (),
     ) -> bool:
-        """Finish cleanup, then suppress a pending response whose source became terminal."""
+        """Reconcile tombstones, then suppress a pending response whose source became terminal."""
         if source_event_ids:
             await self._register_context_revisions(source_event_ids[0], thread_history)
         suppressed = await self._prepare_response_for_redactions(
