@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { useDarkMode } from '@/hooks/useDarkMode'
 import { ProductFilm } from '../ProductFilm'
 
@@ -29,5 +29,19 @@ describe('ProductFilm', () => {
 
     expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/2c3227cf-0cea-475f-8c27-959a21504348')
     expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/70e6d774-5f5c-4d2c-862d-a992136dfd73')
+  })
+
+  it('keeps the film the reader started when the page turns dark', () => {
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: false })
+    const { rerender } = render(<ProductFilm />)
+    const started = film()
+    fireEvent.play(started)
+
+    ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
+    rerender(<ProductFilm />)
+
+    expect(film()).toBe(started)
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/383e9556-af82-4b4c-bdd4-8ba894481eec')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/e3ce6dae-b730-41cc-a1e9-a7292e8e5766')
   })
 })

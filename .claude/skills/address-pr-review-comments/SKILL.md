@@ -38,7 +38,7 @@ gh api repos/mindroom-ai/mindroom/pulls/<pr>/reviews --paginate
 Also inspect the actual diff:
 
 ```bash
-git --no-pager diff origin/main | cat
+git --no-pager diff origin/main...HEAD | cat
 ```
 
 ## Triage Before Editing
