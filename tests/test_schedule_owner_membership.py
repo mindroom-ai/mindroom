@@ -132,6 +132,31 @@ async def test_departed_owner_cancels_persisted_schedule(
 
 
 @pytest.mark.asyncio
+async def test_departed_owner_cancellation_retries_a_failed_approval_withdrawal(
+    owner_membership_runtime_paths: RuntimePaths,
+) -> None:
+    """A transient approval-journal error delays the cancellation instead of failing the task."""
+    client, _workflow, state = _owner_schedule([{"membership": "leave"}])
+    withdraw = AsyncMock(side_effect=[RuntimeError("journal unavailable"), None])
+
+    with (
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+        patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
+    ):
+        task = await scheduling._reconcile_runnable_task_retrying(
+            client,
+            "!test:server",
+            "owner_task",
+            config=Config(),
+            runtime_paths=owner_membership_runtime_paths,
+        )
+
+    assert task is None
+    assert withdraw.await_count == 2
+    assert state["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("created_by", ["@alice:server", "@bob:server"])
 async def test_joined_schedule_stays_pending(
     created_by: str,

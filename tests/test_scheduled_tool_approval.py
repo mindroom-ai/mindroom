@@ -39,6 +39,7 @@ from mindroom.scheduling import (
     _run_once_task,
     _scheduled_call_workflow_digest,
     cancel_scheduled_task,
+    save_edited_scheduled_task,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError
@@ -918,6 +919,74 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     arm.assert_awaited_once_with("task1234", _scheduled_call_workflow_digest("task1234", workflow))
     assert execute.await_count == int(fires)
     assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
+
+
+@pytest.mark.asyncio
+async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it() -> None:
+    """Cancelling keeps its error result when the approval cannot be withdrawn, and publishes nothing."""
+    client = AsyncMock()
+
+    with (
+        patch(
+            "mindroom.scheduling._read_scheduled_task_state",
+            new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
+        ),
+        patch(
+            "mindroom.scheduling.withdraw_scheduled_call_approval",
+            new=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        ),
+    ):
+        result = await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+        )
+
+    assert result.startswith("❌ Failed to cancel task `task1234`: ")
+    assert "journal unavailable" in result
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_withdrawal_rejects_an_edit_before_publishing_it() -> None:
+    """An edit whose old approval cannot be withdrawn fails like other rejected edits."""
+    client = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="Remind me",
+        description="Reminder",
+        room_id="!test:server",
+    )
+    existing = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=existing)),
+        patch(
+            "mindroom.scheduling.withdraw_scheduled_call_approval",
+            new=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        ),
+        pytest.raises(ValueError, match="journal unavailable"),
+    ):
+        await save_edited_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            workflow=workflow.model_copy(update={"message": "Remind me later"}),
+            existing_task=existing,
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            timezone="UTC",
+        )
+
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -949,7 +949,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     return None
                 if current_task != departed_task:
                     continue
-                await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+                await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                 await _persist_scheduled_task_state(
                     client=client,
                     room_id=room_id,
@@ -1166,7 +1166,7 @@ async def save_edited_scheduled_task(
         if current_task != existing_task:
             msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
             raise ValueError(msg)
-        await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_EDITED_REASON)
+        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_EDITED_REASON)
         revision = await _persist_scheduled_task_state(
             client=client,
             room_id=room_id,
@@ -1908,6 +1908,15 @@ def _scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -
     return hashlib.sha256(json.dumps(defining_fields, separators=(",", ":")).encode()).hexdigest()
 
 
+async def _withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
+    """Withdraw a task's call approval, reporting a journal failure the way task-state failures are reported."""
+    try:
+        await withdraw_scheduled_call_approval(task_id, reason=reason)
+    except Exception as exc:
+        msg = f"could not withdraw the approval for its scheduled call ({exc})"
+        raise ValueError(msg) from exc
+
+
 async def _arm_scheduled_call(task_id: str, workflow: ScheduledWorkflow) -> ScheduledApprovalArmState:
     """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
     try:
@@ -2041,7 +2050,7 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         return (None, f"❌ Failed to schedule: {e!s}")
     finally:
         if not task_published:
-            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
     _start_scheduled_task(
         runtime.client,
@@ -2213,8 +2222,8 @@ async def cancel_scheduled_task(
     # Withdraw a scheduled call's approval before publishing the cancellation, so an
     # interruption between the two leaves a runnable task that asks again rather than
     # a cancelled task whose approval still works.
-    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     try:
+        await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
         await _put_scheduled_task_state_content(
             client=client,
             room_id=room_id,
@@ -2257,7 +2266,7 @@ async def cancel_all_scheduled_tasks(
 
                 # Update to cancelled in Matrix state
                 try:
-                    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
+                    await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     await _put_scheduled_task_state_content(
                         client=client,
                         room_id=room_id,
