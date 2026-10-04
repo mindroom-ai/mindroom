@@ -682,7 +682,7 @@ Workers are matched like the worker NetworkPolicy and the runtime's own worker l
 The selector matches any worker pod that carries all of those labels, so releases that share a worker namespace must each set a different value for the same `workers.kubernetes.extraLabels` key, for example `mindroom.ai/instance`.
 If one release's `extraLabels` are empty or a subset of another release's, its vault also admits the other release's workers.
 Ingress to the proxy port (`server.mitmPort`) is limited to the approved egress proxy when `approvedEgress.parentProxy.enabled` is true, or to dedicated workers when `approvedEgress` is disabled and workers use `agentVault.proxyUrl` directly.
-Egress is limited to DNS, TCP `80` and `443` for proxied upstreams and OAuth providers, and `server.smtp.port` when SMTP is enabled; TCP `80`, `443`, and the SMTP port are open to any address.
+Egress is limited to DNS and, to any address, TCP `80` and `443` for proxied upstreams and OAuth providers and `server.smtp.port` when SMTP is enabled.
 When `egressProxy` or `approvedEgress` is enabled and `egressProxy.networkPolicy.create` is true (its default), vault DNS is limited to the same `egressProxy.networkPolicy.dns` destinations as worker DNS (default kube-dns in `kube-system`), and otherwise to port 53 on any address.
 Kubelet health probes are unaffected.
 
