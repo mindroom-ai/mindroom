@@ -180,9 +180,13 @@ def _in_list(values: Iterable[str]) -> tuple[str, list[str]]:
     return ", ".join("?" for _ in ordered), ordered
 
 
+def _journal_results(status: str, location: str, error: str | None = None) -> dict[str, _SourceResult]:
+    return {name: _SourceResult(status, [location], error=error) for name in _JOURNAL_SOURCES}
+
+
 def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
     """Read turn records, admitted events, and outbound deliveries for the identifiers."""
-    results = {name: _SourceResult("ok", [location]) for name in _JOURNAL_SOURCES}
+    results = _journal_results("ok", location)
     marks, event_ids = _in_list(ids.event_ids)
     thread_known = bool(ids.room_id and ids.thread_id)
 
@@ -382,19 +386,12 @@ class DebugReportSources:
     journal_error: str | None = None
 
 
-def _failed(location: str, error: Exception) -> _SourceResult:
-    return _SourceResult("error", [location], error=_describe_error(error))
-
-
-def _journal_failed(location: str, message: str) -> dict[str, _SourceResult]:
-    return {name: _SourceResult("error", [location], error=message) for name in _JOURNAL_SOURCES}
-
-
 def _read_postgres_journal(database_url: str, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     try:
         import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
     except ImportError as error:
-        return _journal_failed(
+        return _journal_results(
+            "error",
             "postgres",
             f"{_describe_error(error)}; reading a PostgreSQL journal needs the mindroom[postgres] extra",
         )
@@ -402,23 +399,23 @@ def _read_postgres_journal(database_url: str, ids: _DebugReportIds) -> dict[str,
         with _postgres_query(database_url) as query:
             return _read_journal(query, ids, "postgres")
     except (psycopg.Error, OSError) as error:
-        return _journal_failed("postgres", _describe_error(error))
+        return _journal_results("error", "postgres", _describe_error(error))
 
 
 def _read_journal_source(sources: DebugReportSources, path: Path, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
     if sources.journal_error is not None:
-        return _journal_failed("postgres", sources.journal_error)
+        return _journal_results("error", "postgres", sources.journal_error)
     if sources.journal_postgres_url is not None:
         return _read_postgres_journal(sources.journal_postgres_url, ids)
     try:
         # `is_file()` raises PermissionError when a parent directory is unreadable, so it belongs in the guard.
         if not path.is_file():
-            return {name: _SourceResult("missing", [str(path)]) for name in _JOURNAL_SOURCES}
+            return _journal_results("missing", str(path))
         with _sqlite_query(path) as query:
             return _read_journal(query, ids, str(path))
     except (sqlite3.Error, OSError) as error:
-        return _journal_failed(str(path), _describe_error(error))
+        return _journal_results("error", str(path), _describe_error(error))
 
 
 def _read_guarded(read: Callable[[], _SourceResult], location: Path) -> _SourceResult:
@@ -426,7 +423,7 @@ def _read_guarded(read: Callable[[], _SourceResult], location: Path) -> _SourceR
     try:
         return read()
     except (sqlite3.Error, OSError) as error:
-        return _failed(str(location), error)
+        return _SourceResult("error", [str(location)], error=_describe_error(error))
 
 
 def build_debug_report(sources: DebugReportSources, ids: _DebugReportIds, *, generated_at: str) -> dict[str, Any]:
