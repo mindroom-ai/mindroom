@@ -190,8 +190,14 @@ server {
   }
 {{- end }}
 {{- if or .Values.matrixRTC.enabled .Values.bugReports.admins }}
+{{- if .Values.matrixRTC.enabled }}
 
-  # Matrix client discovery: MatrixRTC backends for calls and bug-report administrators.
+  # MatrixRTC backend discovery for Matrix voice and video calls.
+{{- end }}
+{{- if .Values.bugReports.admins }}
+
+  # Bug-report administrators for the client's Report a bug menu item.
+{{- end }}
   location = /.well-known/matrix/client {
     default_type application/json;
     add_header Cache-Control "no-store, max-age=0" always;

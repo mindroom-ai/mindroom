@@ -66,8 +66,9 @@
 {{- fail "bugReports.admins must be a list" -}}
 {{- end -}}
 {{- range .Values.bugReports.admins -}}
-{{- if not (regexMatch `^@[a-z0-9._=/+-]+:[A-Za-z0-9.-]+(:[0-9]+)?$` (toString .)) -}}
-{{- fail (printf "bugReports.admins entries must be Matrix user IDs such as @admin:example.com, got %q" (toString .)) -}}
+{{- /* The client accepts any @localpart:server without whitespace; quotes, backslashes, $, <, > and & would break the nginx return body or its JSON. */ -}}
+{{- if or (not (regexMatch `^@[^\s:'"\\$<>&]+:[^\s'"\\$<>&]+$` (toString .))) (regexMatch `[[:cntrl:]]` (toString .)) -}}
+{{- fail (printf "bugReports.admins entries must be Matrix user IDs such as @admin:example.com, without whitespace, quotes, backslashes, $, <, > or &; got %q" (toString .)) -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.bugReports.admins (not .Values.matrix.homeserverUrl) -}}

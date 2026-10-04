@@ -105,7 +105,8 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
     assert actual == expected
 
 
-_BUG_REPORT_ADMINS = ["@admin:chat.example.com", "@ops:chat.example.com"]
+# Historical uppercase localparts, ports, and IPv6 server names are valid Matrix user IDs the client accepts.
+_BUG_REPORT_ADMINS = ["@admin:chat.example.com", "@Ops=Team/1+x:chat.example.com:8448", "@admin:[2001:db8::1]"]
 _MATRIX_RTC = """
 matrixRTC:
   enabled: true
@@ -154,13 +155,33 @@ def test_client_chart_publishes_bug_report_admins_in_matrix_client_discovery(
     assert well_known.get("io.mindroom.bug_reports") == ({"admins": _BUG_REPORT_ADMINS} if admins else None)
 
 
+def test_client_chart_keeps_matrix_rtc_discovery_unchanged_without_bug_report_admins(tmp_path: Path) -> None:
+    """Deployments that publish only MatrixRTC keep the same nginx config, so its checksum triggers no rollout."""
+    docs = _render_chart(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, "matrix:\n  homeserverUrl: https://chat.example.com\n" + _MATRIX_RTC),
+    )
+    nginx_conf = next(doc["data"]["default.conf"] for doc in docs if "default.conf" in doc.get("data", {}))
+
+    assert (
+        "\n\n  # MatrixRTC backend discovery for Matrix voice and video calls.\n"
+        "  location = /.well-known/matrix/client {\n"
+    ) in nginx_conf
+    assert "Bug-report" not in nginx_conf
+
+
 @pytest.mark.parametrize(
     ("values", "error"),
     [
         ('bugReports:\n  admins: "@admin:chat.example.com"\n', "bugReports.admins must be a list"),
         ('bugReports:\n  admins: ["admin"]\n', "bugReports.admins entries must be Matrix user IDs"),
-        # A quote would end the nginx return body and a $ would expand as an nginx variable.
+        ('bugReports:\n  admins: ["@admin chat:example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        # A quote would end the nginx return body, nginx would unescape the JSON's backslash escapes,
+        # and a $ would expand as an nginx variable.
         ('bugReports:\n  admins: ["@a\'b:chat.example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        ("bugReports:\n  admins: ['@a\"b:chat.example.com']\n", "bugReports.admins entries must be Matrix user IDs"),
+        ("bugReports:\n  admins: ['@a\\b:chat.example.com']\n", "bugReports.admins entries must be Matrix user IDs"),
         ('bugReports:\n  admins: ["@admin:chat$host"]\n', "bugReports.admins entries must be Matrix user IDs"),
         (
             'matrix:\n  homeserverUrl: ""\n  defaultServerName: chat.example.com\nbugReports:\n  admins: ["@admin:chat.example.com"]\n',
@@ -171,7 +192,17 @@ def test_client_chart_publishes_bug_report_admins_in_matrix_client_discovery(
             "bugReports.admins requires the chart-managed nginx config",
         ),
     ],
-    ids=["not-a-list", "no-sigil", "quote", "dollar", "no-homeserver-url", "existing-nginx"],
+    ids=[
+        "not-a-list",
+        "no-sigil",
+        "whitespace",
+        "quote",
+        "double-quote",
+        "backslash",
+        "dollar",
+        "no-homeserver-url",
+        "existing-nginx",
+    ],
 )
 def test_client_chart_rejects_bug_report_admins_it_cannot_publish(tmp_path: Path, values: str, error: str) -> None:
     """Administrators that cannot be published intact fail the render instead of silently disabling reports."""
