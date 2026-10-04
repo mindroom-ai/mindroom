@@ -300,6 +300,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
 | `tool_jobs/completion.py` | The response boundary: ready job results a reply continues with, or the work its message holds |
 | `tool_jobs/held_replies.py` | Which work a reply message holds, its waiting notice and edits, and the wake that continues it |
+| `held_reply_lifecycle.py` | One entity's held messages: saving, takeover, release, resumption, and Stop |
 | `tool_jobs/user_stop.py` | Conversation Stop ordering and restoration of durable cancellation intent |
 | `tool_system/construction.py` | Selected toolkit factory and digested constructor identity |
 | `tool_system/filters.py` | Shared include/exclude function policy |

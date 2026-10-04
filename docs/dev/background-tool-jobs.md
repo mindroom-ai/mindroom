@@ -25,7 +25,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   A message offers each ready outcome to the model once, across its own turn and the turns continuing it; one the model leaves unretrieved waits for the conversation's next reply.
   Work that a foreground wait claims, or whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
   A continuation or edit of a held message that ends before its response boundary, because it failed or was stopped or interrupted, releases the hold, and a message the turn did not replace shows how it ended.
-  A continuation a crash cut short runs again from the message as it was held, and retrieves the outcomes the cut-short run already read instead of losing them.
+  A continuation a crash cut short continues below what it already showed, like any reply a restart cut short, and retrieves the outcomes the cut-short run already read instead of losing them.
   Stop on a held message cancels the work it holds through the message's latest turn at once, leaving a newer running reply's work alone, and shows the message as stopped once no turn runs in the conversation; Stop while a turn continues the message stops that turn and the work like any reply.
   A newer reply that reaches its boundary but ends without a finished message leaves an older message holding the work.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
@@ -64,9 +64,10 @@ A hold is saved after its reply's final delivery, so the reply's source settles 
 The coordinator admits one internal `held_reply_wake` journal source per generation of a hold whose work became ready, ended, or now waits for something else.
 That source's turn edits the held message and never claims it in the turn ledger, whose sole owner stays the reply that sent it; a Stop of that turn settles the owner.
 Under the conversation lock the turn finds which work is ready: it continues with that work, shows a changed notice, or releases a message that holds nothing more.
-A continuation that fails, is stopped or interrupted within the process, or pauses for approval releases its hold; one a process stop cuts short keeps holding, and its wake runs again from the held message, asking again for the outcomes the stopped run had already read.
+A continuation that fails, is stopped or interrupted within the process, or pauses for approval releases its hold; one a process stop cuts short keeps holding, and its wake runs again, asking again for the outcomes the stopped run had already read.
 A message continues with ready results at most 20 times across its own turn and the turns continuing it, apart from dynamic tool continuations; then the next reply takes the remaining work.
-A reply that a process stop cuts short is regenerated in place by journal replay, which tells the new attempt what the stopped attempt showed and names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
+A reply that a process stop cuts short continues in place by journal replay, below what the stopped attempt showed, with an account that names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
+A continuation's wake replays the same way: once the held message shows more than its hold, the re-run continues below it like any other reply.
 A detached job start is such a finished call, and its result names the job ID.
 Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the new attempt at its response boundary like any other ready work.
 An interrupted outcome tells the model that a call with side effects may already have taken effect and must not run again, while a read-only call can run again for its lost result; replayed against real models, this wording stopped repeated side effects without stopping read-only calls from running again.
@@ -110,6 +111,7 @@ A held message briefly shows its reply as finished before the waiting notice ret
 Work that a failed or interrupted continuation, a crash before a hold was saved, or the join limit leaves unheld waits for the requester's next answered message.
 A crash after a continuation's final edit but before its hold is saved leaves the hold showing the message as it was before that continuation, so a later takeover or Stop restores that earlier text.
 An ad hoc team's message and its host agent's own message can both hold that agent's work; the first to continue retrieves it, and the other then shows its reply as finished.
+An ad hoc team's hold keeps its members but not the mode its reply chose, so its continuation runs in coordinate mode, and one whose member left the configuration releases the message instead.
 Turning the feature off leaves held messages waiting until it is turned back on.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline, and answering them does nothing.
 Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
