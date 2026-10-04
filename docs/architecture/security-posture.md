@@ -56,6 +56,7 @@ Files it reads or writes there, such as skills, context files, delegation record
 Those descriptors refuse links, never write to a file that has another hard link, open files non-blocking so a FIFO cannot stall the primary, and publish files by atomic replacement or exclusive creation.
 The primary never takes a file lock inside a workspace, because worker code could hold it forever.
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
+Worker code that makes one of those exports or the caller's receipt unwritable only leaves it stale; the delegation still records its events and settles.
 
 In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes open the authorized workspace as spelled rather than its resolved target, so they refuse a workspace replaced by a link after runtime resolution.
 `file` and `coding` also pin their workspace when they are built, refusing one that is a link or that changed while it was resolved, and their listing and search refuse a pinned workspace that no longer resolves to itself.

@@ -1047,7 +1047,7 @@ async def test_record_mutation_refuses_swapped_record_directories(
     monkeypatch: pytest.MonkeyPatch,
     swapped: str,
 ) -> None:
-    """A record directory or ancestor swapped for a link after validation is refused, and a FIFO log is replaced."""
+    """A record directory or ancestor swapped for a link is never written through, and a FIFO log is replaced."""
     module = _records_module()
     runtime_paths = test_runtime_paths(tmp_path)
     owner = module.DelegationRecordOwner(_config(), runtime_paths)
@@ -1080,41 +1080,50 @@ async def test_record_mutation_refuses_swapped_record_directories(
         return validated
 
     monkeypatch.setattr(module.DelegationRecordOwner, "_validated_handle", swap_after_validation)
-    if swapped == "events_fifo":
-        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "after"}))
-        assert (_record_dir(handle) / "events.jsonl").read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
-    else:
-        with pytest.raises(OSError, match=r"Not a directory|Too many levels"):
-            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "attacker"}))
+    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "after"}))
 
+    if swapped == "events_fifo":
+        assert (_record_dir(handle) / "events.jsonl").read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
+    assert _read_events(handle.state_dir / "events.jsonl")[-1]["data"] == {"content": "after"}
     assert {path: path.read_bytes() if path.is_file() else None for path in victim_tree.rglob("*")} == before
 
 
+@pytest.mark.parametrize("planted", ["run.json", "events.jsonl", "transcript.md", "receipt", "record_dir", "artifacts"])
 @pytest.mark.asyncio
-async def test_oversized_artifact_rejects_symlinked_directory(tmp_path: Path) -> None:
-    """An oversized output artifact must remain under its resolved record directory."""
+async def test_an_export_worker_code_made_unwritable_never_fails_the_record(planted: str, tmp_path: Path) -> None:
+    """A directory or link planted where an export goes skips that export, and events and finish still commit."""
     module = _records_module()
     owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="symlink-artifacts",
-    )
-    outside = tmp_path / "outside-artifacts"
+    handle = await _start(module, owner, delegation_id=f"planted-{planted.replace('.', '-').replace('_', '-')}")
+    record_dir = _record_dir(handle)
+    outside = tmp_path / "outside"
     outside.mkdir()
-    (_record_dir(handle) / "artifacts").symlink_to(outside, target_is_directory=True)
+    if planted == "record_dir":
+        shutil.rmtree(record_dir)
+        record_dir.symlink_to(outside, target_is_directory=True)
+    elif planted == "artifacts":
+        (record_dir / "artifacts").symlink_to(outside, target_is_directory=True)
+    else:
+        target = _receipt_path(handle) if planted == "receipt" else record_dir / planted
+        target.unlink(missing_ok=True)
+        target.mkdir()
+    decision = module.DelegationEvent(
+        kind="approval_decision",
+        data={"tool_call_id": "gated", "approved": True, "reason": "x" * 100_000},
+        status="running",
+        event_id="decision",
+    )
 
-    with pytest.raises(OSError, match=r"Not a directory|Too many levels"):
-        await owner.append_event(
-            handle,
-            module.DelegationEvent(
-                kind="tool_result",
-                event_id="large-symlink",
-                data={"result": "x" * 100_000},
-            ),
-        )
+    await owner.append_event(handle, decision)
+    await owner.append_event(handle, decision)
+    await owner.finish(handle, status="completed", output="Done")
+
+    events = _read_events(handle.state_dir / "events.jsonl")
+    assert [event["kind"] for event in events] == ["delegation_started", "approval_decision", "delegation_finished"]
+    assert _read_json(handle.state_dir / "state.json")["run"]["status"] == "completed"
     assert list(outside.iterdir()) == []
+    if planted != "receipt":
+        assert _read_json(_receipt_path(handle))["status"] == "completed"
 
 
 @pytest.mark.asyncio
