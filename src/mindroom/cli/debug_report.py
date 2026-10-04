@@ -1,6 +1,7 @@
 """`mindroom debug-report`: collect the backend side of a MindRoom Chat bug report.
 
-The config is only read: it is parsed with its includes but never validated, migrated, or written.
+The config is only read: it is parsed with its includes, never migrated or written, and only the settings this
+command uses are validated.
 """
 
 from __future__ import annotations

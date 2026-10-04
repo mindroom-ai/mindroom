@@ -27408,7 +27408,7 @@ A source that reads several files can be `ok` with an `error` naming the files i
 When the config selects the PostgreSQL event journal, its URL is resolved from `event_journal.database_url`, the config directory's `.env`, or the environment.
 If no URL resolves, or the `postgres` extra is not installed, the three journal sources are reported with `"status": "error"`, never replaced by the SQLite file.
 Databases are opened read-only, although a read-only open of a SQLite database in WAL mode can still create its `-wal` and `-shm` sidecar files.
-The config is only read: it is never validated, migrated, or written, so a config the runtime would reject still locates the data.
+The config is only read, never migrated or written, and only its `event_journal` and `debug.llm_request_log_dir` settings are checked, so a config the runtime would reject elsewhere still locates the data.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
 Nothing is redacted, and the newest matches are kept: up to 100 Agno runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each.
 `dropped` counts the older matches left out, and `truncated` counts the shortened log lines.
