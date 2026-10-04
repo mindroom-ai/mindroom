@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -20,11 +21,24 @@ _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _AGNO_JSON_COLUMNS = frozenset({"run_data"})
 _MAX_JSONL_RECORDS = 1000
+_MAX_AGNO_RUNS = 100
+# Selected next to `*` so sorting by age cannot collide with a column of the runs table.
+_ROWID_COLUMN = "_debug_report_rowid"
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
+# Where the runtime writes Agno session databases under the session root: shared agents, teams, private instances
+# (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/ folder is not read.
+_SESSION_DATABASE_GLOBS = (
+    "agents/*/sessions/*.db",
+    "teams/*/sessions/*.db",
+    "private_instances/*/*/sessions/*.db",
+    "system/sessions/*.db",
+)
 
 _Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
+# One Agno run with its sort key: `(created_at, rowid)`.
+type _AgedRun = tuple[tuple[float, int], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -225,12 +239,15 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
 def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     """Read Agno runs by run ID or session ID from every session database under the session root.
 
-    Databases are found by path rather than from the config so deleted agents' history is included.
+    Databases are found by the runtime's path layouts rather than from the config so deleted agents' history is
+    included.
+    Only the newest `_MAX_AGNO_RUNS` matching runs across all databases are kept, returned oldest first, and
+    `dropped` counts the rest: an unthreaded report matches the room's whole session, which can span months.
     One unreadable database (locked by a live run, corrupt) is isolated: the runs of the others are kept and
     the failure is recorded as `<path>: <error>` in `error`. The status is "error" only when every database
     failed, and a database that fails part-way contributes none of its rows.
     """
-    databases = sorted(session_root.glob("**/sessions/*.db"))
+    databases = sorted({database for pattern in _SESSION_DATABASE_GLOBS for database in session_root.glob(pattern)})
     if not databases:
         return _SourceResult("missing", [str(session_root)])
     result = _SourceResult("ok", [str(database) for database in databases])
@@ -247,11 +264,19 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     if not conditions:
         return result
     failures: list[str] = []
+    matches = 0
+    runs: list[_AgedRun] = []
     for database in databases:
         try:
-            result.items.extend(_read_agno_database(database, conditions, [*run_ids, *session_ids]))
+            database_matches, database_runs = _read_agno_database(database, conditions, [*run_ids, *session_ids])
         except (sqlite3.Error, OSError) as error:
             failures.append(f"{database}: {_describe_error(error)}")
+            continue
+        matches += database_matches
+        runs.extend(database_runs)
+    newest = sorted(runs, key=lambda run: run[0])[-_MAX_AGNO_RUNS:]
+    result.items = [item for _, item in newest]
+    result.dropped = matches - len(newest)
     if failures:
         result.error = "; ".join(failures)
         if len(failures) == len(databases):
@@ -259,23 +284,37 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     return result
 
 
-def _read_agno_database(database: Path, conditions: Sequence[str], params: Sequence[object]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
+def _read_agno_database(
+    database: Path,
+    conditions: Sequence[str],
+    params: Sequence[object],
+) -> tuple[int, list[_AgedRun]]:
+    """Return how many runs match and the newest `_MAX_AGNO_RUNS` of each table, keyed by age.
+
+    The age is the run's `created_at`, then its rowid; a run without a numeric `created_at` sorts as oldest.
+    """
+    where = " OR ".join(conditions)
+    matches = 0
+    runs: list[_AgedRun] = []
     with _sqlite_query(database) as query:
         tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
         for table in sorted(name for name in tables if name.endswith("_runs")):
             columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
             if not {"run_id", "session_id", "run_data"} <= columns:
                 continue
+            # Table names come from sqlite_master; values are placeholders.
+            matches += query(f'SELECT COUNT(*) AS matches FROM "{table}" WHERE {where}', params)[0]["matches"]  # noqa: S608
             rows = query(
-                f'SELECT * FROM "{table}" WHERE {" OR ".join(conditions)} ORDER BY rowid',  # noqa: S608 - table names come from sqlite_master
-                params,
+                f'SELECT rowid AS "{_ROWID_COLUMN}", * FROM "{table}" WHERE {where} ORDER BY rowid DESC LIMIT ?',  # noqa: S608
+                [*params, _MAX_AGNO_RUNS],
             )
-            items.extend(
-                {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
-                for row in rows
-            )
-    return items
+            for row in rows:
+                rowid = row.pop(_ROWID_COLUMN)
+                created_at = row.get("created_at")
+                age = (created_at if isinstance(created_at, int | float) else float("-inf"), rowid)
+                item = {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
+                runs.append((age, item))
+    return matches, runs
 
 
 def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
@@ -287,12 +326,17 @@ def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
 
 
 def _read_jsonl_records(paths: Sequence[Path], ids: _DebugReportIds, *, location: Path) -> _SourceResult:
-    """Read JSONL records whose correlation, reply target, or session matches, oldest file first."""
+    """Read JSONL records whose correlation, reply target, or session matches, keeping the newest.
+
+    Paths come oldest first, so a bounded deque keeps the newest matches: a report is filed right after the failure.
+    """
     existing = [path for path in paths if path.is_file()]
     if not existing:
         return _SourceResult("missing", [str(location)])
     result = _SourceResult("ok", [str(path) for path in existing])
     needles = tuple(ids.event_ids | ids.session_ids)
+    kept: deque[dict[str, Any]] = deque(maxlen=_MAX_JSONL_RECORDS)
+    matches = 0
     for path in existing:
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -305,10 +349,10 @@ def _read_jsonl_records(paths: Sequence[Path], ids: _DebugReportIds, *, location
                     continue
                 if not isinstance(record, dict) or not _record_matches(record, ids):
                     continue
-                if len(result.items) >= _MAX_JSONL_RECORDS:
-                    result.dropped += 1
-                    continue
-                result.items.append(record)
+                matches += 1
+                kept.append(record)
+    result.items = list(kept)
+    result.dropped = matches - len(kept)
     return result
 
 
@@ -316,6 +360,7 @@ def _read_log_lines(paths: Sequence[Path], ids: _DebugReportIds, *, location: Pa
     """Read log lines that mention an event or run ID, bounded because lines can embed whole prompts.
 
     Room IDs are not matched: every line about the room would match and bury the turn.
+    Paths come oldest first and the newest matching lines are kept; `truncated` counts kept lines only.
     """
     existing = [path for path in paths if path.is_file()]
     if not existing:
@@ -324,19 +369,20 @@ def _read_log_lines(paths: Sequence[Path], ids: _DebugReportIds, *, location: Pa
     needles = tuple(ids.event_ids | ids.run_ids)
     if not needles:
         return result
+    kept: deque[tuple[dict[str, Any], bool]] = deque(maxlen=_MAX_LOG_LINES)
+    matches = 0
     for path in existing:
         with path.open(encoding="utf-8", errors="replace") as handle:
             for number, line in enumerate(handle, start=1):
                 if not any(needle in line for needle in needles):
                     continue
-                if len(result.items) >= _MAX_LOG_LINES:
-                    result.dropped += 1
-                    continue
+                matches += 1
                 text = line.rstrip("\n")
-                if len(text) > _MAX_LOG_LINE_CHARS:
-                    text = text[:_MAX_LOG_LINE_CHARS]
-                    result.truncated += 1
-                result.items.append({"file": path.name, "line": number, "text": text})
+                item = {"file": path.name, "line": number, "text": text[:_MAX_LOG_LINE_CHARS]}
+                kept.append((item, len(text) > _MAX_LOG_LINE_CHARS))
+    result.items = [item for item, _ in kept]
+    result.truncated = sum(truncated for _, truncated in kept)
+    result.dropped = matches - len(kept)
     return result
 
 

@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from agno.run.agent import RunOutput
@@ -32,6 +33,9 @@ from mindroom.debug_report import (
 )
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from tests.conftest import postgres_journal_schema_url, seed_session
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 ROOM = "!room:example.com"
 
@@ -183,38 +187,44 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
         assert db.execute("SELECT count(*) FROM turn_records").fetchone() == (1,)
 
 
-def _seed_agno(storage_root: Path) -> None:
+def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]]) -> None:
+    """Persist one session holding `(run_id, created_at)` runs in the Agno database under `state_root`."""
     storage = create_state_storage(
-        "general",
-        storage_root / "agents" / "general",
+        state_root.name,
+        state_root,
         subdir="sessions",
-        session_table="general_sessions",
+        session_table=f"{state_root.name}_sessions",
     )
     try:
-        for session_id, run_id in ((f"{ROOM}:$root", "run-1"), ("!other:example.com", "run-other")):
-            seed_session(
-                storage,
-                AgentSession(
-                    session_id=session_id,
-                    agent_id="general",
-                    user_id="@alice:example.com",
-                    runs=[
-                        RunOutput(
-                            run_id=run_id,
-                            agent_id="general",
-                            session_id=session_id,
-                            user_id="@alice:example.com",
-                            created_at=1_723_837_600,
-                            status=RunStatus.completed,
-                            metadata={"matrix_event_id": "$user"},
-                        ),
-                    ],
-                    created_at=1_723_837_600,
-                    updated_at=1_723_837_600,
-                ),
-            )
+        seed_session(
+            storage,
+            AgentSession(
+                session_id=session_id,
+                agent_id=state_root.name,
+                user_id="@alice:example.com",
+                runs=[
+                    RunOutput(
+                        run_id=run_id,
+                        agent_id=state_root.name,
+                        session_id=session_id,
+                        user_id="@alice:example.com",
+                        created_at=created_at,
+                        status=RunStatus.completed,
+                        metadata={"matrix_event_id": "$user"},
+                    )
+                    for run_id, created_at in runs
+                ],
+                created_at=1_723_837_600,
+                updated_at=1_723_837_600,
+            ),
+        )
     finally:
         storage.close()
+
+
+def _seed_agno(storage_root: Path) -> None:
+    _seed_runs(storage_root / "agents" / "general", f"{ROOM}:$root", [("run-1", 1_723_837_600)])
+    _seed_runs(storage_root / "agents" / "general", "!other:example.com", [("run-other", 1_723_837_600)])
 
 
 def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> None:
@@ -226,6 +236,42 @@ def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> 
     assert [item["run_id"] for item in result.items] == ["run-1"]
     assert result.items[0]["run_data"]["metadata"] == {"matrix_event_id": "$user"}
     assert result.items[0]["table"] == "general_sessions_runs"
+
+
+def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Beyond the cap the oldest runs by created_at are dropped and counted; the kept runs come oldest first."""
+    monkeypatch.setattr(debug_report_module, "_MAX_AGNO_RUNS", 2)
+    _seed_runs(tmp_path / "agents" / "general", ROOM, [("run-newest", 300), ("run-oldest", 100)])
+    _seed_runs(tmp_path / "teams" / "crew", ROOM, [("run-middle", 200)])
+
+    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
+
+    assert result.status == "ok"
+    assert [item["run_id"] for item in result.items] == ["run-middle", "run-newest"]
+    assert result.dropped == 1
+    assert {item["table"] for item in result.items} == {"general_sessions_runs", "crew_sessions_runs"}
+
+
+def test_read_agno_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Path) -> None:
+    """Agent, team, private-instance, and system databases are read; a sessions/ folder in a workspace is not."""
+    for state_root in (
+        tmp_path / "agents" / "general",
+        tmp_path / "teams" / "crew",
+        tmp_path / "private_instances" / "worker-1" / "helper",
+        tmp_path / "system",
+        tmp_path / "agents" / "general" / "workspace",
+    ):
+        _seed_runs(state_root, f"{ROOM}:$root", [(f"run-{state_root.name}", 1_723_837_600)])
+
+    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+
+    assert result.paths == [
+        str(tmp_path / "agents" / "general" / "sessions" / "general.db"),
+        str(tmp_path / "private_instances" / "worker-1" / "helper" / "sessions" / "helper.db"),
+        str(tmp_path / "system" / "sessions" / "system.db"),
+        str(tmp_path / "teams" / "crew" / "sessions" / "crew.db"),
+    ]
+    assert sorted(item["run_id"] for item in result.items) == ["run-crew", "run-general", "run-helper", "run-system"]
 
 
 def test_read_agno_runs_reports_missing_databases(tmp_path: Path) -> None:
@@ -304,8 +350,8 @@ def test_jsonl_and_log_readers_match_structured_fields_and_bound_output(tmp_path
     assert len(logs.items[1]["text"]) == debug_report_module._MAX_LOG_LINE_CHARS
 
 
-def test_jsonl_reader_caps_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Records beyond the cap are counted as dropped instead of growing the report without bound."""
+def test_jsonl_reader_caps_records_keeping_the_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Beyond the cap the oldest records are dropped and counted: the newest file's record is the one kept."""
     monkeypatch.setattr(debug_report_module, "_MAX_JSONL_RECORDS", 1)
     _seed_files(tmp_path)
     tracking = tmp_path / "tracking"
@@ -314,8 +360,38 @@ def test_jsonl_reader_caps_records(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         collect_ids(None, event_ids=["$user"]),
         location=tracking / "tool_calls.jsonl",
     )
-    assert len(result.items) == 1
+    assert [item["tool_name"] for item in result.items] == ["shell"]
     assert result.dropped == 1
+
+
+def test_log_reader_caps_lines_keeping_the_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Older thread lines beyond the cap are dropped so the reported turn's line, written last, is kept."""
+    monkeypatch.setattr(debug_report_module, "_MAX_LOG_LINES", 2)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "mindroom_20261002_120000.log").write_text(
+        "older thread_id=$root " + "x" * 5000 + "\n" + "older thread_id=$root\n",
+        encoding="utf-8",
+    )
+    (logs / "mindroom_20261003_120000.log").write_text(
+        "older thread_id=$root\nreported event_id=$reported thread_id=$root\n",
+        encoding="utf-8",
+    )
+
+    result = _read_log_lines(
+        sorted(logs.glob("mindroom_*.log")),
+        collect_ids(None, event_ids=["$reported"], room_id=ROOM, thread_id="$root"),
+        location=logs,
+    )
+
+    assert [(item["file"], item["line"]) for item in result.items] == [
+        ("mindroom_20261003_120000.log", 1),
+        ("mindroom_20261003_120000.log", 2),
+    ]
+    assert result.items[-1]["text"] == "reported event_id=$reported thread_id=$root"
+    assert result.dropped == 2
+    # The truncated line was dropped, so no kept line is truncated.
+    assert result.truncated == 0
 
 
 def test_build_debug_report_combines_every_source(tmp_path: Path) -> None:
