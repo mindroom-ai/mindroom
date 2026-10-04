@@ -110,17 +110,12 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                     )
                     assert decision.model_switch_name == "alternate"
                     assert decision.model_switch_when == when
-                    assert (
-                        resolve_thread_model_override(paths, "$thread", configured_models=config.models).active
-                        == "alternate"
-                    )
+                    assert resolve_thread_model_override(paths, "$thread", config=config).active == "alternate"
                 else:
                     assert tool.tool_call_error
                     assert "wait_timeout" in tool.result
                     assert not started.is_set()
-                    assert (
-                        resolve_thread_model_override(paths, "$thread", configured_models=config.models).active is None
-                    )
+                    assert resolve_thread_model_override(paths, "$thread", config=config).active is None
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 schema = model._format_tools([function])[0]["function"]["parameters"]
                 assert "wait_timeout" not in schema["properties"]
