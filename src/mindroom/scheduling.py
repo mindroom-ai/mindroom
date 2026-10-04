@@ -1517,7 +1517,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
 
             approval_state = await arm_scheduled_call_approval(
                 task_id,
-                scheduled_call_workflow_digest(task_id, latest_workflow),
+                _scheduled_call_workflow_digest(task_id, latest_workflow),
             )
             if approval_state == "denied":
                 logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
@@ -1623,6 +1623,11 @@ async def _validate_agent_mentions(
     )
 
 
+def _format_local_time(dt: datetime, timezone_str: str) -> str:
+    """Format a datetime as 24-hour wall time in the configured timezone, like "2024-01-15 15:30 EST"."""
+    return dt.astimezone(ZoneInfo(timezone_str)).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     """Format a datetime with timezone and relative time delta.
 
@@ -1631,20 +1636,11 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         timezone_str: Timezone string (e.g., 'America/New_York')
 
     Returns:
-        Formatted string like "2024-01-15 3:30 PM EST (in 2 hours)"
+        Formatted string like "2024-01-15 15:30 EST (in 2 hours)"
 
     """
-    # Convert UTC to target timezone
-    tz = ZoneInfo(timezone_str)
-    local_dt = dt.astimezone(tz)
-
-    # Get human-readable relative time using humanize
-    now = datetime.now(UTC)
-    relative_str = humanize.naturaltime(dt, when=now)
-
-    # Format the datetime string with 24-hour time
-    time_str = local_dt.strftime("%Y-%m-%d %H:%M %Z")
-    return f"{time_str} ({relative_str})"
+    relative_str = humanize.naturaltime(dt, when=datetime.now(UTC))
+    return f"{_format_local_time(dt, timezone_str)} ({relative_str})"
 
 
 def _extract_mentioned_agents_from_text(
@@ -1899,7 +1895,7 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     return (task_id, response_text)
 
 
-def scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -> str:
+def _scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -> str:
     """Fingerprint the exact task a scheduled-call approval was given for."""
     return hashlib.sha256(f"{task_id}\n{workflow.model_dump_json()}".encode()).hexdigest()
 
@@ -2009,8 +2005,8 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         tool_name=tool_name,
         arguments=arguments,
         execute_at=send_at,
-        workflow_digest=scheduled_call_workflow_digest(task_id, workflow),
-        scheduled_for_text=scheduled_for,
+        workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
+        scheduled_for_text=_format_local_time(send_at, config.timezone),
     ):
         await _persist_scheduled_task_state(
             client=runtime.client,

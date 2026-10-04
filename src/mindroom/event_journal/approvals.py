@@ -34,7 +34,7 @@ from .identity import decode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
-ApprovalTargetKind = Literal["continuation", "background_script", "scheduled_call"]
+_ApprovalTargetKind = Literal["continuation", "background_script", "scheduled_call"]
 logger = get_logger(__name__)
 _CARD_COLUMNS = """
     cards.delivery_id AS delivery_id,
@@ -81,7 +81,7 @@ class StoredApprovalCard:
     continuation_generation: int
     tool_call_id: str
     continuation_entity_name: str | None
-    target_kind: ApprovalTargetKind = "continuation"
+    target_kind: _ApprovalTargetKind = "continuation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1009,7 +1009,7 @@ def _card(row: Row) -> StoredApprovalCard | None:
         )
         background_run_id = cast("str | None", row["background_run_id"])
         if background_run_id is None:
-            target_kind: ApprovalTargetKind = "continuation"
+            target_kind: _ApprovalTargetKind = "continuation"
             card_identity = _native_identity(card)
             continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:

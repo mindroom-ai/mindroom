@@ -36,8 +36,8 @@ from mindroom.scheduling import (
     ScheduledWorkflow,
     _parse_scheduled_task_record,
     _run_once_task,
+    _scheduled_call_workflow_digest,
     cancel_scheduled_task,
-    scheduled_call_workflow_digest,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -511,7 +511,8 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
     assert kwargs["tool_name"] == "post_slack_message"
     assert kwargs["arguments"] == {"channel": "U123", "text": "Good morning!"}
     assert kwargs["execute_at"] == workflow.execute_at
-    assert kwargs["workflow_digest"] == scheduled_call_workflow_digest(record.task_id, workflow)
+    assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
+    assert kwargs["workflow_digest"] == _scheduled_call_workflow_digest(record.task_id, workflow)
     start.assert_called_once()
     assert record.task_id in result
     assert "approve" in result.lower()
@@ -603,12 +604,12 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     record = _parse_scheduled_task_record("!room:localhost", "task1234", stored)
 
     assert record is not None
-    assert scheduled_call_workflow_digest("task1234", record.workflow) == scheduled_call_workflow_digest(
+    assert _scheduled_call_workflow_digest("task1234", record.workflow) == _scheduled_call_workflow_digest(
         "task1234",
         workflow,
     )
     edited = workflow.model_copy(update={"message": workflow.message.replace("Grüße", "Hi")})
-    assert scheduled_call_workflow_digest("task1234", edited) != scheduled_call_workflow_digest("task1234", workflow)
+    assert _scheduled_call_workflow_digest("task1234", edited) != _scheduled_call_workflow_digest("task1234", workflow)
 
 
 @pytest.mark.asyncio
@@ -665,7 +666,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
             AsyncMock(),
         )
 
-    arm.assert_awaited_once_with("task1234", scheduled_call_workflow_digest("task1234", workflow))
+    arm.assert_awaited_once_with("task1234", _scheduled_call_workflow_digest("task1234", workflow))
     assert execute.await_count == int(fires)
     assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
 
