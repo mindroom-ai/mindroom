@@ -88,6 +88,13 @@ _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='compute
 _REAL_WEBSITE_HINT = (
     "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
 )
+# Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
+_CANVAS_LIBRARIES_HINT = (
+    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
+    "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
+)
 
 
 def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], body: str) -> dict[str, object]:
@@ -122,9 +129,11 @@ class ChatUITools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
         enable_show_canvas: bool = False,
+        enable_canvas_libraries: bool = False,
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
+        self._canvas_libraries = enable_canvas_libraries
         tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
@@ -143,6 +152,8 @@ class ChatUITools(Toolkit):
         ]
         if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
             lines.append(_REAL_WEBSITE_HINT)
+        if "show_canvas" in enabled and self._canvas_libraries:
+            lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @instructions.setter
@@ -415,8 +426,10 @@ class ChatUITools(Toolkit):
         whatever the user types into it could leave the panel.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript; external scripts, styles, fonts, images, and network requests
-        are blocked, so draw charts with inline SVG and embed images as data: URLs.
+        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
+        blocked, and so are external scripts, styles, and fonts unless your
+        instructions name a library source; otherwise draw charts with inline SVG.
+        Embed images as data: URLs.
         The panel can be resized from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
