@@ -130,6 +130,8 @@ A later release must continue rejecting unsupported historical layouts and direc
 
 ## Membership Access Migration
 
+See [Access Control](https://docs.mindroom.chat/authorization/#configuration) for the membership access schema.
+
 Loading a monolithic configuration with retired access fields automatically converts it to this schema.
 MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
 When `config.yaml` is a single-file Docker bind mount that cannot be replaced atomically, migration stops and directs the operator to run `mindroom config migrate --path <host-config.yaml>` on the host.

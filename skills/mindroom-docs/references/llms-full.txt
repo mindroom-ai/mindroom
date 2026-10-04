@@ -6004,7 +6004,7 @@ By default, `voice.visible_router_echo: true` also lets the router post an immed
 With STT disabled, the router posts the display-only fallback directly.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](https://docs.mindroom.chat/voice/) for the detailed dispatch behavior.
+See [Dispatch Behavior](#dispatch-behavior) for the detailed dispatch behavior.
 
 ### Single-responder rooms or explicitly targeted audio
 
@@ -6709,7 +6709,7 @@ matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
 
 - `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
 - Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/) guide.
+- For the attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, see [How It Works](#how-it-works) and [Retention](#retention) on this page.
 
 ### Why use this tool?
 
@@ -14434,6 +14434,8 @@ Sections require a non-empty main message body.
 HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
 Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
 
+## Actions and Reading
+
 `matrix_message` supports four actions: `send`, `read`, `edit`, and `react`.
 Sending and reading use the current conversation by default.
 Set `recipient` to an available agent or team name to request a response; without a recipient, text mentions do not dispatch agents.
@@ -14467,7 +14469,7 @@ matrix_message(action="react", event_id="$event123", message="✅")
 
 ## Notes
 
-See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
+See [Arguments](#arguments), [Conversation selection](#conversation-selection), [Attachments](#attachments), and [Collapsible sections](#collapsible-sections) above for the complete semantics.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
 With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
@@ -22656,7 +22658,7 @@ GitHub managed OAuth credentials always use the requester's `user` scope, indepe
 Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth and local-only placement unchanged.
 The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases).
 Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
-Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described below.
+Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described in [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration).
 Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
 
@@ -23863,6 +23865,8 @@ A fixed number of releases is insufficient because installations can skip releas
 A later release must continue rejecting unsupported historical layouts and direct operators to the supported intermediate upgrade.
 
 ## Membership Access Migration
+
+See [Access Control](https://docs.mindroom.chat/authorization/#configuration) for the membership access schema.
 
 Loading a monolithic configuration with retired access fields automatically converts it to this schema.
 MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.

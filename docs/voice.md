@@ -169,7 +169,7 @@ By default, `voice.visible_router_echo: true` also lets the router post an immed
 With STT disabled, the router posts the display-only fallback directly.
 Set `voice.visible_router_echo: false` to suppress that display-only echo.
 
-See [Voice Messages](voice.md) for the detailed dispatch behavior.
+See [Dispatch Behavior](#dispatch-behavior) for the detailed dispatch behavior.
 
 ### Single-responder rooms or explicitly targeted audio
 

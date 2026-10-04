@@ -189,7 +189,7 @@ matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
 
 - `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
 - Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](attachments.md) guide.
+- For the attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, see [How It Works](#how-it-works) and [Retention](#retention) on this page.
 
 ### Why use this tool?
 

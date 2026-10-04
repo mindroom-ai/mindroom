@@ -183,6 +183,8 @@ Sections require a non-empty main message body.
 HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
 Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
 
+## Actions and Reading
+
 `matrix_message` supports four actions: `send`, `read`, `edit`, and `react`.
 Sending and reading use the current conversation by default.
 Set `recipient` to an available agent or team name to request a response; without a recipient, text mentions do not dispatch agents.
@@ -216,7 +218,7 @@ matrix_message(action="react", event_id="$event123", message="✅")
 
 ## Notes
 
-See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
+See [Arguments](#arguments), [Conversation selection](#conversation-selection), [Attachments](#attachments), and [Collapsible sections](#collapsible-sections) above for the complete semantics.
 Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
 With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
