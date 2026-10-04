@@ -54,6 +54,7 @@ Raise `update_interval` to reduce load on the homeserver, or lower it for smooth
 Even when streaming is enabled, MindRoom streams a response only when the user who sent the message is `online` or `unavailable`; for an `offline` requester, the placeholder is replaced with the complete response.
 Everyone in the room sees the same edits.
 If the presence check fails, for example because the homeserver has presence disabled, MindRoom does not stream.
+A reply that continues after a restart always streams, even when streaming is off or the requester is offline, so the part it already showed stays in the message.
 When no requester can be identified, MindRoom streams.
 
 ## Presence
