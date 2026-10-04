@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,7 @@ from agno.session.agent import AgentSession
 from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
+from mindroom import llm_request_logging
 from mindroom.agent_storage import create_state_storage
 from mindroom.cli.debug_report import _resolve_sources
 from mindroom.cli.main import app
@@ -35,9 +37,16 @@ from mindroom.debug_report import (
 )
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.event_journal_open import event_journal_sqlite_path
+from mindroom.history.session_context import _team_scope_state_root
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system import tool_calls
-from tests.conftest import postgres_journal_schema_url, seed_session
+from mindroom.tool_system.worker_routing import (
+    agent_state_root_path,
+    agent_workspace_root_path,
+    private_instance_scope_root_path,
+)
+from mindroom.usage_storage import SYSTEM_USAGE_STORAGE_NAME
+from tests.conftest import postgres_journal_schema_url, seed_session, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -117,10 +126,13 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
     assert sources.llm_request_log_dir == runtime_paths.storage_root / "logs" / "llm_requests"
 
     tool_call_log = tool_calls._tool_call_log_path(runtime_paths)
-    tool_call_log.parent.mkdir(parents=True)
-    tool_call_log.write_text(json.dumps({"correlation_id": "$user"}) + "\n", encoding="utf-8")
+    request_log = llm_request_logging._daily_log_path(None, sources.llm_request_log_dir, datetime.now().astimezone())
+    for log in (tool_call_log, request_log):
+        log.parent.mkdir(parents=True)
+        log.write_text(json.dumps({"correlation_id": "$user"}) + "\n", encoding="utf-8")
     document = build_debug_report(sources, collect_ids(None, event_ids=["$user"]), generated_at="now")
     assert document["sources"]["tool_calls"]["paths"] == [str(tool_call_log)]
+    assert document["sources"]["llm_requests"]["paths"] == [str(request_log)]
     # No journal exists yet, so the missing source names where the reader looked.
     assert document["sources"]["turn_records"]["paths"] == [str(event_journal_sqlite_path(runtime_paths.storage_root))]
 
@@ -323,24 +335,24 @@ def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, m
 
 
 def test_read_agno_runs_reads_only_the_runtime_session_database_layouts(tmp_path: Path) -> None:
-    """Agent, team, private-instance, and system databases are read; a sessions/ folder in a workspace is not."""
-    for state_root in (
-        tmp_path / "agents" / "general",
-        tmp_path / "teams" / "crew",
-        tmp_path / "private_instances" / "worker-1" / "helper",
-        tmp_path / "system",
-        tmp_path / "agents" / "general" / "workspace",
-    ):
+    """Agent, team, private-instance, and system databases are read; a sessions/ folder in a workspace is not.
+
+    The state roots come from the runtime's own helpers, so the reader's copied layouts are pinned to them.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    root = runtime_paths.storage_root
+    state_roots = [
+        agent_state_root_path(root, "general"),
+        _team_scope_state_root(storage_name="crew", runtime_paths=runtime_paths),
+        private_instance_scope_root_path(root, "worker-1") / "helper",
+        root / SYSTEM_USAGE_STORAGE_NAME,
+    ]
+    for state_root in [*state_roots, agent_workspace_root_path(root, "general")]:
         _seed_runs(state_root, f"{ROOM}:$root", [(f"run-{state_root.name}", 1_723_837_600)])
 
-    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+    result = _read_agno_runs(root, collect_ids(None, room_id=ROOM, thread_id="$root"))
 
-    assert result.paths == [
-        str(tmp_path / "agents" / "general" / "sessions" / "general.db"),
-        str(tmp_path / "private_instances" / "worker-1" / "helper" / "sessions" / "helper.db"),
-        str(tmp_path / "system" / "sessions" / "system.db"),
-        str(tmp_path / "teams" / "crew" / "sessions" / "crew.db"),
-    ]
+    assert result.paths == sorted(str(state_root / "sessions" / f"{state_root.name}.db") for state_root in state_roots)
     assert sorted(item["run_id"] for item in result.items) == ["run-crew", "run-general", "run-helper", "run-system"]
 
 
