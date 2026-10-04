@@ -18,9 +18,10 @@ from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom import response_turn as response_turn_module
-from mindroom.agent_storage import create_state_storage, get_agent_session
+from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -700,46 +701,60 @@ async def test_cancel_during_scope_open_closes_entered_context() -> None:
     assert exited.is_set()
 
 
-def _history_run(run_id: str, *, event_id: str, seen: list[str]) -> RunOutput:
+def _history_run(run_id: str, *, team: bool, event_id: str, seen: list[str]) -> RunOutput | TeamRunOutput:
+    metadata: dict[str, Any] = {
+        MATRIX_EVENT_ID_METADATA_KEY: event_id,
+        MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen,
+        MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: f"{event_id}-reply",
+    }
+    if team:
+        return TeamRunOutput(
+            run_id=run_id,
+            team_id="crew",
+            session_id="session-1",
+            status=RunStatus.completed,
+            metadata=metadata,
+        )
     return RunOutput(
         run_id=run_id,
-        agent_id="general",
+        agent_id="crew",
         session_id="session-1",
         status=RunStatus.completed,
-        metadata={
-            MATRIX_EVENT_ID_METADATA_KEY: event_id,
-            MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen,
-            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: f"{event_id}-reply",
-        },
+        metadata=metadata,
     )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("redacted_event_id", ["$older", "$newer-reply"])
+@pytest.mark.parametrize("team", [False, True])
 async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     tmp_path: Path,
     streaming: bool,
     redacted_event_id: str,
+    team: bool,
 ) -> None:
     """A message a newer one superseded never gets a turn, yet the newer turn's run read it as context.
 
     Redacting it, or the reply that read it, must remove that run and everything after it
     before the history is used again, while the history before it stays.
     """
-    storage = create_state_storage("general", tmp_path, subdir="sessions", session_table="general_sessions")
+    storage = create_state_storage("crew", tmp_path, subdir="sessions", session_table="crew_sessions")
+    runs = [
+        _history_run("earlier", team=team, event_id="$earlier", seen=["$earlier"]),
+        _history_run("newer", team=team, event_id="$newer", seen=["$older", "$newer"]),
+        _history_run("later", team=team, event_id="$later", seen=["$later"]),
+    ]
     seed_session(
         storage,
-        AgentSession(
-            session_id="session-1",
-            agent_id="general",
-            runs=[
-                _history_run("earlier", event_id="$earlier", seen=["$earlier"]),
-                _history_run("newer", event_id="$newer", seen=["$older", "$newer"]),
-                _history_run("later", event_id="$later", seen=["$later"]),
-            ],
-        ),
+        TeamSession(session_id="session-1", team_id="crew", runs=runs)
+        if team
+        else AgentSession(session_id="session-1", agent_id="crew", runs=runs),
     )
+
+    def _stored_session() -> AgentSession | TeamSession | None:
+        return get_team_session(storage, "session-1") if team else get_agent_session(storage, "session-1")
+
     lookups: list[tuple[str, ...]] = []
 
     async def _redacted_event_ids(event_ids: tuple[str, ...]) -> frozenset[str]:
@@ -749,9 +764,9 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     def _open_scope() -> AbstractContextManager[ScopeSessionContext]:
         return contextlib.nullcontext(
             ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id="general"),
+                scope=HistoryScope(kind="team" if team else "agent", scope_id="crew"),
                 storage=storage,
-                session=get_agent_session(storage, "session-1"),
+                session=_stored_session(),
             ),
         )
 
@@ -799,7 +814,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     # Nothing that derived from the redacted event is left for the next turn to find.
     assert redacted_event_id not in lookups[1]
     assert attempt_history == [["earlier"], ["earlier"]]
-    stored = get_agent_session(storage, "session-1")
+    stored = _stored_session()
     assert stored is not None
     assert [history_run.run_id for history_run in stored.runs or []] == ["earlier"]
 
