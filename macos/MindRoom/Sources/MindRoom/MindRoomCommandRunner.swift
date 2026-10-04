@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 typealias MindRoomProcessRunner = (MindRoomCommandInvocation, MindRoomCommandProcess) -> CommandResult
@@ -37,6 +38,8 @@ final class MindRoomCommandRunner: ObservableObject {
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
 
+    let inference: LocalInferenceController
+    private var inferenceChanges: AnyCancellable?
     private var refreshRequested = false
     private var activeProcess: MindRoomCommandProcess?
     private let runtime: MindRoomRuntime
@@ -48,13 +51,15 @@ final class MindRoomCommandRunner: ObservableObject {
         processRunner: @escaping MindRoomProcessRunner = { invocation, process in process.run(invocation) },
         showSection: ((AppSection) -> Void)? = nil
     ) {
+        self.inference = LocalInferenceController(runtime: runtime)
         self.runtime = runtime
         self.processRunner = processRunner
         self.showSection = showSection ?? { AppWindowController.shared.show(section: $0) }
+        self.inferenceChanges = inference.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     var isRunningCommand: Bool {
-        runningCommandTitle != nil
+        runningCommandTitle != nil || inference.busy
     }
 
     /// `run()` refuses commands that need the runtime matching this app from every entry point until a
@@ -97,6 +102,7 @@ final class MindRoomCommandRunner: ObservableObject {
                     : MindRoomServiceStatus(state: .unknown, message: "Could not check the background service. Refresh Status to retry.")
                 self.hasRefreshedStatus = true
                 self.isRefreshingStatus = false
+                Task { await self.inference.refresh() }
             }
         }
     }
@@ -120,7 +126,7 @@ final class MindRoomCommandRunner: ObservableObject {
     }
 
     private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
-        guard runningCommandTitle == nil else { return }
+        guard !isRunningCommand else { return }
         feedback = nil
         needsReconnectConfirmation = false
         pairingCancelled = false

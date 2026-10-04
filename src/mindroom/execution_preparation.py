@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     TOOL_TRACE_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -70,8 +71,9 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
-# Lifecycle notices describe the runtime, not the conversation, so no model sees them as a turn.
-_LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY)
+# Notices that are not turns: lifecycle notices describe the runtime, and a Chat UI request is a tool
+# call's fallback text for other clients (answers and error reports name the canvas themselves).
+_NON_TURN_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, UI_ACTION_CONTENT_KEY)
 
 
 class _PartialReplyKind(str, Enum):
@@ -708,7 +710,7 @@ def _get_unseen_messages_for_sender(
             continue
         if current_event_id and event_id == current_event_id:
             continue
-        if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
+        if isinstance(content, dict) and any(key in content for key in _NON_TURN_NOTICE_CONTENT_KEYS):
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(

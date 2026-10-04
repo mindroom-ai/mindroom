@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import LandingPage from '../page'
 
 jest.mock('@/components/landing/HeroParticleBackground', () => ({
@@ -61,6 +61,43 @@ describe('LandingPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
 
     expect(writeText).toHaveBeenCalledWith('uvx mindroom run')
+    const copied = await screen.findByRole('button', { name: 'Copied' })
+    expect(copied).toHaveTextContent('Copied')
+  })
+
+  it('switches the install card to the macOS app', async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<LandingPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'macOS app' }))
+
+    expect(screen.getByRole('button', { name: 'macOS app' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('mindroom-ai/tap/mindroom').closest('pre')).toHaveTextContent('$ brew install --cask mindroom-ai/tap/mindroom')
+    expect(screen.getByRole('link', { name: /Read the macOS app guide/ })).toHaveAttribute('href', 'https://docs.mindroom.chat/installation/macos-app/')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
+    expect(writeText).toHaveBeenCalledWith('brew install --cask mindroom-ai/tap/mindroom')
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+  })
+
+  it('selects the install command when the clipboard is refused', async () => {
+    const writeText = jest.fn().mockRejectedValue(new DOMException('Denied', 'NotAllowedError'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<LandingPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy command' }))
+
+    await waitFor(() => expect(window.getSelection()?.toString()).toBe('uvx mindroom run'))
+    expect(screen.getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
+  })
+
+  it('lists the MindRoom Chat apps', () => {
+    render(<LandingPage />)
+
+    const apps = within(screen.getByRole('list', { name: 'MindRoom Chat apps' }))
+    expect(apps.getByRole('link', { name: 'Web' })).toHaveAttribute('href', 'https://chat.mindroom.chat')
+    expect(apps.getByRole('link', { name: 'Mac' })).toHaveAttribute('href', 'https://docs.mindroom.chat/installation/macos-app/')
+    expect(apps.getByRole('link', { name: 'iPhone & iPad' })).toHaveAttribute('href', 'https://apps.apple.com/us/app/mindroom-ai/id6760272172')
+    expect(apps.getByText('Android')).toHaveTextContent('AndroidBeta')
   })
 })

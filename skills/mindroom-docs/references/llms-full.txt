@@ -80,7 +80,7 @@ The [Security Model](https://docs.mindroom.chat/architecture/security-posture/) 
 
 ### A chat app built for agents
 
-MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), and on the [Mac](https://docs.mindroom.chat/installation/macos-app/), along with the server and the AI backend.
+MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), on the [Mac](https://docs.mindroom.chat/installation/macos-app/), and in beta on Android, along with the server and the AI backend.
 So agents are not limited to what Slack or WhatsApp can display:
 
 - Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](https://docs.mindroom.chat/streaming/)).
@@ -722,6 +722,39 @@ The app opens at the first step that needs attention: **Install** when the runti
 These controls manage only this Mac's launchd service.
 **Service running** means the process is running; use Chat or the dashboard to confirm agents are ready.
 
+### Local AI Models
+
+In **Configure**, choose a model under **Run AI on this Mac** and click **Set Up Local Model**.
+No separate inference application or model-provider API key is required.
+Setup downloads the model, displays download progress, and makes it the default for your agents.
+Choose **Cancel Setup** to stop a download; retry setup to resume it.
+The initial download requires internet; after setup, the model runs locally without internet.
+Matrix chat and hosted pairing still require their configured network connection.
+
+The suggested models are conservative starting points based on total unified memory:
+
+| Unified memory | Suggested model | Approximate model download |
+| --- | --- | --- |
+| 8–15 GB | Qwen 3.5 2B | 1.5 GB |
+| 16–23 GB | Qwen 3.5 4B | 2.8 GB |
+| 24–31 GB | Qwen 3.5 9B | 5.7 GB |
+| 32 GB or more | Qwen 3.8 27B | 17.6 GB |
+
+We recommend Qwen 3.8 27B on Macs with at least 32 GB unified memory, leaving room for macOS, MindRoom, and the model's working memory.
+
+Local inference currently supports text and tool calls.
+Other apps and longer conversations consume additional memory; choose a smaller model when memory is tight.
+Local models support an 8,192-token context, with one model active at a time.
+After five idle minutes, model memory is released; the next request takes longer while the model loads again.
+Agents and the router using `default` follow the new selection; explicitly selected models and existing credentials are kept.
+Setup saves the original YAML as `config.yaml.before-local-model` and rewrites the active YAML without its comments.
+For configurations using `!include`, edit the model's source file manually instead of using automatic setup.
+
+Use **Stop Inference** to stop local inference and **Start Inference** to start it again.
+Agents configured to use it cannot answer while it is stopped.
+The service starts at login and continues after quitting the app.
+Downloaded models are stored in `~/Library/Application Support/MindRoom/inference/models`.
+
 ### Where Do My Agents Run?
 
 Your agents run on this Mac.
@@ -837,6 +870,7 @@ brew upgrade --cask mindroom
 
 **Open Logs Folder** opens `~/Library/Logs/mindroom`, and **Open Config Folder** opens the folder holding the local agents' configuration, `~/.mindroom` by default, which the CLI shares.
 Failed local-agent actions show their output in the window with a copy action.
+For local model download or loading errors, check `inference.log` in the logs folder.
 If the dashboard does not open, start the service and check its logs for missing provider credentials or startup errors.
 
 ## Uninstall
@@ -1768,6 +1802,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](https://docs.mindroom.chat/getting-started/)).
+The [macOS app's local model setup](https://docs.mindroom.chat/installation/macos-app/#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
 
 ## Model Config Fields
 
@@ -2712,7 +2747,7 @@ The check runs between completed tool batches and never interrupts a running too
 The judge sees the active request, earlier public conversation, up to eight queued human messages, the configured guidance, and the agent's visible reply text as published when each message was queued.
 Private tool results and arguments, system prompts, memory, and attachment contents are not sent, but message text can still contain private information.
 Within the judge's 16 KB limit, the active request and queued messages are always sent whole, while older conversation drops out first and long earlier messages are shortened.
-The wrap-up notice is sent without a judgment when conversation history is missing, incomplete, or contains media, when the active request and queued messages alone exceed the limit, when a message contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
+The wrap-up notice is sent without a judgment when conversation history is missing, incomplete, or contains media, when the active request and queued messages alone exceed the limit, when a message the judge would see contains attachments or text that looks like a credential, and for `thread_mode: room` turns.
 Each skipped judgment logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and backend errors log `Mid-turn continuation evaluated` with a `failure`.
 
 Queued messages stay queued and are handled after the active response finishes.
@@ -5083,11 +5118,23 @@ The first ID is the canvas and the second is the version the user answered; when
 MindRoom Chat shows the answer as a one-line receipt that expands to the exact data.
 An answer can carry up to 512 KB of JSON data, enough for a long document the user edited in the canvas; larger or non-JSON data is ignored, so no **Send** prompt appears.
 
+When the page throws an error, fails to load a file, or tries to load something Chat blocks, the panel lists up to five of those errors with a **Tell** *agent* button.
+Nothing is sent unless the user chooses it; the report reaches the agent like an answer:
+
+```text
+@mindroom_planner:example.org Canvas error ($canvas-event, revision $canvas-event):
+Uncaught ReferenceError: drawChart is not defined (line 12)
+Blocked https://unpkg.com/chart.js (script-src-elem)
+```
+
 ## Update a canvas
 
 `show_canvas` returns the canvas `event_id`.
 Calling `show_canvas` again with `canvas_event_id` set to that ID replaces the page in place, for the next step of a flow or a new version of a file the agent edited, and the conversation keeps one card.
+An update may leave out `title` to keep the title the canvas was first shown with.
 An open panel switches to the new page at once, unless the user has been working in it; then Chat shows "*agent* updated this panel." with a **Load update** button, so unsent work is not lost.
+Every update stays available: once a canvas has more than one version, the panel header shows *Version n of m* with buttons to go back and forward, and an earlier version offers **Show latest**.
+The user can answer an earlier version; switching is unavailable while an answer waits for **Send** or is sending.
 An agent can update only canvases it showed to the same user in the same room and thread, or at room level; otherwise the call fails and the agent shows a new canvas instead.
 
 ## Write a page
@@ -5134,6 +5181,8 @@ Chat exposes its current theme as CSS variables, so a page can match light and d
 | `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
 | `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
 | `--mr-radius`, `--mr-font` | Corner radius and font family |
+
+For choices the variables cannot make, such as a chart palette, `window.mindroom.colorScheme` is `light` or `dark`.
 
 ## Privacy and safety
 
@@ -10430,7 +10479,7 @@ None of the actions touches the user's own computer or browser:
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
 | `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
-| `show_canvas(title, html=None, path=None, canvas_event_id=None)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `show_canvas(title=None, html=None, path=None, canvas_event_id=None)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
 | `open_settings(section="general")` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
 
@@ -12273,6 +12322,7 @@ It provides:
 - Servers and lifecycle: `run_server()`, `get_public_url()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
 
 `upload_file()` follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
+`download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
 
 | Option | Type | Default | Notes |
@@ -13374,7 +13424,7 @@ Reads of worker-controlled files are capped per surface.
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
-| `e2b` uploads | 64 MiB | Refused with a tool error |
+| `e2b` uploads, and sandbox files that `e2b` downloads or reads | 64 MiB | Refused with a tool error |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | `moviepy_video_tools` staged inputs | 1 GiB per video; 1 MiB per caption file | The call fails before staging more than the cap |
@@ -17852,6 +17902,8 @@ Create, view, edit, and validate `config.yaml`.
 │ validate          Validate config.yaml and check for common issues.                    │
 │ resolve           Print the fully merged config YAML with all !include tags resolved.  │
 │ path              Show the resolved config file path and search locations.             │
+│ use-local-model   Use a local model as the default, keeping explicitly selected agent  │
+│                   models.                                                              │
 │ migrate           Migrate config.yaml to membership access settings.                   │
 │ fingerprint       Print the config source SHA-256, including all transitively included │
 │                   files.                                                               │

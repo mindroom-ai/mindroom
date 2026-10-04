@@ -1108,6 +1108,7 @@ MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
 MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
+UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 DURABLE_FINAL_OUTCOME_KEY = "io.mindroom.final_delivery"
 DURABLE_FINAL_OUTCOME_VERSION = 2

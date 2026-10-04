@@ -60,6 +60,39 @@ The app opens at the first step that needs attention: **Install** when the runti
 These controls manage only this Mac's launchd service.
 **Service running** means the process is running; use Chat or the dashboard to confirm agents are ready.
 
+### Local AI Models
+
+In **Configure**, choose a model under **Run AI on this Mac** and click **Set Up Local Model**.
+No separate inference application or model-provider API key is required.
+Setup downloads the model, displays download progress, and makes it the default for your agents.
+Choose **Cancel Setup** to stop a download; retry setup to resume it.
+The initial download requires internet; after setup, the model runs locally without internet.
+Matrix chat and hosted pairing still require their configured network connection.
+
+The suggested models are conservative starting points based on total unified memory:
+
+| Unified memory | Suggested model | Approximate model download |
+| --- | --- | --- |
+| 8–15 GB | Qwen 3.5 2B | 1.5 GB |
+| 16–23 GB | Qwen 3.5 4B | 2.8 GB |
+| 24–31 GB | Qwen 3.5 9B | 5.7 GB |
+| 32 GB or more | Qwen 3.8 27B | 17.6 GB |
+
+We recommend Qwen 3.8 27B on Macs with at least 32 GB unified memory, leaving room for macOS, MindRoom, and the model's working memory.
+
+Local inference currently supports text and tool calls.
+Other apps and longer conversations consume additional memory; choose a smaller model when memory is tight.
+Local models support an 8,192-token context, with one model active at a time.
+After five idle minutes, model memory is released; the next request takes longer while the model loads again.
+Agents and the router using `default` follow the new selection; explicitly selected models and existing credentials are kept.
+Setup saves the original YAML as `config.yaml.before-local-model` and rewrites the active YAML without its comments.
+For configurations using `!include`, edit the model's source file manually instead of using automatic setup.
+
+Use **Stop Inference** to stop local inference and **Start Inference** to start it again.
+Agents configured to use it cannot answer while it is stopped.
+The service starts at login and continues after quitting the app.
+Downloaded models are stored in `~/Library/Application Support/MindRoom/inference/models`.
+
 ### Where Do My Agents Run?
 
 Your agents run on this Mac.
@@ -175,6 +208,7 @@ brew upgrade --cask mindroom
 
 **Open Logs Folder** opens `~/Library/Logs/mindroom`, and **Open Config Folder** opens the folder holding the local agents' configuration, `~/.mindroom` by default, which the CLI shares.
 Failed local-agent actions show their output in the window with a copy action.
+For local model download or loading errors, check `inference.log` in the logs folder.
 If the dashboard does not open, start the service and check its logs for missing provider credentials or startup errors.
 
 ## Uninstall
