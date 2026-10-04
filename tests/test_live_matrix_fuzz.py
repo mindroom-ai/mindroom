@@ -310,6 +310,50 @@ class _RestartBoundaryRunner(LiveFuzzRunner):
 
 
 @pytest.mark.asyncio
+async def test_disposable_account_registers_with_the_homeserver_token() -> None:
+    """A homeserver created by deploy.py only admits accounts that present its registration token."""
+    payloads: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if "session" not in payload["auth"]:
+            return httpx.Response(401, json={"session": "uia", "flows": [{"stages": ["m.login.registration_token"]}]})
+        return httpx.Response(200, json={"access_token": "token", "user_id": "@livefuzz:example"})
+
+    token = "instance-token"  # noqa: S105
+    client = LiveMatrixClient("http://matrix.invalid", "", registration_token=token)
+    await client.http.aclose()
+    client.http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        assert await client.register() == "@livefuzz:example"
+    finally:
+        await client.close()
+
+    assert [payload["auth"] for payload in payloads] == [
+        {"type": "m.login.registration_token", "token": token},
+        {"type": "m.login.registration_token", "token": token, "session": "uia"},
+    ]
+
+
+def test_instance_registration_token_comes_from_the_deploy_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The managed MindRoom and its test clients use the token deploy.py wrote for that instance."""
+    (tmp_path / "fuzz-instance.env").write_text(
+        "INSTANCE_ENV_FILE=x\nMATRIX_REGISTRATION_TOKEN=abc123\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tokenless.env").write_text("MATRIX_REGISTRATION_TOKEN=\n", encoding="utf-8")
+    monkeypatch.setattr(live_fuzz, "INSTANCE_ENV_DIR", tmp_path)
+
+    assert live_fuzz._instance_registration_token("fuzz-instance") == "abc123"
+    with pytest.raises(RuntimeError, match="has no MATRIX_REGISTRATION_TOKEN"):
+        live_fuzz._instance_registration_token("tokenless")
+
+
+@pytest.mark.asyncio
 async def test_restart_room_exposes_prejoin_history(monkeypatch: pytest.MonkeyPatch) -> None:
     """The disposable room must expose old events to bots that join during replacement."""
     client = LiveMatrixClient("http://matrix.invalid", "")
@@ -8474,6 +8518,7 @@ async def test_run_live_closes_every_client_without_masking_primary_failure(
     monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
     stack: Any = SimpleNamespace(
         homeserver="http://matrix.invalid",
+        registration_token="",
         room_ids={"lobby": "!room:example"},
         room_keys=("lobby",),
         room_id="!room:example",
@@ -8532,6 +8577,7 @@ async def test_run_live_finishes_client_cleanup_before_rethrowing_first_interrup
     monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
     stack: Any = SimpleNamespace(
         homeserver="http://matrix.invalid",
+        registration_token="",
         room_ids={"lobby": "!room:example"},
         room_keys=("lobby",),
         room_id="!room:example",
@@ -8581,6 +8627,7 @@ async def test_run_live_groups_ordinary_client_cleanup_failures(
     monkeypatch.setattr(live_fuzz, "LiveFuzzRunner", FakeRunner)
     stack: Any = SimpleNamespace(
         homeserver="http://matrix.invalid",
+        registration_token="",
         room_ids={"lobby": "!room:example"},
         room_keys=("lobby",),
         room_id="!room:example",

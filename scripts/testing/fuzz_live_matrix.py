@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INSTANCE_REGISTRY = PROJECT_ROOT / "local" / "instances" / "deploy" / "instances.json"
+INSTANCE_ENV_DIR = INSTANCE_REGISTRY.parent / "envs"
 DEFAULT_LIVE_FUZZ_STATE_ROOT = Path.home() / ".mindroom" / "live-fuzz"
 MODEL_ID = "mindroom-live-fuzz"
 RESTART_MODEL_ID = "mindroom-live-fuzz-replacement"
@@ -2915,6 +2916,17 @@ class PendingLaneReport:
         return f"journal: pending per room {lanes}{head}"
 
 
+def _instance_registration_token(instance_name: str) -> str:
+    """Return the registration token deploy.py generated for one instance's homeserver."""
+    env_file = INSTANCE_ENV_DIR / f"{instance_name}.env"
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "MATRIX_REGISTRATION_TOKEN" and value.strip():
+            return value.strip()
+    msg = f"{env_file} has no MATRIX_REGISTRATION_TOKEN"
+    raise RuntimeError(msg)
+
+
 class ManagedTuwunelStack:
     """Disposable Tuwunel plus the current worktree's MindRoom runtime."""
 
@@ -2967,6 +2979,7 @@ class ManagedTuwunelStack:
         self.api_port = 0
         self.homeserver = ""
         self.server_name = ""
+        self.registration_token = ""
         self.room_keys = room_keys
         self.room_ids: dict[str, str] = {}
         self.room_id = ""
@@ -3174,6 +3187,7 @@ class ManagedTuwunelStack:
         domain = str(instance["domain"])
         self.homeserver = f"http://127.0.0.1:{matrix_port}"
         self.server_name = f"m-{domain}"
+        self.registration_token = _instance_registration_token(self.instance_name)
         self.agent_id = f"@mindroom_{AGENT_NAME}_{self.namespace}:{self.server_name}"
         self.load_sender_id = f"@mindroom_load_sender_{self.namespace}:{self.server_name}"
         self.router_id = f"@mindroom_router_{self.namespace}:{self.server_name}"
@@ -3197,6 +3211,7 @@ class ManagedTuwunelStack:
         environment = {
             **os.environ,
             "MATRIX_HOMESERVER": self.homeserver,
+            "MATRIX_REGISTRATION_TOKEN": self.registration_token,
             "MATRIX_SERVER_NAME": self.server_name,
             "MATRIX_SSL_VERIFY": "false",
             "MINDROOM_CONFIG_PATH": str(self.config_path),
@@ -4134,10 +4149,18 @@ class _SentPayload:
 class LiveMatrixClient:
     """Minimal real Matrix client used by the live fuzzer."""
 
-    def __init__(self, homeserver: str, room_id: str, *, room_ids: tuple[str, ...] | None = None) -> None:
+    def __init__(
+        self,
+        homeserver: str,
+        room_id: str,
+        *,
+        room_ids: tuple[str, ...] | None = None,
+        registration_token: str = "",
+    ) -> None:
         self.homeserver = homeserver.rstrip("/")
         self.room_id = room_id
         self.room_ids = room_ids or (room_id,)
+        self.registration_token = registration_token
         self.http = httpx.AsyncClient(timeout=30)
         self.access_token = ""
         self.user_id = ""
@@ -4153,11 +4176,13 @@ class LiveMatrixClient:
         """Register one disposable account without exposing its token."""
         username = f"livefuzz{secrets.token_hex(6)}"
         password = secrets.token_urlsafe(24)
-        payload: dict[str, Any] = {
-            "auth": {"type": "m.login.dummy"},
-            "username": username,
-            "password": password,
-        }
+        # A homeserver created by deploy.py admits new accounts only with its registration token.
+        auth = (
+            {"type": "m.login.registration_token", "token": self.registration_token}
+            if self.registration_token
+            else {"type": "m.login.dummy"}
+        )
+        payload: dict[str, Any] = {"auth": auth, "username": username, "password": password}
         response = await self.http.post(f"{self.homeserver}/_matrix/client/v3/register", json=payload)
         if response.status_code == HTTPStatus.UNAUTHORIZED:
             session = response.json().get("session")
@@ -9023,7 +9048,15 @@ async def _run_live(
         else scenario.client_count
     )
     room_ids = tuple(stack.room_ids.get(room_key, stack.room_id) for room_key in stack.room_keys)
-    clients = tuple(LiveMatrixClient(stack.homeserver, stack.room_id, room_ids=room_ids) for _ in range(client_count))
+    clients = tuple(
+        LiveMatrixClient(
+            stack.homeserver,
+            stack.room_id,
+            room_ids=room_ids,
+            registration_token=stack.registration_token,
+        )
+        for _ in range(client_count)
+    )
     if scenario.profile == "chaos":
         for client in clients:
             client.transport_retry_seconds = 45.0
