@@ -3175,29 +3175,32 @@ def test_runtime_chart_agent_vault_content_hash_tracks_each_jobs_inputs(tmp_path
     assert changed_bootstrap_name != bootstrap_name
 
 
+@pytest.mark.parametrize("job_naming", ["fixed", "contentHash"])
 @pytest.mark.parametrize(
     ("chart_field", "label", "bumped_label"),
     [("version", "helm.sh/chart", "mindroom-runtime-9.9.9"), ("appVersion", "app.kubernetes.io/version", "9.9.9")],
 )
-def test_runtime_chart_agent_vault_content_hash_ignores_chart_version_labels(
+def test_runtime_chart_agent_vault_jobs_keep_name_and_pod_template_across_version_bumps(
     tmp_path: Path,
+    job_naming: str,
     chart_field: str,
     label: str,
     bumped_label: str,
 ) -> None:
-    """A chart or app version bump alone keeps the hashed Job names."""
+    """A chart or app version bump alone relabels the Jobs but keeps their names and immutable pod templates."""
     bumped_chart = tmp_path / "chart"
     shutil.copytree(Path("cluster/k8s/runtime"), bumped_chart)
     chart_yaml = bumped_chart / "Chart.yaml"
     chart = yaml.safe_load(chart_yaml.read_text(encoding="utf-8"))
     chart_yaml.write_text(yaml.safe_dump({**chart, chart_field: "9.9.9"}), encoding="utf-8")
 
-    _, *jobs = _render_agent_vault_jobs(tmp_path, job_naming="contentHash")
-    _, *bumped_jobs = _render_agent_vault_jobs(tmp_path, job_naming="contentHash", chart_dir=bumped_chart)
+    _, *jobs = _render_agent_vault_jobs(tmp_path, job_naming=job_naming)
+    _, *bumped_jobs = _render_agent_vault_jobs(tmp_path, job_naming=job_naming, chart_dir=bumped_chart)
 
     for job, bumped_job in zip(jobs, bumped_jobs, strict=True):
-        assert bumped_job["spec"]["template"]["metadata"]["labels"][label] == bumped_label
+        assert bumped_job["metadata"]["labels"][label] == bumped_label
         assert bumped_job["metadata"]["name"] == job["metadata"]["name"]
+        assert bumped_job["spec"]["template"] == job["spec"]["template"]
 
 
 def test_runtime_chart_agent_vault_fixed_jobs_keep_names_and_grant_hook(tmp_path: Path) -> None:

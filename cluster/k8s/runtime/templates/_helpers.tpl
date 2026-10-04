@@ -678,14 +678,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
 Agent Vault Job (or grants ConfigMap) name from (list root baseName renderedInputs).
 jobNaming=contentHash appends a hash of the rendered inputs, so a plain `kubectl apply`
 creates a new object when they change and leaves the existing one alone otherwise.
-The hash skips the chart and app version labels, so a chart upgrade alone keeps the name.
 */}}
 {{- define "mindroom-runtime.agentVaultJobName" -}}
 {{- $root := index . 0 -}}
 {{- $name := index . 1 -}}
 {{- if eq $root.Values.workers.kubernetes.agentVault.jobNaming "contentHash" -}}
-{{- $inputs := regexReplaceAll `(?m)^ *(helm\.sh/chart|app\.kubernetes\.io/version):.*$` (index . 2) "" -}}
-{{- printf "%s-%s" ($name | trunc 52 | trimSuffix "-") ($inputs | sha256sum | trunc 10) -}}
+{{- printf "%s-%s" ($name | trunc 52 | trimSuffix "-") (index . 2 | sha256sum | trunc 10) -}}
 {{- else -}}
 {{- $name -}}
 {{- end -}}
