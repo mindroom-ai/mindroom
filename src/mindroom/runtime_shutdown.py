@@ -87,6 +87,16 @@ class RuntimeShutdownIntent:
     stop_reason: StopReason | None
     cancel_source: TaskCancelSource | None = None
 
+    @property
+    def hands_off_unfinished_work(self) -> bool:
+        """Return whether a successor runtime resumes the work this shutdown cancels.
+
+        The next process replays a process shutdown's unfinished turns, and the
+        replacement runtime replays a replaced entity's, so cancelled work must
+        stay pending rather than settle as interrupted.
+        """
+        return self.stop_reason in {"shutdown", "restart"}
+
 
 @dataclass(frozen=True)
 class ShutdownBudget:

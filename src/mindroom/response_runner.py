@@ -275,7 +275,7 @@ async def _cancel_pending_responses(
             request_task_cancel(
                 task,
                 cancel_source=shutdown_intent.cancel_source,
-                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+                process_shutdown=shutdown_intent.hands_off_unfinished_work,
             )
         remaining_seconds = max(0.0, deadline - loop.time())
         window_expired = remaining_seconds == 0.0

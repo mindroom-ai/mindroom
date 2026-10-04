@@ -133,7 +133,12 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import (
+    ENTITY_REMOVED_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    SYNC_RESTART_SHUTDOWN,
+    RuntimeShutdownIntent,
+)
 from mindroom.stop import StopManager
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -586,6 +591,42 @@ async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() ->
 
     assert cancellation_count == 5
     assert runner.pending_inbox_response_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shutdown_intent", "handed_off"),
+    [(ORDERLY_SHUTDOWN, True), (SYNC_RESTART_SHUTDOWN, True), (ENTITY_REMOVED_SHUTDOWN, False)],
+    ids=["process_shutdown", "entity_replacement", "entity_removal"],
+)
+async def test_a_successor_runtime_inherits_cancelled_responses(
+    shutdown_intent: RuntimeShutdownIntent,
+    handed_off: bool,
+) -> None:
+    """A stopping process or a replaced entity leaves its replies pending for the runtime that replays them."""
+    runner = ResponseRunner(deps=MagicMock())
+    response_started = asyncio.Event()
+    observed: list[bool] = []
+
+    async def response() -> None:
+        response_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(current_task_is_process_shutdown())
+            raise
+
+    runner.track_inbox_response(
+        response(),
+        name="test_inherited_response",
+        recovery_proof_ready=lambda: True,
+        room_id=_target().room_id,
+    )
+    await response_started.wait()
+
+    await runner.drain_inbox_responses(cancel_after_seconds=0.05, shutdown_intent=shutdown_intent)
+
+    assert observed == [handed_off]
 
 
 @pytest.mark.asyncio

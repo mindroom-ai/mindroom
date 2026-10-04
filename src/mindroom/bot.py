@@ -2271,7 +2271,11 @@ class AgentBot:
             # generation -- leaving it registered, half-stopped, while its
             # replacement opened the same database under the same principal.
             self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
-            await self._release("journal dispatcher", self._journal_dispatcher.stop(), failures)
+            await self._release(
+                "journal dispatcher",
+                self._journal_dispatcher.stop(shutdown_intent=shutdown_intent),
+                failures,
+            )
             if shutdown_intent.stop_reason == "restart":
                 await self._response_runner.wait_for_source_owned_inbox_responses()
             if self._ingestion_session is not None:
