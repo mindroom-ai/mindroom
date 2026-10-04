@@ -1,5 +1,5 @@
 ---
-icon: lucide/plug-2
+icon: lucide/puzzle
 ---
 
 # Plugins

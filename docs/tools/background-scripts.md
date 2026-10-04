@@ -1,5 +1,5 @@
 ---
-icon: lucide/file-clock
+icon: simple/python
 ---
 
 # Background Python Scripts

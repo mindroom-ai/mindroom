@@ -1,5 +1,5 @@
 ---
-icon: lucide/wrench
+icon: lucide/map-pin
 ---
 
 # Location, Commerce, & Home

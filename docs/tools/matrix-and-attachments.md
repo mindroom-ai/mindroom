@@ -1,5 +1,5 @@
 ---
-icon: lucide/wrench
+icon: lucide/hash
 ---
 
 # Matrix & Threads

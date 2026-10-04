@@ -1,3 +1,7 @@
+---
+icon: lucide/package-plus
+---
+
 # Dynamic Tools
 
 Dynamic tools keep an agent's rarely used tools out of the model's tool list until the agent needs them, which saves context on every request.

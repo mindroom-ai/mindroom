@@ -1,5 +1,5 @@
 ---
-icon: lucide/wrench
+icon: lucide/archive
 ---
 
 # Memory & Storage

@@ -1,5 +1,5 @@
 ---
-icon: lucide/user-round
+icon: simple/google
 ---
 
 # Google Services OAuth For Local Installs

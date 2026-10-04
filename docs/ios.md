@@ -1,5 +1,5 @@
 ---
-icon: fontawesome/brands/apple
+icon: simple/apple
 ---
 
 # iOS App

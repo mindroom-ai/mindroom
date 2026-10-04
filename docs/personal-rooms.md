@@ -1,5 +1,5 @@
 ---
-icon: lucide/user-round
+icon: lucide/door-open
 ---
 
 # Personal Rooms

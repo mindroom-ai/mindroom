@@ -1,5 +1,5 @@
 ---
-icon: lucide/message-circle
+icon: simple/telegram
 ---
 
 # Telegram Bridge

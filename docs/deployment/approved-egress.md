@@ -1,5 +1,5 @@
 ---
-icon: lucide/shield-check
+icon: lucide/globe-lock
 ---
 
 # Approved Egress
@@ -45,7 +45,8 @@ Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring without
 Set allowlist entries in `approvedEgress.allowlist.domains`, or provide them in `approvedEgress.allowlist.existingConfigMap` under the key named by `approvedEgress.allowlist.key` (default `allowed-domains.txt`); you cannot set both.
 A plain hostname matches exactly, and a leading dot such as `.docs.example.com` matches the domain and all its subdomains.
 Allowlisted hostnames never need approval.
-The proxy and MindRoom read the allowlist only at startup; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) describes which allowlist changes roll the proxy and when to restart it or MindRoom.
+Changing `approvedEgress.allowlist.domains` restarts the proxy automatically when you apply the chart, but edits to an `existingConfigMap` reach the proxy only after you restart it.
+MindRoom keeps the allowlist it started with until its own pod restarts, so until then a removed domain is still reported as allowed and gets no grant; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) names the Deployments to restart.
 
 ## Requesting Access
 
@@ -168,7 +169,7 @@ approvedEgress:
 
 Entries match like allowlist entries: exact hostnames, or a leading dot for a domain and its subdomains.
 Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
-Bypassed destinations still need an allowlist match or grant, and changing the list restarts the proxy automatically.
+Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
 Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
 The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.

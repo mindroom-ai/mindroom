@@ -1,5 +1,5 @@
 ---
-icon: lucide/layout-list
+icon: simple/atlassian
 ---
 
 # Atlassian Cloud

@@ -33,6 +33,7 @@ To get started, follow [Install & First Run](https://docs.mindroom.chat/getting-
 | **Images** | Analysis of user-sent images with vision-capable models |
 | **File & Video Attachments** | Files and videos that agents can read and send within a conversation |
 | **Interactive Q&A** | Clickable multiple-choice questions answered with Matrix reactions |
+| **Interactive Canvases** | Agent-written web pages, such as dashboards and forms, that the user answers in MindRoom Chat |
 | **Matrix Desktop Bridge** | Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands without opening inbound ports |
 | **Authorization** | Control which users may use which agents and rooms |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -58,6 +59,7 @@ To get started, follow [Install & First Run](https://docs.mindroom.chat/getting-
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits
 - [Voice Messages](https://docs.mindroom.chat/voice/), [Image Messages](https://docs.mindroom.chat/images/), and [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Media handling
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Multiple-choice questions via Matrix reactions
+- [Interactive Canvases](https://docs.mindroom.chat/canvases/) - Dashboards, reports, and forms in a panel beside the conversation
 - [Rooms & Spaces](https://docs.mindroom.chat/rooms/) - Managed rooms and the optional root Matrix Space
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control

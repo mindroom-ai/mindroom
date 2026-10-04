@@ -1,5 +1,5 @@
 ---
-icon: lucide/message-square
+icon: simple/matrix
 ---
 
 # Matrix Integration

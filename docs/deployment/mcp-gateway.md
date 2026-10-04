@@ -1,5 +1,5 @@
 ---
-icon: lucide/network
+icon: simple/modelcontextprotocol
 ---
 
 # MCP Gateway

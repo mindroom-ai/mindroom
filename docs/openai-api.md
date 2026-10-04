@@ -1,5 +1,5 @@
 ---
-icon: lucide/plug
+icon: fontawesome/brands/openai
 ---
 
 # OpenAI-Compatible API

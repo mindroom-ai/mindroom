@@ -1,3 +1,7 @@
+---
+icon: lucide/shield-half
+---
+
 # Security Posture
 
 This page records MindRoom's security model, the `file_access` setting, and the behaviors that are intentional.
@@ -138,7 +142,7 @@ Do not report or "fix" these; they are deliberate.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
-- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, so agents should only show pages they wrote; see [Sandbox and limits](../tools/chat-ui.md#sandbox-and-limits).
+- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, so agents should only show pages they wrote; see [Privacy and safety](../canvases.md#privacy-and-safety).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.

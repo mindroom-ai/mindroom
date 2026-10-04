@@ -1,5 +1,5 @@
 ---
-icon: lucide/calendar
+icon: lucide/calendar-clock
 ---
 
 # Scheduling
