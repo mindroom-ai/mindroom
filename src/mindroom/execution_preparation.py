@@ -710,11 +710,9 @@ def _get_unseen_messages_for_sender(
             continue
         if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
             continue
-        if msg.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING} and not _clean_partial_reply_body(
-            msg.body,
-        ):
-            # A reply that so far shows only its placeholder has nothing to read yet, and a placeholder that
-            # ends empty is redacted, so recording it as consumed would let that tidy-up remove real history.
+        if msg.stream_status is not None and not _clean_partial_reply_body(msg.body):
+            # A streamed reply that shows only its placeholder or a status note has nothing to read, and a
+            # placeholder that ends empty is redacted, so recording it as consumed would let that remove history.
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(

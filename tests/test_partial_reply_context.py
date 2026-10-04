@@ -44,6 +44,7 @@ from mindroom.streaming import (
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
     StreamingResponse,
 )
 from tests.conftest import (
@@ -532,8 +533,13 @@ class TestUnseenMessagesPartialReplies:
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
         assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
-    @pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
-    def test_another_entitys_placeholder_only_reply_is_neither_read_nor_recorded(self, stream_status: str) -> None:
+    @pytest.mark.parametrize("placeholder", [_PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER])
+    @pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_COMPLETED])
+    def test_another_entitys_placeholder_only_reply_is_neither_read_nor_recorded(
+        self,
+        stream_status: str,
+        placeholder: str,
+    ) -> None:
         """A placeholder that ends empty is redacted, so recording it as consumed would let that remove real history."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
@@ -543,7 +549,7 @@ class TestUnseenMessagesPartialReplies:
                 _make_visible_message(
                     event_id="e1",
                     sender="@mindroom_other:localhost",
-                    body=_PROGRESS_PLACEHOLDER,
+                    body=placeholder,
                     stream_status=stream_status,
                 ),
                 _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),

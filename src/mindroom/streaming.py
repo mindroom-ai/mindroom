@@ -309,7 +309,7 @@ def clean_partial_reply_text(text: str) -> str:
     if _STREAM_ERROR_RESPONSE_NOTE in cleaned:
         cleaned = cleaned.split(_STREAM_ERROR_RESPONSE_NOTE, 1)[0].rstrip()
 
-    if cleaned == _PROGRESS_PLACEHOLDER or not cleaned or not any(char.isalnum() for char in cleaned):
+    if cleaned in {_PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER} or not any(char.isalnum() for char in cleaned):
         return ""
     return cleaned
 
@@ -351,8 +351,6 @@ def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> Unfinish
     if content.get(STREAM_STATUS_KEY) not in {*_IN_PROGRESS_STREAM_STATUSES, STREAM_STATUS_APPROVAL_PENDING}:
         return None
     visible_text = clean_partial_reply_text(body)
-    if visible_text == TEAM_PROGRESS_PLACEHOLDER:
-        visible_text = ""
     tool_trace = tuple(tool_trace_from_content(content))
     if not visible_text and not tool_trace:
         return None
