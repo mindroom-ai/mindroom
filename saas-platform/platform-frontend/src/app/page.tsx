@@ -117,7 +117,7 @@ const workUses = [
 const reasons: IconItem[] = [
   {
     title: 'Connected to your tools and documents',
-    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.',
+    body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.',
     icon: Bot,
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
   },

@@ -143,7 +143,7 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 <td width="50%" valign="top">
 
 **🔌 [Connected to your tools and documents](https://docs.mindroom.chat/#agents-that-know-you-and-your-work)**<br />
-Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.
+Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.
 
 </td>
 <td width="50%" valign="top">
