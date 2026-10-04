@@ -757,6 +757,47 @@ async def test_supersession_cannot_borrow_blocking_terminal_metadata(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["declined", "edit_unsettled", "old_answered"])
+async def test_settled_edit_of_superseded_source_is_a_declined_no_op(tmp_path: Path, variant: str) -> None:
+    """MindRoom settles an edit of a message it superseded without regenerating anything, so the edit owes nothing."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=variant == "old_answered")
+    principal = case.journal.principal("general@@agent:example")
+    edit = {
+        **case.events["$old"],
+        "event_id": "$edit",
+        "origin_server_ts": 25,
+        "content": {
+            "msgtype": "m.text",
+            "body": "* edit",
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$old"},
+        },
+    }
+    await principal.admit(
+        InboundEvent(
+            "$edit",
+            "!room:example",
+            "$root",
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            "@user:example",
+            25,
+            edit,
+        ),
+    )
+    if variant != "edit_unsettled":
+        await principal.settle_many(("$edit",))
+    case.oracle.pending_edit_markers = {"$old": {"$edit": "MRK[src=op:1;rev=edit:3]"}}
+    case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert ("$old" in case.oracle.declined_edit_sources) is (variant == "declined")
+        # A declined edit owes nothing, so it no longer blocks proof that MindRoom superseded the message.
+        assert ("$old" in case.oracle.supersession_proofs) is (variant == "declined")
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("live_poll", [False, True])
 @pytest.mark.parametrize(
     "defect",

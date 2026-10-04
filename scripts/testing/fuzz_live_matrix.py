@@ -3874,6 +3874,9 @@ class ManagedTuwunelStack:
             config["agents"][AGENT_NAME]["model"] = "synthetic"
             config["agents"][AGENT_NAME]["tools"] = ["shell"]
             config["agents"][AGENT_NAME]["worker_tools"] = []
+            # The managed load sender is an agent, so without this its workload roots would stop
+            # waking the responder once they reach the consecutive agent-reply limit.
+            cast("dict[str, Any]", config["defaults"])["max_consecutive_agent_replies"] = 1_000_000
             config["agents"]["load_sender"] = {
                 "display_name": "Live Fuzz Load Sender",
                 "role": "Author deterministic managed-load workload roots.",
@@ -4855,6 +4858,8 @@ class ExactReplyOracle:
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
+        # Sources whose pending edits MindRoom settled without anything to regenerate.
+        self.declined_edit_sources: frozenset[str] = frozenset()
         self.supersession_proofs: dict[str, SupersessionProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.next_batch: str | None = None
@@ -4927,6 +4932,7 @@ class ExactReplyOracle:
             return
         self._ledger_read_at = now
         self.supersession_proofs = {}
+        self.declined_edit_sources = frozenset()
         if self.log_path is None:
             self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
         else:
@@ -4948,6 +4954,7 @@ class ExactReplyOracle:
             except (AssertionError, OSError):
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
+                self.declined_edit_sources = frozenset()
                 self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
@@ -5777,6 +5784,17 @@ class FinalStateAuditor:
         assert self.ledger_path is not None
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
+        # A message MindRoom never answered, such as one it superseded, has no reply to
+        # regenerate, so MindRoom settles each edit of it without any visible effect.
+        self.oracle.declined_edit_sources = frozenset(
+            source
+            for source, edits in self.pending_edit_markers.items()
+            if source not in snapshot.records
+            and all(
+                (row := snapshot.sources.get(event_id)) is not None and row.state == "settled"
+                for event_id in (source, *edits)
+            )
+        )
         # Final audit already validated this view; live polling must validate
         # with the same retained ancestry before joining durable ownership.
         replies = self._canonical_agent_replies(events, sent_records=sent_records) if replies is None else replies
@@ -5902,7 +5920,7 @@ class FinalStateAuditor:
                 for delivery in snapshot.pending_deliveries
             )
             or not all(self._journal_source_matches(item, events, root) for item in (row, next_row))
-            or self.pending_edit_markers.get(source)
+            or (self.pending_edit_markers.get(source) and source not in self.oracle.declined_edit_sources)
             or self.pending_edit_markers.get(newer)
         ):
             return None
@@ -6260,16 +6278,19 @@ class FinalStateAuditor:
             raise AssertionError(msg)
         return replies
 
-    @classmethod
     def _source_thread_root(
-        cls,
+        self,
         event_id: str,
         events: Mapping[str, Mapping[str, Any]],
         records: Mapping[str, _SentRecord],
         *,
         seen: set[str],
     ) -> str | None:
-        """Resolve one source's canonical thread root through reply ancestry."""
+        """Resolve one source's canonical thread root through reply ancestry.
+
+        A redaction strips an ancestor's relation, so a redacted ancestor keeps the
+        relation the oracle saw while it was live, which is what MindRoom resolved.
+        """
         if event_id in seen:
             return None
         seen.add(event_id)
@@ -6279,6 +6300,9 @@ class FinalStateAuditor:
         if not isinstance(content, dict):
             return None
         relation = content.get("m.relates_to")
+        unsigned = event.get("unsigned")
+        if relation is None and isinstance(unsigned, dict) and unsigned.get("redacted_because"):
+            relation = self.oracle.event_summaries.get(event_id, {}).get("relates_to")
         if not isinstance(relation, dict):
             return event_id
         root = relation.get("event_id")
@@ -6287,7 +6311,7 @@ class FinalStateAuditor:
         reply = relation.get("m.in_reply_to")
         target = reply.get("event_id") if isinstance(reply, dict) else None
         if isinstance(target, str):
-            return cls._source_thread_root(target, events, records, seen=seen)
+            return self._source_thread_root(target, events, records, seen=seen)
         return event_id
 
     def _assert_reply_cardinality(self, replies: Mapping[str, set[str]]) -> None:
@@ -8334,10 +8358,14 @@ class LiveFuzzRunner:
     def _reconcile_edit_debts(self) -> None:
         """Only exact visible terminal consumption can discharge or supersede live edit debt."""
         for source_id, pending in tuple(self._pending_edit_markers.items()):
+            # An edit of a redacted source, or one MindRoom declined, can change no reply.
+            if self.oracle.source_tombstoned(source_id) or source_id in self.oracle.declined_edit_sources:
+                del self._pending_edit_markers[source_id]
+                continue
             record = self.oracle._ledger_records.get(source_id)
             if record is None or not record.completed or source_id not in record.source_event_ids:
                 continue
-            if self.oracle.source_tombstoned(source_id) or self.oracle.source_completed_without_response(source_id):
+            if self.oracle.source_completed_without_response(source_id):
                 del self._pending_edit_markers[source_id]
                 continue
             latest = self.oracle.latest_reply_bodies.get(record.response_event_id or "")

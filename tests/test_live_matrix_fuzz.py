@@ -2328,6 +2328,8 @@ def test_sustained_stream_capacity_config_uses_managed_sender_and_synthetic_resp
         }
         assert config["agents"]["general"]["model"] == "synthetic"
         assert config["agents"]["load_sender"]["rooms"] == ["lobby"]
+        # The managed sender is an agent, so every workload root counts toward the consecutive agent-reply limit.
+        assert config["defaults"]["max_consecutive_agent_replies"] > 200
         assert config["models"]["synthetic"]["extra_kwargs"] == {
             "seed": 1,
             "min_response_chars": 4800,
@@ -5360,6 +5362,43 @@ def _threaded_reply_event(
             },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_reply_to_a_redacted_threaded_parent_keeps_the_thread_the_parent_had() -> None:
+    """Redaction strips a parent's thread relation, so the audit uses the relation it had before."""
+    client = LiveMatrixClient("http://matrix.invalid", "!room:example")
+    oracle = ExactReplyOracle(client, "@agent:example")
+    auditor = FinalStateAuditor(
+        client,
+        oracle,
+        agent_id="@agent:example",
+        expected_body_for=lambda call_id: f"LIVE-FUZZ call={call_id} END call={call_id}",
+    )
+    try:
+        oracle.expect("op:1", "$source")
+        parent = _agent_reply_event("$root", "$parent", "Thinking...")
+        oracle._ingest_event(parent)
+        redacted_parent = {**parent, "content": {}, "unsigned": {"redacted_because": {"event_id": "$redaction"}}}
+        source = {
+            "event_id": "$source",
+            "sender": "@user:example",
+            "type": "m.room.message",
+            "origin_server_ts": 50,
+            "content": {"body": "plain reply", "m.relates_to": {"m.in_reply_to": {"event_id": "$parent"}}},
+        }
+        reply = _threaded_reply_event(
+            sender="@agent:example",
+            event_id="$reply",
+            thread_root="$root",
+            in_reply_to="$source",
+            body="LIVE-FUZZ call=1 END call=1",
+        )
+        events = {"$parent": redacted_parent, "$source": source, "$reply": reply}
+
+        assert auditor._canonical_agent_replies(events)["$source"] == {"$reply"}
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -9542,6 +9581,29 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source(monkeypat
     runner.oracle._ledger_records["$root"] = TurnRecord.create(source_event_ids=("$root",))
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=3)
+    assert runner._pending_edit_markers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["tombstoned_before_cleanup_finished", "declined"])
+async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    cause: str,
+) -> None:
+    """An edit of a redacted or superseded source can change no reply, so the checkpoint stops waiting for one."""
+    runner = _temporal_revision_runner()
+    runner._pending_edit_markers = {"$root": {"$edit": _source_marker("root:10", "edit:15")}}
+    if cause == "declined":
+        runner.oracle.declined_edit_sources = frozenset({"$root"})
+    else:
+        runner.oracle._ledger_records["$root"] = TurnRecord.create(
+            source_event_ids=("$root",),
+            completed=False,
+            redacted_source_event_ids=("$root",),
+            pending_redaction_cleanup_event_ids=("$root",),
+        )
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
     assert runner._pending_edit_markers == {}
 
 
