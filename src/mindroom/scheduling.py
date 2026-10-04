@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 import humanize
 import nio
 from agno.agent import Agent
+from agno.tools.function import Function
+from agno.utils.functions import get_function_call
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
@@ -1916,14 +1918,24 @@ def _scheduled_call_trigger_message(agent_name: str, tool_name: str, arguments: 
     )
 
 
-def _parse_scheduled_call(arguments_json: str, execute_at: str) -> tuple[dict[str, object], datetime] | str:
+def _parse_scheduled_call(
+    tool_name: str,
+    arguments_json: str,
+    execute_at: str,
+) -> tuple[dict[str, object], datetime] | str:
     """Return the exact arguments and future UTC send time, or why they cannot be bound."""
     try:
-        arguments = json.loads(arguments_json)
+        decoded = json.loads(arguments_json)
     except json.JSONDecodeError:
-        arguments = None
-    if not isinstance(arguments, dict):
+        decoded = None
+    if not isinstance(decoded, dict):
         return "❌ arguments_json must be a JSON object of the call's exact arguments."
+    # Bind what the fire-time call will run with: Agno decodes a model's tool-call
+    # arguments through this helper, which turns top-level "true", "false",
+    # "none", and "null" strings into literals before approval sees them.
+    call = get_function_call(tool_name, arguments=arguments_json, functions={tool_name: Function(name=tool_name)})
+    assert call is not None
+    arguments = call.arguments or {}
     try:
         send_at = datetime.fromisoformat(execute_at)
     except ValueError:
@@ -1957,7 +1969,7 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
     runtime_paths = runtime.runtime_paths
     if thread_id is None:
         return (None, "❌ Pre-approved tool calls must be scheduled from a thread.")
-    parsed = _parse_scheduled_call(arguments_json, execute_at)
+    parsed = _parse_scheduled_call(tool_name, arguments_json, execute_at)
     if isinstance(parsed, str):
         return (None, parsed)
     arguments, send_at = parsed

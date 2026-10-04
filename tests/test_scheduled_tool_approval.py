@@ -669,6 +669,27 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
 
 
 @pytest.mark.asyncio
+async def test_schedule_tool_call_binds_the_arguments_the_call_will_run_with() -> None:
+    """The card and digest show arguments as the model runtime decodes them, so the fire-time call can match."""
+    context = _tool_context(_gated_config())
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling._start_scheduled_task"),
+        tool_runtime_context(context),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"text": "None", "unfurl": " TRUE ", "blocks": {"hidden": "false"}}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    assert request.await_args.kwargs["arguments"] == {"text": None, "unfurl": True, "blocks": {"hidden": "false"}}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments_json", "execute_at", "thread_id", "gated", "error"),
     [
