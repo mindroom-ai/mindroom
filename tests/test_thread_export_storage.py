@@ -616,7 +616,7 @@ def test_thread_whose_file_passes_the_cap_fails_and_keeps_its_previous_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """libyaml writes each emoji in ten bytes, so a thread the message guard admits can still be refused for its file size."""
+    """Each emoji takes ten bytes of YAML, so a thread the message guard admits can still be refused for its file size."""
     output_dir = tmp_path / "thread_exports"
     room = _room()
 

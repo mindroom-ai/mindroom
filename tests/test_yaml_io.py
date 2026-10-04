@@ -84,7 +84,9 @@ def test_safe_load_without_aliases_refuses_tag_directives_before_composing(monke
 def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
     """A directive, short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
     numeric_keys = "".join(f"{k}: 0, " for k in range(1024))
-    document = "%YAML 1.1\n---\nx: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
+    document = (
+        "%YAML 1.1\n---\nx: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
+    )
     assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
 
 
