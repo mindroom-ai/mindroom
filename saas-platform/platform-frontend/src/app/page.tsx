@@ -49,7 +49,7 @@ const navLinks = [
   { href: '#hosted', label: 'Hosted' },
 ]
 
-const heroFacts = ['Open source, Apache 2.0', 'Any model, local or cloud', 'Self-host the whole stack']
+const heroFacts = ['Personal and team agents', 'Any model, local or cloud', 'Self-host the whole stack']
 
 const personalUses = [
   'Plan a family trip, from flights to a packing list.',
@@ -282,12 +282,13 @@ function ReasonRows({ items }: { items: IconItem[] }) {
               <Icon className="h-5 w-5" />
             </div>
             <div>
-              <h3 className="text-base font-semibold text-gray-950 dark:text-white">{item.title}</h3>
+              <h3 className="text-base font-semibold text-gray-950 dark:text-white">
+                <a href={item.href} className="group inline-flex items-center gap-1.5 hover:text-orange-700 dark:hover:text-orange-300">
+                  {item.title}
+                  <ArrowRight className="h-4 w-4 text-gray-400 transition-transform group-hover:translate-x-0.5 group-hover:text-current" />
+                </a>
+              </h3>
               <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{item.body}</p>
-              <a href={item.href} className={`mt-3 ${textLinkClass}`}>
-                Learn more
-                <ArrowRight className="h-4 w-4" />
-              </a>
             </div>
           </article>
         )
