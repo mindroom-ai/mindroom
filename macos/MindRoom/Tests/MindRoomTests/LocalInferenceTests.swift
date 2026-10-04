@@ -3,9 +3,14 @@ import XCTest
 
 final class LocalInferenceTests: XCTestCase {
     func testRecommendationsLeaveRoomForOperatingSystemAndAgents() {
-        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 8).size, "2B")
-        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 16).size, "4B")
-        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 24).size, "9B")
+        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 8).name, "Qwen 3.5 2B")
+        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 16).name, "Qwen 3.5 4B")
+        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 24).name, "Qwen 3.5 9B")
+        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 31).name, "Qwen 3.5 9B")
+        let largerModel = LocalInferenceModel.recommended(memoryGB: 32)
+        XCTAssertEqual(largerModel.name, "Qwen 3.8 27B")
+        XCTAssertEqual(largerModel.id, "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL")
+        XCTAssertEqual(LocalInferenceModel.recommended(memoryGB: 64), largerModel)
     }
 
     func testDownloadProgressUsesActualServerResponseShape() throws {

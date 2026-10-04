@@ -1,16 +1,20 @@
 import Foundation
 
 struct LocalInferenceModel: Identifiable, Equatable {
-    let size: String
+    let id: String
+    let name: String
     let downloadGB: Double
     let minimumMemoryGB: Int
-    var id: String { "unsloth/Qwen3.5-\(size)-GGUF:Q4_K_M" }
-    var name: String { "Qwen 3.5 \(size)" }
 
     static let choices = [
-        LocalInferenceModel(size: "2B", downloadGB: 1.5, minimumMemoryGB: 8),
-        LocalInferenceModel(size: "4B", downloadGB: 2.8, minimumMemoryGB: 16),
-        LocalInferenceModel(size: "9B", downloadGB: 5.7, minimumMemoryGB: 24),
+        LocalInferenceModel(id: "unsloth/Qwen3.5-2B-GGUF:Q4_K_M", name: "Qwen 3.5 2B",
+                            downloadGB: 1.5, minimumMemoryGB: 8),
+        LocalInferenceModel(id: "unsloth/Qwen3.5-4B-GGUF:Q4_K_M", name: "Qwen 3.5 4B",
+                            downloadGB: 2.8, minimumMemoryGB: 16),
+        LocalInferenceModel(id: "unsloth/Qwen3.5-9B-GGUF:Q4_K_M", name: "Qwen 3.5 9B",
+                            downloadGB: 5.7, minimumMemoryGB: 24),
+        LocalInferenceModel(id: "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL", name: "Qwen 3.8 27B",
+                            downloadGB: 17.6, minimumMemoryGB: 32),
     ]
 
     static func recommended(memoryGB: Int) -> LocalInferenceModel {

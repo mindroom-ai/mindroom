@@ -68,13 +68,18 @@ Setup downloads the model, displays download progress, loads it, and sets `model
 The initial download requires internet, while subsequent inference uses cached model files on this Mac.
 Matrix chat and hosted pairing still require their configured network connection.
 
-The suggested Qwen 3.5 Q4_K_M models are conservative starting points based on total unified memory:
+The suggested models are conservative starting points based on total unified memory:
 
 | Unified memory | Suggested model | Approximate model download |
 | --- | --- | --- |
 | 8–15 GB | Qwen 3.5 2B | 1.5 GB |
 | 16–23 GB | Qwen 3.5 4B | 2.8 GB |
-| 24 GB or more | Qwen 3.5 9B | 5.7 GB |
+| 24–31 GB | Qwen 3.5 9B | 5.7 GB |
+| 32 GB or more | Qwen 3.8 27B | 17.6 GB |
+
+Qwen 3.5 models use Q4_K_M quantization; Qwen 3.8 27B uses Unsloth's UD-Q4_K_XL quantization.
+We recommend Qwen 3.8 27B when it fits, with a 32 GB minimum to leave room for macOS, MindRoom, and the model's working memory.
+See [Unsloth's Qwen3.8 27B memory guide](https://unsloth.ai/models/qwen3.8-27b) for its estimated 17–19 GB inference requirement at 4-bit.
 
 Local inference currently supports text and tool calls.
 Other apps and longer conversations consume additional memory; choose a smaller model when memory is tight.
