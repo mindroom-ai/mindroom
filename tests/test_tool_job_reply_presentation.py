@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.agent import Agent
-from agno.models.response import ModelResponse
+from agno.models.response import ModelResponse, ToolExecution
 from agno.run.agent import RunCompletedEvent, RunContentEvent
 
 from mindroom.ai import ai_response, stream_agent_response
@@ -19,18 +19,18 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
 from mindroom.tool_jobs.completion import HeldContinuation, _JobJoin
-from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import format_job_handle
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     deserialize_tool_trace,
+    format_tool_completed_event,
 )
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_response_payload_preparation import _preparation
-from tests.tool_job_helpers import completed_delegation_job, start_job, tool_job_runtime
+from tests.test_interrupted_reply_recovery import _attempt_context, _crashed_turn, _replay, _streamed
+from tests.tool_job_helpers import completed_delegation_job
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,68 +70,6 @@ async def test_nested_completion_does_not_repeat_parent_text(
     )
 
     assert body == "Starting. Nested text."
-
-
-@pytest.mark.asyncio
-async def test_recovered_job_source_reruns_into_its_reply_without_repeating_accepted_work(tmp_path: Path) -> None:
-    """A re-run of a source whose tool calls became jobs replaces the old reply and retrieves, never repeats, them."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = replace(
-        _plain_request(_target(thread_id="$thread")),
-        existing_event_id="$response",
-        existing_event_is_placeholder=True,
-    )
-    preparation = _preparation(request.response_envelope.target, prompt=request.prompt)
-    request = replace(
-        request,
-        payload_preparation=replace(
-            preparation,
-            dispatch=replace(preparation.dispatch, envelope=request.response_envelope),
-        ),
-    )
-    owner = replace(
-        completed_delegation_job().owner,
-        agent_name="general",
-        transport_agent_name=None,
-        requester_id=request.response_envelope.requester_id,
-        session_id=request.response_envelope.target.session_id,
-    )
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "saved result")
-
-    try:
-        await start_job(
-            runtime,
-            "retained",
-            tool_name="tool",
-            depth=0,
-            source_event_id="$event",
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        recovered = await runner._recover_tool_job_source(request)
-        # Recovery never reads the interrupted reply it replaces.
-        bot.client.room_get_event.assert_not_called()
-        prepared = await runner.deps.request_preparer.prepare(recovered)
-    finally:
-        await runtime.shutdown()
-    assert (recovered.existing_event_id, recovered.existing_event_is_placeholder) == ("$response", True)
-    assert recovered.sources == request.sources
-    # The re-run answers the original request; a nonpersistent note keeps it from repeating accepted work.
-    assert (prepared.prompt, recovered.model_prompt) == (request.prompt, request.model_prompt)
-    (note,) = prepared.system_enrichment_items
-    assert (note.persist, note.minimal_required) == (False, True)
-    assert "do not repeat them" in note.text
-    assert 'job_id="retained"' in note.text
-    # It answers the original human message, whose origin deferred preparation keeps.
-    assert prepared.response_envelope.origin == request.response_envelope.origin
 
 
 @pytest.mark.asyncio
@@ -309,3 +247,28 @@ async def test_blocking_continuation_cancellation_preserves_the_held_presentatio
     final_content = edits[-1][1]
     assert deserialize_tool_trace(final_content["io.mindroom.tool_trace"]["events"]) == list(trace)
     bot.client.room_redact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_replay_account_shows_a_detached_job_start_as_finished_with_its_job_id(tmp_path: Path) -> None:
+    """A crash's replay names a detached job start as already called, and its handle tells the new attempt the job."""
+    running = replace(completed_delegation_job(), status="running", result=None)
+    _text, started = format_tool_completed_event(
+        ToolExecution(
+            tool_name="sleep",
+            tool_args={"seconds": 40, "wait_timeout": 0},
+            result=format_job_handle(running),
+        ),
+    )
+    assert started is not None
+    bot = _bot(tmp_path)
+
+    (context,), _fetch = await _replay(
+        bot,
+        await _crashed_turn(bot),
+        _streamed("🔧 `sleep` [1]\n\nStarted sleeping.", trace=(started,)),
+    )
+
+    (instruction,) = _attempt_context(context)
+    assert f'\\"job_id\\": \\"{running.job_id}\\"' in instruction
+    assert instruction.endswith("Already called for the current message, so do not repeat: `sleep` (1 call).")

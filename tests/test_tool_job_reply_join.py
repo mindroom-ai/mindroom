@@ -43,9 +43,9 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
+from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
-from tests.response_runner_helpers import _plain_request, _target
+from tests.response_runner_helpers import _target
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx, _streaming_adapter
 
 if TYPE_CHECKING:
@@ -227,69 +227,6 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
         assert len(prompts) == 2
         assert 'job_id="quiet"' in prompts[1]
         assert pending_outcome(runtime, "quiet") is not None
-    finally:
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("matching_source", [False, True])
-@pytest.mark.parametrize("consumed", [False, True])
-@pytest.mark.parametrize("authorized", [False, True])
-async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
-    tmp_path: Path,
-    matching_source: bool,
-    consumed: bool,
-    authorized: bool,
-) -> None:
-    """A crash during joining must recover the exact accepted work instead of repeating it."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target(thread_id="$thread"))
-    owner = replace(
-        completed_delegation_job().owner,
-        agent_name="general",
-        transport_agent_name=None,
-        requester_id=request.response_envelope.requester_id,
-        session_id=request.response_envelope.target.session_id,
-    )
-    allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
-    pin_background_tool_jobs(bot.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("interrupted", "Execution stopped; side effects may have happened.")
-
-    try:
-        await start_job(
-            runtime,
-            "retained",
-            tool_name="tool",
-            depth=0,
-            source_event_id=request.response_envelope.source_event_id if matching_source else "$unrelated",
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        waited = await runtime.wait("retained", owner=owner, depth=0)
-        if consumed:
-            await runtime.acknowledge_wait("retained", waited.claim)
-        else:
-            await runtime.release_wait("retained", waited.claim)
-        allowed = authorized
-        recovered = await runner._recover_tool_job_source(request)
-        if matching_source:
-            note = recovered.system_enrichment_items[-1].text
-            assert 'job_id="retained"' in note
-            assert recovered.response_envelope.source_event_id == request.response_envelope.source_event_id
-            assert recovered.sources == request.sources
-            assert recovered.prompt == request.prompt
-            assert "Execution stopped; side effects may have happened." not in note
-            if not authorized:
-                assert pending_outcome(runtime, "retained") is None
-        else:
-            assert recovered is request
     finally:
         await runtime.shutdown()
 

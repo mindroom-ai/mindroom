@@ -148,7 +148,6 @@ from mindroom.tool_jobs.completion import (
     ReplyBoundary,
     ReplyBoundaryReport,
     completion_prompt,
-    recovered_jobs_note,
     reply_boundary_report,
 )
 from mindroom.tool_jobs.held_replies import (
@@ -250,7 +249,7 @@ if TYPE_CHECKING:
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -3420,17 +3419,30 @@ class ResponseRunner:
             # A newer turn saved or released the hold since the wake.
             return None
         work = await conversation_work(runtime, hold.key, attempted=hold.offered)
-        # A run of this wake that a crash interrupted may have read outcomes or started work; its re-run reads them.
-        interrupted = await self._source_jobs(runtime, request)
-        if (work.ready or interrupted) and hold.joins < JOB_JOIN_LIMIT:
-            prompt = completion_prompt(work.ready) if work.ready else request.prompt
+        envelope = request.response_envelope
+        # A run of this wake that a crash cut short may already have read outcomes; its re-run reads them again.
+        reread = [
+            job
+            for job in await runtime.source_jobs(
+                envelope.source_event_id,
+                transport_agent_name=self.deps.agent_name,
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                session_id=envelope.target.session_id,
+                requester_id=envelope.requester_id,
+            )
+            if job.consumed_by_source == envelope.source_event_id
+        ]
+        ready = (*work.ready, *reread)
+        if ready and hold.joins < JOB_JOIN_LIMIT:
+            prompt = completion_prompt(ready)
             return replace(
                 request,
                 prompt=prompt,
-                response_envelope=replace(request.response_envelope, body=prompt),
+                response_envelope=replace(envelope, body=prompt),
                 held_continuation=HeldContinuation(
                     presentation=hold.presentation,
-                    attempted_job_ids=hold.offered | {job.job_id for job in work.ready},
+                    attempted_job_ids=hold.offered | {job.job_id for job in ready},
                     joins=hold.joins,
                 ),
             )
@@ -3955,35 +3967,6 @@ class ResponseRunner:
             reply_entity_names=reply_entity_names,
         )
 
-    async def _source_jobs(self, runtime: ToolJobRuntime, request: ResponseRequest) -> list[BackgroundJob]:
-        """Return work a run of this request's source already started or consumed."""
-        envelope = request.response_envelope
-        return await runtime.source_jobs(
-            envelope.source_event_id,
-            transport_agent_name=self.deps.agent_name,
-            room_id=request.room_id,
-            thread_id=request.thread_id,
-            session_id=envelope.target.session_id,
-            requester_id=envelope.requester_id,
-        )
-
-    async def _recover_tool_job_source(self, request: ResponseRequest) -> ResponseRequest:
-        """Resume accepted source work without asking the model to repeat its original side effects."""
-        runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is None:
-            return request
-        jobs = await self._source_jobs(runtime, request)
-        if not jobs:
-            return request
-        # The re-run replaces the interrupted reply like any recovered request; it only must not repeat accepted work.
-        recovery = EnrichmentItem(
-            key="recovered_tool_jobs",
-            text=recovered_jobs_note(jobs),
-            persist=False,
-            minimal_required=True,
-        )
-        return replace(request, system_enrichment_items=(*request.system_enrichment_items, recovery))
-
     async def _admit_locked_turn(
         self,
         request: ResponseRequest,
@@ -4004,7 +3987,7 @@ class ResponseRunner:
         resumed = await self._resume_held_reply(request)
         if resumed is None:
             return None
-        request = await self._recover_tool_job_source(resumed)
+        request = resumed
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)

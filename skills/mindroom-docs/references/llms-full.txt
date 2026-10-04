@@ -13186,6 +13186,7 @@ A result is consumed only after exact persisted parent tool-result evidence is v
 Listing jobs does not consume it.
 If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+A reply that a crash or shutdown cuts short is answered again in place and told which calls its stopped attempt already finished, including detached job starts with their job IDs; interrupted jobs' outcomes reach it at its response boundary.
 Reading an already consumed result returns its original output without reapplying session-state changes.
 Consumed results remain available for 30 days after their last acknowledged read.
 Hourly cleanup then removes the whole job, only after the originating turn has finished and the conversation has no pending approval continuation.

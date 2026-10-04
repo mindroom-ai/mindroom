@@ -64,11 +64,11 @@ A hold is saved after its reply's final delivery, so the reply's source settles 
 The coordinator admits one internal `held_reply_wake` journal source per generation of a hold whose work became ready, ended, or now waits for something else.
 That source's turn edits the held message and never claims it in the turn ledger, whose sole owner stays the reply that sent it; a Stop of that turn settles the owner.
 Under the conversation lock the turn finds which work is ready: it continues with that work, shows a changed notice, or releases a message that holds nothing more.
-A continuation that fails, is stopped, or pauses for approval releases its hold; one a restart interrupts keeps holding, and its wake runs again.
+A continuation that fails, is stopped or interrupted within the process, or pauses for approval releases its hold; one a process stop cuts short keeps holding, and its wake runs again from the held message, asking again for the outcomes the stopped run had already read.
 A message continues with ready results at most 20 times across its own turn and the turns continuing it, apart from dynamic tool continuations; then the next reply takes the remaining work.
-Accepted jobs retain their original source identity, so a still-pending request recovers stored outcomes instead of repeating its tool calls.
-That re-run replaces the interrupted reply, as it does for any recovered request.
-It answers the original request, with a nonpersistent note naming the accepted jobs whose stored outcomes it retrieves instead of repeating their calls.
+A reply that a process stop cuts short is regenerated in place by journal replay, which tells the new attempt what the stopped attempt showed and names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
+A detached job start is such a finished call, and its result names the job ID.
+Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the new attempt at its response boundary like any other ready work.
 
 Shutdown first stops the coordinator's worker and drains execution.
 Receipt access remains available until response finalizers finish.

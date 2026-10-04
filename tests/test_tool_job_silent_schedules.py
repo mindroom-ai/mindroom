@@ -22,12 +22,10 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
-from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.response_runner import _is_silent_schedule_response, _with_silent_schedule_delivery
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import join_conversation_jobs
@@ -36,7 +34,6 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.turn_origin import TurnIntent
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -278,78 +275,6 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
             ),
         )
     assert observed[1] == observed[0]
-
-
-@pytest.mark.asyncio
-async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: Path) -> None:
-    """Recovery remains runtime-owned without turning a quiet check into visible progress."""
-    bot = _bot(tmp_path)
-    bot.config.background_tool_jobs.enabled = True
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = _plain_request(_target(thread_id="$thread"))
-    envelope = replace(
-        request.response_envelope,
-        origin=replace(
-            request.response_envelope.origin,
-            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
-            intent=TurnIntent.SCHEDULED_FIRE,
-        ),
-    )
-    request = replace(request, response_envelope=envelope)
-    context = runner.deps.tool_runtime.build_context(
-        envelope.target,
-        user_id=envelope.requester_id,
-        source_envelope=envelope,
-    )
-    assert context is not None
-    owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
-    pin_background_tool_jobs(context.config, bot.runtime_paths)
-    register_background_runtime(bot.runtime_paths, runtime)
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("interrupted", "Interrupted; not replayed")
-
-    try:
-        await start_job(
-            runtime,
-            "quiet",
-            tool_name="tool",
-            depth=0,
-            source_event_id=envelope.source_event_id,
-            adapter={},
-            owner=owner,
-            operation=operation,
-        )
-        waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.release_wait("quiet", waited.claim)
-        recovered = await runner._recover_tool_job_source(request)
-        assert _is_silent_schedule_response(recovered)
-        assert recovered.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
-        assert "NO_REPLY" in _with_silent_schedule_delivery((), recovered.response_envelope)[0].text
-        outcome = await runner.deps.delivery_gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=recovered.response_envelope.target,
-                existing_event_id=None,
-                response_text="NO_REPLY",
-                identity=ResponseIdentity(
-                    response_kind="agent",
-                    response_envelope=recovered.response_envelope,
-                    sources=recovered.sources,
-                    correlation_id="silent-recovery",
-                    participating_agent_names=("general",),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-        assert outcome.failure_reason == "silent_no_report"
-        bot.client.room_send.assert_not_called()
-        receipts = list(bot.runtime_paths.storage_root.glob("agents/general/workspace/.mindroom/scheduled_runs/*.json"))
-        assert len(receipts) == 1
-        assert json.loads(receipts[0].read_text())["result"] == "no_report"
-    finally:
-        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

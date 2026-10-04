@@ -318,11 +318,14 @@ async def test_resuming_after_an_interrupted_continuation_reads_what_it_already_
     assert (await conversation_work(held.runtime, _KEY)).jobs == ()
     resumed = await held.runner._resume_held_reply(wake)
     assert resumed is not None
-    assert resumed.prompt == wake.prompt
+    # The re-run asks for the outcome again like any ready work, from the message as it was held.
+    assert 'job_id="read"' in resumed.prompt
     assert resumed.held_continuation is not None
+    assert resumed.held_continuation.attempted_job_ids == frozenset({"read"})
     assert resumed.held_continuation.presentation.response_text == "Started."
-    recovered = await held.runner._recover_tool_job_source(resumed)
-    assert 'job_id="read"' in recovered.system_enrichment_items[-1].text
+    reread = await held.runtime.wait("read", owner=held.owner, depth=0, timeout=0)
+    assert reread.claim is not None
+    await held.runtime.release_wait("read", reread.claim)
 
 
 @pytest.mark.asyncio
