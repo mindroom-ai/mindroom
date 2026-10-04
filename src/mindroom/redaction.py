@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 from itertools import islice
@@ -354,10 +354,22 @@ class _RedactionError(Exception):
     """Internal signal for input that cannot be redacted safely within its budget."""
 
 
-def _next_assignment_value_end(value: str, value_start: int) -> int:
-    literal_terminator = _ASSIGNMENT_VALUE_TERMINATOR_PATTERN.search(value, value_start)
-    next_assignment = _NEXT_ASSIGNMENT_PATTERN.search(value, value_start)
-    return min(match.start() if match is not None else len(value) for match in (literal_terminator, next_assignment))
+def _forward_match_start(pattern: re.Pattern[str], value: str) -> Callable[[int], int]:
+    """Return a lookup of the first match start at or after each position of a forward-only scan.
+
+    A match found earlier is still the first one for any later position up to it, so the lookup
+    searches again only once the scan passes it and reads each stretch of text once in total.
+    """
+    match_start = -1
+
+    def lookup(position: int) -> int:
+        nonlocal match_start
+        if match_start < position:
+            match = pattern.search(value, position)
+            match_start = len(value) if match is None else match.start()
+        return match_start
+
+    return lookup
 
 
 def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
@@ -372,13 +384,17 @@ def _find_unescaped_quote(value: str, quote: str, start: int, end: int) -> int:
     return -1
 
 
-def _assignment_value_span(value: str, value_start: int) -> tuple[int, int, int] | None:
+def _assignment_value_span(
+    value: str,
+    value_start: int,
+    unquoted_value_end: Callable[[int], int],
+) -> tuple[int, int, int] | None:
     if value_start >= len(value):
         return None
     if value[value_start] in "\r\n":
         raise _RedactionError
     if value[value_start] not in {"'", '"'}:
-        value_end = _next_assignment_value_end(value, value_start)
+        value_end = unquoted_value_end(value_start)
         if value_end == value_start:
             return None
         return value_start, value_end, value_end
@@ -414,6 +430,12 @@ def _replace_spans_with_redaction(value: str, spans: list[tuple[int, int]]) -> s
 def _redact_secret_assignments(value: str) -> str:
     """Redact shallow key assignments with one forward-only scan."""
     spans: list[tuple[int, int]] = []
+    literal_terminator = _forward_match_start(_ASSIGNMENT_VALUE_TERMINATOR_PATTERN, value)
+    next_assignment = _forward_match_start(_NEXT_ASSIGNMENT_PATTERN, value)
+
+    def unquoted_value_end(value_start: int) -> int:
+        return min(literal_terminator(value_start), next_assignment(value_start))
+
     search_start = 0
     while prefix_match := _ASSIGNMENT_PREFIX_PATTERN.search(value, search_start):
         search_start = prefix_match.end()
@@ -421,7 +443,7 @@ def _redact_secret_assignments(value: str) -> str:
         if not classification.is_secret:
             continue
 
-        value_span = _assignment_value_span(value, prefix_match.end())
+        value_span = _assignment_value_span(value, prefix_match.end(), unquoted_value_end)
         if value_span is None:
             continue
         value_start, value_end, match_end = value_span
