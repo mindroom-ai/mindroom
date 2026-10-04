@@ -4993,6 +4993,12 @@ Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDel
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
+agents:
+  planner:
+    display_name: Planner
+    role: Plan trips and compare the options visually.
+    model: default
+    tools:
       - chat_ui:
           enable_show_canvas: true
           enable_canvas_libraries: true
