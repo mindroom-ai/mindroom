@@ -61,7 +61,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot, render_stopped_attempt
 from mindroom.history.storage import has_pending_force_compaction_scope, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.hooks import EnrichmentItem, MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_block
 from mindroom.interactive import InteractiveMetadata
 from mindroom.legacy_approval_payloads import restore_legacy_approval_origin
 from mindroom.matrix.client_visible_messages import (
@@ -122,6 +122,7 @@ from mindroom.streaming import (
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
+    UnfinishedStreamedReply,
     build_cancelled_response_update,
     clean_partial_reply_text,
     strip_visible_tool_markers,
@@ -140,7 +141,7 @@ from mindroom.teams import (
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.events import deserialize_tool_trace, earlier_tool_trace_content, serialize_tool_trace
+from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -235,11 +236,12 @@ _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 _PROCESS_SHUTDOWN_CANCEL_RETRY_SECONDS = 0.01
 _INTERRUPTED_ATTEMPT_INSTRUCTION = (
-    "Your previous attempt at replying to the current message was interrupted, and this reply replaces "
-    "everything it showed. What it had shown before stopping is below: tool calls it lists as finished already "
-    "ran, and those it lists as still running may have finished too. Calls hidden from the conversation or made "
-    "just before it stopped may be missing, so before repeating any tool call with side effects, check whether "
-    "it already took effect."
+    "Your reply to the current message was interrupted by a restart before it finished. The user still sees what "
+    "it had shown, which is below, and your reply continues it in the same message after a restart note. Continue "
+    "naturally from where it stopped without repeating what it already said; you may briefly acknowledge the "
+    "interruption first. Build on the tool results it shows: tool calls it lists as finished already ran, and those "
+    "it lists as still running may have finished too. Calls hidden from the conversation or made just before it "
+    "stopped may be missing, so before repeating any tool call with side effects, check whether it already took effect."
 )
 _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
@@ -289,14 +291,12 @@ async def _cancel_pending_responses(
 def _merge_response_extra_content(
     extra_content: dict[str, Any] | None,
     attachment_ids: Sequence[str] | None,
-    earlier_tool_trace: Sequence[ToolTraceEntry] = (),
 ) -> dict[str, Any] | None:
-    """Merge optional attachment IDs and carried tool calls into response metadata."""
+    """Merge optional attachment IDs into response metadata."""
     merged_extra_content = extra_content if extra_content is not None else {}
     if attachment_ids:
         merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
-    merged_extra_content.update(earlier_tool_trace_content(earlier_tool_trace))
-    return merged_extra_content if extra_content is not None or attachment_ids or earlier_tool_trace else None
+    return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
 def _paused_with_committed_presentation(
@@ -530,8 +530,8 @@ class ResponseRequest:
     existing_event_is_placeholder: bool = False
     # Set when replay adopts the reply an earlier attempt at this turn left behind.
     existing_event_is_recovered: bool = False
-    # Tool calls the stopped attempts had shown, carried on this attempt's streamed reply.
-    earlier_tool_trace: tuple[ToolTraceEntry, ...] = ()
+    # What the stopped attempt at the adopted reply showed; this attempt streams below it.
+    resumed_reply: UnfinishedStreamedReply | None = None
     user_id: str | None = None
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
@@ -3586,14 +3586,14 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
     ) -> ResponseRequest:
-        """Tell a replayed turn what its stopped attempt already showed and ran.
+        """Continue a replayed turn below what its stopped attempt already showed and ran.
 
-        A process that stops mid-stream, whether it crashes or shuts down in
-        order, leaves its reply streaming and its sources pending, so replay
-        adopts that reply and answers again in place. The reply in Matrix is
-        the only account of the stopped attempt, so its visible text and tool
-        trace go to the new attempt as transient context that keeps it from
-        repeating finished tools.
+        A restart, whether a crash, an orderly shutdown, a sync-loop stall or
+        an approved run cut short, leaves the reply streaming and its sources
+        pending, so replay adopts that reply. The reply in Matrix is the only
+        account of the stopped attempt: its visible text and tool trace stay in
+        the message with the new attempt streaming below them, and the same
+        account goes into the new attempt's prompt, where later turns keep it.
         """
         event_id = request.existing_event_id
         if event_id is None or not request.existing_event_is_recovered:
@@ -3633,13 +3633,12 @@ class ResponseRunner:
             response_event_id=event_id,
             attempt_shown=unfinished is not None,
         )
+        account = render_enrichment_block([EnrichmentItem(key="interrupted_attempt", text=instruction)])
+        model_prompt = request.model_prompt if request.model_prompt is not None else request.prompt
         return replace(
             request,
-            transient_enrichment_items=(
-                *request.transient_enrichment_items,
-                EnrichmentItem(key="interrupted_attempt", text=instruction, persist=False, minimal_required=True),
-            ),
-            earlier_tool_trace=() if unfinished is None else unfinished.tool_trace,
+            model_prompt=f"{model_prompt.rstrip()}\n\n{account}",
+            resumed_reply=unfinished,
         )
 
     async def _prepare_locked_source(
@@ -4331,11 +4330,15 @@ class ResponseRunner:
         assert turn_models is not None
         model_name = turn_models.team_model_name
         member_model_names = turn_models.member_model_names
-        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=requester_user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        # A resumed reply is a stream, and a blocking answer would replace what it already showed.
+        use_streaming = request.resumed_reply is not None or (
+            not _is_silent_schedule_response(request)
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=requester_user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
@@ -4540,7 +4543,7 @@ class ResponseRunner:
                                 existing_event_id=delivery_request.existing_event_id,
                                 adopt_existing_placeholder=bool(delivery_request.existing_event_id)
                                 and delivery_request.existing_event_is_placeholder,
-                                header=None,
+                                resumed=delivery_request.resumed_reply,
                                 show_tool_calls=show_tool_calls,
                                 # The live collector dict: the turn driver fills it
                                 # at terminal settle, before the stream's final
@@ -4550,7 +4553,6 @@ class ResponseRunner:
                                 extra_content=_merge_response_extra_content(
                                     team_run_metadata_content,
                                     request.attachment_ids,
-                                    request.earlier_tool_trace,
                                 ),
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
@@ -5070,7 +5072,6 @@ class ResponseRunner:
                 response_extra_content = _merge_response_extra_content(
                     run_metadata_content,
                     request.attachment_ids,
-                    request.earlier_tool_trace,
                 )
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
@@ -5083,6 +5084,7 @@ class ResponseRunner:
                         existing_event_id=request.existing_event_id,
                         adopt_existing_placeholder=bool(request.existing_event_id)
                         and request.existing_event_is_placeholder,
+                        resumed=request.resumed_reply,
                         show_tool_calls=runtime.show_tool_calls,
                         extra_content=response_extra_content,
                         tool_trace_collector=tool_trace,
@@ -5601,11 +5603,15 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        use_streaming = not _is_silent_schedule_response(request) and await should_use_streaming(
-            self._client(),
-            request.room_id,
-            requester_user_id=request.user_id,
-            enable_streaming=self.deps.runtime.enable_streaming,
+        # A resumed reply is a stream, and a blocking answer would replace what it already showed.
+        use_streaming = request.resumed_reply is not None or (
+            not _is_silent_schedule_response(request)
+            and await should_use_streaming(
+                self._client(),
+                request.room_id,
+                requester_user_id=request.user_id,
+                enable_streaming=self.deps.runtime.enable_streaming,
+            )
         )
         self._note_pipeline_metadata(request, response_kind="agent", used_streaming=use_streaming)
         generation: _ResponseGenerationOutcome | None = None

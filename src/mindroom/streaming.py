@@ -2089,7 +2089,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     response_stream: AsyncIterator[StreamInputChunk],
     *,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
-    header: str | None = None,
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
     show_tool_calls: bool = True,
@@ -2149,9 +2148,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
         streaming.placeholder_progress_sent = adopt_existing_placeholder
-
-    if header:
-        await streaming.update_content(header, client)
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()

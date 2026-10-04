@@ -119,7 +119,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
-    from mindroom.streaming import ProgressPublisher, StreamInputChunk
+    from mindroom.streaming import ProgressPublisher, StreamInputChunk, UnfinishedStreamedReply
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -430,7 +430,8 @@ class StreamingDeliveryRequest:
     identity: ResponseIdentity
     existing_event_id: str | None = None
     adopt_existing_placeholder: bool = False
-    header: str | None = None
+    # What a stopped attempt at ``existing_event_id`` showed; the stream continues below it.
+    resumed: UnfinishedStreamedReply | None = None
     show_tool_calls: bool = False
     extra_content: dict[str, Any] | None = None
     tool_trace_collector: list[ToolTraceEntry] | None = None
@@ -2077,7 +2078,6 @@ class DeliveryGateway:
             self.deps.runtime_paths,
             request.response_stream,
             streaming_cls=request.streaming_cls,
-            header=request.header,
             show_tool_calls=request.show_tool_calls,
             existing_event_id=request.existing_event_id,
             adopt_existing_placeholder=request.adopt_existing_placeholder,
@@ -2112,6 +2112,7 @@ class DeliveryGateway:
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
+            resumed=request.resumed,
         )
 
     def stream_progress(
