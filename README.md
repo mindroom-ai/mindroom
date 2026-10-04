@@ -143,7 +143,7 @@ These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recor
 <td width="50%" valign="top">
 
 **🔌 [Connected to your tools and documents](https://docs.mindroom.chat/#agents-that-know-you-and-your-work)**<br />
-Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.
+Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, search your own documents, and can use any computer you pair, even from a server across the world.
 
 </td>
 <td width="50%" valign="top">
@@ -171,7 +171,7 @@ One-tap approval for anything risky, sandboxed code execution, and end-to-end en
 <td valign="top">
 
 **💬 [A chat app built for agents](https://docs.mindroom.chat/#a-chat-app-built-for-agents)**<br />
-MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, join voice calls, and work in a browser you can take over.
+MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, open interactive canvases, join voice calls, and work in a real browser you can take over.
 
 </td>
 <td valign="top">
@@ -186,18 +186,50 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 <details>
 <summary><b>Full feature list</b></summary>
 
-- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml`; a built-in router picks the responder when you don't @-mention one, and mentioning several agents makes them collaborate in a thread.
+**Agents and teams**
+
+- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml` or the dashboard; a built-in router picks the responder when you don't @-mention one, mentioning several agents makes them collaborate in a thread, and agents can hand tasks to each other or run reusable workflows ([Teams](docs/configuration/teams.md), [Agent Orchestration](docs/tools/agent-orchestration.md)).
+- **Adaptive participation** — in a thread with several people, agents you opt in that already replied there decide for themselves when an untagged message is theirs to answer, and a judge can decide whether a new message should interrupt the current task or wait ([Threads](docs/configuration/threads.md#adaptive-participation)).
+- **Personal rooms and access control** — each person can get a private room with their own agent, and each agent answers only the people and rooms you allow ([Personal Rooms](docs/personal-rooms.md), [Access Control](docs/authorization.md)).
+
+**Memory and learning**
+
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
-- **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, and more, plus native Matrix tools and a per-thread `todo` planner, with sandboxed execution and per-tool approval rules.
-- **Knowledge bases (RAG)** — point an agent at a folder of files; MindRoom indexes it and can watch it for changes.
-- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](docs/tools/background-scripts.md) that can call governed agent tools and wake the agent only when something changes.
-- **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
-- **Voice** — transcription of Matrix voice messages, and text-to-speech tools via OpenAI, Groq, ElevenLabs, and Cartesia.
+- **Automatic skill learning** — opt-in background reviews turn work an agent repeats into a small library of reusable skills, following the self-improvement loop of Hermes Agent ([Skills](docs/skills.md#automatic-skill-learning)).
+- **Knowledge bases (RAG)** — point an agent at a folder or Git repository; MindRoom indexes it and can watch it for changes ([Knowledge Bases](docs/knowledge.md)).
+
+**Tools and computers**
+
+- **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, any [MCP server](docs/mcp.md), and more, plus native Matrix tools and a per-thread `todo` planner.
+- **A real browser you can take over** — an agent works in its own persistent Chromium browser that you watch live in MindRoom Chat, take control of for a login or passkey, and hand back ([Worker Computer](docs/tools/worker-computer.md)).
+- **Reach any computer you pair** — your agents can run on a server across the world and still use your laptop: turn on the desktop bridge on any machine, and the agent can use the apps and folders you allow and run the commands you approve, over end-to-end encrypted Matrix with no open ports or VPN ([Desktop Bridge](docs/tools/desktop.md)).
+- **Lean prompts** — minimal mode gives an agent one Bash tool that calls its other tools, and dynamic tools load rarely used tools only when needed, so each request carries fewer tokens ([Minimal Mode](docs/tools/agent-cli.md), [Dynamic Tools](docs/tools/dynamic-tools.md)).
+
+**In the chat**
+
+- **Interactive canvases** — an agent can open a page it wrote, such as a dashboard, slide deck, form, or picker, beside the conversation, and what you pick there comes back as your next message ([Interactive Canvases](docs/canvases.md)).
+- **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](docs/tool-approval.md), [Interactive Questions](docs/interactive.md)).
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
+- **Voice** — voice messages are transcribed, agents can join Element Call voice calls and talk in real time, and text-to-speech tools use OpenAI, Groq, ElevenLabs, and Cartesia ([Voice Messages](docs/voice.md), [Voice Calls](docs/voice-calls.md)).
+- **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
+
+**Automation**
+
+- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](docs/tools/background-scripts.md) that can call governed agent tools and wake the agent only when something changes, and [external triggers](docs/external-triggers.md) that let any process wake an agent with one HTTP request.
+
+**Safety and privacy**
+
+- **Isolated execution** — shell, Python, and coding tools can run in container workers with no access to the primary process's secrets, with per-tool [approval rules](docs/tool-approval.md) and [approved egress](docs/deployment/approved-egress.md) for locked-down environments ([Workers & Sandboxing](docs/deployment/sandbox-proxy.md)).
+- **End-to-end encryption** — rooms can be end-to-end encrypted with Matrix's Olm/Megolm ([End-to-End Encryption](docs/matrix.md#end-to-end-encryption)).
+
+**Run it anywhere**
+
+- **Works with other apps** — bridges bring the same agents to Slack, Telegram, WhatsApp, Discord, and email, an [OpenAI-compatible API](docs/openai-api.md) serves them to LibreChat, Open WebUI, and other clients, and an [MCP gateway](docs/deployment/mcp-gateway.md) shares their tools with Claude Code and Codex ([Bridges](docs/deployment/bridges/index.md)).
+- **Native macOS app** — runs your agents on your Mac in the background, with a menu bar companion and one-click local model setup ([macOS App](docs/installation/macos-app.md)).
+- **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
 - **Plugins & hooks** — drop-in [plugins](docs/plugins.md) add custom tools, skills, and OAuth providers, and a typed [event-hook system](docs/hooks.md) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
 - **Hot reload & restart-safe** — `config.yaml` and plugin changes apply live without bringing down the stack, and conversations resume seamlessly after a restart: session history and turn state are durable on disk, so agents pick up where they left off without double-replying.
-- **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
-- **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts, isolated execution workers, and egress approval for locked-down environments.
+- **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts.
 
 </details>
 
@@ -330,12 +362,15 @@ If your client or bridge only sends plain replies, MindRoom keeps them in an exi
 Plain replies that never reach threaded context still stay plain replies.
 
 1. **Mentioned agents and teams respond** - Tag them to get their attention
-2. **Single responder continues** - One agent or team in a thread keeps responding
+2. **Single responder continues** - In a thread with one person, the agent or team that answered keeps responding without a tag
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
-4. **Smart routing** - System picks the best agent or team for new threads
-5. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
+4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one
+5. **Group threads stay human-first** - Once two or more people talk in a thread, agents answer only when tagged, so they don't interrupt
+6. **Adaptive participation** - An agent with [`participation`](docs/configuration/threads.md#adaptive-participation) enabled that has already replied in a group thread decides for each untagged message whether it can help, so nobody has to tag it
+7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
 
-### Chat Commands
+<details>
+<summary><b>Chat commands</b></summary>
 
 <!-- CODE:START -->
 <!-- import sys -->
@@ -363,6 +398,8 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->
+
+</details>
 
 ## Configuration
 
