@@ -1960,12 +1960,7 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        return await self._approval_responses.settle_failure(
-            failing,
-            reason,
-            visible_text=update,
-            stream_status=STREAM_STATUS_ERROR,
-        )
+        return await self._approval_responses.settle_failure(failing, reason, visible_text=update)
 
     async def _approval_interruption_update(
         self,
