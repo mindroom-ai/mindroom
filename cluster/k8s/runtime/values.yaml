@@ -100,7 +100,8 @@ config:
   path: ""
   # Optional native installation before run from one contentBundles entry, whose image digest, sourcePath, and subPath set the revision.
   # Like bootstrapBundlePath, requires source: file, path in its own directory below storage.mountPath, and workers.backend other than
-  # the default static_runner. The bundle must keep overwrite enabled, with no seed or volumeMounts; see "Content Bundles" in the README.
+  # the default static_runner. The bundle must keep overwrite enabled, mount no volume at, above, or inside its sourcePath or targetPath,
+  # and keep its seed from writing under its targetPath; see "Content Bundles" in the README.
   bootstrapContentBundle:
     # contentBundles[].name to bootstrap from.
     name: ""
