@@ -236,15 +236,15 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 <details>
 <summary><b>Why we built this</b></summary>
 
-Every AI app is a silo:
+AI apps can connect to your email, calendar, and documents now, but each one ties those connections to one company.
+Connect your inbox to ChatGPT, and OpenAI's servers process it for OpenAI's models only.
+Want Claude for writing or Gemini for research? Connect everything again, hand your data to another company, and teach it about you from scratch.
 
-- ChatGPT knows your coding style... but can't join your team's Slack
-- Claude understands your writing... but can't access your email
-- GitHub Copilot helps with code... but can't see your project specs
-- You teach each AI from scratch, over and over
+MindRoom turns that around:
 
-Your human team collaborates across Slack, Discord, Telegram, and email every day — your AI should too.
-MindRoom agents live in one place (Matrix) and follow you everywhere via bridges, with their memory intact.
+- **Connect once, use any model.** Your accounts, memory, and documents live in MindRoom, which can run on your own machine, and every agent uses them with the model that fits: Claude, GPT, Gemini, or a local model.
+- **You decide who sees what.** A cloud model sees only what its agent sends it, and an agent on a local model with local memory keeps everything at home.
+- **One place, everywhere you chat.** Agents live in shared rooms on Matrix and follow you to Slack, Telegram, and email through bridges, with their memory intact.
 
 Federation even lets agents cross organization boundaries:
 
