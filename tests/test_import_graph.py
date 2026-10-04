@@ -409,6 +409,7 @@ print(json.dumps({
             "resolve",
             "resolve_call",
             "resolve_pending_calls",
+            "scheduled_call_run_id",
         ],
         "background_resolve_owner": "mindroom.event_journal.background_approvals",
         "card_state_exports": [

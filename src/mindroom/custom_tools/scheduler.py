@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from agno.tools import Toolkit
 
-from mindroom.scheduling import cancel_scheduled_task, edit_scheduled_task, list_scheduled_tasks, schedule_task
+from mindroom.scheduling import (
+    cancel_scheduled_task,
+    edit_scheduled_task,
+    list_scheduled_tasks,
+    schedule_approved_tool_call,
+    schedule_task,
+)
 from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
@@ -25,7 +31,13 @@ class SchedulerTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="scheduler",
-            tools=[self.schedule, self.edit_schedule, self.list_schedules, self.cancel_schedule],
+            tools=[
+                self.schedule,
+                self.schedule_tool_call,
+                self.edit_schedule,
+                self.list_schedules,
+                self.cancel_schedule,
+            ],
         )
 
     async def schedule(
@@ -78,6 +90,53 @@ class SchedulerTools(Toolkit):
             history_limit=history_limit,
             silent=silent,
             model=model,
+        )
+        if task_id is None:
+            raise RuntimeError(response_text)
+        return response_text
+
+    async def schedule_tool_call(
+        self,
+        tool_name: str,
+        arguments_json: str,
+        execute_at: str,
+        description: str,
+    ) -> str:
+        """Schedule one exact approval-gated tool call that the requester approves now.
+
+        Use this when a gated action, such as sending an external message, must run at
+        a set time while the requester may be away. MindRoom posts an approval card in
+        this thread showing the exact call and send time. Once approved, the call runs
+        at that time without another approval, but only if it is made exactly once with
+        exactly these arguments within 15 minutes of the scheduled time. A cancelled or
+        edited schedule, a late run, or any other call asks for approval again. Tell the
+        requester to approve the card; do not claim the call ran until it reports success.
+
+        Args:
+            tool_name: The tool function to call, e.g. "post_slack_message".
+            arguments_json: The call's exact arguments as a JSON object string.
+            execute_at: When to run, as ISO 8601 with a UTC offset,
+                e.g. "2026-10-04T09:00:00-04:00".
+            description: Short human-readable description of the scheduled action.
+
+        Returns:
+            The scheduling result message.
+
+        """
+        context = get_tool_runtime_context()
+        if context is None or context.room is None:
+            return "❌ Scheduler tool is unavailable in this context."
+
+        task_id, response_text = await schedule_approved_tool_call(
+            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
+            room_id=context.room_id,
+            thread_id=context.resolved_thread_id,
+            scheduled_by=context.requester_id,
+            agent_name=context.agent_name,
+            tool_name=tool_name,
+            arguments_json=arguments_json,
+            execute_at=execute_at,
+            description=description,
         )
         if task_id is None:
             raise RuntimeError(response_text)

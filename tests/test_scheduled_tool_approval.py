@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.approval_manager import ApprovalManager
+from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
@@ -20,13 +29,25 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.scheduling import (
+    ScheduledTaskRecord,
+    ScheduledWorkflow,
+    _parse_scheduled_task_record,
+    _run_once_task,
+    cancel_scheduled_task,
+    scheduled_call_workflow_digest,
+)
+from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.scheduling_helpers import joined_member_state
+from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from mindroom.approval_manager import ApprovalActionResult
 
@@ -411,3 +432,264 @@ async def test_new_room_tenure_does_not_inherit_the_approval(
         assert continuation.calls[0].decision is None
     finally:
         await manager.shutdown()
+
+
+def _gated_config() -> Config:
+    return _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+            ),
+        ),
+    )
+
+
+def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
+    context = _make_context(config)
+    client = context.client
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
+    )
+    return replace(
+        context,
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id=thread_id, reply_to_event_id=None),
+    )
+
+
+def _persisted_workflows(context: ToolRuntimeContext) -> list[tuple[str, ScheduledTaskRecord]]:
+    records = []
+    for put in context.client.room_put_state.await_args_list:
+        content = put.kwargs["content"]
+        record = _parse_scheduled_task_record(put.kwargs["room_id"], put.kwargs["state_key"], content)
+        assert record is not None
+        records.append((str(content["status"]), record))
+    return records
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -> None:
+    """The saved task carries the exact call, and the card binds that task as it will fire."""
+    config = _gated_config()
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling._start_scheduled_task") as start,
+        tool_runtime_context(context),
+    ):
+        result = await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"text": "Good morning!", "channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    [(status, record)] = _persisted_workflows(context)
+    workflow = record.workflow
+    assert status == "pending"
+    assert workflow.schedule_type == "once"
+    assert workflow.execute_at == datetime(2030, 1, 2, 14, 0, tzinfo=UTC)
+    assert workflow.room_id == "!room:localhost"
+    assert workflow.thread_id == "$thread"
+    assert workflow.new_thread is False
+    assert workflow.history_limit == 0
+    assert workflow.created_by == "@user:localhost"
+    assert workflow.description == "Morning DM"
+    assert workflow.message.startswith("@general ")
+    assert "`post_slack_message`" in workflow.message
+    assert '"channel": "U123"' in workflow.message
+    assert '"text": "Good morning!"' in workflow.message
+    kwargs = request.await_args.kwargs
+    assert kwargs["task_id"] == record.task_id
+    assert kwargs["room_id"] == "!room:localhost"
+    assert kwargs["thread_id"] == "$thread"
+    assert kwargs["requester_id"] == "@user:localhost"
+    assert kwargs["approver_user_id"] == "@user:localhost"
+    assert kwargs["agent_name"] == "general"
+    assert kwargs["tool_name"] == "post_slack_message"
+    assert kwargs["arguments"] == {"channel": "U123", "text": "Good morning!"}
+    assert kwargs["execute_at"] == workflow.execute_at
+    assert kwargs["workflow_digest"] == scheduled_call_workflow_digest(record.task_id, workflow)
+    start.assert_called_once()
+    assert record.task_id in result
+    assert "approve" in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments_json", "execute_at", "thread_id", "gated", "error"),
+    [
+        ("{", "2030-01-02T09:00:00-05:00", "$thread", True, "arguments_json must be a JSON object"),
+        ("[1]", "2030-01-02T09:00:00-05:00", "$thread", True, "arguments_json must be a JSON object"),
+        ("{}", "tomorrow at nine", "$thread", True, "ISO 8601"),
+        ("{}", "2030-01-02T09:00:00", "$thread", True, "UTC offset"),
+        ("{}", "2020-01-02T09:00:00+00:00", "$thread", True, "future"),
+        ("{}", "2030-01-02T09:00:00-05:00", None, True, "thread"),
+        ("{}", "2030-01-02T09:00:00-05:00", "$thread", False, "does not require approval"),
+    ],
+    ids=["invalid-json", "not-object", "not-iso", "naive", "past", "no-thread", "ungated"],
+)
+async def test_schedule_tool_call_rejects_what_it_cannot_bind(
+    arguments_json: str,
+    execute_at: str,
+    thread_id: str | None,
+    gated: bool,
+    error: str,
+) -> None:
+    """Nothing is saved and no card is posted for a call that cannot be pre-approved exactly."""
+    config = (
+        _gated_config()
+        if gated
+        else _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    )
+    context = _tool_context(config, thread_id=thread_id)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match=error),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json=arguments_json,
+            execute_at=execute_at,
+            description="Morning DM",
+        )
+
+    context.client.room_put_state.assert_not_awaited()
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_call_cancels_the_task_when_its_card_cannot_be_posted() -> None:
+    """A schedule whose approval card never appeared must not fire as an ordinary send."""
+    config = _gated_config()
+    context = _tool_context(config)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=AsyncMock(return_value=False)),
+        patch("mindroom.scheduling._start_scheduled_task") as start,
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="approval card"),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    assert [status for status, _record in _persisted_workflows(context)] == ["pending", "cancelled"]
+    start.assert_not_called()
+
+
+def test_workflow_digest_survives_matrix_state_round_trip() -> None:
+    """The digest read back from stored task state equals the one the approval was bound to."""
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2030, 1, 2, 9, 0, tzinfo=timezone(timedelta(hours=-5))).astimezone(UTC),
+        message='@general call `post_slack_message`\n```json\n{"text": "Grüße 👋"}\n```',
+        description="Morning DM",
+        history_limit=0,
+        created_by="@user:localhost",
+        thread_id="$thread",
+        room_id="!room:localhost",
+    )
+    stored = {"status": "pending", "workflow": workflow.model_dump_json(), "created_at": "2030-01-01T00:00:00+00:00"}
+
+    record = _parse_scheduled_task_record("!room:localhost", "task1234", stored)
+
+    assert record is not None
+    assert scheduled_call_workflow_digest("task1234", record.workflow) == scheduled_call_workflow_digest(
+        "task1234",
+        workflow,
+    )
+    edited = workflow.model_copy(update={"message": workflow.message.replace("Grüße", "Hi")})
+    assert scheduled_call_workflow_digest("task1234", edited) != scheduled_call_workflow_digest("task1234", workflow)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_state", "fires", "final_status"),
+    [
+        ("armed", True, "completed"),
+        ("unarmed", True, "completed"),
+        ("none", True, "completed"),
+        ("denied", False, "cancelled"),
+    ],
+)
+async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
+    approval_state: str,
+    fires: bool,
+    final_status: str,
+) -> None:
+    """The runner arms the exact unchanged task; a send the requester denied never fires."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+    arm = AsyncMock(return_value=approval_state)
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.arm_scheduled_call_approval", new=arm),
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute,
+    ):
+        await _run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    arm.assert_awaited_once_with("task1234", scheduled_call_workflow_digest("task1234", workflow))
+    assert execute.await_count == int(fires)
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
+    """Cancelling through any scheduler entry point denies the task's pending approval card."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
+    )
+    existing = {"status": "pending", "workflow": "{}"}
+    cancel = AsyncMock()
+
+    with (
+        patch("mindroom.scheduling._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
+        patch("mindroom.scheduling.cancel_scheduled_call_approval", new=cancel),
+    ):
+        result = await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="task1234",
+            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+        )
+
+    assert result == "✅ Cancelled task `task1234`"
+    cancel.assert_awaited_once_with("task1234")
