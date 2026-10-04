@@ -5620,7 +5620,8 @@ def _final_attempt_body(body: str) -> str:
 
 
 def _body_call_id(body: str) -> int | None:
-    """Parse the model call ID a completed response body must embed."""
+    """Parse the model call ID a completed response body must embed, from its newest attempt."""
+    body = _final_attempt_body(body)
     if not body.startswith(_CALL_ID_PREFIX):
         return None
     digits = body[len(_CALL_ID_PREFIX) :].split(" ", 1)[0]

@@ -5740,6 +5740,11 @@ async def test_final_state_auditor_rejects_reply_outside_source_thread(
 def test_body_call_id_parses_only_canonical_prefixes() -> None:
     """Call IDs come only from exact stub-format bodies."""
     assert _body_call_id("LIVE-FUZZ call=17 segment-000 END call=17") == 17
+    # A reply continued in place after a restart belongs to its newest attempt's call.
+    continued = (
+        f"LIVE-FUZZ call=172\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nLIVE-FUZZ call=175 segment-000 END call=175"
+    )
+    assert _body_call_id(continued) == 175
     assert _body_call_id("[Response interrupted by service restart]") is None
     assert _body_call_id("LIVE-FUZZ call=x END") is None
 
