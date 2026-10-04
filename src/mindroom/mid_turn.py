@@ -22,9 +22,8 @@ logger = get_logger(__name__)
 
 # A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
 _CLIPPED_TEXT_CHARS = 2_000
-# The redactor refuses input over 64 KiB, so longer text is scanned in overlapping chunks below that bound.
-_REDACTION_CHUNK_CHARS = 60_000
-_REDACTION_OVERLAP_CHARS = 4_000
+# Credentials are shorter than this, so scanning this far past each cut finds one that clipping splits.
+_CLIP_SCAN_MARGIN_CHARS = 4_000
 _MAX_CONTEXT_MESSAGES = 63
 
 MID_TURN_QUESTION = JudgmentQuestion(
@@ -52,14 +51,15 @@ def _clip(text: str) -> str:
 
 
 def _is_unredacted(text: str) -> bool:
-    """Scan the whole text, so a credential that clipping cuts in half still blocks the request."""
-    return all(
-        redact_sensitive_text(chunk) == chunk
-        for chunk in (
-            text[start : start + _REDACTION_CHUNK_CHARS + _REDACTION_OVERLAP_CHARS]
-            for start in range(0, len(text) or 1, _REDACTION_CHUNK_CHARS)
-        )
-    )
+    return redact_sensitive_text(text) == text
+
+
+def _clip_is_unredacted(text: str) -> bool:
+    """Scan what the clip keeps and the margin past each cut, never the omitted middle of a long text."""
+    reach = _CLIPPED_TEXT_CHARS // 2 + _CLIP_SCAN_MARGIN_CHARS
+    if len(text) <= 2 * reach:
+        return _is_unredacted(text)
+    return _is_unredacted(text[:reach]) and _is_unredacted(text[-reach:])
 
 
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
@@ -158,12 +158,10 @@ class MidTurnGate:
         for message in pending:
             if not _is_whole_text(message.text):
                 return "queued_message_unjudgeable"
-            if message.visible_response is None or not _is_unredacted(message.visible_response):
+            if message.visible_response is None or not _clip_is_unredacted(message.visible_response):
                 return "visible_response_unavailable"
             queued.append({"text": message.text, "visible_response": _clip(message.visible_response)})
         history = self.conversation_context[-_MAX_CONTEXT_MESSAGES:]
-        if not all(_is_plain_text(message.text) and _is_unredacted(message.text) for message in history):
-            return "history_unjudgeable"
         evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
         context = [JudgmentMessage(message.sender, _clip(message.text)) for message in history]
         while True:
@@ -174,6 +172,11 @@ class MidTurnGate:
                 instructions=self.instructions,
             )
             if request.incomplete_reason != "essential_input_too_large" or not context:
-                return request
+                break
             # The oldest conversation gives way first.
             del context[0]
+        # Only the newest messages that fit reach the judge, so older ones are never scanned.
+        kept = history[len(history) - len(context) :]
+        if not all(_is_plain_text(message.text) and _clip_is_unredacted(message.text) for message in kept):
+            return "history_unjudgeable"
+        return request

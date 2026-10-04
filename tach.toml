@@ -2068,6 +2068,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.chat_ui"
 depends_on = [
+    "mindroom.constants",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
     "mindroom.file_access",
@@ -4199,6 +4200,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.cli.local_model_config",
     "mindroom.atomic_file",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
@@ -5894,7 +5896,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 
 [[interfaces]]
 expose = [
-    "OpaqueEncryptedThreadHistoryError",
     "RoomThreadsPageError",
     "UnresolvedOpaqueRoomHistoryError",
     "bulk_scan_thread_event_sources",
@@ -7954,3 +7955,8 @@ depends_on = [
     "mindroom.tool_system.skills",
 ]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.cli.local_model_config"
+depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
+visibility = ["mindroom.cli.config"]

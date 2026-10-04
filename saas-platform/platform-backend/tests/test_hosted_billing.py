@@ -186,9 +186,27 @@ def test_missing_account_update_does_not_call_auth(route, expected):
         app.dependency_overrides.clear()
 
 
-def test_suspended_account_moved_to_deleted_is_unbanned():
+@pytest.mark.parametrize("route", ["/admin/accounts/owner/status", "/admin/accounts/owner"])
+@pytest.mark.parametrize("previous", ["active", "suspended"])
+@pytest.mark.parametrize("status", ["suspended", "deleted", "pending_verification"])
+def test_every_refused_status_bans_auth(route, previous, status):
     db = database()
-    db.row("accounts", id="owner")["status"] = "suspended"
+    db.row("accounts", id="owner")["status"] = previous
+    db.auth.admin = Mock()
+    app.dependency_overrides[verify_admin] = lambda: {"user_id": "admin"}
+    try:
+        with patch.object(admin, "ensure_supabase", return_value=db), patch.object(admin, "audit_log_entry"):
+            response = TestClient(app).put(route, json={"status": status})
+        assert response.status_code == 200
+        assert db.row("accounts", id="owner")["status"] == status
+        db.auth.admin.update_user_by_id.assert_called_once_with("owner", {"ban_duration": "876000h"})
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_suspended_account_awaiting_deletion_moved_to_deleted_is_unbanned_to_cancel():
+    db = database()
+    db.row("accounts", id="owner").update({"status": "suspended", "deleted_at": "2026-10-01T00:00:00+00:00"})
     db.auth.admin = Mock()
     app.dependency_overrides[verify_admin] = lambda: {"user_id": "admin"}
     try:
@@ -197,5 +215,19 @@ def test_suspended_account_moved_to_deleted_is_unbanned():
         assert response.status_code == 200
         assert db.row("accounts", id="owner")["status"] == "deleted"
         db.auth.admin.update_user_by_id.assert_called_once_with("owner", {"ban_duration": "none"})
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_generic_deleted_at_change_applies_auth_ban():
+    db = database()
+    db.row("accounts", id="owner").update({"status": "deleted", "deleted_at": "2026-10-01T00:00:00+00:00"})
+    db.auth.admin = Mock()
+    app.dependency_overrides[verify_admin] = lambda: {"user_id": "admin"}
+    try:
+        with patch.object(admin, "ensure_supabase", return_value=db), patch.object(admin, "audit_log_entry"):
+            response = TestClient(app).put("/admin/accounts/owner", json={"deleted_at": None})
+        assert response.status_code == 200
+        db.auth.admin.update_user_by_id.assert_called_once_with("owner", {"ban_duration": "876000h"})
     finally:
         app.dependency_overrides.clear()
