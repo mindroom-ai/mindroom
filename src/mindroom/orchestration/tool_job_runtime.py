@@ -351,7 +351,7 @@ class ToolJobRuntimeCoordinator:
                 # A Stop saved while the runtime was away may still end this work.
                 continue
             work = await conversation_work(self.runtime, hold.key, attempted=hold.offered)
-            if work.jobs and not work.ready and waiting_notice(work.jobs) == hold.notice:
+            if not hold.stopped and work.jobs and not work.ready and waiting_notice(work.jobs) == hold.notice:
                 continue
             bot = self.bot_provider(hold.key.recipient)
             # Synced membership: a bot outside the room costs no homeserver request on every pass.

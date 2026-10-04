@@ -26,7 +26,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   Work that a foreground wait claims, or whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
   A continuation or edit of a held message that ends before its response boundary, because it failed or was stopped or interrupted, releases the hold, and a message the turn did not replace shows how it ended.
   A continuation a crash cut short continues below what it already showed, like any reply a restart cut short, and retrieves the outcomes the cut-short run already read instead of losing them.
-  Stop on a held message cancels the work it holds through the message's latest turn at once, leaving a newer running reply's work alone, and shows the message as stopped; Stop while a turn continues the message stops that turn and the work like any reply, including a turn that began before it could be stopped.
+  Stop on a held message cancels the work it holds through the message's latest turn at once, leaving a newer running reply's work alone, and marks the hold stopped; the hold's wake, or the turn running on the message, then shows the message stopped, so it shows once the conversation is free.
+  Stop while a turn continues the message stops that turn and the work like any reply, including a turn that began before it could be stopped.
   A newer reply that reaches its boundary but ends without a finished message leaves an older message holding the work.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.
@@ -49,7 +50,8 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
 | `tool_jobs/held_replies.py` | Which work a message holds, its notice and edits, and the wake source and envelope of a turn continuing it |
 | `event_journal/held_replies.py` | Durable holds, one per conversation, requester, and participants, each save a new generation |
 | `orchestration/tool_job_runtime.py` | Startup, policy revocation, saved Stops, card expiry, held-message wakes, retention and shutdown coordination |
-| `response_runner.py` | Saving, taking over, and releasing holds after each reply, continuing a woken message under the conversation lock, and Stop on a held message |
+| `held_reply_lifecycle.py` | Saving, taking over, and releasing holds after each reply, resuming a woken message, and Stop on a held message |
+| `response_runner.py` | Running a woken message's continuation under the conversation lock |
 | Response and delivery owners | Serialize turns, preserve published text and tool traces, settle visible delivery |
 
 Execution lifetime is independent of a caller's wait.

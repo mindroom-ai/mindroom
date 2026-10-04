@@ -87,6 +87,8 @@ class HeldReply:
     joins: int
     # Outcomes its turns already asked for; one the model left unread waits for the conversation's next reply.
     offered: frozenset[str] = frozenset()
+    # Set by a Stop on the message; the turn or wake that next settles the message shows it stopped.
+    stopped: bool = False
     # The save that wrote this hold, set once it is saved.
     generation: str = ""
 
@@ -157,6 +159,7 @@ def encode_held_reply(hold: HeldReply) -> str:
             "stop_button_event_id": hold.stop_button_event_id,
             "joins": hold.joins,
             "offered": sorted(hold.offered),
+            "stopped": hold.stopped,
         },
     )
 
@@ -181,6 +184,7 @@ def _restored(saved: SavedHeldReply) -> HeldReply | None:
         stop_button_event_id=payload["stop_button_event_id"],
         joins=int(payload["joins"]),
         offered=frozenset(payload["offered"]),
+        stopped=bool(payload["stopped"]),
         generation=saved.generation,
     )
 

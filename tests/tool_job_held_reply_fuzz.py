@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock, patch
 
-from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.constants import STREAM_STATUS_CANCELLED, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
 from mindroom.delivery_gateway import EditTextRequest
 from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -145,6 +145,8 @@ class HeldReplyFuzzRunner:
         self._ignoring = False
         # Wakes the journal still owes a turn: admitted, and not yet run to the end.
         self.pending_wakes: dict[str, JournalEvent] = {}
+        # Messages a Stop reached while they held work, each of which must end up showing it stopped.
+        self.stopped_messages: set[str] = set()
         self.woken: list[HeldReply] = []
         self.woken_now: list[HeldReply] = []
         self._baseline = asyncio.all_tasks()
@@ -213,6 +215,11 @@ class HeldReplyFuzzRunner:
         assert not self._outstanding(), [job.job_id for job in self._outstanding()]
         assert await self._hold() is None
         assert not self._held_messages(), self._held_messages()
+        for message in self.stopped_messages:
+            # A Stop shows on the message it reached, once the hold's wake settles it.
+            assert (self.model.shown[message].extra_content or {}).get(STREAM_STATUS_KEY) == STREAM_STATUS_CANCELLED, (
+                message
+            )
 
     async def _wake_until_quiet(self) -> None:
         for _ in range(4 * _JOB_JOIN_LIMIT):
@@ -506,6 +513,7 @@ class HeldReplyFuzzRunner:
         if any(turn.message == hold.message_event_id for turn in self._live()):
             return
         assert await self.runner.held_messages.stop(hold.message_event_id, self._next_order())
+        self.stopped_messages.add(hold.message_event_id)
 
     async def _stop_live(self, _step: Step) -> None:
         """Stop the running turn: it ends, and so does the work of it and every earlier turn."""

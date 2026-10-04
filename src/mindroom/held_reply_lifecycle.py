@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
@@ -22,7 +21,7 @@ from mindroom.tool_jobs.held_replies import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     import nio
     import structlog
@@ -37,6 +36,14 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 
+def _shown(final_outcome: FinalDeliveryOutcome) -> StreamingPresentation:
+    """Return what a finished reply's message shows, without any waiting notice."""
+    return StreamingPresentation(
+        response_text=(final_outcome.final_visible_body or "").strip(),
+        tool_trace=final_outcome.tool_trace,
+    )
+
+
 @dataclass(frozen=True)
 class HeldReplyLifecycle:
     """One entity's held messages: which message holds its work, and what a turn, wake, or Stop does to that."""
@@ -49,8 +56,6 @@ class HeldReplyLifecycle:
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
-    # Messages a turn runs on, from before that turn can be stopped until it settles them.
-    _turns: set[str] = field(default_factory=set, init=False, repr=False)
 
     def read(self, saved: SavedHeldReply) -> HeldReply | None:
         """Read one saved hold; an unreadable one holds nothing this runtime can continue."""
@@ -88,7 +93,7 @@ class HeldReplyLifecycle:
         )
         previous = self.read(replaced) if replaced is not None else None
         if previous is not None and previous.message_event_id != hold.message_event_id:
-            await self.release(previous)
+            await self.release(previous, stopped=previous.stopped)
         await self._show_held(hold)
 
     async def _show_held(self, hold: HeldReply) -> None:
@@ -114,6 +119,23 @@ class HeldReplyLifecycle:
         ``continued`` is the hold of the message this turn ran on, such as one it continued or an edit regenerated.
         """
         message_id = final_outcome.final_visible_event_id
+        if continued is not None and await self.stopped(continued):
+            # A Stop reached the message while this turn ran on it, so the message ends stopped and holds nothing more.
+            await self.store.delete(continued.key.hold_id)
+            if final_outcome.terminal_status == "completed" and message_id is not None:
+                await self.release(
+                    replace(
+                        continued,
+                        message_event_id=message_id,
+                        presentation=_shown(final_outcome),
+                        extra_content=dict(final_outcome.extra_content or {}),
+                        stop_button_event_id=stop_button_event_id,
+                    ),
+                    stopped=True,
+                )
+            else:
+                await self._end(continued, final_outcome)
+            return
         if boundary is not None and continued is not None and continued.key.hold_id != boundary.key.hold_id:
             # The turn holds under another key, such as after its team's roster changed, so the hold it ran on ends.
             await self.store.delete(continued.key.hold_id, generation=continued.generation)
@@ -123,7 +145,7 @@ class HeldReplyLifecycle:
             released = await self.store.delete(boundary.key.hold_id)
             previous = self.read(released) if released is not None else None
             if previous is not None and previous.message_event_id != message_id:
-                await self.release(previous)
+                await self.release(previous, stopped=previous.stopped)
             return
         if (
             boundary is not None
@@ -137,10 +159,7 @@ class HeldReplyLifecycle:
                     target=request.response_envelope.target,
                     source_kind=request.response_envelope.source_kind,
                     message_event_id=message_id,
-                    presentation=StreamingPresentation(
-                        response_text=(final_outcome.final_visible_body or "").strip(),
-                        tool_trace=final_outcome.tool_trace,
-                    ),
+                    presentation=_shown(final_outcome),
                     extra_content=dict(final_outcome.extra_content or {}),
                     notice=notice,
                     stop_button_event_id=stop_button_event_id,
@@ -154,8 +173,11 @@ class HeldReplyLifecycle:
         # any more; an approval pause reaches a boundary of its own once it resumes.
         if continued is None:
             return
-        # A Stop on the message may have released the hold already.
         await self.store.delete(continued.key.hold_id, generation=continued.generation)
+        await self._end(continued, final_outcome)
+
+    async def _end(self, continued: HeldReply, final_outcome: FinalDeliveryOutcome) -> None:
+        """Show how a turn on a held message ended when nothing it delivered replaced the message."""
         if (
             continued.message_event_id is not None
             and final_outcome.delivery_kind is None
@@ -168,23 +190,14 @@ class HeldReplyLifecycle:
                 else ended_edit(continued, cancel_source=final_outcome.resolved_cancel_source or "interrupted"),
             )
 
-    @contextmanager
-    def running_on(self, hold: HeldReply | None) -> Iterator[None]:
-        """Leave a held message to the turn running on it, so a Stop does not edit it under that turn."""
-        message_id = hold.message_event_id if hold is not None else None
-        if message_id is None:
-            yield
-            return
-        self._turns.add(message_id)
-        try:
-            yield
-        finally:
-            self._turns.discard(message_id)
-
-    async def released(self, hold: HeldReply) -> bool:
-        """Whether a hold is gone, such as after a Stop released its message before a turn on it could be stopped."""
+    async def stopped(self, hold: HeldReply) -> bool:
+        """Whether a Stop reached the message a hold belongs to, since the snapshot this turn or wake read."""
+        if hold.stopped:
+            # A turn that began on a message already stopped, such as an edit regenerating it, answers anew.
+            return False
         saved = await self.store.load(hold.key.hold_id)
-        return saved is None or saved.generation != hold.generation
+        current = self.read(saved) if saved is not None else None
+        return current is not None and current.stopped
 
     async def on_message(self, message_id: str | None) -> HeldReply | None:
         """Return the hold one of this entity's messages carries; only an instance running background jobs has any."""
@@ -199,17 +212,14 @@ class HeldReplyLifecycle:
         return hold is not None and hold.key.room_id == room_id
 
     async def stop(self, message_id: str, stop_receipt_order: int) -> bool:
-        """End the work a message holds while no turn runs on it, and show the message as stopped.
+        """End the work a message holds, and mark its hold stopped for the turn or wake that next settles the message.
 
-        False when the message holds nothing, or when a turn began continuing it meanwhile; that turn stops like any
-        reply and shows how it ended.
+        False when the message holds nothing, or when a turn on it can be stopped; that turn stops like any reply.
         """
         hold = await self.on_message(message_id)
         runtime = get_background_runtime(self.runtime_paths)
         if hold is None or runtime is None:
             return False
-        # Released first, so a wake queued for the message no longer continues it.
-        released = await self.store.delete(hold.key.hold_id, generation=hold.generation)
         journal = self.journal
         # Like any Stop, it ends work through the message's latest turn, not the work of a newer reply still running.
         cutoff = await journal.response_receipt_order_before_stop(
@@ -226,20 +236,30 @@ class HeldReplyLifecycle:
             return cutoff is None or source is None or source.receipt_order <= cutoff
 
         await runtime.stop_jobs(receipt_order=stop_receipt_order, matches=held_by_message)
-        if self.stop_manager.can_handle_stop_reaction(message_id, hold.key.room_id):
-            return False
-        # A turn running on the message settles it instead: one that cannot be stopped yet stops itself once it can,
-        # and one already past its reply keeps that reply.
-        if released is not None and message_id not in self._turns:
-            # No later turn edits the message: a takeover or wake finds the hold gone.
-            await self.release(hold, stopped=True)
-        return True
+        # Only the turn or wake that next settles the message under the conversation lock edits it, so the mark is
+        # saved again until it lands on whichever save of the hold the message carries now.
+        current: HeldReply | None = hold
+        while current is not None and not current.stopped:
+            stopped = replace(current, stopped=True)
+            if (
+                await self.store.resave(
+                    current.key.hold_id,
+                    generation=current.generation,
+                    hold_json=encode_held_reply(stopped),
+                )
+                is not None
+            ):
+                break
+            current = await self.on_message(message_id)
+        # The new save wakes the hold, whose wake shows the message stopped.
+        runtime.changed.set()
+        return not self.stop_manager.can_handle_stop_reaction(message_id, hold.key.room_id)
 
     async def release_unstarted(self, hold: HeldReply) -> None:
         """Release a hold whose continuation never began, such as one its requester may no longer run."""
         # A turn that began on the hold saved or released it; only one that never began leaves it to the wake.
         if await self.store.delete(hold.key.hold_id, generation=hold.generation) is not None:
-            await self.release(hold)
+            await self.release(hold, stopped=hold.stopped)
 
     async def resume(self, request: ResponseRequest) -> ResponseRequest | None:
         """Under the conversation lock, continue a held message with ready work, or leave it as its work stands."""
@@ -254,6 +274,10 @@ class HeldReplyLifecycle:
         saved = await self.store.load(hold.key.hold_id)
         if saved is None or saved.generation != hold.generation:
             # A newer turn saved or released the hold since the wake.
+            return None
+        if hold.stopped:
+            if await self.store.delete(hold.key.hold_id, generation=hold.generation) is not None:
+                await self.release(hold, stopped=True)
             return None
         work = await conversation_work(runtime, hold.key, attempted=hold.offered)
         envelope = request.response_envelope
