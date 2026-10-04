@@ -44,6 +44,17 @@ if TYPE_CHECKING:
                 "MindRoom Chat must also turn canvases on (mindroom.canvas.enabled)."
             ),
         ),
+        ConfigField(
+            name="enable_canvas_libraries",
+            label="Enable Canvas Libraries",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. "
+                "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries)."
+            ),
+        ),
     ],
     requires_primary_runtime=True,
     requires_room_context=True,

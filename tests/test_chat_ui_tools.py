@@ -57,7 +57,10 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
 
     assert metadata.requires_room_context
     assert metadata.function_names == ("show_computer", "open_settings", "open_panel", "show_canvas")
-    assert [(field.name, field.default) for field in metadata.config_fields] == [("enable_show_canvas", False)]
+    assert [(field.name, field.default) for field in metadata.config_fields] == [
+        ("enable_show_canvas", False),
+        ("enable_canvas_libraries", False),
+    ]
     assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
     assert "show_canvas" in ChatUITools(enable_show_canvas=True).async_functions
     assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)

@@ -16,6 +16,18 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries).",
+          "label": "Enable Canvas Libraries",
+          "name": "enable_canvas_libraries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,

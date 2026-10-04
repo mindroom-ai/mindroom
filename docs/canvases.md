@@ -89,6 +89,32 @@ Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
 
 The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
 
+### Let pages load libraries
+
+Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
+
+```yaml
+      - chat_ui:
+          enable_show_canvas: true
+          enable_canvas_libraries: true
+```
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true,
+      "libraries": true
+    }
+  }
+}
+```
+
+`enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
+Pages may then load scripts, styles, and fonts from `/npm/` paths only; network requests, images, and every other site stay blocked.
+Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+
 ## What the user sees
 
 Each canvas appears in the conversation as a notice with an **Open panel** button.
@@ -155,7 +181,7 @@ chat_ui.show_canvas(
 )
 ```
 
-- **Self-contained:** write inline CSS and JavaScript. The page cannot load or send anything over the network, so draw charts with inline SVG or a `<canvas>` element and embed images as `data:` URLs.
+- **Self-contained:** write inline CSS and JavaScript. The page cannot send anything over the network or load images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
