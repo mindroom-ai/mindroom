@@ -102,6 +102,11 @@ Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](openai-
 
 ## How MindRoom Compares
 
+AI apps such as ChatGPT, Claude, and Gemini can connect to your email, calendar, and documents, but each one ties those connections to one company.
+Connect your inbox to ChatGPT, and OpenAI's servers process it for OpenAI's models only; using Claude or Gemini as well means connecting everything again, handing your data to another company, and teaching it about you from scratch.
+In MindRoom you connect once: your accounts, memory, and documents live in MindRoom, which can run on your own machine, and every agent uses them with the model that fits.
+A cloud model sees only what its agent sends it, and an agent on a local model with local memory keeps everything at home.
+
 Agents such as OpenClaw and Hermes Agent plug into existing messaging apps through one adapter per app.
 That lets them reach many apps, but each app decides what the agent can show.
 MindRoom takes the opposite approach.
