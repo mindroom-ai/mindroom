@@ -22,7 +22,6 @@ Set it explicitly when the homeserver is served from a subdomain such as `https:
 
 The chart renders the complete `tuwunel.toml` into a ConfigMap and never writes secret material into it.
 Tuwunel natively reads `registration_token_file`, `client_secret_file`, and application-service registration files from a directory, so the rendered config references paths backed by Secret volume mounts instead of inline values.
-The alternative of an init container substituting secrets into a config template at pod start was rejected: it adds a moving part, hides the effective config from `helm template` and GitOps diffs, and is unnecessary because Tuwunel's native `*_file` options already keep secrets out of the config file.
 A `checksum/config` pod annotation rolls the Deployment whenever the rendered config changes.
 
 Secret files are mounted at fixed paths that the rendered config references:
