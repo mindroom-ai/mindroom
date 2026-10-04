@@ -8,6 +8,7 @@ rather than something it is trusted not to do.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from itertools import batched
 from typing import TYPE_CHECKING, Literal
@@ -31,6 +32,7 @@ from . import (
     outbox,
     reads,
     response_attempts,
+    scheduled_approvals,
     turn_records,
 )
 from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
@@ -66,6 +68,7 @@ from .projection import (
     project,
     tombstoned_event_ids,
 )
+from .scheduled_approvals import ScheduledApprovalArmState, ScheduledCallBinding  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -1192,6 +1195,39 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 run_id=run_id,
+            ),
+        )
+
+    async def reserve_scheduled_call_approval(
+        self,
+        *,
+        binding: ScheduledCallBinding,
+        card: ApprovalCardReservation,
+    ) -> bool:
+        """Atomically reserve one scheduling-time card and its exact-call binding."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.reserve(
+                transaction,
+                self._principal_id,
+                binding=binding,
+                card=card,
+            ),
+        )
+
+    async def arm_scheduled_call_approval(
+        self,
+        *,
+        task_id: str,
+        workflow_digest: str,
+    ) -> ScheduledApprovalArmState:
+        """Arm one approved scheduled call for its unchanged task firing on time."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.arm(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                workflow_digest=workflow_digest,
+                now_ns=time.time_ns(),
             ),
         )
 

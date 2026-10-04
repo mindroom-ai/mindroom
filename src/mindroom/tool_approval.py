@@ -24,11 +24,13 @@ from mindroom.tool_system.approval_exemptions import tool_call_is_approval_exemp
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
     from pathlib import Path
     from types import ModuleType
 
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
+    from mindroom.event_journal import ScheduledApprovalArmState
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -39,9 +41,12 @@ __all__ = [
     "ToolApprovalDecision",
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
+    "arm_scheduled_call_approval",
+    "cancel_scheduled_call_approval",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
     "is_process_active_approval_card",
+    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
@@ -274,6 +279,50 @@ async def handle_matrix_approval_action(
         auto_approve_seconds=action.auto_approve_seconds,
         current_binding=action.current_binding,
     )
+
+
+async def request_scheduled_call_approval(
+    *,
+    task_id: str,
+    room_id: str,
+    thread_id: str,
+    requester_id: str,
+    approver_user_id: str,
+    agent_name: str,
+    tool_name: str,
+    arguments: dict[str, object],
+    execute_at: datetime,
+    workflow_digest: str,
+    scheduled_for_text: str,
+) -> bool:
+    """Publish the card that pre-approves one exact call a scheduled task will make."""
+    manager = approval_manager.get_approval_store()
+    return manager is not None and await manager.request_scheduled_call_approval(
+        task_id=task_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        requester_id=requester_id,
+        approver_user_id=approver_user_id,
+        agent_name=agent_name,
+        tool_name=tool_name,
+        arguments=arguments,
+        execute_at=execute_at,
+        workflow_digest=workflow_digest,
+        scheduled_for_text=scheduled_for_text,
+    )
+
+
+async def arm_scheduled_call_approval(task_id: str, workflow_digest: str) -> ScheduledApprovalArmState:
+    """Arm a scheduled call's approval as its unchanged task fires; unknown without a store."""
+    manager = approval_manager.get_approval_store()
+    return "none" if manager is None else await manager.arm_scheduled_call_approval(task_id, workflow_digest)
+
+
+async def cancel_scheduled_call_approval(task_id: str) -> None:
+    """Settle a cancelled task's still-pending scheduling-time approval card."""
+    manager = approval_manager.get_approval_store()
+    if manager is not None:
+        await manager.cancel_scheduled_call_approval(task_id)
 
 
 def is_process_active_approval_card(card_event_id: str) -> bool:

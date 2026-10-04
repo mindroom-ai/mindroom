@@ -20,12 +20,21 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
-from . import approval_card_state, approval_continuations, approval_grants, background_approvals, outbox, reads
+from . import (
+    approval_card_state,
+    approval_continuations,
+    approval_grants,
+    background_approvals,
+    outbox,
+    reads,
+    scheduled_approvals,
+)
 from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
 from .identity import decode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
 _DEFAULT_ROOM_CARD_LIMIT = 256
+ApprovalTargetKind = Literal["continuation", "background_script", "scheduled_call"]
 logger = get_logger(__name__)
 _CARD_COLUMNS = """
     cards.delivery_id AS delivery_id,
@@ -72,7 +81,7 @@ class StoredApprovalCard:
     continuation_generation: int
     tool_call_id: str
     continuation_entity_name: str | None
-    target_kind: Literal["continuation", "background_script"] = "continuation"
+    target_kind: ApprovalTargetKind = "continuation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +157,15 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
+        if scheduled_approvals.apply_armed(
+            transaction,
+            card_principal_id,
+            continuation_principal_id=continuation_principal_id,
+            continuation=continuation,
+            card=card,
+            membership_epoch=membership_epoch,
+        ):
+            continue
         scoped_card = approval_grants.reserve_identity(
             transaction,
             card_principal_id,
@@ -841,22 +859,20 @@ def is_terminal_card(
 ) -> bool:
     """Recognize terminal approvals before and after their payloads are retired."""
     row = transaction.fetchone(
-        """
+        f"""
         SELECT 1 AS present FROM approval_action_tombstones
         WHERE principal_id = ? AND room_id = ? AND card_event_id = ?
         UNION ALL
         SELECT 1 AS present FROM matrix_delivery_outbox AS initial
-        JOIN approval_grant_cards AS audit
-          ON audit.principal_id = initial.principal_id AND audit.delivery_id = initial.delivery_id
         WHERE initial.principal_id = ? AND initial.room_id = ?
           AND initial.acknowledged_event_id = ? AND initial.stage = 'initial'
-          AND audit.grant_id IS NOT NULL
+          AND {approval_grants.AUTOMATIC_RECEIPT.format(initial="initial")}
           AND NOT EXISTS (
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = initial.principal_id AND cards.delivery_id = initial.delivery_id
           )
         LIMIT 1
-        """,
+        """,  # noqa: S608 - a fixed predicate, not interpolated input
         (principal_id, room_id, card_event_id, principal_id, room_id, card_event_id),
     )
     return row is not None
@@ -993,11 +1009,13 @@ def _card(row: Row) -> StoredApprovalCard | None:
         )
         background_run_id = cast("str | None", row["background_run_id"])
         if background_run_id is None:
-            target_kind: Literal["continuation", "background_script"] = "continuation"
+            target_kind: ApprovalTargetKind = "continuation"
             card_identity = _native_identity(card)
             continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:
-            target_kind = "background_script"
+            target_kind = (
+                "scheduled_call" if content.get("approval_target") == "scheduled_call" else "background_script"
+            )
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)
             stored_identity = (background_run_id, -1, background_call_id)

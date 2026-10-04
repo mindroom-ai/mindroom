@@ -128,6 +128,32 @@ _TABLES = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS scheduled_call_approvals (
+        -- One exact tool call a requester approved while scheduling it. The
+        -- decision lives on the shared detached-card row; this row holds the
+        -- binding a later call must match and its one-shot consumption.
+        principal_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_digest TEXT NOT NULL,
+        workflow_digest TEXT NOT NULL,
+        execute_at_ns BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        card_event_id TEXT,
+        decided_at_ns BIGINT,
+        armed_at_ns BIGINT,
+        consumed_at_ns BIGINT,
+        consumed_delivery_id TEXT,
+        PRIMARY KEY (principal_id, task_id),
+        UNIQUE (principal_id, delivery_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS matrix_sync_consumers (
         principal_id TEXT NOT NULL PRIMARY KEY,
         consumer_generation TEXT NOT NULL,
@@ -458,6 +484,11 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS approval_grant_cards_scope ON approval_grant_cards (principal_id, scope_key)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS scheduled_call_approvals_scope ON scheduled_call_approvals (
+        principal_id, room_id, thread_id, requester_id, invoking_agent, tool_name, arguments_digest
+    )
     """,
     """
     CREATE INDEX IF NOT EXISTS interactive_selections_revision

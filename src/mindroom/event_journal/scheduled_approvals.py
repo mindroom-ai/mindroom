@@ -1,0 +1,259 @@
+"""One-shot approvals for exact tool calls a requester approved while scheduling them.
+
+A scheduled call's card is a detached exact-call card on the shared
+background-approval lifecycle. This module owns the binding a later call must
+match: the scheduled task fires, arms the binding only if the task is unchanged
+and on time, and the first exactly matching call consumes it.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
+
+from mindroom.logging_config import get_logger
+from mindroom.tool_approval_grants import approval_timestamp
+
+from . import approval_card_state, background_approvals, outbox
+from .models import DeliveryStage
+
+if TYPE_CHECKING:
+    from .approval_card_state import ApprovalCardReservation
+    from .approval_continuations import ApprovalContinuation
+    from .backend import Transaction
+
+__all__ = [
+    "SCHEDULED_APPROVAL_WINDOW_NS",
+    "ScheduledApprovalArmState",
+    "ScheduledCallBinding",
+    "apply_armed",
+    "arm",
+    "reserve",
+]
+
+SCHEDULED_APPROVAL_WINDOW_NS = 15 * 60 * 1_000_000_000
+_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
+ScheduledApprovalArmState = Literal["none", "armed", "denied", "unarmed"]
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledCallBinding:
+    """The exact call, scope, task, and time one scheduled approval covers."""
+
+    task_id: str
+    room_id: str
+    thread_id: str
+    requester_id: str
+    invoking_agent: str
+    tool_name: str
+    arguments_digest: str
+    workflow_digest: str
+    execute_at_ns: int
+
+
+def _prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
+    """Forget old bindings once their decided cards have retired."""
+    rows = transaction.fetchall(
+        "SELECT task_id FROM scheduled_call_approvals WHERE principal_id = ? AND execute_at_ns < ?",
+        (principal_id, now_ns - _RETENTION_NS),
+    )
+    for row in rows:
+        task_id = str(row["task_id"])
+        if background_approvals.prune_calls(
+            transaction,
+            principal_id,
+            run_id=background_approvals.scheduled_call_run_id(task_id),
+        ):
+            transaction.execute(
+                "DELETE FROM scheduled_call_approvals WHERE principal_id = ? AND task_id = ?",
+                (principal_id, task_id),
+            )
+
+
+def reserve(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    binding: ScheduledCallBinding,
+    card: ApprovalCardReservation,
+) -> bool:
+    """Reserve the scheduling-time card and its binding in one commit."""
+    _prune(transaction, principal_id, time.time_ns())
+    if not background_approvals.reserve_delivery(
+        transaction,
+        principal_id,
+        room_id=binding.room_id,
+        thread_id=binding.thread_id,
+        run_id=background_approvals.scheduled_call_run_id(binding.task_id),
+        call_id=binding.task_id,
+        expires_at_ns=binding.execute_at_ns,
+        card=card,
+    ):
+        return False
+    epoch = transaction.fetchone(
+        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, binding.room_id),
+    )
+    transaction.execute(
+        """
+        INSERT INTO scheduled_call_approvals (
+            principal_id, task_id, delivery_id, room_id, thread_id, requester_id, invoking_agent,
+            tool_name, arguments_digest, workflow_digest, execute_at_ns, membership_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (principal_id, task_id) DO NOTHING
+        """,
+        (
+            principal_id,
+            binding.task_id,
+            card.delivery_id,
+            binding.room_id,
+            binding.thread_id,
+            binding.requester_id,
+            binding.invoking_agent,
+            binding.tool_name,
+            binding.arguments_digest,
+            binding.workflow_digest,
+            binding.execute_at_ns,
+            0 if epoch is None else int(epoch["membership_epoch"]),
+        ),
+    )
+    return True
+
+
+def arm(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    task_id: str,
+    workflow_digest: str,
+    now_ns: int,
+) -> ScheduledApprovalArmState:
+    """Arm an approved binding for the unchanged task firing on time."""
+    row = transaction.fetchone(
+        """
+        SELECT scheduled.workflow_digest, scheduled.execute_at_ns, background.decision
+        FROM scheduled_call_approvals AS scheduled
+        JOIN background_approval_calls AS background
+          ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
+        WHERE scheduled.principal_id = ? AND scheduled.task_id = ?
+        """,
+        (principal_id, task_id),
+    )
+    if row is None:
+        return "none"
+    if str(row["workflow_digest"]) != workflow_digest:
+        return "unarmed"
+    if row["decision"] == "denied":
+        return "denied"
+    if row["decision"] != "approved" or abs(now_ns - int(row["execute_at_ns"])) > SCHEDULED_APPROVAL_WINDOW_NS:
+        return "unarmed"
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET armed_at_ns = ?
+        WHERE principal_id = ? AND task_id = ? AND consumed_at_ns IS NULL
+        """,
+        (now_ns, principal_id, task_id),
+    )
+    return "armed"
+
+
+def apply_armed(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    continuation_principal_id: str,
+    continuation: ApprovalContinuation,
+    card: ApprovalCardReservation,
+    membership_epoch: int,
+) -> bool:
+    """Approve one call matching an armed binding and publish its receipt instead of a card."""
+    call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
+    if call.arguments_digest is None or continuation.thread_id is None:
+        return False
+    now = time.time_ns()
+    row = transaction.fetchone(
+        """
+        SELECT scheduled.task_id, scheduled.execute_at_ns, scheduled.decided_at_ns, scheduled.card_event_id
+        FROM scheduled_call_approvals AS scheduled
+        JOIN background_approval_calls AS background
+          ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
+        WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.thread_id = ?
+          AND scheduled.requester_id = ? AND scheduled.invoking_agent = ? AND scheduled.tool_name = ?
+          AND scheduled.arguments_digest = ? AND scheduled.membership_epoch = ?
+          AND scheduled.armed_at_ns IS NOT NULL AND scheduled.consumed_at_ns IS NULL
+          AND scheduled.execute_at_ns BETWEEN ? AND ?
+          AND background.decision = 'approved'
+        ORDER BY scheduled.execute_at_ns, scheduled.task_id
+        LIMIT 1
+        """,
+        (
+            principal_id,
+            continuation.room_id,
+            continuation.thread_id,
+            continuation.requester_id,
+            call.invoking_agent,
+            call.tool_name,
+            call.arguments_digest,
+            membership_epoch,
+            now - SCHEDULED_APPROVAL_WINDOW_NS,
+            now + SCHEDULED_APPROVAL_WINDOW_NS,
+        ),
+    )
+    if row is None:
+        return False
+    decided = transaction.fetchone(
+        """
+        UPDATE approval_continuation_calls SET decision = 'approved'
+        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND tool_call_id = ?
+          AND decision IS NULL AND expires_at_ns > ?
+        RETURNING tool_call_id
+        """,
+        (continuation_principal_id, continuation.approval_id, continuation.generation, call.tool_call_id, now),
+    )
+    if decided is None:
+        return False
+    task_id = str(row["task_id"])
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET consumed_at_ns = ?, consumed_delivery_id = ?
+        WHERE principal_id = ? AND task_id = ?
+        """,
+        (now, card.delivery_id, principal_id, task_id),
+    )
+    approved_at = None if row["decided_at_ns"] is None else approval_timestamp(int(row["decided_at_ns"]))
+    provenance = {
+        "kind": "scheduled_approval",
+        "task_id": task_id,
+        "approval_card_event_id": row["card_event_id"],
+        "approved_by": continuation.requester_id,
+        "approved_at": approved_at,
+        "scheduled_for": approval_timestamp(int(row["execute_at_ns"])),
+        "arguments_digest": call.arguments_digest,
+    }
+    receipt = approval_card_state.terminal_content(
+        card.payload,
+        status="approved",
+        reason=None,
+        metadata=approval_card_state.ApprovalDecisionMetadata(
+            resolved_by=continuation.requester_id,
+            resolved_at=approved_at,
+            provenance=provenance,
+        ),
+        publication="receipt",
+    )
+    outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=card.delivery_id,
+        stage=DeliveryStage.INITIAL,
+        event_type=card.event_type,
+        room_id=continuation.room_id,
+        thread_id=continuation.thread_id,
+        membership_epoch=membership_epoch,
+        payload=receipt,
+        edits_event_id=None,
+    )
+    logger.info("scheduled_tool_call_approval_consumed", tool_name=call.tool_name, **provenance)
+    return True

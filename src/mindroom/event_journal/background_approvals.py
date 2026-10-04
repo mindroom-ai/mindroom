@@ -1,4 +1,8 @@
-"""Exact durable transactions for background-script approval calls."""
+"""Exact durable transactions for detached approval calls.
+
+Background-script calls and scheduled tool calls share this lifecycle; a
+scheduled call is the single call of the detached run named by its task.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +27,10 @@ __all__ = [
     "resolve",
     "resolve_call",
     "resolve_pending_calls",
+    "scheduled_call_run_id",
 ]
+
+_SCHEDULED_CALL_RUN_PREFIX = "scheduled-task:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,9 +41,20 @@ class BackgroundApprovalDecision:
     reason: str | None
 
 
+def scheduled_call_run_id(task_id: str) -> str:
+    """Return the detached run that owns one scheduled task's single approval call."""
+    return _SCHEDULED_CALL_RUN_PREFIX + task_id
+
+
 def background_identity(card: Mapping[str, Any]) -> tuple[str, str]:
-    """Extract strict background-script exact-call identity from one card."""
+    """Extract strict detached exact-call identity from one card."""
     content = card.get("content")
+    if isinstance(content, dict) and content.get("approval_target") == "scheduled_call":
+        task_id = content.get("scheduled_task_id")
+        if not isinstance(task_id, str) or not task_id:
+            msg = "Approval card is missing scheduled-call target identity."
+            raise ValueError(msg)
+        return scheduled_call_run_id(task_id), task_id
     if not isinstance(content, dict) or content.get("approval_target") != "background_script":
         msg = "Approval card is missing background-script target identity."
         raise TypeError(msg)
@@ -190,6 +208,13 @@ def resolve(
     if decided is None:
         msg = f"Background approval call {row['call_id']!r} changed during its exact-call decision"
         raise RuntimeError(msg)
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET card_event_id = ?, decided_at_ns = ?
+        WHERE principal_id = ? AND delivery_id = ?
+        """,
+        (row["acknowledged_event_id"], time.time_ns(), principal_id, str(row["delivery_id"])),
+    )
     approval_card_state.enqueue_resolution(transaction, principal_id, row, stored)
     return approval_card_state.RecordedApprovalDecision(
         resolution=stored,

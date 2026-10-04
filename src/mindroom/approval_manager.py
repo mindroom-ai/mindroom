@@ -20,13 +20,21 @@ from mindroom.event_journal import (
     BackgroundApprovalDecision,
     DeliveryStage,
     MatrixDelivery,
+    ScheduledCallBinding,
     StoredApprovalCard,
     UnreadableApprovalCard,
+    approval_arguments_digest,
+    scheduled_call_run_id,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
 from mindroom.redaction import nests_beyond_redaction_depth, redact_sensitive_data, truncate_review_text
-from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, valid_auto_approve_seconds
+from mindroom.tool_approval_grants import (
+    AUTO_APPROVE_OPTIONS,
+    ApprovalOperation,
+    approval_timestamp,
+    valid_auto_approve_seconds,
+)
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
@@ -35,7 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.approval_recovery import ApprovalRecovery
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision
+    from mindroom.event_journal import ApprovalDeliveryView, RecordedApprovalDecision, ScheduledApprovalArmState
     from mindroom.tool_approval import BackgroundScriptToolOrigin
 
 _ApprovalStatus = Literal["approved", "denied", "expired"]
@@ -373,6 +381,86 @@ class ApprovalManager:
                     return decision
                 return BackgroundApprovalDecision(status="denied", reason=_DEFAULT_TIMEOUT_REASON)
             await asyncio.sleep(min(1.0, remaining))
+
+    async def request_scheduled_call_approval(
+        self,
+        *,
+        task_id: str,
+        room_id: str,
+        thread_id: str,
+        requester_id: str,
+        approver_user_id: str,
+        agent_name: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        execute_at: datetime,
+        workflow_digest: str,
+        scheduled_for_text: str,
+    ) -> bool:
+        """Publish one card approving the exact call a scheduled task will make later."""
+        cards = self.cards
+        if self.prepare_event is None or cards is None or self.send_delivery is None:
+            return False
+        execute_at_ns = int(execute_at.timestamp() * 1_000_000_000)
+        delivery_id = f"scheduled-approval:{task_id}"
+        reservation = await self._prepare_approval_card(
+            approval_id=delivery_id,
+            tool_call_id=task_id,
+            tool_name=tool_name,
+            raw_arguments=arguments,
+            agent_name=agent_name,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            approver_user_id=approver_user_id,
+            expires_at_ns=execute_at_ns,
+            target_fields={
+                "approval_target": "scheduled_call",
+                "scheduled_task_id": task_id,
+                "scheduled_for": approval_timestamp(execute_at_ns),
+                "body": f"🔒 Approval required: {tool_name} (scheduled for {scheduled_for_text})",
+            },
+        )
+        if reservation is None or reservation.payload.get("approvable", True) is not True:
+            return False
+        binding = ScheduledCallBinding(
+            task_id=task_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            requester_id=requester_id,
+            invoking_agent=agent_name,
+            tool_name=tool_name,
+            arguments_digest=approval_arguments_digest(arguments),
+            workflow_digest=workflow_digest,
+            execute_at_ns=execute_at_ns,
+        )
+        if not await cards.reserve_scheduled_call_approval(binding=binding, card=reservation):
+            return False
+        try:
+            await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.INITIAL)
+        except Exception:
+            logger.warning("approval_card_initial_delivery_deferred", delivery_id=delivery_id, exc_info=True)
+        self._ensure_deadline_sweep()
+        return True
+
+    async def arm_scheduled_call_approval(self, task_id: str, workflow_digest: str) -> ScheduledApprovalArmState:
+        """Arm one approved scheduled call as its unchanged task fires."""
+        if self.cards is None:
+            return "none"
+        return await self.cards.arm_scheduled_call_approval(task_id=task_id, workflow_digest=workflow_digest)
+
+    async def cancel_scheduled_call_approval(self, task_id: str) -> None:
+        """Deny a still-pending scheduling-time card once its task is cancelled."""
+        if self.cards is None or self.send_delivery is None:
+            return
+        recorded = await self.cards.resolve_background_approval_call(
+            run_id=scheduled_call_run_id(task_id),
+            call_id=task_id,
+            requested_status="denied",
+            reason="Schedule cancelled.",
+        )
+        if recorded.recorded:
+            await self.recover_cards_on_startup()
 
     async def _prepare_approval_card(
         self,
