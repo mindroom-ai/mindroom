@@ -13,6 +13,7 @@ enum MindRoomRuntimeAction: Equatable {
     case initializeSelfHostedConfig
     case pairHosted
     case reconnectHosted
+    case useLocalModel(String, String)
 }
 
 struct MindRoomCommandInvocation: Equatable {
@@ -27,7 +28,7 @@ struct MindRoomRuntime {
     private static let runtimePython = "cpython-3.13-macos-aarch64-none"
     private static let desktopHelperRelativePath =
         "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
-    private let homeURL: URL
+    let homeURL: URL
     private let bundleURL: URL
     private let baseEnvironment: [String: String]
     private let appVersion: String?
@@ -57,6 +58,10 @@ struct MindRoomRuntime {
 
     var bundledUVURL: URL {
         bundleURL.appendingPathComponent(Self.bundledUVRelativePath)
+    }
+
+    var bundledInferenceURL: URL {
+        bundleURL.appendingPathComponent("Contents/Resources/llama.cpp")
     }
 
     var desktopHelperURL: URL {
@@ -121,6 +126,10 @@ struct MindRoomRuntime {
             return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "mindroom.chat", "--no-input"])
         case .initializeSelfHostedConfig:
             return mindroomCommand(arguments: ["config", "init", "--path", localAgentsConfigURL.path, "--matrix-server", "self-hosted", "--no-input"])
+        case let .useLocalModel(model, apiKey):
+            return mindroomCommand(arguments: ["config", "use-local-model", "--path", localAgentsConfigURL.path,
+                                               "--model", model, "--base-url", LocalInferenceController.baseURL.absoluteString + "/v1",
+                                               "--api-key", apiKey])
         case .pairHosted:
             return mindroomCommand(arguments: ["connect", "--graceful-cancel"])
         case .reconnectHosted:
