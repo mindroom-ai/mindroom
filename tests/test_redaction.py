@@ -686,6 +686,20 @@ def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> 
     assert time.perf_counter() - start < 5.0
 
 
+@pytest.mark.parametrize(
+    ("unit", "redacted_unit"),
+    [("token=&", "token=&"), (" token=a", f" token={REDACTED}")],
+    ids=["empty-values", "no-terminator"],
+)
+def test_redact_sensitive_text_stays_linear_over_many_secret_assignments(unit: str, redacted_unit: str) -> None:
+    """Finding where each secret value ends must not rescan the rest of the text for every assignment."""
+    count = 64_000 // len(unit)
+    with cpu_budget(0.25):
+        redacted = redact_sensitive_text(unit * count)
+
+    assert redacted == redacted_unit * count
+
+
 def test_redact_sensitive_text_handles_deep_assignments_without_recursion() -> None:
     """Non-secret wrappers must not add Python stack frames while finding a secret leaf."""
     value = "api_key=hunter2"

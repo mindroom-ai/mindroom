@@ -26,6 +26,7 @@ from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.response_lifecycle import _QueuedMessageState
 from tests.conftest import request_envelope, test_runtime_paths
+from tests.cpu_budget_helpers import cpu_budget
 from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
@@ -839,7 +840,7 @@ async def test_judge_sees_the_newest_conversation_that_fits(count: int, size: in
 
 @pytest.mark.asyncio
 async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
-    """Redaction scans the whole text, so the kept half of a split credential never reaches the judge."""
+    """Redaction scans past each clip cut, so the kept half of a split credential never reaches the judge."""
 
     async def evaluate(_request: JudgmentRequest) -> bool | None:
         pytest.fail("Credentials must not reach the judgment backend")
@@ -855,6 +856,51 @@ async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
     with capture_logs() as logs:
         assert not await gate.should_finish((QueuedMessage("$new", "Thanks"),))
     assert _skip_reasons(logs) == ["history_unjudgeable"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [False, True], ids=["history", "reply"])
+async def test_megabyte_texts_cost_only_what_the_judge_sees(*, reply: bool) -> None:
+    """Huge earlier messages and reply snapshots are scanned only around their clipped text, keeping the loop free."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    body = "a=" * 1_000_000
+    gate = MidTurnGate(
+        active_text="Do the task",
+        evaluate=evaluate,
+        conversation_context=() if reply else tuple(JudgmentMessage("user", body) for _ in range(7)),
+    )
+    state = _QueuedMessageState(mid_turn_gate=gate)
+    gate.record_visible_response(body if reply else "")
+    state.add_waiting_human_message("$queued", text="Thanks")
+    with cpu_budget(0.25):
+        assert await gate.should_finish(state.pending_message_snapshot())
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newest", [False, True], ids=["gave-way", "kept"])
+async def test_only_conversation_that_reaches_the_judge_is_checked_for_credentials(*, newest: bool) -> None:
+    """A credential in older conversation that gives way to newer messages no longer forces a wrap-up."""
+    requests: list[JudgmentRequest] = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        requests.append(request)
+        return True
+
+    credential = JudgmentMessage("user", '{"password": "fake_secret_for_test"}')
+    newer = tuple(JudgmentMessage("user", f"{i:03} " + "x" * 1_900) for i in range(30))
+    gate = MidTurnGate(
+        active_text="Continue",
+        evaluate=evaluate,
+        conversation_context=(*newer, credential) if newest else (credential, *newer),
+    )
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is not newest
+    assert all(request.body is not None and b"fake_secret_for_test" not in request.body for request in requests)
 
 
 @pytest.mark.asyncio
