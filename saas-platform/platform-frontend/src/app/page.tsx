@@ -6,6 +6,7 @@ import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
+import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
 import {
   ArrowRight,
   BookOpen,
@@ -244,9 +245,11 @@ function RunItYourself() {
     ['Talk to your agents', 'On the web, on iPhone and iPad, or on the Mac.'],
   ]
 
+  const glass = useLiquidGlass<HTMLDivElement>()
+
   return (
-    <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl shadow-gray-200/70 dark:border-gray-800 dark:bg-gray-950 dark:shadow-black/25">
-      <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+    <div ref={glass} className="liquid-glass relative overflow-hidden rounded-2xl">
+      <div className="flex items-center justify-between border-b border-gray-950/8 px-4 py-3 dark:border-white/10">
         <div className="flex items-center gap-2">
           <span className="h-3 w-3 rounded-full bg-red-400" />
           <span className="h-3 w-3 rounded-full bg-yellow-400" />
