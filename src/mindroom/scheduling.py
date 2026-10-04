@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ScheduledApprovalArmState
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.matrix.conversation_reads import ConversationReader
 
@@ -1523,10 +1524,7 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 logger.error("No execution time provided for one-time task", task_id=task_id)
                 return
 
-            approval_state = await arm_scheduled_call_approval(
-                task_id,
-                _scheduled_call_workflow_digest(task_id, latest_workflow),
-            )
+            approval_state = await _arm_scheduled_call(task_id, latest_workflow)
             if approval_state == "denied":
                 logger.info("scheduled_tool_call_skipped_after_denial", task_id=task_id)
                 final_status = "cancelled"
@@ -1904,8 +1902,19 @@ async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
 
 
 def _scheduled_call_workflow_digest(task_id: str, workflow: ScheduledWorkflow) -> str:
-    """Fingerprint the exact task a scheduled-call approval was given for."""
-    return hashlib.sha256(f"{task_id}\n{workflow.model_dump_json()}".encode()).hexdigest()
+    """Fingerprint the fields that define the call a scheduled-call approval was given for."""
+    execute_at = None if workflow.execute_at is None else workflow.execute_at.astimezone(UTC).isoformat()
+    defining_fields = [task_id, workflow.room_id, workflow.thread_id, workflow.created_by, workflow.message, execute_at]
+    return hashlib.sha256(json.dumps(defining_fields, separators=(",", ":")).encode()).hexdigest()
+
+
+async def _arm_scheduled_call(task_id: str, workflow: ScheduledWorkflow) -> ScheduledApprovalArmState:
+    """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
+    try:
+        return await arm_scheduled_call_approval(task_id, _scheduled_call_workflow_digest(task_id, workflow))
+    except Exception:
+        logger.warning("scheduled_tool_call_arming_failed", task_id=task_id, exc_info=True)
+        return "unarmed"
 
 
 def _scheduled_call_trigger_message(agent_name: str, tool_name: str, arguments: dict[str, object]) -> str:
@@ -2030,6 +2039,8 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         )
     finally:
         if not card_posted:
+            # A stop can land after the card was reserved but before the request returned.
+            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
             await _persist_scheduled_task_state(
                 client=runtime.client,
                 room_id=room_id,
@@ -2040,8 +2051,6 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
                 created_at=created_at,
                 matrix_admin=runtime.matrix_admin,
             )
-            # A stop can land after the card was reserved but before the request returned.
-            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     if not card_posted:
         return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
     scheduled_for = _format_scheduled_time(send_at, config.timezone)

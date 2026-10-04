@@ -799,7 +799,12 @@ async def test_interrupted_card_request_cancels_the_task_and_withdraws_its_card(
     """A stop while the card is being delivered leaves neither a runnable task nor an actionable card."""
     config = _gated_config()
     context = _tool_context(config)
-    withdraw = AsyncMock()
+    order: list[str] = []
+    withdraw = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("withdraw"))
+    put_state = context.client.room_put_state.return_value
+    context.client.room_put_state.side_effect = lambda **kwargs: (
+        order.append(str(kwargs["content"]["status"])) or put_state
+    )
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=AsyncMock(side_effect=asyncio.CancelledError)),
@@ -818,6 +823,7 @@ async def test_interrupted_card_request_cancels_the_task_and_withdraws_its_card(
     [(_status, record), (cancelled_status, _cancelled)] = _persisted_workflows(context)
     assert cancelled_status == "cancelled"
     withdraw.assert_awaited_once_with(record.task_id, reason="Schedule cancelled.")
+    assert order == ["pending", "withdraw", "cancelled"]
     start.assert_not_called()
 
 
@@ -842,8 +848,18 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
         "task1234",
         workflow,
     )
-    edited = workflow.model_copy(update={"message": workflow.message.replace("Grüße", "Hi")})
-    assert _scheduled_call_workflow_digest("task1234", edited) != _scheduled_call_workflow_digest("task1234", workflow)
+    original = _scheduled_call_workflow_digest("task1234", workflow)
+    for change in (
+        {"message": workflow.message.replace("Grüße", "Hi")},
+        {"execute_at": workflow.execute_at + timedelta(minutes=1)},
+        {"thread_id": "$other"},
+        {"created_by": "@other:localhost"},
+    ):
+        assert _scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
+    # Fields that do not define the call, including ones a later release may add, leave the binding intact.
+    assert (
+        _scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
+    )
 
 
 @pytest.mark.asyncio
@@ -903,6 +919,50 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     arm.assert_awaited_once_with("task1234", _scheduled_call_workflow_digest("task1234", workflow))
     assert execute.await_count == int(fires)
     assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
+
+
+@pytest.mark.asyncio
+async def test_plain_tasks_still_fire_when_scheduled_call_arming_fails() -> None:
+    """An approval-journal error must not stop an ordinary reminder; an unarmed call still asks for approval."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state = AsyncMock()
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="Remind me",
+        description="Reminder",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.arm_scheduled_call_approval", new=AsyncMock(side_effect=RuntimeError("db down"))),
+        patch(
+            "mindroom.scheduling_executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute,
+    ):
+        await _run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    execute.assert_awaited_once()
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
 
 
 @pytest.mark.asyncio
