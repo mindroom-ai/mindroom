@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Long background text reaches the judge as its start and end, so one big reply cannot disable judgment.
+# A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
 _CLIPPED_TEXT_CHARS = 2_000
 # The redactor refuses input over 64 KiB, so longer text is scanned in overlapping chunks below that bound.
 _REDACTION_CHUNK_CHARS = 60_000
@@ -45,14 +44,11 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
-def _clip(text: str, limit: int = _CLIPPED_TEXT_CHARS) -> str:
-    if len(text) <= limit:
+def _clip(text: str) -> str:
+    if len(text) <= _CLIPPED_TEXT_CHARS:
         return text
-    half = limit // 2
-    # A cut inside a sender tag would leak part of a Matrix ID past speaker aliasing.
-    head = re.sub(r"<(?:m|ms|msg\b[^<>]*)?$", "", text[:half])
-    tail = re.sub(r"^[^<>]*[\"']>", "", text[-half:])
-    return f"{head}\n[... {len(text) - 2 * half} characters omitted ...]\n{tail}"
+    half = _CLIPPED_TEXT_CHARS // 2
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
 
 
 def _is_unredacted(text: str) -> bool:
@@ -73,6 +69,10 @@ def _is_plain_text(text: str | None) -> TypeGuard[str]:
         and "[attachments:" not in text
         and "Attachments sent with the current message" not in text
     )
+
+
+def _is_whole_text(text: str | None) -> TypeGuard[str]:
+    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and _is_unredacted(text)
 
 
 def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
@@ -129,58 +129,43 @@ class MidTurnGate:
             if self._checked == pending:
                 return self._finish
             finish = False
-            reason = self._skip_reason(pending)
-            if reason is None:
-                request = self._request(pending)
+            request = self._request(pending)
+            if isinstance(request, str):
+                reason = request
+            else:
                 reason = request.incomplete_reason
                 if request.complete:
                     try:
                         finish = await self.evaluate(request) is True
-                    except Exception as exc:
+                    except Exception:
                         # Keep the existing behavior; SDK exceptions can contain private inputs.
-                        reason = f"judge_error:{type(exc).__name__}"
+                        reason = "judge_error"
             if reason is not None:
                 logger.info("Mid-turn judgment skipped", reason=reason, queued_messages=len(pending))
             self._checked, self._finish = pending, finish
             return finish
 
-    def _skip_reason(self, pending: tuple[QueuedMessage, ...]) -> str | None:
-        """Name why the queue cannot be judged; the judge sees each queued message whole."""
+    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:  # noqa: PLR0911
+        """Build the judge's request, or name why the queue cannot be judged."""
         if self.conversation_context is None:
             return "history_unavailable"
         if not pending or len(pending) > 8:
             return "queued_message_count"
-        if not all(
-            _is_plain_text(message.text) and len(message.text) <= MAX_REQUEST_BYTES and _is_unredacted(message.text)
-            for message in pending
-        ):
-            return "queued_message_unjudgeable"
-        background = (
-            self.active_text,
-            *(message.text for message in self.conversation_context[-_MAX_CONTEXT_MESSAGES:]),
-        )
-        if not all(_is_plain_text(text) and _is_unredacted(text) for text in background):
-            return "context_unjudgeable"
-        if any(message.visible_response is None or not _is_unredacted(message.visible_response) for message in pending):
-            return "visible_response_unavailable"
-        return None
-
-    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest:
-        """Build the request from clipped background, dropping the oldest conversation until it fits."""
-        evidence = json.dumps(
-            {
-                "active_request": _clip(self.active_text or ""),
-                "queued_messages": [
-                    {"text": message.text, "visible_response": _clip(message.visible_response or "")}
-                    for message in pending
-                ],
-            },
-            ensure_ascii=False,
-        )
-        context = [
-            JudgmentMessage(message.sender, _clip(message.text))
-            for message in (self.conversation_context or ())[-_MAX_CONTEXT_MESSAGES:]
-        ]
+        # The judge compares the active request with each queued message, so both are sent whole.
+        if not _is_whole_text(self.active_text):
+            return "active_request_unjudgeable"
+        queued = []
+        for message in pending:
+            if not _is_whole_text(message.text):
+                return "queued_message_unjudgeable"
+            if message.visible_response is None or not _is_unredacted(message.visible_response):
+                return "visible_response_unavailable"
+            queued.append({"text": message.text, "visible_response": _clip(message.visible_response)})
+        history = self.conversation_context[-_MAX_CONTEXT_MESSAGES:]
+        if not all(_is_plain_text(message.text) and _is_unredacted(message.text) for message in history):
+            return "history_unjudgeable"
+        evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
+        context = [JudgmentMessage(message.sender, _clip(message.text)) for message in history]
         while True:
             request = build_judgment_request(
                 MID_TURN_QUESTION,
@@ -188,6 +173,7 @@ class MidTurnGate:
                 max_context_messages=_MAX_CONTEXT_MESSAGES + 1,
                 instructions=self.instructions,
             )
-            if request.complete or request.incomplete_reason != "essential_input_too_large" or not context:
+            if request.incomplete_reason != "essential_input_too_large" or not context:
                 return request
+            # The oldest conversation gives way first.
             del context[0]

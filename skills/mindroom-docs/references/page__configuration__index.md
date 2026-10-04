@@ -217,9 +217,9 @@ Each pending message includes a snapshot of the active reply text last acknowled
 That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
 It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
 Private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
-To fit the 16 KB request limit, a long earlier message, active request, or reply snapshot reaches the judge as its first and last 1,000 characters, and older messages give way to the newest 63 or fewer that fit.
-Queued messages are always sent whole.
-Missing or partial conversation history, earlier media, and a queue that does not fit even without earlier messages retain wrap-up; each queued message carries its own reply snapshot, and the limit counts bytes, so non-Latin text fits fewer characters.
+To fit the 16 KB request limit, a long earlier message or reply snapshot reaches the judge as its first and last 1,000 characters, and older messages give way to the newest 63 or fewer that fit.
+The active request and queued messages are always sent whole.
+Missing or partial conversation history, earlier media, and a request and queue that do not fit even without earlier messages retain wrap-up; each queued message carries its own reply snapshot, and the limit counts bytes, so non-Latin text fits fewer characters.
 Text that looks like a credential anywhere in a message, including a clipped-out middle, retains wrap-up.
 Each wrap-up that skips the judge logs `Mid-turn judgment skipped` with a reason such as `history_unavailable` or `essential_input_too_large`; judge timeouts and backend errors are logged as `Mid-turn continuation evaluated` with a `failure`.
 Room-mode turns currently have no public conversation snapshot and retain normal wrap-up; empty history is sufficient only for a proven new thread.

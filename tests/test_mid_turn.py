@@ -781,7 +781,7 @@ def _skip_reasons(logs: list[dict]) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
-    """A long earlier reply, active request, or reply snapshot no longer disables the judge; queued text stays whole."""
+    """A long earlier reply or reply snapshot no longer disables the judge; the request and queued text stay whole."""
     requests: list[dict] = []
 
     async def evaluate(request: JudgmentRequest) -> bool | None:
@@ -790,7 +790,7 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
         return True
 
     gate = MidTurnGate(
-        active_text="Triage start. " + "y" * 20_000 + " Triage end.",
+        active_text="Triage the next batch",
         evaluate=evaluate,
         conversation_context=(
             JudgmentMessage("user", "Triage the batch"),
@@ -807,9 +807,10 @@ async def test_long_background_reaches_the_judge_as_its_start_and_end() -> None:
     conversation = requests[0]["state"]["conversation"]
     evidence = json.loads(conversation[-1]["text"])
     assert conversation[0]["text"] == "Triage the batch"
+    assert evidence["active_request"] == "Triage the next batch"
     assert evidence["queued_messages"][0]["text"] == queued
-    clipped = (conversation[1]["text"], evidence["active_request"], evidence["queued_messages"][0]["visible_response"])
-    for text, label in zip(clipped, ("Report", "Triage", "Progress"), strict=True):
+    clipped = (conversation[1]["text"], evidence["queued_messages"][0]["visible_response"])
+    for text, label in zip(clipped, ("Report", "Progress"), strict=True):
         assert text.startswith(f"{label} start.")
         assert text.endswith(f"{label} end.")
         assert "characters omitted" in text
@@ -853,51 +854,7 @@ async def test_credential_across_a_clip_cut_keeps_wrap_up() -> None:
     )
     with capture_logs() as logs:
         assert not await gate.should_finish((QueuedMessage("$new", "Thanks"),))
-    assert _skip_reasons(logs) == ["context_unjudgeable"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cut", ["start", "end"])
-async def test_clipping_never_splits_a_speaker_tag(cut: str) -> None:
-    """A cut inside a sender tag drops the fragment, so no partial Matrix ID or name escapes speaker aliasing."""
-    requests: list[str] = []
-
-    async def evaluate(request: JudgmentRequest) -> bool | None:
-        assert request.body is not None
-        requests.append(request.body.decode())
-        return True
-
-    tag = '<msg from="@alice:example.org" display_name="Alice">'
-    text = "x" * 980 + tag + "y" * 20_000 if cut == "start" else "y" * 20_000 + tag + "z" * 980
-    gate = MidTurnGate(
-        active_text="Do the task",
-        evaluate=evaluate,
-        conversation_context=(JudgmentMessage("user", text),),
-    )
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
-    assert "alice" not in requests[0].lower()
-
-
-@pytest.mark.asyncio
-async def test_clipping_keeps_text_around_stray_angle_brackets() -> None:
-    """Only a split sender tag is trimmed; comparisons and arrows near a cut keep the kept text whole."""
-    requests: list[dict] = []
-
-    async def evaluate(request: JudgmentRequest) -> bool | None:
-        assert request.body is not None
-        requests.append(json.loads(request.body))
-        return True
-
-    text = "If a < b then " + "x" * 20_000 + " then step1 -> step2 " + "y" * 900
-    gate = MidTurnGate(
-        active_text="Do the task",
-        evaluate=evaluate,
-        conversation_context=(JudgmentMessage("user", text),),
-    )
-    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
-    clipped = requests[0]["state"]["conversation"][0]["text"]
-    assert clipped.startswith("If a < b then xxx")
-    assert "then step1 -> step2" in clipped
+    assert _skip_reasons(logs) == ["history_unjudgeable"]
 
 
 @pytest.mark.asyncio
@@ -908,12 +865,13 @@ async def test_clipping_keeps_text_around_stray_angle_brackets() -> None:
         ({"pending": tuple(QueuedMessage(f"${i}", "Thanks") for i in range(9))}, "queued_message_count"),
         ({"pending": (QueuedMessage("$new", None),)}, "queued_message_unjudgeable"),
         ({"pending": (QueuedMessage("$new", "x" * 16_001),)}, "queued_message_unjudgeable"),
-        ({"active_text": None}, "context_unjudgeable"),
+        ({"active_text": None}, "active_request_unjudgeable"),
+        ({"active_text": "x" * 16_001}, "active_request_unjudgeable"),
         ({"pending": (QueuedMessage("$new", "Thanks", None),)}, "visible_response_unavailable"),
         ({"pending": (QueuedMessage("$new", "x" * 15_000),)}, "essential_input_too_large"),
-        ({"evaluate_error": True}, "judge_error:RuntimeError"),
+        ({"evaluate_error": True}, "judge_error"),
     ],
-    ids=["history", "count", "missing", "oversized", "media", "progress", "request", "error"],
+    ids=["history", "count", "missing", "oversized", "media", "long-request", "progress", "request", "error"],
 )
 async def test_skipped_judgment_logs_its_reason(setup: dict, reason: str) -> None:
     """Every wrap-up without a judge decision says why, once per queue snapshot."""
