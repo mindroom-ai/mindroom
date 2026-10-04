@@ -113,6 +113,10 @@ spec:
     spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ $name }}
+      {{- with $bs.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       initContainers:
         - name: bootstrap-owner
           image: {{ include "mindroom-runtime.agentVaultBootstrapImage" . | quote }}
@@ -180,6 +184,10 @@ spec:
               value: {{ $bs.allowedDomains | quote }}
           resources:
             {{- toYaml $bs.resources | nindent 12 }}
+          {{- with $bs.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: work
               mountPath: /work
@@ -214,6 +222,10 @@ spec:
                   fieldPath: metadata.namespace
           resources:
             {{- toYaml $bs.resources | nindent 12 }}
+          {{- with $bs.kubectlSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: work
               mountPath: /work

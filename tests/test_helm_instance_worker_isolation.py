@@ -4058,6 +4058,42 @@ def test_runtime_chart_agent_vault_server_runs_as_numeric_non_root_user() -> Non
     }
 
 
+@pytest.mark.parametrize("override", [None, "podSecurityContext", "securityContext", "kubectlSecurityContext"])
+def test_runtime_chart_agent_vault_bootstrap_security_contexts(tmp_path: Path, override: str | None) -> None:
+    """The bootstrap Job pod and both containers get configurable security contexts with hardened defaults."""
+    custom = {"runAsUser": 1234}
+    bootstrap: dict[str, Any] = {"enabled": True, "kubectlImage": "registry.example.test/kubectl:1"}
+    if override:
+        bootstrap[override] = custom
+    agent_vault = {
+        "enabled": True,
+        "cliImage": "infisical/agent-vault:test",
+        "ownerEmail": "owner@example.test",
+        "workerCaConfigMapName": "agent-vault-ca",
+        "bootstrap": bootstrap,
+    }
+    values = {"workers": {"backend": "kubernetes", "kubernetes": {"agentVault": agent_vault}}}
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=_values_files(tmp_path, values),
+        release_name="mindroom-runtime",
+    )
+    job = _resource(docs, "Job", "agent-vault-bootstrap")
+    drop_all = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+    expected = {
+        "podSecurityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, **drop_all},
+        "kubectlSecurityContext": drop_all,
+    }
+    if override:
+        # Helm deep-merges a values-file map into the chart default.
+        expected[override] = {**expected[override], **custom}
+
+    assert job["spec"]["template"]["spec"]["securityContext"] == expected["podSecurityContext"]
+    assert _init_container(job, "bootstrap-owner")["securityContext"] == expected["securityContext"]
+    assert _container(job, "publish-ca")["securityContext"] == expected["kubectlSecurityContext"]
+
+
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:
     """Hosted runtimes should keep Matrix client state on a dedicated PVC."""
     values_path = tmp_path / "values.yaml"
