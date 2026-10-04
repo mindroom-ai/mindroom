@@ -49,12 +49,13 @@ function variantClassName(variant: ParticleBackgroundVariant) {
   return 'pointer-events-none absolute inset-x-0 bottom-0 top-80 z-0 block overflow-hidden bg-gradient-to-b from-transparent via-(--particle-backdrop)/55 to-(--particle-backdrop) [mask-image:linear-gradient(to_bottom,transparent_0%,black_26%,black_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0%,black_26%,black_100%)] lg:inset-y-0 lg:left-auto lg:w-[70%] lg:bg-gradient-to-l lg:from-(--particle-backdrop) lg:via-(--particle-backdrop)/95 lg:to-transparent lg:[mask-image:linear-gradient(to_left,black_62%,transparent_100%)] lg:[-webkit-mask-image:linear-gradient(to_left,black_62%,transparent_100%)] motion-reduce:hidden'
 }
 
-function canvasClassName(variant: ParticleBackgroundVariant) {
+function canvasClassName(variant: ParticleBackgroundVariant, isDarkMode: boolean) {
   if (variant === 'auth') {
     return 'relative h-full w-full opacity-90'
   }
 
-  return 'relative h-full w-full opacity-[0.58] lg:opacity-80'
+  // Dark particles on a light page read as dust, so the light field stays faint.
+  return isDarkMode ? 'relative h-full w-full opacity-[0.58] lg:opacity-80' : 'relative h-full w-full opacity-40 lg:opacity-55'
 }
 
 export function HeroParticleBackground({
@@ -95,7 +96,7 @@ export function HeroParticleBackground({
       style={{ '--particle-backdrop': theme.backdrop } as CSSProperties}
     >
       <ParticularDriftCanvas
-        className={canvasClassName(variant)}
+        className={canvasClassName(variant, isDarkMode)}
         imageUrl={MINDROOM_LOGO_SRC}
         options={options}
       />
