@@ -28,7 +28,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
 from agno.run.requirement import RunRequirement
 from agno.session.agent import AgentSession
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function, FunctionCall, UserInputField
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
@@ -54,6 +54,7 @@ from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
+    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -3688,7 +3689,14 @@ async def test_agent_continuation_executes_real_agno_confirmation(
 
 @pytest.mark.parametrize(
     ("mutation", "approved"),
-    [(None, True), ("rewritten", True), ("planted", True), ("planted", False), ("copied", True)],
+    [
+        (None, True),
+        ("rewritten", True),
+        ("planted", True),
+        ("planted", False),
+        ("copied", True),
+        ("user_input", True),
+    ],
 )
 @pytest.mark.asyncio
 async def test_agent_continuation_runs_only_approved_calls(
@@ -3768,6 +3776,19 @@ async def test_agent_continuation_runs_only_approved_calls(
             **(paused.metadata or {}),
             DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
         }
+    elif mutation == "user_input":
+        # The stored call keeps its approved arguments, but answered user input would replace them before it runs.
+        pending = (paused.requirements or [])[0]
+        paused.metadata = {
+            **(paused.metadata or {}),
+            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+        }
+        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
+            assert tool is not None
+            tool.requires_confirmation = False
+            tool.requires_user_input = True
+            tool.answered = True
+            tool.user_input_schema = [UserInputField(name="args", field_type=list, value=attacker_args["args"])]
     agent.db.upsert_run(paused, session_id="session-1")
     continuation = ApprovalContinuation(
         approval_id="approval-rewritten",
@@ -5047,7 +5068,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
     assert outcome.terminal_status == "cancelled"
     assert _approval_reply_edits(client) == [
         (STREAM_STATUS_STREAMING, "Checking the report."),
-        (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**"),
+        (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**"),
     ]
     assert await runner.deps.approval_store.approval_continuation(claimed.approval_id) is None
 
@@ -9879,8 +9900,8 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         assert in_flight == []
 
     assert outcome.terminal_status == "cancelled"
-    assert landed == [STREAM_STATUS_COMPLETED]
-    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_COMPLETED, "**[Response cancelled by user]**")
+    assert landed == [STREAM_STATUS_CANCELLED]
+    assert _approval_reply_edits(client)[-1] == (STREAM_STATUS_CANCELLED, "**[Response cancelled by user]**")
 
 
 @dataclass
