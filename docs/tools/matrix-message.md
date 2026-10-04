@@ -1,3 +1,7 @@
+---
+icon: lucide/send
+---
+
 # Matrix messages
 
 `matrix_message` lets an agent send, read, edit, and react to Matrix messages, and ask other agents to respond in a visible conversation.

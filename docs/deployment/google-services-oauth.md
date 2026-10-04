@@ -1,5 +1,5 @@
 ---
-icon: lucide/mail
+icon: lucide/key-square
 ---
 
 # Google Services OAuth

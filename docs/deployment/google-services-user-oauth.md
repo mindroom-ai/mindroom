@@ -1,5 +1,5 @@
 ---
-icon: lucide/user-round
+icon: fontawesome/brands/google
 ---
 
 # Google Services OAuth For Local Installs

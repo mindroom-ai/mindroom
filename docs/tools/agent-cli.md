@@ -1,3 +1,7 @@
+---
+icon: lucide/minimize-2
+---
+
 # Minimal Agent Mode
 
 Minimal mode gives an existing agent a short prompt and one Bash tool instead of its full system prompt and tool schemas, so each request carries far fewer tokens.

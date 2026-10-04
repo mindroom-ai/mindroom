@@ -1,5 +1,5 @@
 ---
-icon: lucide/wrench
+icon: lucide/globe
 ---
 
 # Web Scraping & Browser

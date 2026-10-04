@@ -1,3 +1,7 @@
+---
+icon: lucide/phone
+---
+
 # Voice Calls
 
 MindRoom agents can join Element Call voice calls (MatrixRTC, also used by Element X and recent Cinny releases) in their rooms and talk with the caller in real time.

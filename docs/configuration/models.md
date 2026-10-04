@@ -1,5 +1,5 @@
 ---
-icon: lucide/brain
+icon: lucide/cpu
 ---
 
 # Model Configuration

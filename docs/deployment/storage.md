@@ -1,5 +1,5 @@
 ---
-icon: lucide/database
+icon: lucide/hard-drive
 ---
 
 # Data Storage & Journal

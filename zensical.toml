@@ -177,6 +177,16 @@ repo = "fontawesome/brands/github"
 [project.extra]
 generator = false
 
+# Icons for sidebar sections that have no index page; used by docs/overrides/partials/nav-item.html.
+[project.extra.nav_icons]
+"Get Started" = "lucide/compass"
+"Features" = "lucide/layers"
+"Matrix" = "simple/matrix"
+"Tool Catalog" = "lucide/library"
+"Security & Access" = "lucide/lock"
+"Extend & Integrate" = "lucide/blocks"
+"About" = "lucide/info"
+
 [project.extra.analytics]
 provider = "custom"
 

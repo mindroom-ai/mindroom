@@ -1,5 +1,5 @@
 ---
-icon: lucide/wrench
+icon: lucide/at-sign
 ---
 
 # Messaging & Social

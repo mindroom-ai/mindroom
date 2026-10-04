@@ -1,3 +1,7 @@
+---
+icon: lucide/laptop
+---
+
 # macOS App
 
 The MindRoom macOS app is a native window with a menu bar companion for two independent roles:

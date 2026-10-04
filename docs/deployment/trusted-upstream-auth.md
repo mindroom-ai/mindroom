@@ -1,5 +1,5 @@
 ---
-icon: lucide/shield-check
+icon: lucide/log-in
 ---
 
 # Trusted Upstream Browser Auth

@@ -1,5 +1,5 @@
 ---
-icon: lucide/shield
+icon: lucide/boxes
 ---
 
 # Sandbox Proxy Isolation

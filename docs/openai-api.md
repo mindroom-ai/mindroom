@@ -1,5 +1,5 @@
 ---
-icon: lucide/plug
+icon: lucide/braces
 ---
 
 # OpenAI-Compatible API

@@ -1,3 +1,7 @@
+---
+icon: lucide/shield-half
+---
+
 # Security Posture
 
 This page records MindRoom's security model, the `file_access` setting, and the behaviors that are intentional.

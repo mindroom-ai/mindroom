@@ -1,5 +1,5 @@
 ---
-icon: lucide/shield-check
+icon: lucide/eye-off
 ---
 
 

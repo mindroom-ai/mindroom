@@ -1,5 +1,5 @@
 ---
-icon: lucide/layout-list
+icon: fontawesome/brands/atlassian
 ---
 
 # Atlassian Cloud
