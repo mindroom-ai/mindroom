@@ -151,7 +151,6 @@ from .scheduling import (
     restore_scheduled_tasks,
 )
 from .startup_errors import PermanentStartupError
-from .sync_restart_retry import InterruptedTurnRooms
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -434,7 +433,6 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._interrupted_turn_rooms = InterruptedTurnRooms()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -446,7 +444,6 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
-        self._entity_removed = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
@@ -767,7 +764,6 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
-                register_approval_interruption=self._register_approval_interruption,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -781,7 +777,6 @@ class AgentBot:
                 generate_response=lambda request: self._run_regenerated_response(request),
                 wait_for_turn_settled=self._turn_store.wait_for_turn_settled,
                 receipt_order=self._journal_dispatcher.receipt_order,
-                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
                     timezone=self.config.timezone,
@@ -873,7 +868,6 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                interrupted_turn_rooms=self._interrupted_turn_rooms,
                 visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
@@ -1060,33 +1054,6 @@ class AgentBot:
     def admission_gate(self, value: ResponseAdmissionGate) -> None:
         """Bind the orchestrator-owned response-admission gate."""
         self._runtime_view.response_admission_gate = value
-
-    @property
-    def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
-        """Return rooms with interrupted turns awaiting replacement recovery."""
-        return self._interrupted_turn_rooms.pending_room_ids
-
-    def _register_approval_interruption(self, source_event_id: str, room_id: str) -> None:
-        """Wake fleet recovery after the settled approval's owner releases its claims."""
-        if self._entity_removed or not self._interrupted_turn_rooms.register(source_event_id, room_id=room_id):
-            return
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return
-
-        def notify(_done: asyncio.Task | None = None) -> None:
-            if not self._entity_removed:
-                orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
-
-        try:
-            task = asyncio.current_task()
-        except RuntimeError:
-            # Synchronous registration stays available to later fleet capture.
-            return
-        if task is None:
-            notify()
-        else:
-            task.add_done_callback(notify)
 
     @property
     def approval_room_ids(self) -> frozenset[str]:
@@ -2390,8 +2357,6 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
-        if shutdown_intent.stop_reason == "entity_removed":
-            self._entity_removed = True
         if not self._sync_shutting_down:
             self.logger.info(
                 "matrix_agent_response_runtime_shutdown",

@@ -47,7 +47,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_auto_resume_relay_body, is_automation_source_kind
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import (
     ApprovalContinuation,
@@ -328,6 +328,23 @@ def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
     return show_tool_calls
 
 
+def _interruption_note_landed(final_outcome: FinalDeliveryOutcome) -> bool:
+    """Return whether a cancellation ended its turn with the interruption note visible in Matrix.
+
+    That note is the turn's terminal outcome, since nothing resumes it; a note
+    that never landed leaves the turn to replay.
+    """
+    if final_outcome.terminal_status != "cancelled" or final_outcome.delivery_kind is None:
+        return False
+    note = (
+        RESTART_INTERRUPTED_RESPONSE_NOTE
+        if final_outcome.resolved_cancel_source == "sync_restart"
+        else INTERRUPTED_RESPONSE_NOTE
+    )
+    body = final_outcome.final_visible_body
+    return body is not None and body.rstrip().endswith(note)
+
+
 def _split_delivery_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -551,7 +568,6 @@ class ResponseRequest:
     ) = None
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
-    on_interrupted_response_recoverable: Callable[[], None] | None = None
     sync_restart_retry_source_event_id: str | None = None
     on_deferred_outcome_handled: Callable[[str], Awaitable[None]] | None = None
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
@@ -871,7 +887,6 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
-    register_approval_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -903,17 +918,13 @@ class _InboxResponseOwnership:
     proof_task: asyncio.Task[bool] | None = None
 
 
-def _requested_by_a_person(origin: TurnOrigin, body: str) -> bool:
+def _requested_by_a_person(origin: TurnOrigin) -> bool:
     """Whether a turn counts toward skill learning.
 
-    Like Hermes skipping cron reviews, automated runs, restart resumes, and replies to other agents never count toward
-    a review; they have no human to learn from.
+    Like Hermes skipping cron reviews, automated runs and replies to other agents never count toward a review; they
+    have no human to learn from.
     """
-    return (
-        origin.requester_kind == SenderKind.USER
-        and not is_automation_source_kind(origin.source_kind)
-        and not is_auto_resume_relay_body(body)
-    )
+    return origin.requester_kind == SenderKind.USER and not is_automation_source_kind(origin.source_kind)
 
 
 @dataclass
@@ -1910,21 +1921,22 @@ class ResponseRunner:
         """Hand an approved run a restart cut short back to replay, which continues its reply.
 
         Before a FINAL the reply is still the unfinished stream of one turn, so
-        the replayed turn adopts it like any reply a restart left streaming.
-        A deleted reply, or a FINAL already owed, settles the continuation as a failure instead.
+        the replayed turn adopts it like any reply a restart left streaming. A
+        hand-back that cannot finish yet, such as cards that did not expire, is
+        retried by the next recovery pass. A deleted reply, or a FINAL already
+        owed, settles the continuation as a failure instead.
         """
         initial = await self.deps.approval_store.load_matrix_delivery(
             delivery_id=continuation.source_event_ids[0],
             stage=DeliveryStage.INITIAL,
         )
-        # A deleted reply has nothing left to continue.
-        if (initial is None or not initial.retired) and await self._approval_responses.release_to_replay(
+        if (initial is not None and initial.retired) or await self._approval_responses.final_delivery(
             continuation,
-            reason,
-        ):
-            return None
-        settled = await self._approval_responses.settle_failure(continuation, reason)
-        return continuation.response_event_id if settled else None
+        ) is not None:
+            settled = await self._approval_responses.settle_failure(continuation, reason)
+            return continuation.response_event_id if settled else None
+        await self._approval_responses.release_to_replay(continuation, reason)
+        return None
 
     async def _settle_interrupted_approval_recovery(
         self,
@@ -1953,19 +1965,12 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        settled = await self._approval_responses.settle_failure(
+        return await self._approval_responses.settle_failure(
             failing,
             reason,
             visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
-        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
-            failing.source_event_ids[0],
-            visible_text=update,
-            failure_reason=failing.failure_reason,
-        ):
-            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
-        return settled
 
     async def _approval_interruption_update(
         self,
@@ -2166,7 +2171,7 @@ class ResponseRunner:
         reviews = orchestrator.skill_reviews
         agent_name = self.deps.agent_name
         reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
-        if not _requested_by_a_person(request.response_envelope.origin, request.response_envelope.body):
+        if not _requested_by_a_person(request.response_envelope.origin):
             return None, runtime
         capture = SkillReviewCapture()
 
@@ -3090,7 +3095,7 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
-    async def _recover_nonready_approval(  # noqa: PLR0911 - explicit approval states have independent terminal outcomes
+    async def _recover_nonready_approval(
         self,
         owned: ApprovalContinuation,
         *,
@@ -3122,24 +3127,33 @@ class ResponseRunner:
         if owned.state == "claimed":
             return True, await self._recover_claimed_approval_lifecycle(owned, target=target)
         if owned.state == "failing":
-            if await self._approval_responses.successful_final_delivery(owned, recover=True) is not None:
-                owns_final, event_id = await self._recover_frozen_approval_final(owned, target=target)
-                return True, event_id if owns_final else None
-            reason = owned.failure_reason or "Tool approval continuation failed safely."
-            if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
-                return True, await self._release_interrupted_approval(owned, reason=reason)
-            cancel_source = _approval_interruption_cancel_source(reason)
-            settled = (
-                await self._settle_interrupted_approval_recovery(
-                    owned,
-                    reason=reason,
-                    cancel_source=cancel_source,
-                )
-                if cancel_source is not None
-                else await self._approval_responses.settle_failure(owned, reason)
-            )
-            return True, owned.response_event_id if settled else None
+            return True, await self._recover_failing_approval(owned, target=target)
         return False, None
+
+    async def _recover_failing_approval(
+        self,
+        failing: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> str | None:
+        """Finish a fenced continuation through its frozen FINAL, replay after a restart, or its failure note."""
+        if await self._approval_responses.successful_final_delivery(failing, recover=True) is not None:
+            owns_final, event_id = await self._recover_frozen_approval_final(failing, target=target)
+            return event_id if owns_final else None
+        reason = failing.failure_reason or "Tool approval continuation failed safely."
+        if reason == _INTERRUPTED_APPROVAL_RECOVERY_REASON:
+            return await self._release_interrupted_approval(failing, reason=reason)
+        cancel_source = _approval_interruption_cancel_source(reason)
+        settled = (
+            await self._settle_interrupted_approval_recovery(
+                failing,
+                reason=reason,
+                cancel_source=cancel_source,
+            )
+            if cancel_source is not None
+            else await self._approval_responses.settle_failure(failing, reason)
+        )
+        return failing.response_event_id if settled else None
 
     async def _finalize_early_placeholder_cancellation(
         self,
@@ -3461,39 +3475,6 @@ class ResponseRunner:
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
         )
-
-    def _notify_interrupted_response_recoverable(
-        self,
-        request: ResponseRequest,
-        final_outcome: FinalDeliveryOutcome,
-    ) -> bool:
-        """Tell the dispatcher when a marked-handled interrupted turn is recoverable.
-
-        Only turns whose terminal interruption update reached Matrix are
-        reported: restart cleanup can discover that note, while the handled-turn
-        ledger prevents source replay from answering it twice. Explicit user
-        stops are terminal user intent and must never schedule recovery.
-        """
-        if request.on_interrupted_response_recoverable is None or final_outcome.terminal_status != "cancelled":
-            return False
-        if (
-            not final_outcome.mark_handled
-            or final_outcome.delivery_kind is None
-            or request.response_envelope.target.resolved_thread_id is None
-        ):
-            return False
-        cancel_source = final_outcome.resolved_cancel_source
-        if cancel_source == "user_stop":
-            return False
-        expected_note = (
-            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else INTERRUPTED_RESPONSE_NOTE
-        )
-        if final_outcome.final_visible_body is None or not final_outcome.final_visible_body.rstrip().endswith(
-            expected_note,
-        ):
-            return False
-        request.on_interrupted_response_recoverable()
-        return True
 
     async def _record_user_stop_handled(
         self,
@@ -4128,13 +4109,12 @@ class ResponseRunner:
                 await on_suppressed()
         if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
             request.source_handoff.set()
-        interruption_recovery_registered = self._notify_interrupted_response_recoverable(request, final_outcome)
         cancel_source = final_outcome.resolved_cancel_source
         source_handled = final_outcome.mark_handled and (
             request.on_deferred_outcome_handled is None
             or cancel_source is None
             or cancel_source == "user_stop"
-            or interruption_recovery_registered
+            or _interruption_note_landed(final_outcome)
         )
         await self._record_user_stop_handled(
             request,

@@ -401,7 +401,6 @@ defaults:
   large_message_strategy: sidecar        # Oversized replies: sidecar (preview plus full text as an attachment) or split (several complete messages); global-only
   coalescing:
     debounce_ms: 1000                    # Milliseconds to wait for more attachments or a trailing caption after media; text dispatches immediately
-  auto_resume_after_restart: true        # Resume interrupted threads after a restart; see configuration/threads.md
   thread_summary_model: null             # Model alias for automatic thread summaries (null = default)
   thread_summary_temperature: 0.2        # null uses provider defaults
   thread_summary_first_threshold: 1      # Messages before the first automatic summary (integer >= 1)

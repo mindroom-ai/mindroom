@@ -240,7 +240,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 
 See [Background Scripts](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) for when each script gateway variable is required, and [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference) for the other `MINDROOM_SANDBOX_*` and Kubernetes worker variables.
 
-See [Credential Seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds), [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption), [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal), [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync), [Automatic Restart Resumption](https://docs.mindroom.chat/configuration/threads/#automatic-restart-resumption), and [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging).
+See [Credential Seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds), [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption), [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal), [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync), [Restart Continuation](https://docs.mindroom.chat/configuration/threads/#restart-continuation), and [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging).
 
 ## Built-In Prompt Overrides
 

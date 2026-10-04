@@ -119,9 +119,12 @@ The partial text stays in the message, followed by a note explaining how it ende
 | Note | Cause |
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
-| `**[Response interrupted by service restart]**` | MindRoom stopped or restarted while the response was being generated. If MindRoom was stopped, the note is added when it starts again. |
+| `**[Response interrupted by service restart]**` | MindRoom stopped or restarted while the response was being generated. The reply continues below the note once MindRoom is back, numbering its tool calls after the earlier ones; startup cleanup adds the note alone when no turn is left to continue it. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
+
+A restart covers a crash, an orderly shutdown, and an agent replaced by a configuration or MCP change.
+The continuing run is told what the stopped attempt showed and which finished tool calls not to repeat.
 
 ## Large Streamed Messages
 

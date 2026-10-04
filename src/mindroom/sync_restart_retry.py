@@ -1,17 +1,11 @@
-"""Track exact sources whose responses reached visible terminal interruption.
+"""Decide whether an edit regeneration of an already committed revision may run again.
 
-A registered source reached a visible terminal Matrix interruption note: the
-service-restart note for replacement or the generic note for orderly shutdown.
-A later restart scan can find either note without replaying the handled source.
-Replacement recovery can use the registered rooms directly, while orderly
-restart recovery discovers the note through that scan. Whether a discovered
-interruption resumes remains controlled by the runtime's auto-resume policy.
-Each exact source event is recorded once.
+The retry is current only while persisted history still ends in that source's
+interrupted replay record.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agno.run.agent import RunOutput
@@ -19,14 +13,11 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
 from mindroom.history_run_visibility import is_model_history_visible_run
-from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.history.types import HistoryScope
-
-logger = get_logger(__name__)
 
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _INTERRUPTED_REPLAY_STATE = "interrupted"
@@ -81,27 +72,3 @@ def interrupted_source_needs_retry(
         assert isinstance(metadata, dict)
         interrupted_replay_found = metadata.get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
     return interrupted_replay_found
-
-
-@dataclass
-class InterruptedTurnRooms:
-    """Track rooms containing exact-source terminal interruption proofs."""
-
-    _pending: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def pending_room_ids(self) -> frozenset[str]:
-        """Return rooms available to replacement recovery."""
-        return frozenset(self._pending.values())
-
-    def contains(self, key: str) -> bool:
-        """Return whether one exact source reached a visible terminal interruption."""
-        return key in self._pending
-
-    def register(self, key: str, *, room_id: str) -> bool:
-        """Record one exact source's terminal interruption proof once."""
-        if key in self._pending:
-            return False
-        self._pending[key] = room_id
-        logger.info("interrupted_turn_recovery_recorded", source_event_id=key, pending_count=len(self._pending))
-        return True

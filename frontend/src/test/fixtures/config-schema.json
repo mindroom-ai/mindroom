@@ -1207,12 +1207,6 @@
           "title": "Max Consecutive Agent Replies",
           "type": "integer"
         },
-        "auto_resume_after_restart": {
-          "default": true,
-          "description": "Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
-          "title": "Auto Resume After Restart",
-          "type": "boolean"
-        },
         "learning": {
           "default": true,
           "description": "Default Agno Learning setting",
@@ -4223,7 +4217,6 @@
         },
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
-        "auto_resume_after_restart": true,
         "learning": true,
         "learning_mode": "always",
         "compaction": {

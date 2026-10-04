@@ -63,7 +63,7 @@ When deriving context for an incoming event, MindRoom:
 3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
 4. May start a new thread under a room-root event when agent thread mode requires it.
 
-A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 events from that walk, counting each non-edit message and one edit per original and sender; a root older than either bound is reported as unproven, so those callers fail closed.
+A read that must come straight from the homeserver, such as the thread-summary pin check and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 events from that walk, counting each non-edit message and one edit per original and sender; a root older than either bound is reported as unproven, so those callers fail closed.
 Every message event in the room counts toward the page bound, including each streaming edit of every other reply on a homeserver that keeps them.
 
 ```
@@ -258,8 +258,8 @@ With `defer_reaction` set, each deferred message gets the reaction once; wrap-up
 The agent edits its own previous reply in place rather than sending a new message.
 Edits from other agents never trigger regeneration; another agent's completed reply that mentions this entity is dispatched to it as a reply instead.
 
-## Automatic Restart Resumption
+## Restart Continuation
 
-`defaults.auto_resume_after_restart` (boolean, default `true`) makes the router post resume prompts after a restart in eligible threads whose conversations were interrupted.
-Set it to `false` to suppress those prompts and resume the work manually.
-Work that was superseded by later messages, or whose requester or room membership no longer applies, is not resumed.
+A reply interrupted by a restart continues by itself in the same message, so there is nothing to configure.
+This covers a crash, an orderly shutdown, an agent replaced by a configuration or MCP change, and an approved tool run cut short by any of them.
+See [Streaming](../streaming.md#cancellation-and-errors) for what the message shows.

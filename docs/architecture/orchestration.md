@@ -117,8 +117,7 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
 6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
    The refusal leaves the admitted source pending in the event journal so the replacement runtime can replay it.
    The refusal path performs no Matrix I/O, so replacement shutdown cannot stall on an untimed send.
-   Auto-resume messages received by replacement bots during the apply wait for the gate to reopen instead of being dropped.
-   Before emitting a resume relay, history recovery requires a nonretired attempted outbox delivery binding the target response to the current principal and room membership.
+   Replies the forced apply cancels are left pending the same way, so the replacement runtime replays them and continues each in its existing message.
    A send with no known response event remains the responsibility of existing outbox and pending-source recovery.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.

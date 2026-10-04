@@ -664,8 +664,10 @@ class StreamingResponse:
         self.reply_to_event_id = self.target.reply_to_event_id
         self.room_mode = self.target.is_room_mode
         if self.resumed_text or self.resumed_tool_trace:
-            self.accumulated_text = self.resumed_text
+            # The stopped attempt's part is already in Matrix, so a failed edit rolls back to it, not past it.
+            self.accumulated_text = self._last_delivered_text = self.resumed_text
             self.tool_trace = list(self.resumed_tool_trace)
+            self._last_delivered_tool_trace = list(self.resumed_tool_trace)
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -809,13 +811,6 @@ class StreamingResponse:
                 allow_empty_progress=allow_empty_progress,
                 capture_completions=capture_completions,
             )
-
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
-        """Add new content and potentially update the message."""
-        self._warmup_state.clear_terminal_failures()
-        previous_last_delta_at = self.last_delta_at
-        self._update(new_chunk)
-        await self._throttled_send(client, prior_delta_at=previous_last_delta_at)
 
     def _prepare_terminal_text_and_status(
         self,
@@ -1488,6 +1483,29 @@ class ReplacementStreamingResponse(StreamingResponse):
     def uses_replacement_updates(self) -> bool:
         """Return whether each visible chunk replaces the current body."""
         return True
+
+    def committed_presentation(self) -> StreamingPresentation:
+        """Return the document's own presentation, which its approval snapshot must reproduce.
+
+        A stopped attempt's part above a resumed document is not in that
+        snapshot, so a resumed document that pauses for approval goes on without it.
+        """
+        presentation = super().committed_presentation()
+        resumed_count = len(self.resumed_tool_trace)
+        resumed_text = self.resumed_text.rstrip()
+        if not resumed_text or not presentation.response_text.startswith(resumed_text):
+            return presentation
+        own_count = len(presentation.tool_trace) - resumed_count
+        own_text = presentation.response_text.removeprefix(resumed_text).lstrip()
+        return replace(
+            presentation,
+            response_text=remap_visible_tool_marker_indices(
+                own_text,
+                {index + resumed_count: index for index in range(1, own_count + 1)},
+            ),
+            rendered_response_text=None,
+            tool_trace=presentation.tool_trace[resumed_count:],
+        )
 
     def _update(self, new_chunk: str) -> None:
         """Replace the text below any stopped attempt's text with new chunk, numbering its tools after that attempt's."""

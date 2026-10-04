@@ -4443,6 +4443,15 @@ def test_config_rejects_legacy_defaults_toolkit_fields() -> None:
         )
 
 
+def test_config_rejects_retired_auto_resume_after_restart() -> None:
+    """The retired restart resume switch fails fast instead of silently doing nothing."""
+    with pytest.raises(ValidationError, match=re.escape("defaults.auto_resume_after_restart was removed.")):
+        Config(
+            defaults={"auto_resume_after_restart": True},
+            agents={"calculator": {"display_name": "CalculatorAgent"}},
+        )
+
+
 def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
     """Removed agent toolkit knobs should point users to expand presets before lazy flags."""
     with pytest.raises(

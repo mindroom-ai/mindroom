@@ -27,7 +27,7 @@ An already durable Nio store is never reset by this migration.
 Unfinished replies and tool approvals from before the upgrade are abandoned.
 An old approval card may remain visible, but it cannot resume the retired continuation.
 A tool action that already happened is not undone; check its result before manually retrying it.
-Old interrupted responses do not auto-resume because startup recovery requires delivery ownership in the current journal and room membership.
+Old interrupted responses do not continue, because startup recovery requires delivery ownership in the current journal and room membership.
 
 Nio establishes a new room baseline without importing the previous sync checkpoint.
 Initial historical messages are context only: they do not trigger replies or commands.

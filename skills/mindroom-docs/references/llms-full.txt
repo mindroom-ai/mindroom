@@ -1955,7 +1955,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 
 See [Background Scripts](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) for when each script gateway variable is required, and [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference) for the other `MINDROOM_SANDBOX_*` and Kubernetes worker variables.
 
-See [Credential Seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds), [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption), [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal), [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync), [Automatic Restart Resumption](https://docs.mindroom.chat/configuration/threads/#automatic-restart-resumption), and [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging).
+See [Credential Seeds](https://docs.mindroom.chat/oauth-framework/#credential-seeds), [Credential Storage Encryption](https://docs.mindroom.chat/oauth-framework/#credential-storage-encryption), [Event Journal](https://docs.mindroom.chat/deployment/storage/#event-journal), [Matrix Sync](https://docs.mindroom.chat/matrix/#matrix-sync), [Restart Continuation](https://docs.mindroom.chat/configuration/threads/#restart-continuation), and [Debug Logging](https://docs.mindroom.chat/deployment/operational-log-events/#debug-logging).
 
 ## Built-In Prompt Overrides
 
@@ -2387,7 +2387,6 @@ defaults:
   large_message_strategy: sidecar        # Oversized replies: sidecar (preview plus full text as an attachment) or split (several complete messages); global-only
   coalescing:
     debounce_ms: 1000                    # Milliseconds to wait for more attachments or a trailing caption after media; text dispatches immediately
-  auto_resume_after_restart: true        # Resume interrupted threads after a restart; see configuration/threads.md
   thread_summary_model: null             # Model alias for automatic thread summaries (null = default)
   thread_summary_temperature: 0.2        # null uses provider defaults
   thread_summary_first_threshold: 1      # Messages before the first automatic summary (integer >= 1)
@@ -3478,7 +3477,7 @@ When deriving context for an incoming event, MindRoom:
 3. Lets edits, reactions, redactions, and other target-bound operations inherit the canonical thread membership of their target event.
 4. May start a new thread under a room-root event when agent thread mode requires it.
 
-A read that must come straight from the homeserver, such as the thread-summary pin check, restart auto-resume, and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 events from that walk, counting each non-edit message and one edit per original and sender; a root older than either bound is reported as unproven, so those callers fail closed.
+A read that must come straight from the homeserver, such as the thread-summary pin check and thread-root proofs for tools, walks room history back at most 1,000 pages of 100 events and keeps at most 10,000 events from that walk, counting each non-edit message and one edit per original and sender; a root older than either bound is reported as unproven, so those callers fail closed.
 Every message event in the room counts toward the page bound, including each streaming edit of every other reply on a homeserver that keeps them.
 
 ```
@@ -3673,11 +3672,11 @@ With `defer_reaction` set, each deferred message gets the reaction once; wrap-up
 The agent edits its own previous reply in place rather than sending a new message.
 Edits from other agents never trigger regeneration; another agent's completed reply that mentions this entity is dispatched to it as a reply instead.
 
-## Automatic Restart Resumption
+## Restart Continuation
 
-`defaults.auto_resume_after_restart` (boolean, default `true`) makes the router post resume prompts after a restart in eligible threads whose conversations were interrupted.
-Set it to `false` to suppress those prompts and resume the work manually.
-Work that was superseded by later messages, or whose requester or room membership no longer applies, is not resumed.
+A reply interrupted by a restart continues by itself in the same message, so there is nothing to configure.
+This covers a crash, an orderly shutdown, an agent replaced by a configuration or MCP change, and an approved tool run cut short by any of them.
+See [Streaming](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for what the message shows.
 
 # History & Compaction
 
@@ -5808,9 +5807,12 @@ The partial text stays in the message, followed by a note explaining how it ende
 | Note | Cause |
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
-| `**[Response interrupted by service restart]**` | MindRoom stopped or restarted while the response was being generated. If MindRoom was stopped, the note is added when it starts again. |
+| `**[Response interrupted by service restart]**` | MindRoom stopped or restarted while the response was being generated. The reply continues below the note once MindRoom is back, numbering its tool calls after the earlier ones; startup cleanup adds the note alone when no turn is left to continue it. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
+
+A restart covers a crash, an orderly shutdown, and an agent replaced by a configuration or MCP change.
+The continuing run is told what the stopped attempt showed and which finished tool calls not to repeat.
 
 ## Large Streamed Messages
 
@@ -23899,7 +23901,7 @@ An already durable Nio store is never reset by this migration.
 Unfinished replies and tool approvals from before the upgrade are abandoned.
 An old approval card may remain visible, but it cannot resume the retired continuation.
 A tool action that already happened is not undone; check its result before manually retrying it.
-Old interrupted responses do not auto-resume because startup recovery requires delivery ownership in the current journal and room membership.
+Old interrupted responses do not continue, because startup recovery requires delivery ownership in the current journal and room membership.
 
 Nio establishes a new room baseline without importing the previous sync checkpoint.
 Initial historical messages are context only: they do not trigger replies or commands.

@@ -109,7 +109,6 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling import ScheduledWorkflow
 from mindroom.scheduling_executor import _prepare_scheduled_trigger
-from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
@@ -249,9 +248,7 @@ class _RecordingResponseRunner:
             await request.on_visible_response(self.visible_response_event_id)
         if self.deferred_sync_restart_error is not None:
             assert self.response_event_id is not None
-            assert request.on_interrupted_response_recoverable is not None
             assert request.on_deferred_outcome_handled is not None
-            request.on_interrupted_response_recoverable()
             await request.on_deferred_outcome_handled(self.response_event_id)
             raise self.deferred_sync_restart_error
         if self.suspend_source:
@@ -372,7 +369,6 @@ class _Harness:
     journal_store: EventJournalStore
     journal_principal: PrincipalStore
     turn_store: TurnStore
-    interrupted_turn_rooms: InterruptedTurnRooms
     gate: CoalescingGate
     gate_batches: list[PreparedTurn]
     ignored_dispatch_sources: list[tuple[str, ...]]
@@ -536,7 +532,6 @@ def _build_harness(
     )
     runner = _RecordingResponseRunner()
     gateway = _RecordingDeliveryGateway()
-    interrupted_turn_rooms = InterruptedTurnRooms()
     controller_ref: list[TurnController] = []
     gate_batches: list[PreparedTurn] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
@@ -630,7 +625,6 @@ def _build_harness(
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
-            interrupted_turn_rooms=interrupted_turn_rooms,
             visible_voice_echo=VisibleVoiceEchoLifecycle(
                 VisibleVoiceEchoDeps(
                     runtime=runtime,
@@ -659,7 +653,6 @@ def _build_harness(
         journal_store=journal_store,
         journal_principal=journal_principal,
         turn_store=turn_store,
-        interrupted_turn_rooms=interrupted_turn_rooms,
         gate=gate,
         gate_batches=gate_batches,
         ignored_dispatch_sources=ignored_dispatch_sources,
@@ -3539,8 +3532,6 @@ async def test_room_mode_plain_user_message_keeps_room_session(tmp_path: Path) -
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id is None
     assert target.session_id == _ROOM_ID
-    harness.interrupted_turn_rooms.register(event.event_id, room_id=room.room_id)
-    assert await harness.runner.recovery_proof_checks[0]() is False
 
 
 @pytest.mark.asyncio
@@ -3572,7 +3563,6 @@ async def test_handled_thread_alone_does_not_prove_recovery(
 
     assert harness.runner.requests[0].response_envelope.target.resolved_thread_id == event.event_id
     assert harness.turn_store.is_handled(event.event_id)
-    assert not harness.interrupted_turn_rooms.pending_room_ids
     assert await harness.runner.recovery_proof_checks[0]() is False
 
 
@@ -3792,37 +3782,16 @@ async def test_user_message_cannot_spoof_scheduled_thread_promotion(tmp_path: Pa
 async def test_deferred_sync_restart_records_handled_outcome_before_rethrow(
     config: Config,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn interrupted by bot replacement must settle durably before rethrowing."""
+    """A turn whose interruption note reached Matrix must settle durably before rethrowing."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = _room_with_members(config, "general")
     event = _text_event("please survive the sync restart")
-    response_started = asyncio.Event()
-    release_response = asyncio.Event()
-    generate_response = harness.runner.generate_response
 
-    async def generate_with_barrier(request: ResponseRequest) -> str | None:
-        response_started.set()
-        await release_response.wait()
-        return await generate_response(request)
-
-    monkeypatch.setattr(harness.runner, "generate_response", generate_with_barrier)
-    delivery = asyncio.create_task(harness.deliver(room, event))
-    await response_started.wait()
-    recovery_ready = harness.runner.recovery_proof_checks[0]
-    assert await recovery_ready() is False
-    harness.interrupted_turn_rooms.register("$different", room_id=room.room_id)
-    assert await recovery_ready() is False
-
-    release_response.set()
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await delivery
+        await harness.deliver(room, event)
 
-    assert await recovery_ready() is True
-    assert harness.interrupted_turn_rooms.contains(event.event_id)
-    assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
     assert harness.runner.requests[0].sync_restart_retry_source_event_id is None
     assert harness.turn_store.is_handled(event.event_id) is True
     record = harness.turn_store.get_turn_record(event.event_id)
@@ -3870,7 +3839,6 @@ async def test_interrupted_router_relay_detaches_its_advisory_human_alias(
     relay_record = harness.turn_store.get_turn_record(relay.event_id)
     assert relay_record is not None
     assert relay_record.discovery_event_ids == ()
-    assert harness.interrupted_turn_rooms.pending_room_ids == {room.room_id}
 
 
 @pytest.mark.asyncio
@@ -5156,11 +5124,11 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
 
 
 @pytest.mark.asyncio
-async def test_interactive_selection_interruption_registers_exact_source_before_settlement(
+async def test_interactive_selection_interruption_records_handled_selection(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A landed interruption must register the selection event before its durable handled write."""
+    """A landed interruption must durably record the selection event as handled."""
     harness = _build_harness(config, tmp_path)
     harness.runner.deferred_sync_restart_error = asyncio.CancelledError("sync_restart")
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
@@ -5183,7 +5151,6 @@ async def test_interactive_selection_interruption_registers_exact_source_before_
             source_event_id=selection_event_id,
         )
 
-    assert harness.interrupted_turn_rooms.contains(selection_event_id)
     record = harness.turn_store.get_turn_record(selection_event_id)
     assert record is not None
     assert record.response_event_id == "$response:localhost"

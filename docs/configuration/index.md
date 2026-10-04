@@ -244,7 +244,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 
 See [Background Scripts](../tools/background-scripts.md#worker-and-network-requirements) for when each script gateway variable is required, and [Sandbox Proxy](../deployment/sandbox-proxy.md#environment-variable-reference) for the other `MINDROOM_SANDBOX_*` and Kubernetes worker variables.
 
-See [Credential Seeds](../oauth-framework.md#credential-seeds), [Credential Storage Encryption](../oauth-framework.md#credential-storage-encryption), [Event Journal](../deployment/storage.md#event-journal), [Matrix Sync](../matrix.md#matrix-sync), [Automatic Restart Resumption](threads.md#automatic-restart-resumption), and [Debug Logging](../deployment/operational-log-events.md#debug-logging).
+See [Credential Seeds](../oauth-framework.md#credential-seeds), [Credential Storage Encryption](../oauth-framework.md#credential-storage-encryption), [Event Journal](../deployment/storage.md#event-journal), [Matrix Sync](../matrix.md#matrix-sync), [Restart Continuation](threads.md#restart-continuation), and [Debug Logging](../deployment/operational-log-events.md#debug-logging).
 
 ## Built-In Prompt Overrides
 

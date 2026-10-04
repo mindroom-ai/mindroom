@@ -42,7 +42,6 @@ from mindroom.handled_turns import (
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
@@ -166,7 +165,6 @@ async def _regeneration_prompt(record: TurnRecord) -> str:
             generate_response=AsyncMock(),
             wait_for_turn_settled=AsyncMock(),
             receipt_order=AsyncMock(return_value=1),
-            interrupted_turn_rooms=InterruptedTurnRooms(),
             timestamp_formatter=_timestamp_formatter,
         ),
     )
