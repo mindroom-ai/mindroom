@@ -71,11 +71,20 @@ def test_safe_load_without_aliases_refuses_costly_or_unbuildable_values(document
         yaml_io.safe_load_without_aliases(document)
 
 
+def test_safe_load_without_aliases_refuses_tag_directives_before_composing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``%TAG`` prefix is copied into every node naming its handle, so a short document is refused before it is composed."""
+    composed: list[object] = []
+    monkeypatch.setattr(yaml, "load", lambda stream, **_kwargs: composed.append(stream))
+    document = "%TAG !t! " + "A" * 4096 + "\r---\n" + "- !t!a\n" * 100
+    with pytest.raises(yaml.YAMLError, match="%TAG directives are not allowed"):
+        yaml_io.safe_load_without_aliases(document)
+    assert composed == []
+
+
 def test_safe_load_without_aliases_builds_values_at_the_limits() -> None:
-    """A few directives, short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
+    """A directive, short base-60 integers, a few merge keys, and many numeric keys still load exactly like ``safe_load``."""
     numeric_keys = "".join(f"{k}: 0, " for k in range(1024))
-    directives = "".join(f"%TAG !t{k}! x\n" for k in range(16)) + "---\n"
-    document = directives + "x: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
+    document = "%YAML 1.1\n---\nx: 12" + ":1" * 31 + "\ny: {" + "<<: {a: 1}, " * 64 + "b: 2}\nz: {" + numeric_keys + "}\n"
     assert yaml_io.safe_load_without_aliases(document) == yaml_io.safe_load(document)
 
 
