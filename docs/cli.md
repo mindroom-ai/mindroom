@@ -983,7 +983,7 @@ Each source lists the files it read under `paths` and has a `status` of `ok`, `m
 A source that cannot be read, such as a locked or corrupt database, is reported with `"status": "error"` and its message under `error`, while the other sources are still collected.
 A source that reads several files can be `ok` with an `error` naming the files it could not read, for example one locked session database among many.
 When the config selects the PostgreSQL event journal, its URL is resolved from `event_journal.database_url`, the config directory's `.env`, or the environment.
-If no URL resolves, or the `postgres` extra is not installed, the three journal sources are reported with `"status": "error"`, never replaced by the SQLite file.
+If no URL resolves, the `postgres` extra is not installed, or the config file exists but cannot be read or parsed, the three journal sources are reported with `"status": "error"`, never replaced by the SQLite file.
 Databases are opened read-only, although a read-only open of a SQLite database in WAL mode can still create its `-wal` and `-shm` sidecar files.
 The config is only read, never migrated or written, and only its `event_journal` and `debug.llm_request_log_dir` settings are checked, so a config the runtime would reject elsewhere still locates the data.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.

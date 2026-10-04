@@ -41,11 +41,13 @@ def _read_report(path: Path) -> dict[str, Any]:
     return data
 
 
-def _read_config_source(runtime_paths: RuntimePaths) -> dict[str, Any]:
+def _read_config_source(runtime_paths: RuntimePaths) -> tuple[dict[str, Any], str | None]:
     """Parse the config file with its includes, without validating, migrating, or writing it.
 
     Loading the full config can persist an access migration, and inspecting an install must not rewrite its config.
     Only `event_journal` and `debug.llm_request_log_dir` are used, so a config the runtime would reject still works.
+    A missing config means default locations. A config that exists but cannot be read may select the journal, so
+    the second value is the reason it could not be read, and no default journal is chosen in its place.
     """
     import yaml  # noqa: PLC0415
 
@@ -54,16 +56,17 @@ def _read_config_source(runtime_paths: RuntimePaths) -> dict[str, Any]:
     path = runtime_paths.config_path
     if not path.exists():
         typer.echo(f"Note: no config at {path}; using default storage locations.", err=True)
-        return {}
+        return {}, None
     try:
         data, _files = load_yaml_config_source(path)
     except (yaml.YAMLError, OSError, UnicodeError) as exc:
-        typer.echo(f"Warning: config not read ({exc}); using default storage locations.", err=True)
-        return {}
-    if not isinstance(data, dict):
-        typer.echo(f"Warning: {path} is not a mapping; using default storage locations.", err=True)
-        return {}
-    return data
+        reason = str(exc)
+    else:
+        if isinstance(data, dict):
+            return data, None
+        reason = f"{path} is not a mapping"
+    typer.echo(f"Warning: {path} could not be read; LLM request logs use the default directory.", err=True)
+    return {}, f"config could not be read: {reason}"
 
 
 def _llm_request_log_dir(config_source: dict[str, Any], storage_root: Path) -> Path:
@@ -83,18 +86,18 @@ def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
     from mindroom.config.matrix import EventJournalConfig  # noqa: PLC0415
 
     storage_root = runtime_paths.storage_root
-    config_source = _read_config_source(runtime_paths)
+    config_source, journal_error = _read_config_source(runtime_paths)
     journal_postgres_url: str | None = None
-    journal_error: str | None = None
-    try:
-        journal = EventJournalConfig.model_validate(config_source.get("event_journal") or {})
-        if journal.backend == "postgres":
-            journal_postgres_url = journal.resolve_postgres_database_url(runtime_paths)
-    except ValueError as exc:
-        # An invalid section (pydantic's ValidationError is a ValueError), or a URL that lives in the service's
-        # environment rather than this one.
-        # Reading the SQLite file instead could show the wrong database, so the journal sources report the error.
-        journal_error = str(exc)
+    if journal_error is None:
+        try:
+            journal = EventJournalConfig.model_validate(config_source.get("event_journal") or {})
+            if journal.backend == "postgres":
+                journal_postgres_url = journal.resolve_postgres_database_url(runtime_paths)
+        except ValueError as exc:
+            # An invalid section (pydantic's ValidationError is a ValueError), or a URL that lives in the service's
+            # environment rather than this one.
+            # Reading the SQLite file instead could show the wrong database, so the journal sources report the error.
+            journal_error = str(exc)
     return DebugReportSources(
         storage_root=storage_root,
         session_root=resolve_session_state_root(storage_root, runtime_paths),

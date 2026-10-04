@@ -861,16 +861,55 @@ def test_cli_notes_default_locations_when_the_default_config_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without --config and without a config at the default path, the report is written and stderr says so."""
+    """Without --config and without a config at the default path, the default journal is read and stderr says so."""
     missing = tmp_path / "absent.yaml"
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(missing))
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
     output = tmp_path / "backend.json"
 
-    result = runner.invoke(app, ["debug-report", "-e", "$user", "-s", str(tmp_path / "storage"), "-o", str(output)])
+    result = runner.invoke(app, ["debug-report", "-e", "$user", "-s", str(storage), "-o", str(output)])
 
     assert result.exit_code == 0, result.output
     assert f"Note: no config at {missing}; using default storage locations." in result.output
-    assert json.loads(output.read_text(encoding="utf-8"))["type"] == "io.mindroom.debug_report"
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["type"] == "io.mindroom.debug_report"
+    assert document["sources"]["turn_records"]["status"] == "ok"
+    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("agents: [unclosed\n", id="unparseable"),
+        pytest.param("- not\n- a mapping\n", id="not-a-mapping"),
+    ],
+)
+def test_cli_reports_journal_errors_when_the_config_exists_but_cannot_be_read(tmp_path: Path, content: str) -> None:
+    """A config that exists but is unreadable may select PostgreSQL, so the SQLite file is never read in its place."""
+    config = tmp_path / "config.yaml"
+    config.write_text(content, encoding="utf-8")
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    _seed_files(storage)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert sources[name]["items"] == []
+        assert sources[name]["error"].startswith("config could not be read: ")
+    # The request-log directory stays at its default, so the sources that do not depend on the config are still read.
+    assert sources["llm_requests"]["status"] == "ok"
+    assert [item["request_log_id"] for item in sources["llm_requests"]["items"]] == ["r1"]
+    assert sources["tool_calls"]["status"] == "ok"
+    assert "turn_records: error, 0 items (config could not be read: " in result.output
 
 
 def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path) -> None:
