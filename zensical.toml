@@ -45,6 +45,7 @@ nav = [
     { "Image Messages" = "images.md" },
     { "File & Video Attachments" = "attachments.md" },
     { "Interactive Questions" = "interactive.md" },
+    { "Interactive Canvases" = "canvases.md" },
     { "Thread Exports" = "thread-exports.md" },
     { "Usage Tracking" = "usage.md" },
   ] },

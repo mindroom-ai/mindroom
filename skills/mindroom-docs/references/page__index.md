@@ -81,7 +81,7 @@ So agents are not limited to what Slack or WhatsApp can display:
 - Approval cards and clickable questions sit right in the conversation ([Interactive Questions](https://docs.mindroom.chat/interactive/)).
 - An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#watch-take-control-and-resume)).
 - An agent can use the apps and folders you select on your own computer, and runs shell commands only after you approve them ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
-- An agent can open an interactive page next to the conversation, such as a dashboard or a presentation ([Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#interactive-canvases)).
+- An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](https://docs.mindroom.chat/canvases/)).
 - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat)).
 
 ### Yours to own

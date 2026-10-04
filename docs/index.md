@@ -85,7 +85,7 @@ So agents are not limited to what Slack or WhatsApp can display:
 - Approval cards and clickable questions sit right in the conversation ([Interactive Questions](interactive.md)).
 - An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](tools/worker-computer.md#watch-take-control-and-resume)).
 - An agent can use the apps and folders you select on your own computer, and runs shell commands only after you approve them ([Desktop Bridge](tools/desktop.md)).
-- An agent can open an interactive page next to the conversation, such as a dashboard or a presentation ([Chat UI Actions](tools/chat-ui.md#interactive-canvases)).
+- An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](canvases.md)).
 - You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](configuration/models.md#model-overrides-in-chat)).
 
 ### Yours to own

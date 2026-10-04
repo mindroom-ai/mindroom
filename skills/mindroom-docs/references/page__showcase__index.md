@@ -42,7 +42,7 @@ Each video comes in a light and a dark recording to match your color scheme.
 ## Canvases
 
 Agents can show a page they made beside the conversation and act on what you pick in it.
-See [Interactive canvases](https://docs.mindroom.chat/tools/chat-ui/#interactive-canvases).
+See [Interactive Canvases](https://docs.mindroom.chat/canvases/).
 
 === "Overview · 27 s"
 

@@ -46,7 +46,7 @@ Each video comes in a light and a dark recording to match your color scheme.
 ## Canvases
 
 Agents can show a page they made beside the conversation and act on what you pick in it.
-See [Interactive canvases](tools/chat-ui.md#interactive-canvases).
+See [Interactive Canvases](canvases.md).
 
 === "Overview · 27 s"
 
