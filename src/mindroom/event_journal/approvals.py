@@ -157,7 +157,8 @@ def reserve_deliveries(
     ):
         return False
     for card in cards:
-        if scheduled_approvals.apply_armed(
+        # A scheduled call runs unattended only when no other card in its step would hold the run.
+        if len(cards) == 1 and scheduled_approvals.apply_armed(
             transaction,
             card_principal_id,
             continuation_principal_id=continuation_principal_id,

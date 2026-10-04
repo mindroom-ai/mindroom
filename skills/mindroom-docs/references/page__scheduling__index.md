@@ -175,6 +175,7 @@ MindRoom saves a one-time task in the current thread and posts an approval card 
 Only the original human requester can approve or deny the card, and it expires at the send time.
 When the task fires, the agent receives a trigger asking it to make that call exactly once with exactly those arguments.
 If the requester approved the card, the task is unchanged, and it fires within 15 minutes of its scheduled time, the first call with exactly those arguments from the same agent or team, requester, room, and thread is approved once.
+That call must be the only call needing approval in its model step; otherwise every gated call in that step asks for approval as usual, so the send cannot wait behind another card.
 That call publishes an approved receipt card whose `approval_provenance` has `kind: scheduled_approval` with the task, approver, approval time, scheduled time, and arguments digest, and MindRoom logs `scheduled_tool_call_approval_consumed` with the same fields.
 Every other call keeps per-call approval, including a call with different arguments, a second identical call, a call after the router left and rejoined the room, a late fire, a fire of an edited task, and a fire whose card was never answered.
 If the requester denies the card, the task is skipped, while a card that MindRoom denies on its own, for example after the router leaves the room, falls back to per-call approval when the task fires.

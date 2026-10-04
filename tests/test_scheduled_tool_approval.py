@@ -449,6 +449,96 @@ async def test_new_room_tenure_does_not_inherit_the_approval(
 
 
 @pytest.mark.asyncio
+async def test_approval_is_not_used_when_another_gated_call_would_hold_the_run(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The scheduled call runs unattended only when nothing else in its step waits for a person."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager)
+        await _decide(manager, "approved")
+        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        responder = journal.principal("agent@" + _AGENT)
+        await responder.admit(
+            InboundEvent(
+                event_id="$source-pair",
+                room_id=_ROOM,
+                thread_id=_THREAD,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender=_REQUESTER,
+                origin_server_ts=1000,
+                source={"type": "m.room.message", "content": {"msgtype": "m.text", "body": "send it"}},
+            ),
+        )
+        other_arguments: dict[str, object] = {"channel": "U999", "text": "Also this"}
+        calls = (("call-scheduled", _ARGUMENTS), ("call-other", other_arguments))
+        continuation = ApprovalContinuation(
+            approval_id="pair",
+            run_id="run-pair",
+            session_id="session-pair",
+            entity_kind="agent",
+            entity_name=_AGENT,
+            room_id=_ROOM,
+            thread_id=_THREAD,
+            requester_id=_REQUESTER,
+            response_event_id="$waiting-pair",
+            sources=ResponseSources(("$source-pair",), ("$source-pair",)),
+            calls=tuple(
+                ApprovalCall(
+                    tool_call_id=call_id,
+                    tool_name="post_slack_message",
+                    invoking_agent=_AGENT,
+                    expires_at_ns=9_000_000_000_000_000_000,
+                    arguments_digest=approval_arguments_digest(arguments),
+                )
+                for call_id, arguments in calls
+            ),
+            state="waiting",
+            runtime_generation="runtime",
+        )
+        assert await responder.create_approval_continuation(continuation) is not None
+        cards = []
+        for index, (call_id, arguments) in enumerate(calls):
+            card = await manager.prepare_detached_approval(
+                approval_id=f"card-pair-{index}",
+                continuation_id="pair",
+                continuation_generation=0,
+                entity_name=_AGENT,
+                response_event_id=continuation.response_event_id,
+                tool_call_id=call_id,
+                tool_name="post_slack_message",
+                arguments=dict(arguments),
+                room_id=_ROOM,
+                requester_id=_REQUESTER,
+                approver_user_id=_REQUESTER,
+                expires_at_ns=9_000_000_000_000_000_000,
+                agent_name=_AGENT,
+                thread_id=_THREAD,
+            )
+            assert card is not None
+            cards.append(card)
+
+        assert await manager.reserve_and_publish(
+            continuation_principal_id=responder.principal_id,
+            continuation_id="pair",
+            continuation_generation=0,
+            cards=tuple(cards),
+        )
+
+        stored = await responder.approval_continuation("pair")
+        assert stored is not None
+        assert [call.decision for call in stored.calls] == [None, None]
+        follow_up = await _fire_time_call(journal, manager, "alone")
+        assert follow_up.calls[0].decision is not None
+        assert follow_up.calls[0].decision.value == "approved"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_team_member_call_consumes_the_team_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
