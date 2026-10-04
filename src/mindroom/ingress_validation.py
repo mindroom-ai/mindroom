@@ -111,7 +111,7 @@ class IngressValidator:
                 trusted_requester = requester_id_from_trusted_original_sender(
                     original_sender=original_sender,
                     original_sender_entity_name=self.managed_entity_name_for_sender(original_sender),
-                    original_sender_is_human=is_human_requester_id(
+                    original_sender_is_access_checked=is_access_checked_requester_id(
                         original_sender,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,

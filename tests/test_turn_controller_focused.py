@@ -1872,6 +1872,52 @@ async def test_trusted_router_relay_preserves_transport_sender_while_canonicaliz
     assert request.response_envelope.origin.transport_sender_id == router_sender
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_router_handoff_runs_as_the_bot_account_it_routes(tmp_path: Path, *, admitted: bool) -> None:
+    """A routed bot-account message runs as that bot account, so access applies to it rather than to the router."""
+    bot_account = "@telegram:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    access=ResponderAccessConfig(users=[bot_account if admitted else "@owner:localhost"]),
+                ),
+            },
+            bot_accounts=[bot_account],
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    router_sender = _entity_user_id(config, ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general could you help with this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                constants.ORIGINAL_SENDER_KEY: bot_account,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+            },
+            "event_id": "$router-bot-relay:localhost",
+            "sender": router_sender,
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert [request.user_id for request in harness.runner.requests] == ([bot_account] if admitted else [])
+    assert [request.response_envelope.requester_id for request in harness.runner.requests] == (
+        [bot_account] if admitted else []
+    )
+
+
 _OWNER = "@owner:localhost"
 
 
