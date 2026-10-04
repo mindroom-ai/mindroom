@@ -192,7 +192,6 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.
-- For full filter semantics, see [`tools`](./index.md).
 - `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
 - `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
 - It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.

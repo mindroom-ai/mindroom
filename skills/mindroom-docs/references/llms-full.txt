@@ -14035,7 +14035,6 @@ list_thread_tags(exclude_tag="resolved", include_untagged=True)
 - `list_thread_tags()` can inspect the active thread or an explicitly provided `thread_id`.
 - `list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
 - Both filters can be combined.
-- For full filter semantics, see [`tools`](https://docs.mindroom.chat/tools/).
 - `list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
 - `include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
 - It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
@@ -22468,7 +22467,7 @@ Plain `uvx mindroom run` runs the published PyPI release, so when testing unrele
 
 ### Optional: Docker worker isolation
 
-If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Dedicated Docker worker backend](#dedicated-docker-worker-backend).
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Host machine + dedicated Docker workers](#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
 That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
 Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
 They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
