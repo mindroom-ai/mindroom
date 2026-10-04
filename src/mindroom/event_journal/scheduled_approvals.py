@@ -57,7 +57,11 @@ class ScheduledCallBinding:
 
 
 def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
-    """Forget bindings past their send time or withdrawal once their cards and any receipt have retired."""
+    """Forget bindings past their send time or withdrawal once their card has retired and any receipt is settled.
+
+    A receipt Matrix never accepted, because it was retired or failed for good, has no
+    event a click could target, so it no longer needs the binding that explains it.
+    """
     cutoff_ns = now_ns - _RETENTION_NS
     rows = transaction.fetchall(
         """
@@ -67,6 +71,7 @@ def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
               SELECT 1 FROM matrix_delivery_outbox AS receipt
               WHERE receipt.principal_id = scheduled.principal_id
                 AND receipt.delivery_id = scheduled.consumed_delivery_id
+                AND receipt.retired = 0 AND receipt.permanent_failure_reason IS NULL
           )
         """,
         (principal_id, cutoff_ns, cutoff_ns),

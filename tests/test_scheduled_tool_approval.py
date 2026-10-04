@@ -633,6 +633,52 @@ async def test_receipt_names_the_account_that_approved_the_card(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "abandon",
+    [
+        "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL, retired = 1 WHERE delivery_id = ?",
+        "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL, permanent_failure_reason = 'gone' "
+        "WHERE delivery_id = ?",
+    ],
+    ids=["retired", "permanently-failed"],
+)
+async def test_receipt_that_will_never_be_sent_does_not_block_pruning(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    abandon: str,
+) -> None:
+    """A receipt abandoned before Matrix accepted it, such as after the router left, needs no binding."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+    try:
+        assert await _schedule(manager)
+        await _decide(manager, "approved")
+        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _fire_time_call(journal, manager, "first")
+        await journal.backend.write(lambda transaction: transaction.execute(abandon, ("card-first",)))
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE scheduled_call_approvals SET execute_at_ns = 0 WHERE task_id = ?",
+                (_TASK,),
+            ),
+        )
+
+        await manager.recover_cards_on_startup()
+
+        remaining = await journal.backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
+                (_TASK,),
+            ),
+        )
+        assert remaining is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_withdrawn_bindings_are_pruned_without_waiting_for_their_send_time(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
