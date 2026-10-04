@@ -532,7 +532,7 @@ def _load_state(handle: DelegationRecordHandle) -> _RecordState | None:
         # LEGACY_COMPAT: Delegation records whose working state lived only in their workspace files.
         # Legacy format: A record directory below the child workspace's .mindroom/delegations/ with no state.json below
         # tracking/; selected when the state file is missing while that workspace directory exists.
-        # Last legacy release: v2026.10.94; replacement: the next release keeps each record's state below tracking/
+        # Last legacy release: v2026.10.101; replacement: the next release keeps each record's state below tracking/
         # and writes run.json, events.jsonl, and transcript.md as exports of it.
         # Handling: Such a record's operations return without reading or writing its workspace files, so a delegation
         # still in flight at the upgrade settles and its record stays as it was; a record found in neither place is missing.
