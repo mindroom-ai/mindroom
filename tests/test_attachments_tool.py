@@ -21,9 +21,10 @@ from agno.tools.function import FunctionCall, ToolResult
 from mindroom.attachments import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -755,6 +756,47 @@ async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_matrix_message_attachments_tell_receivers_to_ignore_mentions_in_file_names(tmp_path: Path) -> None:
+    """A file named after an agent must not wake that agent as the sending agent, whoever supplied the name."""
+    sample_file = tmp_path / "@general.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_named")
+    assert attachment is not None
+    context = _tool_context(tmp_path, attachment_ids=("att_named",))
+    context.client.rooms["!room:localhost"].encrypted = False
+    media = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_media",
+        filename="@general.png",
+        url="mxc://localhost/media",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=1,
+    )
+    register_tool_runtime_media_attachment(context, media)
+    sent_contents: list[dict[str, object]] = []
+
+    async def capture_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+        sent_contents.append(content)
+        return DeliveredMatrixEvent(event_id=f"$sent{len(sent_contents)}", content_sent=content)
+
+    with (
+        patch(
+            "mindroom.matrix.client_delivery._upload_file_as_mxc",
+            new=AsyncMock(return_value=("mxc://localhost/file", {"info": {"size": 7, "mimetype": "text/plain"}})),
+        ),
+        patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
+        tool_runtime_context(context),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_named", "att_media"]))
+
+    assert result["status"] == "ok"
+    assert [content["body"] for content in sent_contents] == ["@general.txt", "@general.png"]
+    assert all(content[SKIP_MENTIONS_KEY] is True for content in sent_contents)
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_attachments_reuses_ephemeral_encrypted_media(tmp_path: Path) -> None:
     """Turn-scoped media sends reuse MXC ciphertext and never create a local attachment file."""
     context = _tool_context(tmp_path)
@@ -791,6 +833,7 @@ async def test_matrix_message_attachments_reuses_ephemeral_encrypted_media(tmp_p
         attachment,
         thread_id=context.resolved_thread_id,
         latest_thread_event_id=context.resolved_thread_id,
+        extra_content={SKIP_MENTIONS_KEY: True},
     )
     send_file.assert_not_awaited()
     assert not (tmp_path / "attachments").exists()
