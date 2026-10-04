@@ -19,9 +19,6 @@ Pick one setup:
 ## Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
 
 The Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`; only MindRoom runs on your machine.
-Watch the 2-minute setup video:
-
-[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
