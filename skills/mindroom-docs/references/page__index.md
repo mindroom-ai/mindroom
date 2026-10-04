@@ -1,9 +1,9 @@
 # MindRoom
 
-**AI agents that know your work, in a chat app anyone can use.**
+**AI agents that know you and your work, in a chat app anyone can use.**
 
-MindRoom gives everyone a personal AI agent, and every team shared agents connected to its email, chat, calendar, documents, tickets, and code.
-They find what you need, write what you ask for, run recurring jobs on their own, and learn from every conversation, so they get better the more your team uses them.
+MindRoom gives you a personal AI agent for everything from family trips to your homelab, and gives teams shared agents connected to their email, chat, calendar, documents, tickets, and code.
+They find what you need, write what you ask for, run recurring jobs on their own, and learn from every conversation, so they get better the more they are used.
 It is open source, works with any model, and you can run all of it yourself: the chat app, the server, and the AI backend.
 
 <video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
@@ -15,17 +15,29 @@ It is open source, works with any model, and you can run all of it yourself: the
 
 ## What People Use It For
 
-- Find anything across email, chat, documents, tickets, and code, and see where each answer came from.
-- Get a morning briefing, or a summary of your week before every one-on-one.
-- Write status updates from what actually happened in chat and the tracker, not from what people remembered to report.
-- Turn a question into a report or an interactive presentation built from your own documents.
-- Triage the inbox, prepare for meetings, and draft emails, then approve each one before it is sent.
-- Investigate a technical question across specifications, code, and records, with every claim traced to its source.
-- Join a new team and ask its agent how the work fits together and whom to ask.
+=== "Personal"
+
+    - Plan a family trip: flights, places to stay, a day-by-day itinerary, and a packing list.
+    - Keep your calendar, reminders, and to-do lists in order, by voice from your phone.
+    - Look after your home network and homelab: check services, read logs, and change configs from the chat, with approval rules for anything risky.
+    - Build quick tools and scripts in the agent's own workspace.
+    - Keep notes and memories you can still find months later.
+    - Follow the topics you care about, with a digest that only arrives when there is something new.
+    - Control your smart home through Home Assistant.
+
+=== "Work"
+
+    - Find anything across email, chat, documents, tickets, and code, and see where each answer came from.
+    - Get a morning briefing, or a summary of your week before every one-on-one.
+    - Write status updates from what actually happened in chat and the tracker, not from what people remembered to report.
+    - Turn a question into a report or an interactive presentation built from your own documents.
+    - Triage the inbox, prepare for meetings, and draft emails, then approve each one before it is sent.
+    - Investigate a technical question across specifications, code, and records, with every claim traced to its source.
+    - Join a new team and ask its agent how the work fits together and whom to ask.
 
 ## Why MindRoom
 
-### Agents that know your work
+### Agents that know you and your work
 
 Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](https://docs.mindroom.chat/tools/), [MCP Servers](https://docs.mindroom.chat/mcp/)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
 Each person can get a private room with their own agent ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/)), each team can share agents that answer only its members ([Access Control](https://docs.mindroom.chat/authorization/)), and agents can work as a team or hand tasks to each other ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
