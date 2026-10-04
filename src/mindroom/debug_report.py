@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
-_AGNO_JSON_COLUMNS = frozenset({"run_data"})
 _MAX_JSONL_RECORDS = 1000
 _MAX_AGNO_RUNS = 100
 _MAX_LOG_LINES = 2000
@@ -138,11 +137,11 @@ def _describe_error(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozenset()) -> dict[str, Any]:
+def _decode_json_columns(row: Mapping[str, Any]) -> dict[str, Any]:
     """Decode JSON stored as text, so the report nests objects instead of escaped strings."""
     decoded: dict[str, Any] = {}
     for key, value in row.items():
-        if isinstance(value, str) and (key.endswith("_json") or key in extra):
+        if isinstance(value, str) and (key.endswith("_json") or key == "run_data"):
             try:
                 decoded[key] = json.loads(value)
             # JSONDecodeError and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
@@ -308,8 +307,7 @@ def _read_agno_database(
                 [*params, _MAX_AGNO_RUNS],
             )
             runs.extend(
-                {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
-                for row in reversed(rows)
+                {"database": str(database), "table": table, **_decode_json_columns(row)} for row in reversed(rows)
             )
     return matches, runs
 
