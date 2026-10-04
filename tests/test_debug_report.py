@@ -460,6 +460,25 @@ def test_jsonl_reader_matches_a_record_by_its_reply_target_alone(tmp_path: Path)
     assert [item["tool_name"] for item in result.items] == ["replied"]
 
 
+def test_jsonl_reader_skips_records_whose_identifiers_are_not_strings(tmp_path: Path) -> None:
+    """A list or object where an identifier belongs matches nothing and does not abort the read."""
+    log = tmp_path / "tool_calls.jsonl"
+    odd = [
+        {"tool_name": "list", "correlation_id": ["$user"]},
+        {"tool_name": "object", "reply_to_event_id": {"id": "$user"}},
+        {"tool_name": "session", "session_id": [f"{ROOM}:$root"]},
+        {"tool_name": "number", "correlation_id": 7, "reply_to_event_id": None},
+    ]
+    log.write_text(
+        "".join(json.dumps(record) + "\n" for record in [*odd, {"tool_name": "plain", "correlation_id": "$user"}]),
+        encoding="utf-8",
+    )
+    ids = collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root")
+    result = _read_jsonl_records([log], ids, location=log)
+    assert result.status == "ok"
+    assert [item["tool_name"] for item in result.items] == ["plain"]
+
+
 def test_jsonl_reader_caps_records_keeping_the_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Beyond the cap the oldest records are dropped and counted: the newest file's record is the one kept."""
     monkeypatch.setattr(debug_report_module, "_MAX_JSONL_RECORDS", 1)

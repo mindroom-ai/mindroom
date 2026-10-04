@@ -308,10 +308,14 @@ def _read_agno_database(
 
 
 def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
-    return (
-        record.get("correlation_id") in ids.event_ids
-        or record.get("reply_to_event_id") in ids.event_ids
-        or record.get("session_id") in ids.session_ids
+    """Match string identifiers only: a list or object in a logged field is unhashable and never an ID."""
+    return any(
+        isinstance(value := record.get(key), str) and value in known
+        for key, known in (
+            ("correlation_id", ids.event_ids),
+            ("reply_to_event_id", ids.event_ids),
+            ("session_id", ids.session_ids),
+        )
     )
 
 
