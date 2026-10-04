@@ -44,6 +44,7 @@ from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.media_delivery import image_result
 from mindroom.path_confinement import (
     open_directory_within_root,
+    read_regular_file_within_root,
     resolve_path_within_root,
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -73,6 +74,8 @@ _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
 _MAX_CONSOLE_ENTRIES = 200
+# A page an agent wrote; Claude Code artifacts allow the same 16 MiB.
+_MAX_OPEN_FILE_BYTES = 16 * 1024 * 1024
 # Upload snapshots stay on disk until their tab closes, so bound what one browser holds at once.
 _MAX_STAGED_UPLOAD_BYTES = 256 * 1024 * 1024
 _VIEWPORT_WIDTH = 1280
@@ -127,7 +130,7 @@ _BROWSER_ACTION_TABLE = (
     {"action": "stop", "description": "Stop the selected browser profile."},
     {"action": "profiles", "description": "List known browser profiles."},
     {"action": "tabs", "description": "List tabs for the selected browser profile."},
-    {"action": "open", "description": "Open targetUrl in a new tab."},
+    {"action": "open", "description": "Open targetUrl, or one HTML file from paths, in a new tab."},
     {"action": "focus", "description": "Host target only: focus targetId; desktop does not support focus."},
     {
         "action": "close",
@@ -871,6 +874,8 @@ class BrowserTools(Toolkit):
             level: Console log level filter.
             paths: Browser artifact or workspace file paths, or att_* context attachment IDs to upload.
                 Workspace-relative paths are allowed; use ./ for a workspace file named att_*.
+                For ``open``, one HTML file to show instead of targetUrl, for example to check a page you wrote;
+                it cannot load other local files, and relative links in it do not resolve.
             inputRef: Host-target upload input selector or ref.
             timeoutMs: Host-target timeout for upload/dialog actions.
             accept: Whether to accept dialog.
@@ -906,6 +911,9 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         if saveOnly and resolved_target == "desktop":
             msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
+            raise ValueError(msg)
+        if resolved_target == "desktop" and normalized_action == "open" and paths:
+            msg = "Opening a file requires target=host."
             raise ValueError(msg)
         if resolved_target == "desktop":
             unsupported = {
@@ -964,6 +972,12 @@ class BrowserTools(Toolkit):
             return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
         if normalized_action == "open":
             target_url = _clean_str(targetUrl)
+            if paths:
+                if target_url is not None or len(paths) != 1:
+                    msg = "action=open takes targetUrl or one HTML file in paths."
+                    raise ValueError(msg)
+                page_html = await asyncio.to_thread(self._read_page_file, paths[0])
+                return json.dumps(await self._open_tab(profile_name, html=page_html), sort_keys=True)
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
@@ -1280,11 +1294,22 @@ class BrowserTools(Toolkit):
             "tabs": tabs,
         }
 
-    async def _open_tab(self, profile_name: str, target_url: str) -> dict[str, Any]:
+    async def _open_tab(
+        self,
+        profile_name: str,
+        target_url: str | None = None,
+        *,
+        html: str | None = None,
+    ) -> dict[str, Any]:
         state = await self._ensure_profile(profile_name)
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        if html is not None:
+            # Content on about:blank, unlike a file:// page, cannot load or navigate to other local files.
+            await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        else:
+            assert target_url is not None
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
         if self._worker_display is not None:
             await page.bring_to_front()
         state.active_target_id = target_id
@@ -2021,7 +2046,17 @@ class BrowserTools(Toolkit):
             pass
         return output_dir
 
-    def _resolve_upload_path(self, path: str) -> AuthorizedFile:
+    def _read_page_file(self, path: str) -> str:
+        """Read one HTML file to open, from the same places uploads may read."""
+        authorized = self._resolve_upload_path(path, field_name="open path")
+        page = read_regular_file_within_root(authorized.root, authorized.relative, max_bytes=_MAX_OPEN_FILE_BYTES)
+        try:
+            return page.decode("utf-8")
+        except UnicodeDecodeError:
+            msg = f"File to open must be UTF-8 text: {path}"
+            raise ValueError(msg) from None
+
+    def _resolve_upload_path(self, path: str, *, field_name: str = "upload path") -> AuthorizedFile:
         """Resolve one upload path or ``att_*`` ID to its authorized file.
 
         The agent's ``file_access`` governs paths in the agent workspace, which
@@ -2034,7 +2069,7 @@ class BrowserTools(Toolkit):
                 path,
                 workspace_root=self._worker_workspace,
                 file_access=self._file_access,
-                field_name="upload path",
+                field_name=field_name,
             )
         if path.startswith("att_"):
             return self._resolve_upload_attachment(path)
@@ -2046,13 +2081,13 @@ class BrowserTools(Toolkit):
                     path,
                     workspace_root=artifact_dir,
                     file_access="workspace",
-                    field_name="upload path",
+                    field_name=field_name,
                 )
         return resolve_agent_file(
             path,
             workspace_root=self._workspace_root,
             file_access=self._file_access,
-            field_name="upload path",
+            field_name=field_name,
         )
 
     @staticmethod

@@ -375,6 +375,15 @@ Everything else is refused, including credentials, encryption keys, Matrix state
 With `unrestricted`, `upload` accepts any file its process can read.
 One browser holds at most 256 MiB of uploaded files until their tabs close, so a larger upload is refused until a tab is closed.
 
+On the host target, `open` also takes one HTML file in `paths` instead of `targetUrl`, read under the same rules as `upload`, so an agent can check a page it wrote with `screenshot`, `console`, and `act`.
+The file is UTF-8 text of at most 16 MiB.
+The page cannot load or navigate to other local files, and relative links in it do not resolve; its network requests follow the same checks as any page.
+
+```python
+browser_control(action="open", paths=["slides/deck.html"])
+browser_control(action="screenshot")
+```
+
 #### Profiles and Signed-In Sessions
 
 Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.

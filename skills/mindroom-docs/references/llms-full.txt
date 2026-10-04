@@ -5165,6 +5165,8 @@ chat_ui.show_canvas(
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
+- **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
+  Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
   Each update of a page larger than about 24 KB stores a new copy on the homeserver that users cannot delete, so iterate on large pages sparingly.
 
@@ -9403,6 +9405,15 @@ With the default `workspace`, `upload` accepts files in the artifact directory, 
 Everything else is refused, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces; in a worker only the worker workspace is readable.
 With `unrestricted`, `upload` accepts any file its process can read.
 One browser holds at most 256 MiB of uploaded files until their tabs close, so a larger upload is refused until a tab is closed.
+
+On the host target, `open` also takes one HTML file in `paths` instead of `targetUrl`, read under the same rules as `upload`, so an agent can check a page it wrote with `screenshot`, `console`, and `act`.
+The file is UTF-8 text of at most 16 MiB.
+The page cannot load or navigate to other local files, and relative links in it do not resolve; its network requests follow the same checks as any page.
+
+```python
+browser_control(action="open", paths=["slides/deck.html"])
+browser_control(action="screenshot")
+```
 
 #### Profiles and Signed-In Sessions
 
