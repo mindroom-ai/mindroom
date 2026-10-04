@@ -724,7 +724,7 @@ def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
         assert sources[name]["items"] == []
         assert "MINDROOM_EVENT_CACHE_DATABASE_URL" in sources[name]["error"]
     assert sources["tool_calls"]["status"] == "ok"
-    assert "Warning:" in result.output
+    assert "Warning:" not in result.output
     assert "turn_records: error, 0 items (PostgreSQL event journal requires" in result.output
 
 

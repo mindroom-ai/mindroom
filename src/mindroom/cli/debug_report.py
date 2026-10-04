@@ -95,7 +95,6 @@ def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
         # environment rather than this one.
         # Reading the SQLite file instead could show the wrong database, so the journal sources report the error.
         journal_error = str(exc)
-        typer.echo(f"Warning: {exc}; the journal sources are reported as errors.", err=True)
     return DebugReportSources(
         storage_root=storage_root,
         session_root=resolve_session_state_root(storage_root, runtime_paths),
