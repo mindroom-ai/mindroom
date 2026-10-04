@@ -42,7 +42,7 @@ Set allowlist entries in `approvedEgress.allowlist.domains`, or provide them in 
 A plain hostname matches exactly, and a leading dot such as `.docs.example.com` matches the domain and all its subdomains.
 Allowlisted hostnames never need approval.
 Changing `approvedEgress.allowlist.domains` restarts the proxy automatically when you apply the chart, but edits to an `existingConfigMap` reach the proxy only after you restart it.
-MindRoom keeps the allowlist it started with until its own pod restarts; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) names the Deployments to restart.
+MindRoom keeps the allowlist it started with until its own pod restarts, so until then a removed domain is still reported as allowed and gets no grant; the [runtime chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#worker-egress-proxy) names the Deployments to restart.
 
 ## Requesting Access
 
