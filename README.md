@@ -335,7 +335,8 @@ Plain replies that never reach threaded context still stay plain replies.
 4. **Smart routing** - System picks the best agent or team for new threads
 5. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
 
-### Chat Commands
+<details>
+<summary><b>Chat commands</b></summary>
 
 <!-- CODE:START -->
 <!-- import sys -->
@@ -363,6 +364,8 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!hi` - Show welcome message
 
 <!-- OUTPUT:END -->
+
+</details>
 
 ## Configuration
 
