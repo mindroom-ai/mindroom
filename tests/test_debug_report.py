@@ -397,6 +397,21 @@ def test_build_debug_report_marks_every_journal_source_when_the_journal_cannot_b
     assert sources["tool_calls"]["status"] == "ok"
 
 
+def test_build_debug_report_marks_journal_sources_with_the_given_journal_error(tmp_path: Path) -> None:
+    """A journal that could not be located is an error on all three sources, and the SQLite file is not read."""
+    _seed_journal(tmp_path / "tracking" / "event_journal.db")
+    _seed_files(tmp_path)
+    sources = dataclasses.replace(_sources(tmp_path), journal_error="no database URL")
+
+    document = build_debug_report(sources, collect_ids(None, event_ids=["$user"]), generated_at="now")
+
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert document["sources"][name]["status"] == "error"
+        assert document["sources"][name]["error"] == "no database URL"
+        assert document["sources"][name]["items"] == []
+    assert document["sources"]["tool_calls"]["status"] == "ok"
+
+
 def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(tmp_path: Path) -> None:
     """A PostgreSQL journal that refuses the connection marks all three journal sources as errors."""
     pytest.importorskip("psycopg")
@@ -512,6 +527,59 @@ def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) 
     assert "turn_records: ok, 1 items" in result.output
 
 
+def test_cli_shows_the_error_of_a_source_that_is_ok_with_a_partial_failure(tmp_path: Path) -> None:
+    """One unreadable session database leaves agno_runs ok, and the stderr summary still names what failed."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    _seed_agno(storage)
+    broken = storage / "agents" / "x" / "sessions" / "x.db"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"this is not a sqlite database" * 100)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-r", ROOM, "-t", "$root", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    agno_runs = json.loads(output.read_text(encoding="utf-8"))["sources"]["agno_runs"]
+    assert agno_runs["status"] == "ok"
+    assert [item["run_id"] for item in agno_runs["items"]] == ["run-1"]
+    assert f"agno_runs: ok, 1 items ({agno_runs['error']})" in result.output
+
+
+def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A postgres journal without a DSN in this shell is an error, never a silent read of the SQLite file."""
+    monkeypatch.delenv("MINDROOM_EVENT_CACHE_DATABASE_URL", raising=False)
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    config.write_text(config.read_text(encoding="utf-8") + "event_journal:\n  backend: postgres\n", encoding="utf-8")
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    _seed_files(storage)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox"):
+        assert sources[name]["status"] == "error"
+        assert sources[name]["items"] == []
+        assert "MINDROOM_EVENT_CACHE_DATABASE_URL" in sources[name]["error"]
+    assert sources["tool_calls"]["status"] == "ok"
+    assert "Warning:" in result.output
+    assert "turn_records: error, 0 items (PostgreSQL event journal requires" in result.output
+
+
 def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path) -> None:
     """Without --output the JSON goes to stdout."""
     config = tmp_path / "config.yaml"
@@ -522,7 +590,7 @@ def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path
     result = runner.invoke(app, ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage)])
 
     assert result.exit_code == 0, result.output
-    assert '"type": "io.mindroom.debug_report"' in result.stdout
+    assert json.loads(result.stdout)["type"] == "io.mindroom.debug_report"
 
 
 def test_cli_requires_an_identifier(tmp_path: Path) -> None:
@@ -530,6 +598,15 @@ def test_cli_requires_an_identifier(tmp_path: Path) -> None:
     result = runner.invoke(app, ["debug-report", "-s", str(tmp_path)])
     assert result.exit_code == 1
     assert "at least one of --event, --room, --thread" in result.output
+
+
+def test_cli_rejects_a_binary_file_as_a_bug_report(tmp_path: Path) -> None:
+    """A file that is not UTF-8 text is refused with a message instead of a traceback."""
+    binary = tmp_path / "bug-report.json"
+    binary.write_bytes(b"\xff\xfe\x00\x80 not text")
+    result = runner.invoke(app, ["debug-report", str(binary), "-s", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "cannot read" in result.output
 
 
 def test_cli_rejects_a_file_that_is_not_a_bug_report(tmp_path: Path) -> None:

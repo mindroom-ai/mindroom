@@ -348,6 +348,9 @@ class DebugReportSources:
     journal_sqlite_path: Path | None
     journal_postgres_url: str | None
     llm_request_log_dir: Path
+    # Why the journal could not be located (for example no PostgreSQL URL in this shell).
+    # It is reported instead of falling back to the SQLite path, which would read the wrong database.
+    journal_error: str | None = None
 
 
 def _failed(location: str, error: Exception) -> _SourceResult:
@@ -356,6 +359,8 @@ def _failed(location: str, error: Exception) -> _SourceResult:
 
 def _read_journal_source(sources: DebugReportSources, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
+    if sources.journal_error is not None:
+        return {name: _SourceResult("error", ["postgres"], error=sources.journal_error) for name in _JOURNAL_SOURCES}
     if sources.journal_postgres_url is not None:
         import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
 

@@ -29,7 +29,7 @@ def _fail(message: str) -> NoReturn:
 def _read_report(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _fail(f"cannot read {path}: {exc}")
     if not isinstance(data, dict) or data.get("type") != _BUG_REPORT_TYPE:
         _fail(f"{path} is not a MindRoom Chat bug report.")
@@ -57,26 +57,34 @@ def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
     llm_request_log_dir = storage_root / "logs" / "llm_requests"
     journal_sqlite_path: Path | None = storage_root / "tracking" / "event_journal.db"
     journal_postgres_url: str | None = None
+    journal_error: str | None = None
     config = _load_config_if_present(runtime_paths)
     if config is not None:
         if config.debug.llm_request_log_dir:
             configured = Path(config.debug.llm_request_log_dir).expanduser()
             llm_request_log_dir = configured if configured.is_absolute() else runtime_paths.config_dir / configured
         if config.event_journal.backend == "postgres":
-            journal_postgres_url = config.event_journal.resolve_postgres_database_url(runtime_paths)
             journal_sqlite_path = None
+            try:
+                journal_postgres_url = config.event_journal.resolve_postgres_database_url(runtime_paths)
+            except ValueError as exc:
+                # The URL usually lives in the service's environment, not in this shell.
+                # Reading the SQLite file instead would show the wrong database, so the journal sources report the error.
+                journal_error = str(exc)
+                typer.echo(f"Warning: {exc}; the journal sources are reported as errors.", err=True)
     return DebugReportSources(
         storage_root=storage_root,
         session_root=resolve_session_state_root(storage_root, runtime_paths),
         journal_sqlite_path=journal_sqlite_path,
         journal_postgres_url=journal_postgres_url,
         llm_request_log_dir=llm_request_log_dir,
+        journal_error=journal_error,
     )
 
 
 def _summarize(name: str, source: dict[str, Any]) -> str:
     line = f"{name}: {source['status']}, {len(source['items'])} items"
-    if source["status"] == "error":
+    if source["error"]:
         line += f" ({source['error']})"
     return line
 

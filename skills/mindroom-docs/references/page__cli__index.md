@@ -977,7 +977,9 @@ The input is the JSON file a MindRoom Chat **Report a bug** message carries, or 
 The command reads the event journal (turn records, admitted events, and outbound deliveries), every Agno session database's runs, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error`.
 A source that cannot be read, such as a locked or corrupt database, is reported with `"status": "error"` and its message under `error`, while the other sources are still collected.
-Databases are opened read-only, so running it never changes an install.
+A source that reads several files can be `ok` with an `error` naming the files it could not read, for example one locked session database among many.
+A PostgreSQL event journal whose connection URL is not set in the current shell is reported the same way, never replaced by the SQLite file.
+The event journal and the Agno session databases are opened read-only.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
 Nothing is redacted; JSONL sources are capped at 1,000 records and log lines at 2,000 lines of 4,000 characters each.
 
