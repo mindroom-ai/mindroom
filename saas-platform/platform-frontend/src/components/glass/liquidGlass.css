@@ -1,0 +1,81 @@
+/*
+ * Liquid glass material from MindRoom Chat (mindroom-ai/mindroom-chat src/app/styles/Glass.css.ts): the floating overlay
+ * level, with the Surface colors of MindRoom Chat's default light and dark themes.
+ * liquidGlass.ts adds the refraction filter (Chromium) and the pointer light; other browsers keep the blurred glass.
+ * The element needs position: relative and a border radius for the rim.
+ */
+.liquid-glass {
+  --glass-container: #ffffff;
+  --glass-shadow: 0 0 0 transparent;
+  --glass-tint: 60%;
+  --glass-blur: 3px;
+  --glass-highlight: rgb(255 255 255 / 22%);
+  --glass-rim-highlight: rgb(255 255 255 / 32%);
+  --glass-rim-shade: rgb(65 70 90 / 24%);
+  /* Let the shaded rim show through so the top stays visible on white backgrounds. */
+  --glass-rim-reflection: rgb(255 255 255 / 50%);
+  background-color: var(--glass-container);
+  background-image: none;
+  box-shadow: var(--glass-shadow);
+}
+
+.dark .liquid-glass {
+  --glass-container: #2b2b2e;
+  --glass-tint: 72%;
+  --glass-highlight: rgb(255 255 255 / 4%);
+  --glass-rim-highlight: rgb(255 255 255 / 14%);
+  --glass-rim-shade: rgb(255 255 255 / 3%);
+  --glass-rim-reflection: rgb(255 255 255 / 32%);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) and ((mask-composite: exclude) or (-webkit-mask-composite: xor)) {
+  .liquid-glass {
+    --glass-shadow: 0 16px 48px rgb(0 0 0 / 18%), 0 2px 8px rgb(0 0 0 / 8%);
+  }
+
+  /* A one-pixel rim, lit at the top and bottom while the sides recede. */
+  .liquid-glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    pointer-events: none;
+    background-color: var(--glass-rim-shade);
+    background-image: linear-gradient(180deg, var(--glass-rim-reflection), transparent 45%, transparent 65%, var(--glass-rim-highlight));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+}
+
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .liquid-glass {
+    --glass-shadow: inset 0 1px 0 var(--glass-rim-highlight), inset 0 -1px 0 rgb(255 255 255 / 6%), 0 16px 48px rgb(0 0 0 / 18%), 0 2px 8px rgb(0 0 0 / 8%);
+    background-color: color-mix(in srgb, var(--glass-container) var(--glass-tint), transparent);
+    background-image: radial-gradient(circle 90px at var(--liquid-glass-light-x, 0%) var(--liquid-glass-light-y, 0%), var(--glass-highlight), transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  }
+
+  .liquid-glass[data-liquid-glass="active"] {
+    -webkit-backdrop-filter: var(--liquid-glass-filter) saturate(145%);
+    backdrop-filter: var(--liquid-glass-filter) saturate(145%);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  .liquid-glass::before {
+    display: none;
+  }
+
+  .liquid-glass,
+  .liquid-glass[data-liquid-glass="active"] {
+    --glass-shadow: 0 0 0 transparent;
+    background-color: var(--glass-container);
+    background-image: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
