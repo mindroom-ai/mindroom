@@ -1,5 +1,12 @@
-/* Films with light and dark recordings: show the one matching the page palette. */
-[data-md-color-scheme="slate"] video.only-light,
-[data-md-color-scheme="default"] video.only-dark {
+/* Films with light and dark recordings: show the one matching the page palette.
+   themed-video.js marks a film that started, which stays on screen in its theme until it leaves the screen. */
+[data-md-color-scheme="slate"] video.only-light:not(.started),
+[data-md-color-scheme="default"] video.only-dark:not(.started),
+video.only-light.started + video.only-dark {
+  display: none;
+}
+
+/* A rule of its own, since a browser without :has() drops every selector in a list that contains it. */
+video.only-light:has(+ video.only-dark.started) {
   display: none;
 }

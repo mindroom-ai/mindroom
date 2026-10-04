@@ -1,10 +1,12 @@
 'use client'
 
 import Link from 'next/link'
+import { useState } from 'react'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { HeroParticleBackground } from '@/components/landing/HeroParticleBackground'
 import { ProductFilm } from '@/components/landing/ProductFilm'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
+import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
 import {
   ArrowRight,
   BookOpen,
@@ -12,6 +14,7 @@ import {
   Brain,
   Check,
   Cloud,
+  Copy,
   GitBranch,
   Laptop,
   Lock,
@@ -36,7 +39,6 @@ type PricePlan = {
   features: string[]
   cta: string
   href: string
-  highlighted?: boolean
 }
 
 const docsUrl = 'https://docs.mindroom.chat/'
@@ -71,7 +73,7 @@ const workUses = [
 
 const reasons: IconItem[] = [
   {
-    title: 'Agents that know you and your work',
+    title: 'Connected to your tools and documents',
     body: 'Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.',
     icon: Bot,
     href: `${docsUrl}#agents-that-know-you-and-your-work`,
@@ -83,14 +85,14 @@ const reasons: IconItem[] = [
     href: `${docsUrl}#private-where-it-matters`,
   },
   {
-    title: 'They remember, and keep improving',
+    title: 'Memory that keeps improving',
     body: 'Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.',
     icon: Brain,
     href: `${docsUrl}#they-remember-and-keep-improving`,
   },
   {
     title: 'Safe to give real access',
-    body: 'One-tap approval before anything is sent, code in isolated workers, and Matrix: the open, end-to-end encrypted standard governments use for secure messaging.',
+    body: 'One-tap approval for anything risky, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.',
     icon: Shield,
     href: `${docsUrl}#safe-to-give-real-access`,
   },
@@ -125,7 +127,7 @@ const setups: (IconItem & { cta: string })[] = [
   },
   {
     title: 'Hosted MindRoom',
-    body: 'Let us run the same open-source software for you, from a free plan to a larger workspace.',
+    body: 'Let us run it for you, from a free plan to a larger workspace.',
     icon: Cloud,
     href: '#hosted',
     cta: 'See hosted plans',
@@ -142,10 +144,10 @@ const plans: PricePlan[] = [
     href: '/auth/signup',
   },
   {
-    name: 'BYOK',
+    name: 'Your own keys',
     price: '$10',
-    description: 'Hosted MindRoom for customers who bring their own model keys.',
-    features: ['Hosted instance', 'Bring your own keys', 'All integrations'],
+    description: 'Hosted MindRoom that uses your model API keys, so AI usage is billed by your provider.',
+    features: ['Hosted instance', 'Your own model API keys', 'All integrations'],
     cta: 'Create account',
     href: '/auth/signup?plan=byok',
   },
@@ -156,13 +158,12 @@ const plans: PricePlan[] = [
     features: ['Hosted instance', '$15 included monthly AI usage', 'All integrations'],
     cta: 'Create account',
     href: '/auth/signup?plan=hobby',
-    highlighted: true,
   },
   {
     name: 'Pro',
     price: '$200',
     description: 'Larger hosted workspace with a higher included AI budget.',
-    features: ['Larger resource profile', '$150 included monthly AI usage', 'Priority support'],
+    features: ['Larger instance', '$150 included monthly AI usage', 'Priority support'],
     cta: 'Create account',
     href: '/auth/signup?plan=pro',
   },
@@ -176,9 +177,9 @@ const footerLinks = [
   { href: 'https://pypi.org/project/mindroom/', label: 'PyPI' },
 ]
 
-const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
+const primaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200'
 const secondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-gray-300 bg-white/70 px-5 py-3 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10'
-const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/18 bg-white/10 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-white/16'
+const darkPrimaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white bg-white px-5 py-3 text-sm font-semibold text-gray-950 transition-colors hover:bg-gray-200'
 const darkSecondaryCtaClass = 'inline-flex items-center justify-center gap-2 rounded-md border border-white/14 bg-transparent px-5 py-3 text-sm font-semibold text-white/82 transition-colors hover:bg-white/8 hover:text-white'
 const textLinkClass = 'inline-flex items-center gap-1 text-sm font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200'
 
@@ -193,7 +194,7 @@ function SectionHeading({
 }) {
   return (
     <div className="max-w-2xl">
-      <p className="text-sm font-semibold uppercase tracking-normal text-orange-600 dark:text-orange-400">
+      <p className="text-sm font-semibold uppercase tracking-normal text-orange-700 dark:text-orange-400">
         {eyebrow}
       </p>
       <h2 className="mt-3 text-3xl font-semibold text-gray-950 dark:text-white sm:text-4xl">
@@ -206,6 +207,37 @@ function SectionHeading({
   )
 }
 
+const installCommand = 'uvx mindroom run'
+
+function CopyCommand() {
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(installCommand)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md bg-gray-950 py-2 pl-4 pr-2 dark:bg-black">
+      <pre className="overflow-x-auto font-mono text-sm text-gray-100">
+        <code>
+          <span className="select-none text-emerald-400">$ </span>
+          {installCommand}
+        </code>
+      </pre>
+      <button
+        type="button"
+        onClick={copy}
+        aria-label={copied ? 'Copied' : 'Copy command'}
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-white/10 hover:text-white"
+      >
+        {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+      </button>
+    </div>
+  )
+}
+
 function RunItYourself() {
   const steps = [
     ['Run MindRoom on your computer', 'One command installs and starts it, with a starter agent.'],
@@ -213,9 +245,11 @@ function RunItYourself() {
     ['Talk to your agents', 'On the web, on iPhone and iPad, or on the Mac.'],
   ]
 
+  const glass = useLiquidGlass<HTMLDivElement>()
+
   return (
-    <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl shadow-gray-200/70 dark:border-gray-800 dark:bg-gray-950 dark:shadow-black/25">
-      <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900">
+    <div ref={glass} className="liquid-glass relative overflow-hidden rounded-2xl">
+      <div className="flex items-center justify-between border-b border-gray-950/8 px-4 py-3 dark:border-white/10">
         <div className="flex items-center gap-2">
           <span className="h-3 w-3 rounded-full bg-red-400" />
           <span className="h-3 w-3 rounded-full bg-yellow-400" />
@@ -224,12 +258,7 @@ function RunItYourself() {
         <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Run it yourself</span>
       </div>
       <div className="p-5 sm:p-6">
-        <pre className="overflow-x-auto rounded-md bg-gray-950 px-4 py-3 font-mono text-sm text-gray-100 dark:bg-black">
-          <code>
-            <span className="select-none text-emerald-400">$ </span>
-            uvx mindroom run
-          </code>
-        </pre>
+        <CopyCommand />
         <ol className="mt-6 space-y-5">
           {steps.map(([title, body], index) => (
             <li key={title} className="flex gap-4">
@@ -312,19 +341,19 @@ export default function LandingPage() {
                 {link.label}
               </Link>
             ))}
-            <a href={docsUrl} className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
-              Docs
-            </a>
-            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white">
-              GitHub
-            </a>
           </div>
           <div className="flex items-center gap-2 sm:gap-3">
+            <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
+              Docs
+            </a>
+            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
+              GitHub
+            </a>
             <DarkModeToggle />
             <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white sm:inline-flex">
               Sign in
             </Link>
-            <a href={installGuideUrl} className="inline-flex items-center gap-2 rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16 sm:px-4">
+            <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
               Get started
               <ArrowRight className="h-4 w-4" />
             </a>
@@ -334,22 +363,16 @@ export default function LandingPage() {
 
       <section className="relative overflow-hidden border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950">
         <HeroParticleBackground />
-        <div className="relative z-10 mx-auto grid max-w-7xl gap-10 px-4 py-10 sm:px-6 sm:py-12 lg:grid-cols-[1fr_0.9fr] lg:items-center lg:px-8 lg:py-16">
+        <div className="relative z-10 mx-auto max-w-7xl px-4 py-10 sm:px-6 sm:py-12 lg:px-8 lg:py-16">
+          <h1 className="text-4xl font-semibold tracking-tight text-gray-950 dark:text-white lg:text-5xl">
+            <span className="block text-balance">AI agents that know you and your work,</span>{' '}
+            <span className="block text-balance text-gray-500 dark:text-gray-400">in a chat app anyone can use.</span>
+          </h1>
+          <div className="mt-8 grid gap-10 lg:grid-cols-[1fr_0.9fr] lg:items-start">
           <div>
-            <div className="flex flex-wrap items-center gap-4">
-              <MindRoomLogo className="h-14 w-14 sm:h-16 sm:w-16" size={64} />
-              <h1 className="text-5xl font-semibold text-gray-950 dark:text-white sm:text-6xl">
-                MindRoom
-              </h1>
-            </div>
-            <p className="mt-4 text-pretty text-xl font-medium leading-8 text-gray-900 dark:text-gray-100">
-              AI agents that know you and your work,{' '}
-              <br className="hidden sm:inline" />
-              in a chat app anyone can use.
-            </p>
-            <p className="mt-4 max-w-xl text-base leading-7 text-gray-600 dark:text-gray-300">
-              A personal agent for everything from family trips to your homelab, and shared agents for teams, connected to email, chat, documents, and code.
-              Choose a local model for your private life or a frontier model for hard problems, and run all of it yourself.
+            <p className="max-w-xl text-pretty text-base leading-7 text-gray-600 dark:text-gray-300 sm:text-lg sm:leading-8">
+              A personal agent for your calendar, notes, trips, and homelab, and shared agents for your team&apos;s email, documents, and code.
+              Pick a local model for your private life or a frontier model for hard problems.
             </p>
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
               <a href={installGuideUrl} className={primaryCtaClass}>
@@ -369,8 +392,8 @@ export default function LandingPage() {
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium text-gray-500 dark:text-gray-400">
               {heroFacts.map((fact, index) => (
-                <div key={fact} className="flex items-center gap-4">
-                  {index > 0 && <span className="hidden h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 sm:block" />}
+                <div key={fact} className="flex items-center gap-2.5 sm:gap-4">
+                  <span className={`h-1 w-1 rounded-full bg-gray-300 dark:bg-gray-700 ${index === 0 ? 'sm:hidden' : ''}`} />
                   <span>{fact}</span>
                 </div>
               ))}
@@ -379,29 +402,20 @@ export default function LandingPage() {
           <div className="relative">
             <RunItYourself />
           </div>
-        </div>
-      </section>
-
-      <section id="film" className="border-b border-gray-200 py-16 dark:border-gray-800">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <SectionHeading
-            eyebrow="In action"
-            title="Agents at work and at home."
-            body="Approvals, team threads, code, documents, and the browser at the office; lights, trips, and dinners at home. Every step happens in a room you can read."
-          />
-          <div className="mt-10">
-            <ProductFilm />
           </div>
         </div>
       </section>
 
-      <section id="use-cases" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
+      <section id="use-cases" className="border-b border-gray-200 py-16 dark:border-gray-800">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
             eyebrow="What people use it for"
             title="Your assistant at home, your team's memory at work."
-            body="The same agents handle your personal life and your team's work, each with its own model, memory, and access."
+            body="Personal agents for your own life and shared agents for your team, each with its own model, memory, and access."
           />
+          <div className="mt-10">
+            <ProductFilm />
+          </div>
           <div className="mt-10 grid gap-6 lg:grid-cols-2">
             <UseCaseList title="Personal" items={personalUses} />
             <UseCaseList title="Work" items={workUses} />
@@ -409,11 +423,11 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="why" className="border-b border-gray-200 py-16 dark:border-gray-800">
+      <section id="why" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
             eyebrow="Why MindRoom"
-            title="Agents that know you, remember, and stay yours."
+            title="Agents that remember and stay yours."
             body="MindRoom builds the whole stack, from the chat app to the server to the AI backend, so it can be private, extensible, and built for agents from end to end."
           />
           <div className="mt-10">
@@ -422,7 +436,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="self-host" className="border-b border-gray-200 bg-gray-50 py-16 dark:border-gray-800 dark:bg-gray-900/30">
+      <section id="self-host" className="border-b border-gray-200 py-16 dark:border-gray-800">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <SectionHeading
             eyebrow="Run it your way"
@@ -450,32 +464,24 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section id="hosted" className="py-16">
+      <section id="hosted" className="bg-gray-50 py-16 dark:bg-gray-900/30">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col justify-between gap-8 lg:flex-row lg:items-end">
-            <SectionHeading
-              eyebrow="Hosted"
-              title="Prefer us to host it?"
-              body="Hosted MindRoom runs the same open-source software for you, with nothing to install. Start free, bring your own model keys, or include AI usage in your plan."
-            />
-            <Link href="/dashboard" className="inline-flex items-center gap-2 self-start rounded-md border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8 lg:self-end">
-              Open dashboard
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-          </div>
+          <SectionHeading
+            eyebrow="Hosted"
+            title="Prefer us to host it?"
+            body="Nothing to install: start free, bring your own model keys, or include AI usage in your plan."
+          />
           <div className="mt-10 overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
             {plans.map((plan) => (
               <article
                 key={plan.name}
-                className={`grid gap-5 border-b border-gray-200 p-5 last:border-b-0 dark:border-gray-800 lg:grid-cols-[0.7fr_0.9fr_1.2fr_auto] lg:items-center ${
-                  plan.highlighted ? 'bg-orange-50/70 dark:bg-orange-500/10' : ''
-                }`}
+                className="grid gap-5 border-b border-gray-200 p-5 last:border-b-0 dark:border-gray-800 lg:grid-cols-[1fr_0.6fr_1.2fr_10rem] lg:items-center"
               >
                 <div>
                   <h3 className="text-lg font-semibold text-gray-950 dark:text-white">{plan.name}</h3>
                   <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-300">{plan.description}</p>
                 </div>
-                <div className="flex items-baseline gap-2 lg:justify-center">
+                <div className="flex items-baseline gap-2">
                   <span className="text-3xl font-semibold text-gray-950 dark:text-white">{plan.price}</span>
                   {plan.price !== '$0' && <span className="text-sm text-gray-500 dark:text-gray-400">monthly</span>}
                 </div>
@@ -489,11 +495,7 @@ export default function LandingPage() {
                 </ul>
                 <Link
                   href={plan.href}
-                  className={`inline-flex items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold transition-colors ${
-                    plan.highlighted
-                      ? 'border border-gray-950/10 bg-gray-950 text-white hover:bg-gray-800 dark:border-white/16 dark:bg-white/10 dark:text-white dark:hover:bg-white/16'
-                      : 'border border-gray-300 text-gray-800 hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8'
-                  }`}
+                  className="inline-flex items-center justify-center rounded-md border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:text-gray-100 dark:hover:bg-white/8"
                 >
                   {plan.cta}
                 </Link>
@@ -530,8 +532,8 @@ export default function LandingPage() {
       <footer className="py-10">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 text-sm text-gray-500 dark:text-gray-400 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
           <div className="flex items-center gap-3">
-            <MindRoomLogo className="opacity-75" size={24} />
-            <span>MindRoom</span>
+            <MindRoomLogo size={24} />
+            <span>MindRoom is open source under the Apache 2.0 license.</span>
           </div>
           <div className="flex flex-wrap gap-4">
             {footerLinks.map((link) => (
