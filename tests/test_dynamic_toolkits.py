@@ -1471,6 +1471,18 @@ def test_chat_ui_instructions_map_only_the_enabled_functions(
     assert "open_panel(panel='members') shows the Members panel" in prompt
 
 
+def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
+    """An operator may exclude show_canvas defensively; that must not drop the other chat_ui functions."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": {"exclude_tools": ["show_canvas"]}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None, session_id="thread-a")
+    toolkit = next(tool for tool in agent.tools if tool.name == "chat_ui")
+
+    assert sorted(toolkit.async_functions) == ["open_panel", "open_settings", "show_computer"]
+
+
 @pytest.mark.parametrize(
     ("options", "available"),
     [
