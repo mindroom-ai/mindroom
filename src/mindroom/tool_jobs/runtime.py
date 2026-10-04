@@ -151,6 +151,14 @@ def job_summary(job: BackgroundJob) -> dict[str, Any]:
     return summary
 
 
+def _interrupted_reason(cause: Literal["restart", "shutdown"]) -> str:
+    """Tell the model what an interrupted call may have done, so it repeats only a read-only one."""
+    return (
+        f"A runtime {cause} interrupted this call before it returned a result. If it has side effects, they may "
+        "already have happened, so do not run it again; a read-only call can run again to get its result."
+    )
+
+
 def format_job_handle(job: BackgroundJob) -> str:
     """Return the job's summary as the machine-readable handle a detached or queued call returns."""
     return json.dumps(job_summary(job))
@@ -390,7 +398,7 @@ class ToolJobRuntime:
                 if entry.job.status not in TERMINAL_STATUSES:
                     # Only work the restart cut short is interrupted by it; a cancellation or Stop saved before it is not.
                     cancelled = entry.job.status == "cancel_requested" or entry.job.user_stop_receipt_order is not None
-                    reason = "Tool execution was interrupted by a runtime restart; it was not replayed."
+                    reason = _interrupted_reason("restart")
                     default = BackgroundOutcome("cancelled") if cancelled else BackgroundOutcome("interrupted", reason)
                     entry.control.cancel(shutdown=not cancelled)
                     outcome = await self._cleanup(entry)
@@ -901,7 +909,7 @@ class ToolJobRuntime:
                     entry.task.cancel()
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
-        reason = "Tool execution was interrupted by runtime shutdown; it was not replayed."
+        reason = _interrupted_reason("shutdown")
         for entry in self._entries.values():
             try:
                 await self._settle(entry, BackgroundOutcome("interrupted", reason))

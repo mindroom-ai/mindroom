@@ -69,6 +69,7 @@ A message continues with ready results at most 20 times across its own turn and 
 A reply that a process stop cuts short is regenerated in place by journal replay, which tells the new attempt what the stopped attempt showed and names the finished calls it must not repeat (see [Bot Runtime](../architecture/bot-runtime.md)); background jobs add no restart path of their own.
 A detached job start is such a finished call, and its result names the job ID.
 Jobs the stopped attempt left running are interrupted by the restart, and their outcomes reach the new attempt at its response boundary like any other ready work.
+An interrupted outcome tells the model that a call with side effects may already have taken effect and must not run again, while a read-only call can run again for its lost result; replayed against real models, this wording stopped repeated side effects without stopping read-only calls from running again.
 
 Shutdown first stops the coordinator's worker and drains execution.
 Receipt access remains available until response finalizers finish.

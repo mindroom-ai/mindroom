@@ -41,8 +41,14 @@ type Finish = Literal["completed", "failed", "raise", "self_cancel"]
 type Cleanup = Literal["none", "completed", "failed", "cancelled", "raise", "park", "classify"]
 type _Cause = Literal["cancel", "shutdown", "restart"]
 
-_RESTARTED = "Tool execution was interrupted by a runtime restart; it was not replayed."
-_SHUT_DOWN = "Tool execution was interrupted by runtime shutdown; it was not replayed."
+_RESTARTED = (
+    "A runtime restart interrupted this call before it returned a result. If it has side effects, they may already "
+    "have happened, so do not run it again; a read-only call can run again to get its result."
+)
+_SHUT_DOWN = (
+    "A runtime shutdown interrupted this call before it returned a result. If it has side effects, they may already "
+    "have happened, so do not run it again; a read-only call can run again to get its result."
+)
 _CLASSIFIED = "Interrupted by a shutdown or restart."
 # Loop iterations one step may take before it counts as livelocked.
 _IDLE_ROUNDS = 10_000
