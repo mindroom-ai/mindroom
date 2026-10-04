@@ -603,6 +603,14 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
         "https://host/path",
         "https://host\n",
         "https://",
+        "null",
+        "capacitor://other-host",
+        "capacitor://localhost/",
+        "capacitor://localhost:443",
+        "capacitor://user@localhost",
+        "capacitor://localhost?secret=value",
+        "capacitor://localhost#fragment",
+        "CAPACITOR://localhost",
     ],
 )
 def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> None:
@@ -617,7 +625,13 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "origin",
-    ["https://chat.example.org", "http://localhost:4173", "http://127.0.0.2:4173", "http://[::1]:4173"],
+    [
+        "https://chat.example.org",
+        "http://localhost:4173",
+        "http://127.0.0.2:4173",
+        "http://[::1]:4173",
+        "capacitor://localhost",
+    ],
 )
 def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, tmp_path: Path) -> None:
     """Accepted origins retain exact matching, including the explicit port."""
@@ -627,6 +641,88 @@ def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, 
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
     assert computer_origins(paths) == (origin,)
+
+
+def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
+    """The native literal coexists with exact HTTPS origins without granting other schemes."""
+    origins = ["https://chat.example.org", "capacitor://localhost"]
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
+    )
+    assert computer_origins(paths) == tuple(origins)
+    invalid = replace(paths, process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([*origins, "null"])})
+    assert computer_origins(invalid) == ()
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_native_origin_cors_and_stream_require_explicit_allowlist(gateway: Gateway, allowed: bool) -> None:
+    """Native transport uses the same OpenID, bearer and single-use ticket checks as web Chat."""
+    client, _, app = gateway
+    state = config_lifecycle.require_api_state(app)
+    paths = state.snapshot.runtime_paths
+    origins = ["https://chat.example.org"]
+    if allowed:
+        origins.append("capacitor://localhost")
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(
+            paths,
+            process_env={**paths.process_env, "MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
+        ),
+    )
+    origin = "capacitor://localhost"
+    response = client.options(
+        "/api/computers/sessions",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == (200 if allowed else 400)
+    assert response.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    client.headers["Origin"] = origin
+    created = create(client)
+    assert created.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    session = created.json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket_response = client.post(path + "/stream-ticket", headers=headers)
+    assert ticket_response.headers.get("access-control-allow-origin") == (origin if allowed else None)
+    ticket = ticket_response.json()["ticket"]
+    protocols = ["binary", "mindroom-ticket." + ticket]
+    if not allowed:
+        with (
+            pytest.raises(WebSocketDenialResponse) as denied,
+            client.websocket_connect(path + "/stream", subprotocols=protocols, headers={"Origin": origin}),
+        ):
+            pass
+        assert denied.value.status_code == 403
+        return
+    with client.websocket_connect(path + "/stream", subprotocols=protocols, headers={"Origin": origin}) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        take = client.post(path + "/control", headers=headers, json={"action": "take"})
+        assert take.headers["access-control-allow-origin"] == origin
+        assert take.json()["mode"] == "control"
+        websocket.send_bytes(b"input")
+        assert websocket.receive_bytes() == b"control"
+        assert client.post(path + "/control", headers=headers, json={"action": "release"}).json()["mode"] == "view"
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    for hostile in ["null", "capacitor://other-host", "https://evil.example.org"]:
+        next_ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+        with (
+            pytest.raises(WebSocketDenialResponse) as denied,
+            client.websocket_connect(
+                path + "/stream",
+                subprotocols=["binary", "mindroom-ticket." + next_ticket],
+                headers={"Origin": hostile},
+            ),
+        ):
+            pass
+        assert denied.value.status_code == 403
 
 
 def test_configured_remote_http_denied_at_cors_and_stream(gateway: Gateway) -> None:

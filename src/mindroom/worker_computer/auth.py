@@ -27,7 +27,7 @@ class MatrixOpenIDToken(BaseModel):
 
 
 def computer_origins(paths: RuntimePaths) -> tuple[str, ...]:
-    """Read only exact HTTP origins; invalid configuration fails closed."""
+    """Read exact web and bundled iOS app origins; invalid configuration fails closed."""
     try:
         origins = json.loads(paths.env_value(COMPUTER_ALLOWED_ORIGINS_ENV, default="[]") or "[]")
         if not isinstance(origins, list):
@@ -35,6 +35,10 @@ def computer_origins(paths: RuntimePaths) -> tuple[str, ...]:
         for origin in origins:
             if not isinstance(origin, str) or any(character.isspace() or ord(character) < 32 for character in origin):
                 return ()
+            # The bundled iOS app has a fixed custom-scheme origin. Accept only
+            # this literal, never arbitrary capacitor origins or opaque "null".
+            if origin == "capacitor://localhost":
+                continue
             parsed = urlsplit(origin)
             hostname = parsed.hostname
             port = parsed.port  # Validate malformed and out-of-range ports.
