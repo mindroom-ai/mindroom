@@ -46,6 +46,7 @@ nav = [
     { "File & Video Attachments" = "attachments.md" },
     { "Interactive Questions" = "interactive.md" },
     { "Thread Exports" = "thread-exports.md" },
+    { "Bug Reports" = "bug-reports.md" },
     { "Usage Tracking" = "usage.md" },
   ] },
   { "Matrix" = [

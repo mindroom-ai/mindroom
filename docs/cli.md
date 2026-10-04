@@ -1298,6 +1298,7 @@ mindroom journal adopt --storage-path mindroom_data --yes
 
 Collect everything the backend stored about one conversation into a single JSON document, for example to debug a chat bug report.
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
+See [Bug Reports](bug-reports.md) for how users send those reports and how administrators receive them.
 
 The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's Agno runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.

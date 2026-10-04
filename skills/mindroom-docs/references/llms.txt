@@ -30,6 +30,7 @@
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/)
 - [Interactive Questions](https://docs.mindroom.chat/interactive/)
 - [Thread Exports](https://docs.mindroom.chat/thread-exports/)
+- [Bug Reports](https://docs.mindroom.chat/bug-reports/)
 - [Usage Tracking](https://docs.mindroom.chat/usage/)
 - [Matrix Integration](https://docs.mindroom.chat/matrix/)
 - [Rooms & Spaces](https://docs.mindroom.chat/rooms/)
