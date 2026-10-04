@@ -758,6 +758,34 @@ async def test_a_wake_whose_turn_never_begins_releases_its_hold(
 
 
 @pytest.mark.asyncio
+async def test_a_wake_for_an_ad_hoc_team_missing_a_member_releases_its_hold(
+    held: _Held,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that left the configuration cannot continue its team's message, so the wake releases it."""
+    key = replace(_KEY, participants=("general", "departed"))
+    await held.runner.held_messages.settle(
+        held.request,
+        _completed("$reply", "Started."),
+        ReplyBoundary(key, _WAITING_NOTICE, 0),
+        continued=None,
+        stop_button_event_id=None,
+    )
+    saved = await held.runner.deps.held_replies.load(key.hold_id)
+    assert saved is not None
+    hold = decode_held_reply(saved)
+    team = AsyncMock()
+    settle = AsyncMock()
+    monkeypatch.setattr(held.runner, "generate_team_response_helper", team)
+    monkeypatch.setattr(type(held.runner.deps.approval_store), "settle", settle)
+    await held.runner._continue_held_reply(_wake(hold))
+    team.assert_not_awaited()
+    settle.assert_awaited_once_with(_wake_event_id(hold))
+    assert await held.runner.deps.held_replies.load(key.hold_id) is None
+    assert held.edits[-1].new_text == "Started."
+
+
+@pytest.mark.asyncio
 async def test_a_wake_whose_turn_began_leaves_its_hold_to_that_turn(
     held: _Held,
     monkeypatch: pytest.MonkeyPatch,

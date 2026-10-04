@@ -3252,6 +3252,9 @@ class ResponseRunner:
             (team.agents, team.mode) if team is not None else (hold.key.participants, "coordinate")
         )
         registry = entity_identity_registry(config, self.deps.runtime_paths)
+        if any(name not in registry.current_ids for name in member_names):
+            # A member left the configuration, so no team continues the message; its wake releases it.
+            return
         await self.generate_team_response_helper(
             request,
             team_agents=[registry.current_ids[name] for name in member_names],
