@@ -124,6 +124,10 @@ class SourceResult:
     error: str | None = None
 
 
+def _describe_error(error: Exception) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
 def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Decode JSON stored as text, so the report nests objects instead of escaped strings."""
     decoded: dict[str, Any] = {}
@@ -221,6 +225,9 @@ def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
     """Read Agno runs by run ID or session ID from every session database under the session root.
 
     Databases are found by path rather than from the config so deleted agents' history is included.
+    One unreadable database (locked by a live run, corrupt) is isolated: the runs of the others are kept and
+    the failure is recorded as `<path>: <error>` in `error`. The status is "error" only when every database
+    failed, and a database that fails part-way contributes none of its rows.
     """
     databases = sorted(session_root.glob("**/sessions/*.db"))
     if not databases:
@@ -238,22 +245,36 @@ def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
     ]
     if not conditions:
         return result
+    failures: list[str] = []
     for database in databases:
-        with sqlite_query(database) as query:
-            tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
-            for table in sorted(name for name in tables if name.endswith("_runs")):
-                columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
-                if not {"run_id", "session_id", "run_data"} <= columns:
-                    continue
-                rows = query(
-                    f'SELECT * FROM "{table}" WHERE {" OR ".join(conditions)} ORDER BY rowid',  # noqa: S608 - table names come from sqlite_master
-                    [*run_ids, *session_ids],
-                )
-                result.items.extend(
-                    {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
-                    for row in rows
-                )
+        try:
+            result.items.extend(_read_agno_database(database, conditions, [*run_ids, *session_ids]))
+        except (sqlite3.Error, OSError) as error:
+            failures.append(f"{database}: {_describe_error(error)}")
+    if failures:
+        result.error = "; ".join(failures)
+        if len(failures) == len(databases):
+            result.status = "error"
     return result
+
+
+def _read_agno_database(database: Path, conditions: Sequence[str], params: Sequence[object]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    with sqlite_query(database) as query:
+        tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
+        for table in sorted(name for name in tables if name.endswith("_runs")):
+            columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
+            if not {"run_id", "session_id", "run_data"} <= columns:
+                continue
+            rows = query(
+                f'SELECT * FROM "{table}" WHERE {" OR ".join(conditions)} ORDER BY rowid',  # noqa: S608 - table names come from sqlite_master
+                params,
+            )
+            items.extend(
+                {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
+                for row in rows
+            )
+    return items
 
 
 def _record_matches(record: Mapping[str, Any], ids: DebugReportIds) -> bool:
@@ -330,7 +351,7 @@ class DebugReportSources:
 
 
 def _failed(location: str, error: Exception) -> SourceResult:
-    return SourceResult("error", [location], error=f"{type(error).__name__}: {error}")
+    return SourceResult("error", [location], error=_describe_error(error))
 
 
 def _read_journal_source(sources: DebugReportSources, ids: DebugReportIds) -> dict[str, SourceResult]:
@@ -342,15 +363,16 @@ def _read_journal_source(sources: DebugReportSources, ids: DebugReportIds) -> di
             with postgres_query(sources.journal_postgres_url) as query:
                 return read_journal(query, ids, "postgres")
         except (psycopg.Error, OSError) as error:
-            return dict.fromkeys(JOURNAL_SOURCES, _failed("postgres", error))
+            return {name: _failed("postgres", error) for name in JOURNAL_SOURCES}
     path = sources.journal_sqlite_path
-    if path is None or not path.is_file():
-        return {name: SourceResult("missing", [str(path)]) for name in JOURNAL_SOURCES}
     try:
+        # `is_file()` raises PermissionError when a parent directory is unreadable, so it belongs in the guard.
+        if path is None or not path.is_file():
+            return {name: SourceResult("missing", [str(path)]) for name in JOURNAL_SOURCES}
         with sqlite_query(path) as query:
             return read_journal(query, ids, str(path))
     except (sqlite3.Error, OSError) as error:
-        return dict.fromkeys(JOURNAL_SOURCES, _failed(str(path), error))
+        return {name: _failed(str(path), error) for name in JOURNAL_SOURCES}
 
 
 def _read_guarded(read: Callable[[], SourceResult], location: Path) -> SourceResult:

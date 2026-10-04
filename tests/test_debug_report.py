@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -340,8 +341,8 @@ def test_build_debug_report_marks_missing_sources(tmp_path: Path) -> None:
     )
 
 
-def test_build_debug_report_isolates_a_failing_agno_database(tmp_path: Path) -> None:
-    """A session database that cannot be read marks only agno_runs as an error; other sources still report."""
+def test_build_debug_report_marks_agno_runs_when_every_session_database_fails(tmp_path: Path) -> None:
+    """When every session database is unreadable only agno_runs is an error; other sources still report."""
     _seed_journal(tmp_path / "tracking" / "event_journal.db")
     _seed_files(tmp_path)
     broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
@@ -352,11 +353,27 @@ def test_build_debug_report_isolates_a_failing_agno_database(tmp_path: Path) -> 
 
     sources = document["sources"]
     assert sources["agno_runs"]["status"] == "error"
-    assert sources["agno_runs"]["error"]
+    assert sources["agno_runs"]["error"].startswith(f"{broken}: DatabaseError")
     healthy = {name: source["status"] for name, source in sources.items() if name != "agno_runs"}
     assert healthy == dict.fromkeys(healthy, "ok")
     assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
     json.dumps(document)
+
+
+def test_read_agno_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -> None:
+    """A corrupt session database is named in `error` while the runs of a healthy one are still returned."""
+    _seed_agno(tmp_path)
+    broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"this is not a sqlite database" * 100)
+
+    result = read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+
+    assert result.status == "ok"
+    assert [item["run_id"] for item in result.items] == ["run-1"]
+    assert result.error is not None
+    assert result.error.startswith(f"{broken}: DatabaseError")
+    assert "general.db" not in result.error
 
 
 def test_build_debug_report_marks_every_journal_source_when_the_journal_cannot_be_read(tmp_path: Path) -> None:
@@ -394,3 +411,23 @@ def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(t
         assert sources[name]["error"]
         assert sources[name]["paths"] == ["postgres"]
     assert sources["tool_calls"]["status"] == "ok"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_build_debug_report_survives_an_unreadable_tracking_directory(tmp_path: Path) -> None:
+    """An unreadable parent directory makes `is_file()` raise; the affected sources error and the rest still report."""
+    _seed_journal(tmp_path / "tracking" / "event_journal.db")
+    _seed_files(tmp_path)
+    tracking = tmp_path / "tracking"
+    tracking.chmod(0o000)
+    try:
+        document = build_debug_report(_sources(tmp_path), collect_ids(_report()), generated_at="now")
+    finally:
+        tracking.chmod(0o700)
+
+    sources = document["sources"]
+    for name in ("turn_records", "journal_events", "delivery_outbox", "tool_calls"):
+        assert sources[name]["status"] == "error"
+        assert "PermissionError" in sources[name]["error"]
+    assert sources["llm_requests"]["status"] == "ok"
+    assert sources["log_lines"]["status"] == "ok"
