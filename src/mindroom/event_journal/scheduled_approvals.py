@@ -305,8 +305,14 @@ def apply_armed(
     continuation: ApprovalContinuation,
     card: ApprovalCardReservation,
     membership_epoch: int,
+    any_arguments_eligible: bool,
 ) -> bool:
-    """Approve one call matching an armed binding and publish its receipt instead of a card."""
+    """Approve one call matching an armed binding and publish its receipt instead of a card.
+
+    An any-arguments approval covers only a call whose card a timed approval
+    could cover, so a call no card could approve, such as one with arguments
+    too large to show, still asks.
+    """
     call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
     if call.arguments_digest is None or continuation.thread_id is None:
         return False
@@ -337,7 +343,8 @@ def apply_armed(
             continuation.entity_name,
             call.tool_name,
             call.arguments_digest,
-            ANY_ARGUMENTS,
+            # NULL matches no scope, leaving only an exact-arguments match.
+            ANY_ARGUMENTS if any_arguments_eligible else None,
             membership_epoch,
             now - SCHEDULED_APPROVAL_WINDOW_NS,
             now + SCHEDULED_APPROVAL_WINDOW_NS,

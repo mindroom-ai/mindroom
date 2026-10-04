@@ -236,7 +236,7 @@ class ScheduledWorkflow(BaseModel):
     silent: bool = False
     # LEGACY_COMPAT: Scheduled workflows without the pre-approved call flag.
     # Legacy format: Scheduled workflows omitted pre_approved_call before scheduled tool calls existed.
-    # Last legacy release: v2026.10.140; replacement: the next release writes the flag on every workflow.
+    # Last legacy release: v2026.10.143; replacement: the next release writes the flag on every workflow.
     # Handling: Pydantic defaults absence to False, which is correct because no earlier task carried an approval.
     # Coverage: tests/test_scheduled_tool_approval.py::test_workflow_without_flag_loads_as_ordinary_task.
     pre_approved_call: bool = Field(
@@ -2071,7 +2071,9 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             execute_at=send_at,
             workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
-            any_arguments_offered=scheduled_call_offers_any_arguments(config, tool_name, arguments),
+            # Like a timed approval, the broader scope needs the requester to approve their own calls.
+            any_arguments_offered=approver_id == scheduled_by
+            and scheduled_call_offers_any_arguments(config, tool_name, arguments),
         ):
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
         await _persist_scheduled_task_state(

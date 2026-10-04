@@ -151,6 +151,7 @@ async def _fire_time_call(
     thread: str = _THREAD,
     agent: str = _AGENT,
     member: str | None = None,
+    grantable: bool = True,
 ) -> ApprovalContinuation:
     """Pause one agent or team run on a gated call, the way the fire-time turn does."""
     responder = journal.principal("agent@" + agent)
@@ -205,7 +206,7 @@ async def _fire_time_call(
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=member or agent,
         thread_id=thread,
-        grant_operation=ApprovalOperation("binding", "post_slack_message"),
+        grant_operation=ApprovalOperation("binding", "post_slack_message") if grantable else None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -611,6 +612,35 @@ async def test_any_arguments_approval_runs_one_call_with_different_arguments(
         )
         again = await _fire_time_call(journal, manager, "again")
         assert again.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_any_arguments_covers_only_calls_a_timed_approval_could_cover(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A call no card could approve for any arguments, such as one too large to show, still asks."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager, any_arguments_offered=True)
+        await _decide(manager, "approved", scheduled_scope="any_arguments")
+        assert await _arm(manager) == "armed"
+
+        changed = await _fire_time_call(
+            journal,
+            manager,
+            "changed",
+            arguments={"channel": "U999", "text": "Other"},
+            grantable=False,
+        )
+        exact = await _fire_time_call(journal, manager, "exact", grantable=False)
+
+        assert changed.calls[0].decision is None
+        assert exact.calls[0].decision is not None
+        assert exact.calls[0].decision.value == "approved"
     finally:
         await manager.shutdown()
 
@@ -1114,6 +1144,32 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
     start.assert_called_once()
     assert record.task_id in result
     assert "approve" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_call_offers_any_arguments_only_to_a_requester_approving_their_own_calls() -> None:
+    """A requester whose approvals go to another account gets an exact-only card, as with timed approvals."""
+    config = _gated_config()
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling.resolve_tool_approval_approver", return_value="@owner:localhost"),
+        patch("mindroom.scheduling._start_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"text": "Good morning!", "channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    kwargs = request.await_args.kwargs
+    assert kwargs["approver_user_id"] == "@owner:localhost"
+    assert kwargs["any_arguments_offered"] is False
 
 
 @pytest.mark.asyncio

@@ -167,6 +167,7 @@ def reserve_deliveries(
             continuation=continuation,
             card=approval_grants.unscoped(card),
             membership_epoch=membership_epoch,
+            any_arguments_eligible=card.grant_operation is not None,
         ):
             continue
         scoped_card = approval_grants.reserve_identity(
