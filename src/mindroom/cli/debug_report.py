@@ -49,14 +49,14 @@ def _read_config_source(runtime_paths: RuntimePaths) -> dict[str, Any]:
     """
     import yaml  # noqa: PLC0415
 
-    from mindroom.config.yaml_includes import load_yaml_config_source_with_digests  # noqa: PLC0415
+    from mindroom.config.yaml_includes import load_yaml_config_source  # noqa: PLC0415
 
     path = runtime_paths.config_path
     if not path.exists():
         typer.echo(f"Note: no config at {path}; using default storage locations.", err=True)
         return {}
     try:
-        data, _source_digests, _uses_includes = load_yaml_config_source_with_digests(path)
+        data, _files = load_yaml_config_source(path)
     except (yaml.YAMLError, OSError, UnicodeError) as exc:
         typer.echo(f"Warning: config not read ({exc}); using default storage locations.", err=True)
         return {}
