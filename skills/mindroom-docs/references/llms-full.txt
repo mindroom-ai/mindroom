@@ -80,7 +80,7 @@ The [Security Model](https://docs.mindroom.chat/architecture/security-posture/) 
 
 ### A chat app built for agents
 
-MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), and on the [Mac](https://docs.mindroom.chat/installation/macos-app/), along with the server and the AI backend.
+MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](https://docs.mindroom.chat/ios/), on the [Mac](https://docs.mindroom.chat/installation/macos-app/), and in beta on Android, along with the server and the AI backend.
 So agents are not limited to what Slack or WhatsApp can display:
 
 - Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](https://docs.mindroom.chat/streaming/)).
