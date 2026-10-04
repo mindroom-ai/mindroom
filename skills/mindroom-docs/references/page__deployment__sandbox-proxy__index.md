@@ -281,7 +281,7 @@ The charts mount no config directory, so plugin directories beside the primary's
 
 ## Choosing which tools run in workers
 
-Set `worker_tools` per agent or in `defaults`; the field reference is in [Agent configuration](#worker-routing).
+Set `worker_tools` per agent or in `defaults`; the field reference is in [Worker Routing](#worker-routing).
 Per-agent tool overrides, such as `shell: {extra_env_passthrough: "DAWARICH_*"}` in an agent's `tools` list, reach the worker with the call; see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration).
 
 ```yaml

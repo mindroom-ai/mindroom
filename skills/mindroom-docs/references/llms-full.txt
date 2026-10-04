@@ -2387,7 +2387,7 @@ defaults:
   large_message_strategy: sidecar        # Oversized replies: sidecar (preview plus full text as an attachment) or split (several complete messages); global-only
   coalescing:
     debounce_ms: 1000                    # Milliseconds to wait for more attachments or a trailing caption after media; text dispatches immediately
-  auto_resume_after_restart: true        # Resume interrupted threads after a restart; see configuration/index.md
+  auto_resume_after_restart: true        # Resume interrupted threads after a restart; see configuration/threads.md
   thread_summary_model: null             # Model alias for automatic thread summaries (null = default)
   thread_summary_temperature: 0.2        # null uses provider defaults
   thread_summary_first_threshold: 1      # Messages before the first automatic summary (integer >= 1)
@@ -4990,7 +4990,7 @@ agents:
 Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Self-hosted configurations from `mindroom config init` leave it off.
 
-All fields, defaults, and bounds are listed in the [agent configuration reference](#settings).
+All fields, defaults, and bounds are listed in [Settings](#settings).
 
 ### Settings
 
@@ -5813,7 +5813,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 ## Large Streamed Messages
 
 A response too large for one Matrix event is delivered as a preview with the full content attached, or as several complete messages with `defaults.large_message_strategy: split`.
-See [Matrix Integration — Large Messages](#large-messages) for details.
+See [Large Messages](#large-messages) for details.
 
 ## Large Messages
 
@@ -6987,7 +6987,7 @@ Use **Refresh** to request the latest available report; completed reports may be
 ## Token Usage
 
 `GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
-`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](#usage-export-service).
+`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Usage Export Service](#usage-export-service).
 The two routes share report preparation and caching while authenticating every request through their own policy.
 When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.
@@ -17975,7 +17975,7 @@ Pending approvals survive restarts and config reloads, and an approved call resu
 The approved call runs only with the exact arguments shown on the card.
 Tool calls authored by agents, the system, or configured bridge bots are denied instead of entering the approval flow.
 An agent acting on a request relayed by another agent's reply asks the original human for approval.
-See [Agents](#when-the-router-is-missing) when approval fails because the router is not in the room.
+See [When the Router Is Missing](#when-the-router-is-missing) when approval fails because the router is not in the room.
 
 ## Approval Card Contents
 
@@ -22491,7 +22491,7 @@ The charts mount no config directory, so plugin directories beside the primary's
 
 ## Choosing which tools run in workers
 
-Set `worker_tools` per agent or in `defaults`; the field reference is in [Agent configuration](#worker-routing).
+Set `worker_tools` per agent or in `defaults`; the field reference is in [Worker Routing](#worker-routing).
 Per-agent tool overrides, such as `shell: {extra_env_passthrough: "DAWARICH_*"}` in an agent's `tools` list, reach the worker with the call; see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration).
 
 ```yaml

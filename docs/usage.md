@@ -30,7 +30,7 @@ Use **Refresh** to request the latest available report; completed reports may be
 ## Token Usage
 
 `GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
-`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](#usage-export-service).
+`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Usage Export Service](#usage-export-service).
 The two routes share report preparation and caching while authenticating every request through their own policy.
 When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.

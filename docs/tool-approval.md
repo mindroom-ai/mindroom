@@ -51,7 +51,7 @@ Pending approvals survive restarts and config reloads, and an approved call resu
 The approved call runs only with the exact arguments shown on the card.
 Tool calls authored by agents, the system, or configured bridge bots are denied instead of entering the approval flow.
 An agent acting on a request relayed by another agent's reply asks the original human for approval.
-See [Agents](#when-the-router-is-missing) when approval fails because the router is not in the room.
+See [When the Router Is Missing](#when-the-router-is-missing) when approval fails because the router is not in the room.
 
 ## Approval Card Contents
 

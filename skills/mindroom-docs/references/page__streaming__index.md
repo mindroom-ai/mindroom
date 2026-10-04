@@ -126,7 +126,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 ## Large Streamed Messages
 
 A response too large for one Matrix event is delivered as a preview with the full content attached, or as several complete messages with `defaults.large_message_strategy: split`.
-See [Matrix Integration — Large Messages](#large-messages) for details.
+See [Large Messages](#large-messages) for details.
 
 ## Large Messages
 
