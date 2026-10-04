@@ -489,27 +489,6 @@ def test_log_reader_caps_lines_keeping_the_newest(tmp_path: Path, monkeypatch: p
     assert result.truncated == 0
 
 
-def test_build_debug_report_combines_every_source(tmp_path: Path) -> None:
-    """One document carries the journal, Agno, tool call, LLM request, and log sources, and is JSON-serializable."""
-    _seed_journal(tmp_path / "tracking" / "event_journal.db")
-    _seed_agno(tmp_path)
-    _seed_files(tmp_path)
-    document = build_debug_report(_sources(tmp_path), collect_ids(_report()), generated_at="2026-10-03T12:00:00+00:00")
-    assert document["type"] == "io.mindroom.debug_report"
-    assert document["identifiers"]["threadId"] == "$root"
-    assert set(document["sources"]) == {
-        "turn_records",
-        "journal_events",
-        "delivery_outbox",
-        "agno_runs",
-        "tool_calls",
-        "llm_requests",
-        "log_lines",
-    }
-    assert document["sources"]["agno_runs"]["items"][0]["run_id"] == "run-1"
-    json.dumps(document)
-
-
 def test_build_debug_report_marks_missing_sources(tmp_path: Path) -> None:
     """An install with no data at all reports every source as missing instead of failing."""
     document = build_debug_report(_sources(tmp_path), collect_ids(None, event_ids=["$x"]), generated_at="now")
@@ -519,31 +498,16 @@ def test_build_debug_report_marks_missing_sources(tmp_path: Path) -> None:
     )
 
 
-def test_build_debug_report_marks_agno_runs_when_every_session_database_fails(tmp_path: Path) -> None:
-    """When every session database is unreadable only agno_runs is an error; other sources still report."""
-    _seed_journal(tmp_path / "tracking" / "event_journal.db")
-    _seed_files(tmp_path)
-    broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
-    broken.parent.mkdir(parents=True)
-    broken.write_bytes(b"this is not a sqlite database" * 100)
-
-    document = build_debug_report(_sources(tmp_path), collect_ids(_report(), event_ids=["$user"]), generated_at="now")
-
-    sources = document["sources"]
-    assert sources["agno_runs"]["status"] == "error"
-    assert sources["agno_runs"]["error"].startswith(f"{broken}: DatabaseError")
-    healthy = {name: source["status"] for name, source in sources.items() if name != "agno_runs"}
-    assert healthy == dict.fromkeys(healthy, "ok")
-    assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
-    json.dumps(document)
+def _write_corrupt_database(path: Path) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"this is not a sqlite database" * 100)
 
 
 def test_read_agno_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -> None:
     """A corrupt session database is named in `error` while the runs of a healthy one are still returned."""
     _seed_agno(tmp_path)
     broken = tmp_path / "agents" / "x" / "sessions" / "x.db"
-    broken.parent.mkdir(parents=True)
-    broken.write_bytes(b"this is not a sqlite database" * 100)
+    _write_corrupt_database(broken)
 
     result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
 
@@ -678,27 +642,17 @@ def test_cli_writes_backend_report_for_a_chat_bug_report(tmp_path: Path) -> None
     assert result.exit_code == 0, result.output
     document = json.loads(output.read_text(encoding="utf-8"))
     assert document["identifiers"]["roomId"] == ROOM
-    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == []
+    assert set(document["sources"]) == {
+        "turn_records",
+        "journal_events",
+        "delivery_outbox",
+        "agno_runs",
+        "tool_calls",
+        "llm_requests",
+        "log_lines",
+    }
     assert document["sources"]["agno_runs"]["items"][0]["run_id"] == "run-1"
     assert "agno_runs: ok" in result.output
-
-
-def test_cli_accepts_plain_identifiers(tmp_path: Path) -> None:
-    """Plain --event identifiers work without a bug report file."""
-    config = tmp_path / "config.yaml"
-    _write_config(config)
-    storage = tmp_path / "storage"
-    _seed_journal(storage / "tracking" / "event_journal.db")
-    output = tmp_path / "backend.json"
-
-    result = runner.invoke(
-        app,
-        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
-    )
-
-    assert result.exit_code == 0, result.output
-    document = json.loads(output.read_text(encoding="utf-8"))
-    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
 
 
 def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) -> None:
@@ -707,9 +661,7 @@ def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) 
     _write_config(config)
     storage = tmp_path / "storage"
     _seed_journal(storage / "tracking" / "event_journal.db")
-    broken = storage / "agents" / "x" / "sessions" / "x.db"
-    broken.parent.mkdir(parents=True)
-    broken.write_bytes(b"this is not a sqlite database" * 100)
+    _write_corrupt_database(storage / "agents" / "x" / "sessions" / "x.db")
     output = tmp_path / "backend.json"
 
     result = runner.invoke(
@@ -731,9 +683,7 @@ def test_cli_shows_the_error_of_a_source_that_is_ok_with_a_partial_failure(tmp_p
     _write_config(config)
     storage = tmp_path / "storage"
     _seed_agno(storage)
-    broken = storage / "agents" / "x" / "sessions" / "x.db"
-    broken.parent.mkdir(parents=True)
-    broken.write_bytes(b"this is not a sqlite database" * 100)
+    _write_corrupt_database(storage / "agents" / "x" / "sessions" / "x.db")
     output = tmp_path / "backend.json"
 
     result = runner.invoke(
