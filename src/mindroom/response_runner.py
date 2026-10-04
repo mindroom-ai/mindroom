@@ -340,19 +340,6 @@ def _replaceable_placeholder(request: ResponseRequest) -> bool:
     return request.existing_event_is_placeholder and request.resumed_reply is None
 
 
-def _stopped_before_showing_work(message: ResolvedVisibleMessage | None, *, replayed_turn: bool) -> bool:
-    """Return whether an adopted reply stopped before showing work its attempt may have done.
-
-    An acknowledgement, hidden tool calls and non-streamed tool calls show
-    nothing: unknown work, not absent work. A reply without a stream status, or
-    one that cannot be read, counts only for a replayed turn, since an edit
-    regeneration's earlier answer finished.
-    """
-    if message is None or message.stream_status is None:
-        return replayed_turn
-    return message.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING}
-
-
 def _split_delivery_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -3608,8 +3595,8 @@ class ResponseRunner:
     ) -> ResponseRequest:
         """Continue a replayed turn below what its stopped attempt already showed and ran.
 
-        A restart, whether a crash, an orderly shutdown, a sync-loop stall or
-        an approved run cut short, leaves the reply streaming and its sources
+        A restart, whether a crash, an orderly shutdown, an entity replacement
+        or an approved run cut short, leaves the reply streaming and its sources
         pending, so replay adopts that reply. The reply in Matrix is the only
         account of the stopped attempt: its visible text and tool trace stay in
         the message with the new attempt streaming below them, and the same
@@ -3639,7 +3626,14 @@ class ResponseRunner:
                 interrupted_tools=interrupted_tools,
             )
             instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        elif _stopped_before_showing_work(message, replayed_turn=request.existing_event_is_placeholder):
+        elif message is None or message.stream_status in {
+            None,
+            STREAM_STATUS_PENDING,
+            STREAM_STATUS_STREAMING,
+            STREAM_STATUS_APPROVAL_PENDING,
+        }:
+            # Unreadable, or stopped before showing anything (an acknowledgement,
+            # hidden or non-streamed tool calls): unknown work, not absent work.
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
         else:
             return request
@@ -4502,9 +4496,7 @@ class ResponseRunner:
                 team_turn_recorder.set_response_event_id(response_event_id)
 
             if use_streaming and (
-                delivery_request.existing_event_id is None
-                or delivery_request.existing_event_is_placeholder
-                or delivery_request.resumed_reply is not None
+                delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
             ):
                 async with _response_typing_indicator(
                     self._client(),

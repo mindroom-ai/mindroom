@@ -313,7 +313,8 @@ The owning turn's typed physical revision map retains edit ordering independentl
 One draining owner folds each source's newest Matrix revision into a complete response request and loops when newer edits arrive.
 A drain asked to rebuild more than eight times in a row drops the edit with an error log instead of holding the room's event lane.
 Physical source IDs are exclusive turn claims, while discovery aliases are advisory settlement keys observed by `wait_for_turn_settled`.
-An interrupted turn or edit revision stays pending, and replay continues its reply in place.
+An interrupted turn stays pending, and replay continues its reply in place.
+An interrupted edit regeneration also stays pending but starts over, because a newer edit may have replaced the prompt its stopped attempt answered.
 Startup cleanup finishes only orphaned streams: acknowledged INITIAL deliveries without an owning FINAL in the current membership epoch whose sources no longer replay.
 Discovery pages the existing delivery outbox, including acknowledgements made before turn attribution, and an empty inventory requires no Matrix history calls.
 Cleanup reads each owned response and its complete same-sender replacement history by exact event ID; unreadable content remains untouched for retry.
