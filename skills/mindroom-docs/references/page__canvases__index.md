@@ -108,7 +108,7 @@ This takes two more switches, both off by default; turn on both, because a page 
 ```
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
-Pages may then load scripts, styles, and fonts from `/npm/` paths only; network requests, images, and every other site stay blocked.
+Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
 Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
 
 ## What the user sees
@@ -177,7 +177,7 @@ chat_ui.show_canvas(
 )
 ```
 
-- **Self-contained:** write inline CSS and JavaScript. The page cannot send anything over the network or load images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
+- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
@@ -200,6 +200,6 @@ Chat exposes its current theme as CSS variables, so a page can match light and d
 
 - The page cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate away; a page that tries is stopped, and Chat shows "This panel tried to leave its sandbox and was stopped." with a **Reload panel** button.
 - In an encrypted room, the page and the answer are end-to-end encrypted like other messages.
-- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, so a malicious page could leak what the user types into it.
+- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.

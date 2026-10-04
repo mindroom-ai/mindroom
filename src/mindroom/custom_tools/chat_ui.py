@@ -92,7 +92,8 @@ _REAL_WEBSITE_HINT = (
 _CANVAS_LIBRARIES_HINT = (
     "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
     'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
-    "or as ES modules through /+esm; no other source works."
+    "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
+    "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
 )
 
 
@@ -425,9 +426,10 @@ class ChatUITools(Toolkit):
         whatever the user types into it could leave the panel.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript; network requests and external images are blocked, and so are
-        external scripts, styles, and fonts unless your instructions name a library
-        source, so draw charts with inline SVG and embed images as data: URLs.
+        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
+        blocked, and so are external scripts, styles, and fonts unless your
+        instructions name a library source; otherwise draw charts with inline SVG.
+        Embed images as data: URLs.
         The panel can be resized from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
