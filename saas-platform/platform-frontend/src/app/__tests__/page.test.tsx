@@ -36,6 +36,16 @@ describe('LandingPage', () => {
     expect(screen.queryByRole('heading', { name: 'Teams' })).not.toBeInTheDocument()
   })
 
+  it('leads with self-hosting and keeps hosted plans one click away', () => {
+    render(<LandingPage />)
+
+    const getStarted = screen.getAllByRole('link', { name: /Get started/ })
+    expect(getStarted[0]).toHaveAttribute('href', 'https://docs.mindroom.chat/getting-started/')
+    expect(screen.getByRole('link', { name: 'Try hosted MindRoom' })).toHaveAttribute('href', '#hosted')
+    expect(screen.getByRole('heading', { name: 'Everything on your servers' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Prefer us to host it?' })).toBeInTheDocument()
+  })
+
   it('shows the product film below the hero', () => {
     render(<LandingPage />)
 
