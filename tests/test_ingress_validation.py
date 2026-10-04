@@ -12,7 +12,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import DispatchIngressMetadata, DispatchPayloadMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
@@ -127,6 +127,16 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
         ingress_metadata=ingress_metadata,
         payload_metadata=DispatchPayloadMetadata(original_sender=bridge_human),
     )
+    # The router's visible transcript of human or bot-account audio is display-only history.
+    for audio_sender in (bridge_human, "@bridge_bot:localhost"):
+        assert validator.is_trusted_router_visible_voice_echo_content(
+            ids["router"].full_id,
+            {
+                ORIGINAL_SENDER_KEY: audio_sender,
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            },
+        )
 
     for non_human_sender in non_human_senders:
         assert validator.requester_user_id(sender=non_human_sender, source=None) == non_human_sender

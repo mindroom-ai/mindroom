@@ -1918,6 +1918,43 @@ async def test_router_handoff_runs_as_the_bot_account_it_routes(tmp_path: Path, 
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_router_voice_echo_for_a_bot_account_is_display_only(tmp_path: Path) -> None:
+    """The router's visible transcript of bot-account audio starts no turn, just like a human's."""
+    bot_account = "@telegram:localhost"
+    config = bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General", access=ResponderAccessConfig(users=[bot_account]))},
+            bot_accounts=[bot_account],
+        ),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "🎤 @general could you help with this?",
+                "msgtype": "m.text",
+                "m.mentions": {"user_ids": [_entity_user_id(config, "general")]},
+                constants.ORIGINAL_SENDER_KEY: bot_account,
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
+            },
+            "event_id": "$router-bot-voice-echo:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert harness.runner.requests == []
+
+
 _OWNER = "@owner:localhost"
 
 
