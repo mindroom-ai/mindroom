@@ -71,8 +71,9 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
-# Lifecycle notices describe the runtime, not the conversation, and a Chat UI request is the sending
-# agent's tool call, already in its history; no model sees either as a turn.
+# Lifecycle notices describe the runtime, not the conversation. A Chat UI request is a tool call's
+# fallback text for other clients: the sending agent already has the call, and answers and error
+# reports name the canvas themselves. No model sees either as a turn.
 _LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, UI_ACTION_CONTENT_KEY)
 
 

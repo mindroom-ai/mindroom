@@ -166,7 +166,7 @@ Calling `show_canvas` again with `canvas_event_id` set to that ID replaces the p
 An update may leave out `title` to keep the title the canvas was first shown with.
 An open panel switches to the new page at once, unless the user has been working in it; then Chat shows "*agent* updated this panel." with a **Load update** button, so unsent work is not lost.
 Every update stays available: once a canvas has more than one version, the panel header shows *Version n of m* with buttons to go back and forward, and an earlier version offers **Show latest**.
-The user can answer an earlier version, and switching waits while an answer is pending.
+The user can answer an earlier version; switching is unavailable while an answer waits for **Send** or is sending.
 An agent can update only canvases it showed to the same user in the same room and thread, or at room level; otherwise the call fails and the agent shows a new canvas instead.
 
 ## Write a page
