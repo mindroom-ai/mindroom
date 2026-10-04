@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path  # noqa: TC003
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
@@ -63,6 +64,9 @@ def _wait_for_idle(
     wait: float,
 ) -> ResponseActivity | DetailedResponseActivity:
     """Poll while busy; idle, unavailable, or the deadline ends the wait with that snapshot."""
+    if not math.isfinite(wait):
+        msg = "--wait must be finite."
+        raise ValueError(msg)
     deadline = monotonic() + wait
     while True:
         snapshot = _request_activity(runtime_paths, url, timeout, details=details)
