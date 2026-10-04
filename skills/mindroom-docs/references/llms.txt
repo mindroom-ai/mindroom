@@ -8,7 +8,7 @@
 - [Showcase](https://docs.mindroom.chat/showcase/)
 - [Overview](https://docs.mindroom.chat/getting-started/)
 - [macOS App](https://docs.mindroom.chat/installation/macos-app/)
-- [iOS Beta](https://docs.mindroom.chat/ios-beta/)
+- [iOS App](https://docs.mindroom.chat/ios-beta/)
 - [Dashboard](https://docs.mindroom.chat/dashboard/)
 - [Overview](https://docs.mindroom.chat/configuration/)
 - [Agents](https://docs.mindroom.chat/configuration/agents/)

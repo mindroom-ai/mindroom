@@ -2,27 +2,19 @@
 icon: fontawesome/brands/apple
 ---
 
-# iOS Beta
+# iOS App
 
-MindRoom for iOS is distributed through Apple TestFlight while it is in beta.
-
-## Enroll
-
-Install [TestFlight](https://apps.apple.com/app/testflight/id899247664) from the App Store, then join the MindRoom beta:
+MindRoom AI is available on the App Store for iPhone, iPad, and Apple silicon Macs.
+It requires iOS or iPadOS 16.4 or later, or macOS 13.3 or later on a Mac with an M1 chip or newer.
 
 <p>
-  <a class="md-button md-button--primary" href="https://testflight.apple.com/join/WW68wXxw">Join the iOS Beta</a>
+  <a class="md-button md-button--primary" href="https://apps.apple.com/us/app/mindroom-ai/id6760272172">Download on the App Store</a>
 </p>
-
-Open the link on your iPhone or iPad, tap **Accept**, then install **MindRoom AI** from TestFlight.
-
-If TestFlight says the beta is not accepting new testers, enrollment is temporarily unavailable.
-Try the button again later or use the [support page](support.md).
 
 ## Sign In
 
 MindRoom is a Matrix client.
-After installing the beta, sign in with the Matrix homeserver and account you normally use.
+After installing the app, sign in with the Matrix homeserver and account you normally use.
 
 For the hosted MindRoom flow, use:
 
@@ -31,10 +23,6 @@ For the hosted MindRoom flow, use:
 
 Then follow the [Getting Started](getting-started.md) guide to pair your local MindRoom runtime from the chat UI.
 
-## Beta Notes
+## Reporting Issues
 
-- TestFlight builds expire after 90 days.
-  Install updates from TestFlight when they appear.
-- The public beta link accepts testers only while an eligible build and public enrollment are available.
-- If the invitation is full, expired, or missing, use the [support page](support.md).
-- Include your device model, iOS version, app version, and homeserver URL when reporting beta issues.
+Use the [support page](support.md), and include your device model, iOS version, app version, and homeserver URL.

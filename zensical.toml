@@ -20,7 +20,7 @@ nav = [
   { "Getting Started" = [
     { "Overview" = "getting-started.md" },
     { "macOS App" = "installation/macos-app.md" },
-    { "iOS Beta" = "ios-beta.md" },
+    { "iOS App" = "ios-beta.md" },
   ] },
   { "Dashboard" = "dashboard.md" },
   { "Configuration" = [
