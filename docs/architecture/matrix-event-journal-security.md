@@ -101,7 +101,7 @@ Compact grant identity remains so duplicate actions cannot recreate a window or 
 Grant maintenance deletes retired scope rows that were never associated with a grant.
 `approval_grant_locks` contains only the principal identity used to serialize grant changes, maintenance, and card reservation.
 
-The [automatic Nio 1.0 migration](../deployment/nio-upgrade.md) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
+The [automatic Nio 1.0 migration](../deployment/upgrades.md#upgrading-to-nio-10) settles old pending events and recreates execution, approval, and membership state atomically while preserving journal identity and message history; it never converts old unfinished work into new requests.
 
 ## Sidecar previews are never stored as bodies
 
@@ -232,7 +232,7 @@ The one-time upgrade resets pre-durable membership tenures and converts v2/v3 co
 ## Storage and connections
 
 SQLite stores the journal at `<storage>/tracking/event_journal.db`, which is `mindroom_data/tracking/event_journal.db` with the default storage root.
-PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../configuration/index.md#event-journal) for URL resolution and restart requirements.
+PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../deployment/storage.md#event-journal) for URL resolution and restart requirements.
 
 That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
 

@@ -523,90 +523,7 @@ models:
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
 
-## Context Window
-
-Set `context_window` to the model provider's actual limit.
-MindRoom uses it to budget persisted replay and required text compaction unless compaction config sets a smaller `replay_window_tokens` cap.
-MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
-That replay-fit step reduces or disables persisted replay for the current run when needed.
-On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
-Before each asynchronous runtime request, including follow-up requests after tool results, MindRoom estimates the full provider payload and checks it against Vertex's exact token counter when it approaches the window.
-When a request would exceed the window, MindRoom drops the oldest replayed history turns for that request only and logs a warning.
-When the current turn alone cannot fit, the request fails with a clear provider error instead of being sent oversized.
-Automatic compaction is enabled by default through `defaults.compaction`.
-Supported routes use [native compaction](#native-compaction) during ordinary requests.
-The portable text fallback runs before the reply when history exceeds the hard replay budget.
-Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic native and pre-reply text compaction.
-
-You can tune compaction behavior with these settings:
-
-- Use `threshold_tokens` or `threshold_percent` to set the native provider trigger, or the soft planning threshold on text-only routes.
-- Use `replay_window_tokens` to keep persisted replay and required-compaction planning within a smaller operational window without presenting that smaller value as the provider's request limit.
-- Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
-- Use `model` to choose the summary model, and `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
-- Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
-
-When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
-When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
-Each compaction summary input chunk is sized independently from the selected compaction model's real `context_window`, after reserve, prompt overhead, and a safety margin.
-Text compaction requires the resolved summary input budget to exceed 2,000 tokens.
-With the default `reserve_tokens`, this makes text compaction unavailable when the compaction model's context window is roughly 10,000 tokens or smaller; lowering `reserve_tokens` restores availability for such small windows.
-
-Manual `compact_context` records a durable request that runs before the next reply in the same conversation scope.
-Manual `compact_context` remains available when a compaction model and context window are configured and the resolved summary input budget exceeds 2,000 tokens.
-It still uses the active runtime window for the final replay-fit step, while an explicit `compaction.model` can supply the summary-generation window subject to the same minimum summary-input budget.
-If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
-`compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
-Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
-Otherwise MindRoom preserves canonical history and applies the selected replay strategy.
-
-Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.
-Summary-input chunk sizing uses the model's tiktoken encoding when recognized.
-Direct Anthropic, Vertex AI Claude, and Bedrock Claude summary models without a recognized encoding use one token per UTF-8 byte as a conservative upper bound.
-Compaction chunk logs report `summary_input_estimate`, `summary_input_estimate_kind`, and `summary_input_budget_tokens` so tiktoken counts, o200k estimates, and UTF-8 byte upper bounds are never presented as the same measurement.
-MindRoom does not mutate configured `num_history_runs` to fit the window.
-Instead, it computes the replay plan that actually fits the current call and uses compaction to keep future replay healthy.
-If needed, that replay plan can reduce raw replay, fall back to summary-only replay, or disable persisted replay entirely for the run.
-
-```yaml
-models:
-  default:
-    provider: anthropic
-    id: claude-sonnet-5-5
-    context_window: 1000000  # 1M tokens
-
-defaults:
-  compaction:
-    replay_window_tokens: 200000  # Compact persisted replay around a smaller operational window
-```
-
-This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
-
-### Native compaction
-
-MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude compaction](https://platform.claude.com/docs/en/build-with-claude/compaction).
-OpenAI native replay uses the official Responses endpoint or the Codex login backend with `store: false`.
-When native mode is disabled, the authored storage setting is restored; canonical replay retains stateless reasoning and never chains to a response the provider did not store.
-Automatic enablement covers GPT-5.3 Codex, GPT-5.4, and GPT-6 model families; other models retain the portable path.
-An explicitly configured `store: true`, background mode, alternate OpenAI endpoint, or custom context-management request stays on the portable path.
-Claude native compaction supports direct Anthropic and Vertex Claude on the supported Sonnet, Opus, Fable, and Mythos models; it is a provider beta and requires a trigger of at least 50,000 tokens.
-An authored Claude `compact_20260112` policy keeps its own trigger and instructions; compatible checkpoints use the same replay and portable-fallback rules.
-Changing that policy affects future summaries; existing compatible checkpoints remain conversation history.
-Gemini, Chat Completions, and other provider adapters retain text compaction.
-
-Native compaction requires automatic compaction to be enabled, all-history replay, no historical tool-call limit, and a trigger above the current prompt size and below the hard request limit.
-Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
-Manual `compact_context` always requests portable text compaction.
-Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
-Native compaction itself never moves canonical runs; they stay stored in `session.runs` until portable text compaction moves older runs into the compaction archive.
-
-Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
-The system instructions keep their shared prompt-cache prefix.
-OpenAI checkpoints remain opaque; local budgeting conservatively estimates their serialized size rather than treating billed pre-compaction input as active context.
-Claude usage includes every compaction iteration while context occupancy uses the final iteration.
-Vertex token counting represents checkpoint contents as text and omits the compaction policy and beta header, which its counting endpoint rejects; generation still receives the native blocks and policy.
-Canonical fallback discards thinking bound to a removed checkpoint on adaptive-thinking routes, while preserving the unchanged thinking required by legacy manual-thinking tool turns.
-Claude `pause_after_compaction: true` is rejected because MindRoom's automatic path requires the provider to continue its response.
+See [Context Window](https://docs.mindroom.chat/configuration/history/#context-window).
 
 ## Extra Kwargs
 
@@ -690,3 +607,104 @@ ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key
 ```
 
 This works for all API key environment variables (e.g., `OPENAI_API_KEY_FILE`, `GOOGLE_API_KEY_FILE`, etc.).
+
+## Model Overrides in Chat
+
+Model discovery uses Olm-encrypted to-device events, including for unencrypted rooms.
+Only the configured router registers the receiver.
+No room-state advertisement, extra state permissions, or external discovery endpoint is required.
+The receiver authenticates the actual requesting device and checks current joined requester/router membership plus at least one configured, permitted, joined agent.
+Teams alone do not qualify.
+An included thread must be a readable, unredacted root in that room; encrypted roots are decrypted before validation.
+Replies target only that authenticated device.
+Sending a catalog never verifies a previously untrusted device.
+Blocked devices, malformed requests, and unauthorized room/thread scopes receive no response.
+Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
+An older or unavailable backend leaves the existing `!model` command available.
+
+### `!model`
+
+Show or switch the model that the agents, teams, and router you may address use in the current thread.
+
+```
+!model
+!model list
+!model opus
+!model reset
+```
+
+The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
+`!model reset` likewise removes the override only for the entities you may address.
+
+`!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
+Model names come from the `models:` section of `config.yaml`.
+The override applies from the next message in the thread and survives restarts.
+Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.
+Use `!room_model` for a durable runtime room default or `room_models` in `config.yaml` for an authored room default.
+Agents with the `thread_model` tool can list configured models and switch either after the tool call in the current response or from the next turn.
+
+### `!room_model`
+
+Show or switch the model that every agent, team, and the router uses by default in the current room.
+
+```
+!room_model
+!room_model list
+!room_model opus
+!room_model reset
+```
+
+`!room_model` and `!room_model list` show the current runtime override and available model names.
+`!room_model opus` stores a durable room override without modifying `config.yaml`.
+The new default applies to subsequent turns; an in-progress or approval-paused turn keeps the model choices it started with.
+`!room_model reset` removes the runtime override so the configured `room_models` choice or each entity's configured model applies again.
+Thread-level `!model` overrides and explicit per-run model choices take precedence over the room default.
+Set and reset are Matrix room-admin-only actions, while status is available to authorized room members.
+The override is keyed by Matrix room ID and stored under `mindroom_data/tracking`, so it survives restarts and room-alias changes.
+
+### [`thread_model`]
+
+`thread_model` lets agents list configured models or show, switch, and reset the model override for the current Matrix thread, mirroring the `!model` chat command.
+
+#### What It Does
+
+`thread_model` exposes `list_models()`, `get_thread_model()`, `switch_thread_model(model_name, when)`, and `reset_thread_model()`.
+`list_models` returns every configured model alias with its provider and provider model ID and does not require an active thread.
+The other three functions require an active thread context and return an error outside a thread.
+`switch_thread_model` accepts a configured model name from the `models:` section of `config.yaml` and rejects unknown names with the available model list.
+Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
+With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
+With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
+The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
+Every other entity keeps its own thread override or room-level model.
+During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
+`get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
+When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
+`reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
+
+#### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+#### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - thread_model
+```
+
+```python
+list_models()
+get_thread_model()
+switch_thread_model("opus", when="after-toolcall")
+reset_thread_model()
+```
+
+#### Notes
+
+- The override is stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
+- Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
+- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.

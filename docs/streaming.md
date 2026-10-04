@@ -15,6 +15,11 @@ This page covers when streaming is used, how to tune or disable it, and how stre
 
 When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
 
+## Typing Indicators
+
+Agents show typing indicators while processing via `typing_indicator()` context manager.
+The indicator auto-refreshes at `min(timeout/2, 15)` seconds to remain visible during long operations.
+
 ## Configuration
 
 Streaming is enabled by default.
@@ -56,6 +61,15 @@ Even when streaming is enabled, MindRoom streams a response only when the user w
 If the presence check fails, for example because the homeserver has presence disabled, MindRoom does not stream.
 When no requester can be identified, MindRoom streams.
 
+## Presence
+
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-5-5 | 💼 Code assistant | 🔧 5 tools available").
+
+**Presence States:**
+- **online** - Agent running and ready
+- **unavailable** - Agent idle but connected (treated as online for streaming)
+- **offline** - Agent stopped or disconnected
+
 ## Stream Status
 
 Each streamed message carries its progress in the Matrix event content field `io.mindroom.stream_status`.
@@ -84,6 +98,23 @@ The number in brackets counts tool calls within the message, and `io.mindroom.to
 To hide markers and tool-trace metadata, set `show_tool_calls: false` (see [Agent Configuration](configuration/agents.md)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
 
+## Streaming Responses
+
+Agents stream responses by progressively editing messages.
+When requester identity is available, `should_use_streaming()` enables streaming only while that requester is online, avoiding progressive Matrix edits for offline users.
+When requester identity is unavailable, the presence check cannot run and `should_use_streaming()` defaults to streaming.
+See [Streaming Responses](streaming.md) for the full feature documentation.
+
+Tool call telemetry is emitted as plain inline markers and mirrored in `io.mindroom.tool_trace` metadata on the same message content.
+
+Marker format:
+```text
+🔧 `tool_name` [N] ⏳     ← pending
+🔧 `tool_name` [N]        ← completed
+```
+
+Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-1]`.
+
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
@@ -100,4 +131,22 @@ The partial text stays in the message, followed by a note explaining how it ende
 ## Large Streamed Messages
 
 A response too large for one Matrix event is delivered as a preview with the full content attached, or as several complete messages with `defaults.large_message_strategy: split`.
-See [Matrix Integration — Large Messages](architecture/matrix.md#large-messages) for details.
+See [Matrix Integration — Large Messages](#large-messages) for details.
+
+## Large Messages
+
+Messages approaching the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
+
+- Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
+- Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)
+- Preview text included in message body (maximum that fits)
+- Custom metadata dict `io.mindroom.long_text` contains `version: 2`, `encoding: "matrix_event_content_json"`, original and preview sizes, and a completeness flag
+- Preview event is compact (for example no inline `io.mindroom.tool_trace`), while the sidecar preserves full content fidelity
+- Encrypted rooms: sidecar JSON is encrypted before upload (`message-content.json.enc`)
+
+With `defaults.large_message_strategy: split`, an oversized final text response is instead delivered as several complete rich-text events by `segment_matrix_content()` in `matrix/segmented_messages.py`.
+The body is cut at paragraph or line boundaries, never inside a fenced code block, and concatenating the segment bodies reproduces the original exactly.
+The first segment stays a final `m.replace` of the streaming placeholder when there is one; continuations are plain messages that stay in the thread when there is one.
+Every segment is rendered as standalone Markdown with `m.mentions` attached to the segment whose body carries the mention.
+Continuation payloads are frozen in the local outbox row and sent under deterministic transaction IDs, so a retry or restart resends only the segments the room does not already hold.
+Non-text payloads, metadata that alone exceeds the budget, and a single code fence larger than one event still use the sidecar path.

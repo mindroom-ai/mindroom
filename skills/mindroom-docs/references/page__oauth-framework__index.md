@@ -1,5 +1,64 @@
 # OAuth Integration Framework
 
+## Credential Storage
+
+### Automatic Credential Import
+
+**Automatic credential import**: When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
+Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
+Environment import never overwrites credentials saved through the dashboard or credentials with no recorded source.
+When a stored value is first imported or changes, MindRoom logs a notice naming the service, the supplying variable, and whether it came from the process environment or `.env`; values are never logged.
+To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env`, then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+
+### Credential Seeds
+
+MindRoom can create shared credential services at startup from explicit seed declarations, for deployment-managed credentials.
+Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve from the config directory), or `MINDROOM_CREDENTIAL_SEEDS_JSON` to equivalent inline JSON.
+Credential fields can read from env vars, from files, or from literal values:
+
+```json
+[
+  {
+    "service": "example_oauth_client",
+    "credentials": {
+      "client_id": {"env": "EXAMPLE_CLIENT_ID"},
+      "client_secret": {"env": "EXAMPLE_CLIENT_SECRET"}
+    }
+  }
+]
+```
+
+- If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
+- If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
+- Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
+- Seeds are reapplied on later startups but never replace credentials saved through the dashboard or with no recorded source.
+- OAuth token services whose names end with `_oauth` cannot be seeded; connect them through OAuth instead.
+  OAuth client configuration services whose names end with `_oauth_client` can be seeded.
+- To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
+
+### Credential Storage Encryption
+
+Set `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` to encrypt stored credential files at rest.
+The key must be a base64-encoded 32-byte value and must stay stable across restarts.
+Generate one with:
+
+```bash
+python - <<'PY'
+import base64
+import os
+
+print(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"))
+PY
+```
+
+Existing plaintext credential files become unreadable and cannot be overwritten once the key is set, so back them up and recreate them under encryption, or remove the key to read them again.
+OAuth connections made before the key was set must likewise be reconnected.
+Encrypted credentials become readable again when their correct key is restored.
+Dedicated Docker and Kubernetes workers never receive the key; see [credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) for how tool settings reach them.
+
+## OAuth Framework
+
 MindRoom owns OAuth state, callback handling, credential scoping, and token persistence because those steps decide which human and agent scope receive access to an external account.
 Providers supply only provider-specific metadata and parsing behavior, such as OAuth endpoints, scopes, client config services, optional PKCE requirements, requester-only credential placement, explicitly permitted manual fallback fields and runtime environment names, token response parsing, claim validation, the token credential service name used by OAuth, and the optional tool config service name used by dashboard settings.
 
@@ -124,3 +183,79 @@ Generated MCP OAuth providers can also discover protected-resource metadata and 
 If the authorization server advertises dynamic client registration and no client config is stored yet, MindRoom registers a public client and persists the returned registration metadata in the generated OAuth client config service.
 Hosted OAuth entrypoints accept that dynamically registered client only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` produces an exact, unambiguous HTTPS callback without a query or fragment on the same non-special-use fully qualified ASCII DNS hostname as the initiating request and the authorization server confirms that callback in its registration response.
 Missing, replaced, insecure, local-only, IP-literal, cross-host, non-ASCII, or ambiguous callback metadata keeps the provisioned client restricted to localhost, and MindRoom rejects a new registration before persistence when the response does not confirm the requested callback.
+
+## MindRoom-Managed OAuth Onboarding In Conversation
+
+This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
+It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
+When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
+Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
+When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
+For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
+If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
+When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
+When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
+After the user connects, have the target agent retry the safe operation or original request.
+The dashboard remains a manual alternative only when no `connect_url` is available.
+
+## [`oauth_connections`]
+
+`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
+
+### What It Does
+
+The toolkit exposes only `reset_oauth_connection(provider_id)`.
+The provider must back one of the current agent's configured tools.
+The call returns a temporary browser link and does not change the connection by itself.
+After you confirm, MindRoom removes its saved connection and opens the provider's sign-in page so you can reconnect.
+It does not revoke access at the provider itself.
+
+### Configuration
+
+Enable the tool alongside the OAuth-backed tools the agent may recover.
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Work with connected documents and recover revoked connections
+    model: sonnet
+    worker_scope: user_agent
+    tools:
+      - oauth_connections
+      - google_drive
+```
+
+### Who Can Reset A Connection
+
+| Connection type | Who confirms the reset | What the reset affects |
+| --- | --- | --- |
+| Shared (`shared`) | An administrator or configured credential manager can request the link. Anyone with the complete link can confirm it before it expires. | Everyone using this agent |
+| Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
+| Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
+
+A shared connection belongs to the agent rather than to one MindRoom user.
+Anyone who can use the agent can reset their own personal connection, and on a private agent every connection is personal.
+Resetting a shared connection requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
+Some providers always use personal connections, regardless of the agent's configured scope.
+
+### Reset A Connection
+
+1. Ask the agent to call `reset_oauth_connection()` for the affected provider.
+2. Open the returned link within 10 minutes.
+3. Review which agent and connection type will be affected, then confirm the reset.
+4. Sign in at the provider and retry the original request.
+
+Keep a shared reset link private.
+Anyone with the complete link can confirm it before it expires, and confirming it can disconnect the service for everyone using that agent until reconnection finishes.
+
+### Notes
+
+- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
+- Opening a reset link without confirming it does not change the connection.
+- MindRoom refuses an expired, unauthorized, or outdated link before deleting credentials.
+- A shared reset link works once. Run `reset_oauth_connection()` again if you need a new one.
+- Installation-level connections that are not assigned to an agent scope must be reset from the dashboard.
+- Normal `tool_approval` rules still apply when the agent creates the link.
+
+For implementation details and lifecycle guarantees, see [OAuth Credential Lifecycle Design](https://docs.mindroom.chat/dev/oauth-credential-lifecycle-design/#browser-reset).

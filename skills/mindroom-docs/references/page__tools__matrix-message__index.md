@@ -46,7 +46,7 @@ Without `recipient`, text mentions do not start agent turns.
 Recipient discovery checks the current requester, authorization, room membership, and agent availability.
 
 Sending returns immediately with the delivered event IDs; read the conversation later for its response.
-For a bounded task whose answer should return within the same tool call, use [run_subagent](https://docs.mindroom.chat/configuration/agents/#agent-delegation).
+For a bounded task whose answer should return within the same tool call, use [run_subagent](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
 Matrix conversations and local subagent runs have separate lifecycles.
 
 Thread-mode recipients support `new_thread=True` and explicit thread IDs.
@@ -182,3 +182,45 @@ A call supports up to eight sections; titles are limited to 120 characters and c
 Sections require a non-empty main message body.
 HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
 Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
+
+`matrix_message` supports four actions: `send`, `read`, `edit`, and `react`.
+Sending and reading use the current conversation by default.
+Set `recipient` to an available agent or team name to request a response; without a recipient, text mentions do not dispatch agents.
+Set `new_thread=True` to start a separate conversation, an explicit `thread_id` to continue another thread, or `thread_id="room"` for the room timeline.
+Cross-room calls never inherit the origin room's thread.
+`edit` and `react` require the target message's `event_id`.
+`read` returns recent messages and edit options, with `limit` clamped to 1–50 and defaulting to 20.
+Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
+The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
+
+## Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - matrix_message
+```
+
+## Example
+
+```python
+matrix_room(action="room-info")
+matrix_room(action="agents")
+matrix_message(recipient="code", message="Review this export.", new_thread=True)
+matrix_message(message="Here is the report.", attachments=["exports/report.csv", "att_chart"])
+matrix_message(action="react", event_id="$event123", message="✅")
+```
+
+## Notes
+
+See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
+Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
+`attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
+With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
+With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
+When sending to a recipient, all files arrive before the task text starts its response.
+For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
+Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.

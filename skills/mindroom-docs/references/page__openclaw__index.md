@@ -48,6 +48,53 @@ Preset expansion:
 Memory is not a separate OpenClaw subsystem in MindRoom.
 It uses the normal MindRoom memory backend.
 
+### [`openclaw_compat`]
+
+`openclaw_compat` is a config-only preset for OpenClaw-style workspace portability.
+
+#### What It Does
+
+`openclaw_compat` is not a runtime toolkit.
+The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
+`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `matrix_message`.
+`matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
+Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
+This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
+
+#### Configuration
+
+This preset has no inline configuration fields and cannot use `defer` or `initial`.
+Configure individual member tools directly when they need lazy loading.
+
+#### Example
+
+```yaml
+agents:
+  openclaw:
+    display_name: OpenClawAgent
+    role: OpenClaw-style personal assistant with a file-first workspace
+    model: opus
+    include_default_tools: false
+    learning: false
+    memory_backend: file
+    context_files:
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
+    tools:
+      - openclaw_compat
+      - python
+```
+
+#### Notes
+
+- [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
+- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
+- If you only need one or two of the member tools, configure those tools directly instead of using the preset.
+
 ## Drop-in config
 
 Use this as a starting point for importing an OpenClaw workspace into MindRoom's canonical agent workspace:

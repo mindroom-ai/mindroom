@@ -175,169 +175,11 @@ Only those declared functions receive `None` in place of the injected agent when
 Do not use this declaration for functions that depend on agent identity, configuration, or session state.
 This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
 
-## OAuth providers
+### Tool runtime context
 
-An OAuth module registers provider definitions without registering FastAPI routes.
-MindRoom core owns state generation, callback consumption, authenticated requester binding, scoped OAuth token writes, status checks, and disconnect handling.
-The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, optional PKCE requirements, token parsing, optional claim validators, and display metadata.
-
-Declare the module in the manifest:
-
-```json
-{
-  "name": "drive-plugin",
-  "tools_module": "tools.py",
-  "oauth_module": "oauth.py"
-}
-```
-
-Then expose `register_oauth_providers(settings, runtime_paths)`:
-
-```python
-from __future__ import annotations
-
-from mindroom.oauth import OAuthProvider
-
-
-def register_oauth_providers(settings, runtime_paths):
-    del runtime_paths
-    return [
-        OAuthProvider(
-            id="acme_drive",
-            display_name="Acme Drive",
-            authorization_url="https://accounts.acme.example/oauth/authorize",
-            token_url="https://accounts.acme.example/oauth/token",
-            scopes=("files.read",),
-            credential_service="acme_drive_oauth",
-            tool_config_service="acme_drive",
-            client_config_services=(
-                settings.get("client_config_service", "acme_drive_oauth_client"),
-            ),
-            allowed_email_domains=tuple(settings.get("allowed_email_domains", [])),
-            allowed_hosted_domains=tuple(settings.get("allowed_hosted_domains", [])),
-        ),
-    ]
-```
-
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
-Dashboard flows normally call `connect` and use the returned provider authorization URL.
-Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
-Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
-The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
-The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
-Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
-If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
-Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
-MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
-For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
-Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
-
-Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
-
-```python
-from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
-
-provider = OAuthProvider(
-    id="acme_drive",
-    display_name="Acme Drive",
-    authorization_url="",
-    token_url="",
-    scopes=("files.read",),
-    credential_service="acme_drive_oauth",
-    client_config_services=("acme_drive_oauth_client",),
-    token_endpoint_auth_method="none",
-    pkce_code_challenge_method="S256",
-    runtime_bootstrapper=oauth_runtime_bootstrapper(
-        OAuthDiscoveryConfig(
-            resource="https://api.acme.example",
-            token_endpoint_auth_method="none",
-            pkce_code_challenge_method="S256",
-        ),
-    ),
-)
-```
-
-Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
-Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
-
-OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
-When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
-The user can complete OAuth and retry the same tool request.
-
-Deployment restrictions belong in plugin settings.
-Use `allowed_email_domains` to restrict verified email claims by domain.
-Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
-If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
-
-### Additional Google workspaces
-
-Use `GoogleWorkspaceConfig` to expose another Google account alongside the built-in tools.
-Each workspace gets separate OAuth providers, stored connections, and function names while reusing the existing Google tool implementations and Connections page.
-Existing tools and saved logins remain unchanged; no credential migration is needed.
-
-For example, a plugin can use one module for both registrations:
-
-```json
-{
-  "name": "google-workspaces",
-  "tools_module": "workspaces.py",
-  "oauth_module": "workspaces.py"
-}
-```
-
-```python
-# workspaces.py
-from mindroom.tool_system.google_workspaces import (
-    GoogleWorkspaceConfig,
-    google_workspace_oauth_providers,
-    register_google_workspace_tools,
-)
-
-WORKSPACES = (
-    GoogleWorkspaceConfig(
-        name="secondary",
-        display_name="Secondary",
-        client_config_service="secondary_google_oauth_client",
-        allowed_hosted_domains=("secondary.example",),
-        services=("gmail",),
-    ),
-)
-
-for workspace in WORKSPACES:
-    register_google_workspace_tools(workspace)
-
-
-def register_oauth_providers(settings, runtime_paths):
-    return tuple(
-        provider
-        for workspace in WORKSPACES
-        for provider in google_workspace_oauth_providers(workspace)
-    )
-```
-
-Enable the plugin and add `secondary_gmail` beside `gmail` in the agent's tools.
-The additional Connections card is labeled **Secondary Gmail**.
-When it needs a login, the tool returns its own chat authorization link.
-Google must verify a hosted domain from `allowed_hosted_domains`; choosing a personal account or another organization's account fails without saving credentials.
-
-Provision the workspace's OAuth client through a [shared credential seed](configuration/index.md#credential-seeds) with `client_id` and `client_secret` under `secondary_google_oauth_client`.
-Enable the Gmail API and register the exact callback `https://your-host/api/oauth/secondary_google_gmail/callback` on that client before exposing the tool.
-Workspace tools require their own OAuth connection and never fall back to the default Google client or a global service account.
-Like the built-in Google tools, they always execute in the primary runtime, where their OAuth credentials are managed.
-
-Function names are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`.
-Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
-
-Add more workspace definitions with distinct names and client services as needed.
-Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
-Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
-Keep workspace names stable because they identify stored connections.
-
-### Additional Atlassian connections
-
-Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
-Each connection gets its own OAuth provider, stored connection, site pin, requested scopes, and prefixed function names such as `partner_confluence_search`.
-See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin example, fields, and callback setup.
+When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
+This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
+`thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
 
 ### Minimal example
 
@@ -567,6 +409,170 @@ worker_target = context.resolve_worker_target()
 This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
 `resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
 
+## OAuth providers
+
+An OAuth module registers provider definitions without registering FastAPI routes.
+MindRoom core owns state generation, callback consumption, authenticated requester binding, scoped OAuth token writes, status checks, and disconnect handling.
+The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, optional PKCE requirements, token parsing, optional claim validators, and display metadata.
+
+Declare the module in the manifest:
+
+```json
+{
+  "name": "drive-plugin",
+  "tools_module": "tools.py",
+  "oauth_module": "oauth.py"
+}
+```
+
+Then expose `register_oauth_providers(settings, runtime_paths)`:
+
+```python
+from __future__ import annotations
+
+from mindroom.oauth import OAuthProvider
+
+
+def register_oauth_providers(settings, runtime_paths):
+    del runtime_paths
+    return [
+        OAuthProvider(
+            id="acme_drive",
+            display_name="Acme Drive",
+            authorization_url="https://accounts.acme.example/oauth/authorize",
+            token_url="https://accounts.acme.example/oauth/token",
+            scopes=("files.read",),
+            credential_service="acme_drive_oauth",
+            tool_config_service="acme_drive",
+            client_config_services=(
+                settings.get("client_config_service", "acme_drive_oauth_client"),
+            ),
+            allowed_email_domains=tuple(settings.get("allowed_email_domains", [])),
+            allowed_hosted_domains=tuple(settings.get("allowed_hosted_domains", [])),
+        ),
+    ]
+```
+
+OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
+Dashboard flows normally call `connect` and use the returned provider authorization URL.
+Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
+Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
+The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
+The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
+Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
+If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
+Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
+MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
+For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
+Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
+
+Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
+
+```python
+from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+
+provider = OAuthProvider(
+    id="acme_drive",
+    display_name="Acme Drive",
+    authorization_url="",
+    token_url="",
+    scopes=("files.read",),
+    credential_service="acme_drive_oauth",
+    client_config_services=("acme_drive_oauth_client",),
+    token_endpoint_auth_method="none",
+    pkce_code_challenge_method="S256",
+    runtime_bootstrapper=oauth_runtime_bootstrapper(
+        OAuthDiscoveryConfig(
+            resource="https://api.acme.example",
+            token_endpoint_auth_method="none",
+            pkce_code_challenge_method="S256",
+        ),
+    ),
+)
+```
+
+Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
+Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
+
+OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
+When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
+The user can complete OAuth and retry the same tool request.
+
+Deployment restrictions belong in plugin settings.
+Use `allowed_email_domains` to restrict verified email claims by domain.
+Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
+If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
+
+### Additional Google workspaces
+
+Use `GoogleWorkspaceConfig` to expose another Google account alongside the built-in tools.
+Each workspace gets separate OAuth providers, stored connections, and function names while reusing the existing Google tool implementations and Connections page.
+Existing tools and saved logins remain unchanged; no credential migration is needed.
+
+For example, a plugin can use one module for both registrations:
+
+```json
+{
+  "name": "google-workspaces",
+  "tools_module": "workspaces.py",
+  "oauth_module": "workspaces.py"
+}
+```
+
+```python
+# workspaces.py
+from mindroom.tool_system.google_workspaces import (
+    GoogleWorkspaceConfig,
+    google_workspace_oauth_providers,
+    register_google_workspace_tools,
+)
+
+WORKSPACES = (
+    GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_google_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    ),
+)
+
+for workspace in WORKSPACES:
+    register_google_workspace_tools(workspace)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return tuple(
+        provider
+        for workspace in WORKSPACES
+        for provider in google_workspace_oauth_providers(workspace)
+    )
+```
+
+Enable the plugin and add `secondary_gmail` beside `gmail` in the agent's tools.
+The additional Connections card is labeled **Secondary Gmail**.
+When it needs a login, the tool returns its own chat authorization link.
+Google must verify a hosted domain from `allowed_hosted_domains`; choosing a personal account or another organization's account fails without saving credentials.
+
+Provision the workspace's OAuth client through a [shared credential seed](oauth-framework.md#credential-seeds) with `client_id` and `client_secret` under `secondary_google_oauth_client`.
+Enable the Gmail API and register the exact callback `https://your-host/api/oauth/secondary_google_gmail/callback` on that client before exposing the tool.
+Workspace tools require their own OAuth connection and never fall back to the default Google client or a global service account.
+Like the built-in Google tools, they always execute in the primary runtime, where their OAuth credentials are managed.
+
+Function names are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`.
+Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
+
+Add more workspace definitions with distinct names and client services as needed.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
+Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
+Keep workspace names stable because they identify stored connections.
+
+### Additional Atlassian connections
+
+Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
+Each connection gets its own OAuth provider, stored connection, site pin, requested scopes, and prefixed function names such as `partner_confluence_search`.
+See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin example, fields, and callback setup.
+
 ## MCP via plugins (advanced)
 
 MindRoom supports native MCP servers in `config.yaml` — see [MCP](mcp.md) for the normal setup path.
@@ -732,6 +738,25 @@ If you need to force a reload, for example because the watcher missed something 
 
 The bot replies with the active plugin set and the count of cancelled background tasks.
 Admin gating uses `administrators` from `config.yaml`.
+
+#### `!reload-plugins`
+
+Force-reload every configured plugin from disk. Admin-only.
+
+```
+!reload-plugins
+```
+
+Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](plugins.md#live-development-hot-reload) for details.
+This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
+
+**Reply format:**
+
+```
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+```
+
+**Permission:** Caller must be a platform administrator. Aliases: `!reload-plugins`, `!reload_plugins`.
 
 ### Caveats and tradeoffs
 

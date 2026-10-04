@@ -9,15 +9,15 @@ Use these tools when you need OAuth recovery, multi-agent coordination, reusable
 
 ## Tools On This Page
 
-- [`oauth_connections`] - Issue a browser-confirmed reset for one authorized OAuth connection.
+- [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one authorized OAuth connection.
 - [`delegate`] - Run a configured agent as a fresh subagent and wait for its answer.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
 - [`self_config`] - Let an agent read and update only its own configuration.
-- [`openclaw_compat`] - Config-only preset that expands to native MindRoom tools.
+- [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`claude_agent`] - Persistent Claude Agent SDK sessions with optional gateway support and per-session labels.
-- [`usage_stats`] - Local, read-only summaries of retained Agno run usage.
+- [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Local, read-only summaries of retained Agno run usage.
 
 ## Common Setup Notes
 
@@ -34,203 +34,7 @@ Only [`claude_agent`] has tool-specific credential fields.
 `Config.expand_tool_names()` expands presets and implied tools while deduping and preserving order.
 For [`openclaw_compat`], that means `matrix_message` is added directly and `attachments` is added indirectly through `Config.IMPLIED_TOOLS`.
 
-## [`oauth_connections`]
-
-`oauth_connections` lets an agent recover a stuck or revoked MindRoom-managed OAuth connection without exposing broader credential-management controls.
-
-### What It Does
-
-The toolkit exposes only `reset_oauth_connection(provider_id)`.
-The provider must back one of the current agent's configured tools.
-The call returns a temporary browser link and does not change the connection by itself.
-After you confirm, MindRoom removes its saved connection and opens the provider's sign-in page so you can reconnect.
-It does not revoke access at the provider itself.
-
-### Configuration
-
-Enable the tool alongside the OAuth-backed tools the agent may recover.
-
-```yaml
-agents:
-  researcher:
-    display_name: Researcher
-    role: Work with connected documents and recover revoked connections
-    model: sonnet
-    worker_scope: user_agent
-    tools:
-      - oauth_connections
-      - google_drive
-```
-
-### Who Can Reset A Connection
-
-| Connection type | Who confirms the reset | What the reset affects |
-| --- | --- | --- |
-| Shared (`shared`) | An administrator or configured credential manager can request the link. Anyone with the complete link can confirm it before it expires. | Everyone using this agent |
-| Personal (`user`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection across agents |
-| Personal for one agent (`user_agent`) | The same MindRoom user who requested the link, signed in to the dashboard | That user's connection for this agent only |
-
-A shared connection belongs to the agent rather than to one MindRoom user.
-Anyone who can use the agent can reset their own personal connection, and on a private agent every connection is personal.
-Resetting a shared connection requires platform `administrator` access or an entry in `agents.<name>.credential_managers`.
-Some providers always use personal connections, regardless of the agent's configured scope.
-
-### Reset A Connection
-
-1. Ask the agent to call `reset_oauth_connection()` for the affected provider.
-2. Open the returned link within 10 minutes.
-3. Review which agent and connection type will be affected, then confirm the reset.
-4. Sign in at the provider and retry the original request.
-
-Keep a shared reset link private.
-Anyone with the complete link can confirm it before it expires, and confirming it can disconnect the service for everyone using that agent until reconnection finishes.
-
-### Notes
-
-- `oauth_connections` always runs in the primary MindRoom runtime, even if it appears in `worker_tools`.
-- Opening a reset link without confirming it does not change the connection.
-- MindRoom refuses an expired, unauthorized, or outdated link before deleting credentials.
-- A shared reset link works once. Run `reset_oauth_connection()` again if you need a new one.
-- Installation-level connections that are not assigned to an agent scope must be reset from the dashboard.
-- Normal `tool_approval` rules still apply when the agent creates the link.
-
-For implementation details and lifecycle guarantees, see [OAuth Credential Lifecycle Design](https://docs.mindroom.chat/dev/oauth-credential-lifecycle-design/#browser-reset).
-
-## [`usage_stats`]
-
-`usage_stats` returns aggregate retained usage for the caller without modifying session storage.
-All operations are local and read-only.
-`get_my_usage()` always scopes the result to the current agent and the canonical current requester.
-For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
-`get_my_private_usage()` reports all configured private agents belonging to the current requester, including retained stores under known requester aliases.
-It resolves only that requester's databases and does not scan other users' private instances.
-Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
-The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
-Provider billing, embedding usage, and speech-to-text usage are outside version one.
-
-### Self-Service Configuration
-
-Configure a normal agent with `usage_stats` to make `get_my_usage()` and `get_my_private_usage()` available.
-
-```yaml
-agents:
-  usage_assistant:
-    display_name: Usage Assistant
-    role: Report the caller's retained MindRoom usage
-    tools:
-      - usage_stats
-```
-
-### Admin Configuration
-
-Configure an admin agent with the per-agent `admin_scope` override to make `get_all_usage()` available.
-Admin access requires both `admin_scope: true` and platform-administrator authority.
-
-```yaml
-administrators:
-  - "@usage-admin:example.com"
-
-agents:
-  usage_admin:
-    display_name: Usage Administrator
-    role: Report retained MindRoom usage across configured entities
-    tools:
-      - usage_stats:
-          admin_scope: true
-```
-
-All three functions accept an optional `include_daily` boolean, which defaults to `false`.
-`get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
-`get_all_usage()` reports retained Agno session aggregates across configured agents and all stored teams, including ad hoc teams and teams removed from configuration.
-
-### Daily Token Usage
-
-Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
-The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use individual request timestamps when all counters reconcile to the recorded run and its per-model totals; older or unreconciled details fall back to run creation time.
-New requests retain their own model attribution; older requests can inherit a single known run model, but ambiguous mixed-model history cannot be split.
-Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
-Each model counts that run once on the first date it was used.
-Dates are sorted oldest first and omit days without usable retained usage.
-The daily breakdown follows the same requester and administrator access rules as the rest of the report.
-Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
-The report's overall totals and overall `model_breakdown` expose the same counters.
-For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includes a `daily_breakdown` with the same daily totals, run counts, and per-model rows.
-Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
-
-`daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
-Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
-The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
-This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
-Daily rows include saved team member usage, but may differ from session totals when historical usage lacks retained counters or dates.
-Both daily fields are omitted unless `include_daily=True`.
-
-### Response And Coverage
-
-All three functions return a JSON custom-tool envelope with `status` and `tool` fields.
-A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
-Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
-
-The admin response groups session aggregates by configured agent or stored team ID.
-Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
-Admin breakdown rows include every configured agent and stored team with retained usage and are sorted by total tokens.
-Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained usage by canonical requester and model.
-With `include_daily=True`, these requester rows include daily detail too; the report's model, user, and daily coverage applies to them.
-Shared and private instances of the same entity are combined; `private_agent_breakdown` separately identifies the private contribution.
-Run counts describe retained top-level runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
-Both responses group stored usage snapshots by provider and model in `model_breakdown`.
-Organization detail includes each saved team member's own counters once, without adding replies to `run_count` or adding its tokens again to cumulative team session totals.
-When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
-Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
-Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
-Model rows include token totals and run counts and are sorted by total tokens.
-Each model counts a top-level run once, while daily and user run counts count that run once across all its models.
-Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because history lost before usage migration and unrecorded member usage can contribute to report totals without model attribution.
-Consequently, model rows do not necessarily sum to the top-level totals.
-The tool does not change Agno persistence settings.
-The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
-
-Admin and all-private self reports also include `cumulative_model_breakdown` and `cumulative_model_coverage`.
-Cumulative model rows use per-model details stored with session aggregates, so they include compacted usage still present in retained sessions.
-Each row contains provider, model, all token counters, and `session_count`; a session using several models counts once in each model row.
-Duplicate entries for the same provider and model within one session are combined before that count is added.
-The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
-Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
-Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
-
-`get_all_usage()` also includes recorded internal AI work under `system:internal`, including routing, room topics, schedule interpretation, thread summaries, voice normalization, and provider-reported transcription tokens.
-This overhead contributes tokens but adds no conversations or top-level replies, and no human requester is inferred for it.
-It is excluded from personal and private-agent usage reports. Historical internal calls and transcription tokens not reported by the provider remain unavailable.
-
-### Private-Agent Accounting
-
-`private_agent_breakdown` separates usage by `agent_name` and, for admin reports, canonical `user_id`.
-Personal reports omit user identifiers and contain only the requester's own private agents.
-`get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
-
-Each private row contains session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
-With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
-Session totals can include history compacted before usage migration that no longer has model or daily detail; the two totals are intentionally separate.
-
-For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
-Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
-Known aliases are combined; missing ownership remains `user_id: null`.
-`private_agent_coverage` describes unavailable attribution or metrics.
-All views share the same storage reader, run deduplication, token normalization, and daily grouping.
-Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
-Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
-A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
-The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
-A session database the startup import cannot read, or that is locked, is skipped with a warning instead of stopping startup, and its import retries when its agent or team next opens it.
-The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
-Reports and tools read the current usage table without migrating or scanning conversation payloads.
-History lost before migration cannot be recovered by this report.
-Missing counters are reported as zero, so zero does not prove that an older provider recorded that token category.
-These counters support cost estimates, but do not guarantee exact billing: provider-specific charging rules and calls outside retained session storage are not captured.
-
-Errors use the same envelope with a stable code.
-Common codes are `authorization_error` and `context_unavailable`.
+See [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) and [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats).
 
 ## Matrix Conversations
 
@@ -300,6 +104,61 @@ A running or paused record stays in memory until it finishes, or until its start
 A failure to open or read a record, such as running out of file descriptors, fails only that attempt; a refusal of the record's content is remembered while the log stays unchanged.
 The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
 Completed task results include a reference to the child's record.
+
+### Agent Delegation
+
+Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None, minimal: bool = False)` and `continue_subagent(subagent_id: str, message: str)`.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
+
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
+Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
+An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
+Unknown model aliases are rejected before execution.
+The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
+Pass `minimal: true` to run the child in [minimal mode](https://docs.mindroom.chat/tools/agent-cli/#minimal-subagents), which saves tokens when the child's full system prompt is not needed; follow-ups keep that mode.
+The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
+Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
+Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
+The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
+Listing the caller itself allows a fresh copy with the same configured capabilities.
+Omitting `agent_name` or passing `None` selects the caller itself; the same `delegate_to` allowlist still applies.
+For an ongoing Matrix conversation, use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations).
+Each child writes redacted execution records under `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in its resolved workspace, and the caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Approval-gated child calls use the native Matrix approval flow in the source room and thread while the parent-child continuation remains durable.
+
+```yaml
+agents:
+  leader:
+    display_name: Leader
+    role: Orchestrate tasks by delegating to specialist agents
+    model: sonnet
+    delegate_to: [leader, code, research]
+    rooms: [lobby]
+
+  code:
+    display_name: CodeAgent
+    role: Generate code, manage files
+    model: sonnet
+    tools: [file, shell]
+    delegate_to: [research]  # can further delegate
+    rooms: [lobby]
+
+  research:
+    display_name: ResearchAgent
+    role: Research topics and provide summaries
+    model: sonnet
+    tools: [duckduckgo]
+    rooms: [lobby]
+```
+
+**Constraints:**
+
+- Targets must reference existing agent names in the config
+- An agent may delegate to itself only when its own name appears in `delegate_to`
+- Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
 
 ### Configuration
 
@@ -704,52 +563,7 @@ update_own_config(
 - `include_default_tools=True` is also rejected when `defaults.tools` contains blocked privileged tools such as `config_manager`.
 - Use [`self_config`] for narrow self-tuning at runtime and [`config_manager`] for full config-authoring workflows.
 
-## [`openclaw_compat`]
-
-`openclaw_compat` is a config-only preset for OpenClaw-style workspace portability.
-
-### What It Does
-
-`openclaw_compat` is not a runtime toolkit.
-The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
-`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `matrix_message`.
-`matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
-Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
-This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
-
-### Configuration
-
-This preset has no inline configuration fields and cannot use `defer` or `initial`.
-Configure individual member tools directly when they need lazy loading.
-
-### Example
-
-```yaml
-agents:
-  openclaw:
-    display_name: OpenClawAgent
-    role: OpenClaw-style personal assistant with a file-first workspace
-    model: opus
-    include_default_tools: false
-    learning: false
-    memory_backend: file
-    context_files:
-      - SOUL.md
-      - AGENTS.md
-      - USER.md
-      - IDENTITY.md
-      - TOOLS.md
-      - HEARTBEAT.md
-    tools:
-      - openclaw_compat
-      - python
-```
-
-### Notes
-
-- [`openclaw_compat`] is a preset name that belongs in `tools:` but does not expose callable runtime methods of its own.
-- Use the dedicated [OpenClaw Workspace Import](https://docs.mindroom.chat/openclaw/) guide for workspace layout, file memory behavior, and migration details.
-- If you only need one or two of the member tools, configure those tools directly instead of using the preset.
+See [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat).
 
 ## [`claude_agent`]
 

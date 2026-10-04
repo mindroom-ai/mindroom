@@ -271,60 +271,7 @@ Additional small compatibility branches stay with current readers.
 [`execution_preparation.py`][execution-preparation] classifies structured stream status first and uses the old `[cancelled]` and `[error]` body suffixes (each preceded by one space) owned by [`legacy_streaming.py`][legacy-streaming] only through the streaming reader fallback.
 Interrupted visible replies are excluded; eligible in-progress text is cleaned before it is included in model context.
 
-A journal replacement must coordinate its generation binding with the next Nio baseline.
-Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
-Private storage moves require stopped primaries and absent managed workers, as described in [Private Storage Migration](../deployment/private-storage-upgrade.md).
-Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
-The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](../deployment/nio-upgrade.md).
-Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
-Primary-process host browser profiles moved from `<storage>/browser-profiles` into each agent's state root, and the old directory is no longer read, because nothing records which agent or requester signed in to it; sign in again and delete it.
-Default host browser screenshots, PDFs, and downloads likewise moved from `<storage>/browser` to `browser/` in each agent's state root, so `upload` no longer accepts files left in the old directory; move any still needed into the agent workspace, then delete it.
-A `private.root` may no longer start with `browser` or `browser-profiles`, the directories the primary uses beside the private workspace.
-Chromium in the host, headless worker, and Computer browsers and in `crawl4ai` no longer reads proxy settings from the environment; its only proxy is MindRoom's destination relay, which opens HTTP `CONNECT` tunnels through the configured egress proxy.
-That proxy must now allow `CONNECT` to port 80 for plain-HTTP pages, which it previously received as ordinary proxied requests; the chart-managed approved egress proxy requires mindroom-egress-proxy v0.1.10 or later, so set `approvedEgress.image.tag: v0.1.10` before upgrading.
-The primary's egress proxy must also allow `CONNECT` to IP addresses on ports 80 and 443, because the primary tunnels to the address it validated; egress proxies that allow only hostnames are no longer supported for the primary browser.
-In the primary, a SOCKS proxy, a proxy URL with credentials or a path, `auto_proxy`, or `socks_server` is now ignored with a warning and those destinations are dialed directly, and `no_proxy` applies only to browsers with `allow_private_networks`.
-A sandbox runner refuses to start a browser when its proxy variables name different proxies or one it cannot follow, so set them all, or only `all_proxy`, to the one HTTP(S) egress proxy.
-Stored tool config values for boolean fields, such as credential seeds read from environment variables or files, must now be JSON booleans or exactly `true` or `false`; any other value makes that tool fail to load with an error naming the field.
-
-### Workspace-only worker mounts
-
-v2026.9.327 mounts only agent workspaces into dedicated Docker and Kubernetes workers.
-Drain worker activity before upgrading, because primary startup stops every worker from an older release before it serves anything, which ends its tool calls, shells, background scripts, and CLI sessions.
-Until every such worker is stopped, startup fails and the primary restarts, so the Docker daemon or Kubernetes API must be reachable when it starts.
-Upgrade worker images in lockstep with the primary: the worker protocol is now 2 and the Docker backend refuses older images, while Kubernetes workers run the configured worker image, so that image must come from the same release.
-Rolling back to v2026.9.326 is safe when the Docker and Kubernetes worker images roll back together with the primary; that release recreates workers with its state-root mounts on their next use, and upgrading again stops them at startup even though they keep this release's annotation, because their template hash no longer matches it.
-
-Before upgrading, check two new limits:
-
-- A `private.root` may no longer start with a name the primary writes beside the private workspace: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, or `.sessions-recovery.lock`; such a configuration now fails validation, so rename the root first.
-- Knowledge files above 64 MiB are left out of every knowledge base, including operator-managed ones, and the next refresh removes their existing vectors; find them with `find <knowledge folder> -type f -size +64M`.
-
-Workers from older releases could write agent state roots, so after the upgrade check those roots for links they may have planted, running each command once with GNU find:
-
-```bash
-find "$STORAGE/agents" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/agents/[^/]*/workspace" -prune
-find "$STORAGE/private_instances" -mindepth 2 -type l -print -o -type d -regex "$STORAGE/private_instances/[^/]*/\([^/]*\)/\1_data" -prune
-find "$STORAGE/agents" "$STORAGE/private_instances" -type f -links +1 -print
-```
-
-The second command skips private workspaces at the default `private.root` of `<agent>_data`; when some agents set another root, pair every private agent with its root, default ones included, in one alternation instead, such as `-regex "$STORAGE/private_instances/[^/]*/\(notes/notes_data\|mail/inbox\)"`, because a run per root would print the other agents' own workspace links, and roots listed without their agents would also skip a directory of that name under any other agent.
-The first two commands skip links inside workspaces, which are the workers' own, and verified legacy aliases directly below `private_instances`; remove every link they print, including a workspace that is itself a link, and inspect hard-linked files for data copied out of another instance.
-
-### Config-free runners and workers
-
-MindRoom no longer mounts the primary's config into the `static_runner` sidecar or dedicated Kubernetes workers, which take agent settings only from the allowlisted snapshot each request carries.
-The runtime chart's `workers.kubernetes.configMapName`, `configKey`, and `configPath` values and the matching `MINDROOM_KUBERNETES_WORKER_CONFIG_*` settings are removed.
-Every script recovery signature written by an older release covers those removed worker settings, so background scripts still running on Kubernetes workers during the upgrade no longer verify and are interrupted once when the primary starts.
-For the same reason the unversioned and pre-seccomp recovery-signature migrations were removed: no record they could adopt still verifies.
-Kubernetes workers pick up their new pod template when they are next recreated.
-Plugin directories beside a file-sourced config are no longer visible to the sidecar or Kubernetes workers, so install proxied plugins as Python packages in the runner image.
-
-### Requester-scoped worker keys
-
-v2026.9.33 changed the key of every `user` and `user_agent` worker, and workers or scoped integrations from earlier releases are not reused or migrated.
-After upgrading from an earlier release, reprovision every existing `user` and `user_agent` worker and reconnect every integration connected for those scopes.
-Shared and unscoped workers are unaffected.
+See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limits).
 
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py

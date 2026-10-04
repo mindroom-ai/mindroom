@@ -9,15 +9,15 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 
 ## Tools On This Page
 
-- [`matrix_message`] - Send, read, edit, and react in Matrix conversations.
+- [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#matrix-messages) - Send, read, edit, and react in Matrix conversations.
 - [`matrix_room`] - Inspect Matrix room metadata, available agents, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen Matrix threads in the current room.
 - [`thread_summary`] - Set or update a Matrix thread summary from the current room and thread context.
-- [`thread_model`] - List models or show, switch, and reset the model override for the current Matrix thread.
+- [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model) - List models or show, switch, and reset the model override for the current Matrix thread.
 - [`matrix_api`] - Use a low-level Matrix event and state API with explicit room and event IDs.
-- [`attachments`] - List, inspect, and register context-scoped attachment IDs for later tool calls.
+- [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool) - List, inspect, and register context-scoped attachment IDs for later tool calls.
 
 ## Common Setup Notes
 
@@ -26,49 +26,27 @@ These tools depend on the active `ToolRuntimeContext`, so they only work when an
 Attachment IDs are context-scoped `att_*` values, and the runtime only exposes IDs from the current conversation plus any IDs registered during the current tool run.
 Current source in this worktree exposes `matrix_message`, `matrix_room`, `matrix_voice_message`, `thread_tags`, `thread_resolution`, `thread_summary`, `thread_model`, `matrix_api`, and `attachments` in this area.
 
-## [`matrix_message`]
+## Tool Runtime Context
 
-`matrix_message` supports four actions: `send`, `read`, `edit`, and `react`.
-Sending and reading use the current conversation by default.
-Set `recipient` to an available agent or team name to request a response; without a recipient, text mentions do not dispatch agents.
-Set `new_thread=True` to start a separate conversation, an explicit `thread_id` to continue another thread, or `thread_id="room"` for the room timeline.
-Cross-room calls never inherit the origin room's thread.
-`edit` and `react` require the target message's `event_id`.
-`read` returns recent messages and edit options, with `limit` clamped to 1–50 and defaulting to 20.
-Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
-The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
+Tools like `matrix_message`, `matrix_room`, `chat_ui`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
+`thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
+`thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
+`thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
+`thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
+`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
+Both can be combined.
+Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
+`thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
+`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
+It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
+The response includes `include_untagged: bool` and `truncated: bool`.
+Callers must check `truncated` before claiming the unresolved list is complete.
+`thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
+`thread_resolution` is an explicit opt-in capability backed by the `resolved` thread tag and does not read the removed experimental `com.mindroom.thread.resolution` event type.
+It is absent from starter configs and default tool sets, while `thread_tags` can list but cannot mutate `resolved` state.
+`matrix_api` defaults `room_id` to the active room, supports cross-room targeting for rooms the requester is joined to, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
 
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - matrix_message
-```
-
-### Example
-
-```python
-matrix_room(action="room-info")
-matrix_room(action="agents")
-matrix_message(recipient="code", message="Review this export.", new_thread=True)
-matrix_message(message="Here is the report.", attachments=["exports/report.csv", "att_chart"])
-matrix_message(action="react", event_id="$event123", message="✅")
-```
-
-### Notes
-
-See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
-Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
-`attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
-With the default `file_access: workspace`, paths resolve from the agent workspace and must stay inside it; absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace.
-With [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) set to `unrestricted`, any existing file the MindRoom process can read is accepted.
-When sending to a recipient, all files arrive before the task text starts its response.
-For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
-Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
+See [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#matrix-messages).
 
 ## [`matrix_room`]
 
@@ -324,51 +302,7 @@ set_thread_summary(
 - Pinning stops the whole automatic pass, not just the title. A thread pinned before its automatic topic tags are inferred will not receive them; tag it explicitly with `thread_tags` instead.
 - Automatic summaries are also skipped on threads carrying the `resolved` tag.
 
-## [`thread_model`]
-
-`thread_model` lets agents list configured models or show, switch, and reset the model override for the current Matrix thread, mirroring the `!model` chat command.
-
-### What It Does
-
-`thread_model` exposes `list_models()`, `get_thread_model()`, `switch_thread_model(model_name, when)`, and `reset_thread_model()`.
-`list_models` returns every configured model alias with its provider and provider model ID and does not require an active thread.
-The other three functions require an active thread context and return an error outside a thread.
-`switch_thread_model` accepts a configured model name from the `models:` section of `config.yaml` and rejects unknown names with the available model list.
-Its optional `when` argument accepts `after-toolcall` or `next-turn` and defaults to `next-turn`.
-With `after-toolcall`, MindRoom rebuilds the current agent or team with the selected model and continues the same response after the tool call.
-With `next-turn`, the current response continues with the model it started with and the selected model begins on the next user turn.
-The override applies to the agents, teams, and router in the thread that the requester may address, and persists across restarts.
-Every other entity keeps its own thread override or room-level model.
-During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
-`get_thread_model` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names.
-When a stored override names a model that has been removed from `config.models`, runtime resolution ignores it, and `get_thread_model` reports that entity under `stale_overrides` instead of `overrides`.
-`reset_thread_model` removes the thread override of the entities the requester may address so room-level model selection applies to them: an active runtime `!room_model` override, then configured `room_models`, then each entity's configured model.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - thread_model
-```
-
-```python
-list_models()
-get_thread_model()
-switch_thread_model("opus", when="after-toolcall")
-reset_thread_model()
-```
-
-### Notes
-
-- The override is stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
-- Users can manage the same override with the `!model` chat command; see [Chat Commands](https://docs.mindroom.chat/chat-commands/).
-- An explicit `active_model_name` (for example a delegated child run) still beats the thread override, and the thread override beats the runtime `!room_model` choice, configured `room_models`, and the authored entity model.
+See [`thread_model`](https://docs.mindroom.chat/configuration/models/#thread_model).
 
 ## [`matrix_api`]
 
@@ -428,75 +362,7 @@ matrix_api(
 - The tool returns structured JSON payloads for both success and error cases.
 - Because it is intentionally low-level, it requires explicit IDs instead of deriving them from reply or thread context.
 
-## [`attachments`]
-
-`attachments` lets agents inspect and register files that are scoped to the current Matrix conversation.
-
-### What It Does
-
-`attachments` exposes `view_file(path=None, attachment_id=None)`, `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
-`view_file(path="plots/result.png")` delivers an image directly to the calling model in one call.
-`view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
-Supply exactly one source; keep `read_file` for ordinary text and code.
-Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
-Worker-routed viewing uses the same configured workspace as shell and file tools, even when the primary and worker mount storage at different paths.
-PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
-The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
-Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
-Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
-A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
-For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
-Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
-Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
-Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
-Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.
-`list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
-Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
-`get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
-`get_attachment(attachment_id, view=True)` sends image, audio, video, or document content (including PDF) to the model, including local files and attachments from earlier in the conversation.
-Image viewing uses the same preparation, size limits, transformation disclosures, and history replay as `view_file` and browser screenshots.
-Viewing requires a model and provider adapter that support the media type, and a readable, context-scoped file no larger than 20 MiB.
-Rejected media requests retry without the media and give the agent explicit guidance to use the attachment ID/path with other available tools; known adapter omissions receive the same guidance.
-It cannot be combined with `mindroom_output_path`.
-`get_attachment(attachment_id, mindroom_output_path="relative/path")` saves the attachment bytes into the agent workspace and returns a `mindroom_tool_output` save receipt with the saved path, byte count, binary format, and SHA256 digest.
-Use `mindroom_output_path` before handing attachments to worker-routed workspace tools such as `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
-In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
-The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
-`register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
-`register_attachment()` paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
-Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
-Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
-Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
-Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
-This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - attachments
-```
-
-```python
-list_attachments()
-list_attachments(target="att_abc123")
-get_attachment("att_abc123")
-get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
-register_attachment("incoming/plan.pdf")
-matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
-```
-
-### Notes
-
-- `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
-- Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
-- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](https://docs.mindroom.chat/attachments/) guide.
+See [`attachments`](https://docs.mindroom.chat/attachments/#the-attachments-tool).
 
 ## Related Matrix Runtime Features
 
@@ -529,4 +395,4 @@ Initial enrichment uses the summary call that would already run and can add up t
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Attachments](https://docs.mindroom.chat/attachments/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)

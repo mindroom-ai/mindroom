@@ -112,6 +112,21 @@ Before mounting `config.yaml` read-only, run `mindroom config migrate --path ./c
 > ```
 > Alternatively, omit the `user:` directive to run as root (less secure).
 
+### Sandbox Proxy Isolation
+
+When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
+The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
+This provides real process-level isolation for code-execution tools.
+In a simple local static-runner install with no proxy URL and no YAML or environment settings requesting worker routing, execution tools run in the MindRoom process.
+Explicit YAML worker lists take precedence over environment execution modes.
+Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
+Dedicated Docker and Kubernetes workers do not allow that fallback.
+
+See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
+
+> [!TIP]
+> For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
 In Kubernetes the shared runner runs as a second container in the MindRoom pod and is reached over `localhost`.
@@ -145,7 +160,7 @@ They never receive the credentials-encryption key, so tool settings reach them o
 Worker pods can reach the primary API over the pod network, so the runtime chart gives the primary a generated `MINDROOM_API_KEY` that workers never receive, unless the explicit opt-out is configured.
 
 When you upgrade, keep worker images on the primary's release.
-See [Workspace-only worker mounts](../architecture/migrations.md#workspace-only-worker-mounts) and [Config-free runners and workers](../architecture/migrations.md#config-free-runners-and-workers) when upgrading from a release whose workers mounted agent state roots or the primary's config.
+See [Workspace-only worker mounts](upgrades.md#workspace-only-worker-mounts) and [Config-free runners and workers](upgrades.md#config-free-runners-and-workers) when upgrading from a release whose workers mounted agent state roots or the primary's config.
 
 ### Host machine + Docker sandbox container
 
@@ -246,6 +261,17 @@ On a mismatch it pulls the configured image, recreates the worker container, and
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
 
+### Optional: Docker worker isolation
+
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](sandbox-proxy.md).
+That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
+Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
+They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
+Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
+Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific secrets.
+Use `worker_scope: shared` when you want one persistent container per agent.
+Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
+
 ## Live config snapshots
 
 Runners never receive the primary's config file, the directory around it, its `.env`, or a ConfigMap holding it.
@@ -261,8 +287,8 @@ The charts mount no config directory, so plugin directories beside the primary's
 
 ## Choosing which tools run in workers
 
-Set `worker_tools` per agent or in `defaults`; the field reference is in [Agent configuration](../configuration/agents.md#worker-routing).
-Per-agent tool overrides, such as `shell: {extra_env_passthrough: "DAWARICH_*"}` in an agent's `tools` list, reach the worker with the call; see [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration).
+Set `worker_tools` per agent or in `defaults`; the field reference is in [Agent configuration](#worker-routing).
+Per-agent tool overrides, such as `shell: {extra_env_passthrough: "DAWARICH_*"}` in an agent's `tools` list, reach the worker with the call; see [Per-Agent Tool Configuration](../tools/index.md#per-agent-tool-configuration).
 
 ```yaml
 defaults:
@@ -308,8 +334,53 @@ Do not set it in hosted or multi-tenant deployments.
 
 ### Worker scopes
 
-`worker_scope` controls how worker runtimes are shared between calls; its values, including leaving it unset, are described in [Worker Routing](../configuration/agents.md#worker-routing), and its effect on dashboard credentials in [Where Agent Data Lives](../configuration/agents.md#where-agent-data-lives).
-When upgrading from a release before v2026.9.33, see [Requester-scoped worker keys](../architecture/migrations.md#requester-scoped-worker-keys).
+`worker_scope` controls how worker runtimes are shared between calls; its values, including leaving it unset, are described in [Worker Routing](#worker-routing), and its effect on dashboard credentials in [Where Agent Data Lives](#where-agent-data-lives).
+When upgrading from a release before v2026.9.33, see [Requester-scoped worker keys](upgrades.md#requester-scoped-worker-keys).
+
+### Worker-Routed Execution
+
+Some tools default to running in a sandboxed worker container instead of the primary agent process.
+The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
+Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for deployment details and worker-scope behavior.
+
+### Shared-Only Integrations
+
+Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
+The current shared-only integrations are `spotify` and `homeassistant`.
+MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the selected agent's effective execution scope, while non-OAuth servers always call through the shared server session without requester credentials.
+For OAuth-backed MCP, `shared` belongs to the agent, `user` belongs to the requester across agents, `user_agent` belongs to one requester-agent pair, and unscoped belongs to the installation.
+
+## Worker Routing
+
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
+An explicit agent `worker_tools` list takes precedence, followed by `defaults.worker_tools`; an explicit empty list selects local execution.
+When both are omitted, MindRoom follows the [sandbox environment routing policy](../deployment/sandbox-proxy.md#execution-modes).
+With the default static backend, no proxy URL, and no environment routing overrides, tools execute locally.
+Invalid non-empty execution modes are rejected when that environment policy is read.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
+Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
+Config-adjacent `.env` files are intentionally masked as files inside those Docker workers.
+A filtered public startup-runtime env payload can still propagate from exported env vars and allowed `.env` values.
+`worker_scope` controls how those sandbox runtimes are reused between calls.
+Some integrations require `worker_scope` unset or `shared` because their credentials or sessions are shared at runtime.
+That list includes `spotify` and `homeassistant`.
+Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
+For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
+Both of those shared-scope integrations always stay local regardless of `worker_tools` and are never proxied to the sandbox.
+Credential-backed integrations that declare `requires_primary_runtime=True` also always stay local.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
+
+The supported `worker_scope` values are:
+
+- `shared`: one runtime per agent, shared by all users.
+- `user`: one runtime per user, shared across that user's agents.
+- `user_agent`: one runtime per user+agent pair.
+
+Leave `worker_scope` unset for unscoped execution: dedicated Docker and Kubernetes workers still keep one persistent worker per agent, while the shared `static_runner` uses no worker-specific storage.
+`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 ## Filesystem isolation and agent data
 
@@ -322,12 +393,62 @@ What a worker can see depends on the backend:
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
 - **Dedicated Docker and Kubernetes workers** mount only agent workspaces, their own scratch space, and read-only assigned knowledge, never the sessions, memory, or learning data beside the workspaces.
-  Which workspaces each `worker_scope` mounts is described in [Filesystem Isolation](../configuration/agents.md#filesystem-isolation).
+  Which workspaces each `worker_scope` mounts is described in [Filesystem Isolation](#filesystem-isolation).
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
 Kubernetes knowledge mounts are described in [Knowledge Source Visibility](kubernetes.md#knowledge-source-visibility).
 Any change to a dedicated worker's launch configuration, mounts, environment, or tool and plugin config recreates the worker on its next use, which ends its tmux sessions, background shells, and computer sessions.
+
+### Filesystem Isolation
+
+`worker_scope` controls runtime reuse, not filesystem security.
+When the effective memory backend is `file`, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) at the agent's canonical workspace root.
+Without file-backed workspace state, those tools keep their normal defaults such as the current directory.
+Even when set, `base_dir` is a convenience, not a hard boundary.
+
+Isolation depends on the worker backend:
+
+- **Kubernetes and Docker dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's workspace plus its worker-local scratch space; the agent's sessions, memory, and learning data stay with the primary.
+  This is the strongest isolation available today.
+- **Kubernetes and Docker dedicated workers** (`user`): the runtime can see the workspaces of every non-private agent that resolves to `worker_scope: user`, plus that user's own private workspaces of `private.per: user` agents, because `user` mode intentionally shares one runtime across that user's agents.
+  It never mounts agents on `shared`, `user_agent`, or unscoped execution, so their sessions, memory, and workspaces stay out of reach.
+  It still mounts every `worker_scope: user` agent's shared workspace, including files other requesters leave there, even when this requester may not use all of them.
+  Treat this as a shared workstation.
+  A `user`-scope tool call whose `base_dir` points at an agent on another scope fails with HTTP 400 (`base_dir must stay inside a visible workspace or the worker root`).
+  Adding, removing, or re-scoping a `worker_scope: user` agent changes every user worker's mounts, so Kubernetes and Docker recreate those workers on their next use.
+- **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
+
+Use `user_agent` if you need per-agent filesystem isolation.
+
+For per-workspace env that an agent can edit (PATH, package indexes, npm cache locations, etc.), drop a `.mindroom/worker-env.sh` script in the agent workspace; MindRoom sources it before each worker-routed `shell` or `python` request.
+MindRoom-owned workspace identity, cache, and virtualenv env names are reasserted after the hook, so hooks cannot redirect `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, or `VIRTUAL_ENV`.
+With `worker_scope: user`, the same runtime can move between several agent workspaces, and the hook is discovered from the current request's workspace — different agents get different overlays automatically.
+See [Workspace env hook](../deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) for filename, filtering, and failure semantics.
+
+### Where Agent Data Lives
+
+Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning).
+Changing `worker_scope` changes how tool runtimes are isolated.
+It does **not** change where that non-private agent's data lives.
+All runtimes for the same non-private agent read and write the same storage directory.
+If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
+Agents that use `private` are different.
+They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`.
+Dedicated Docker and Kubernetes workers mount only the private root (`private.root`) inside that state root, never the state root itself, and own neither.
+The Kubernetes `static_runner` sidecar mounts the whole `private_instances` directory.
+
+The dashboard's generic credential forms only work for unscoped agents and agents with `worker_scope=shared`.
+The Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks OAuth providers are an exception: the dashboard can connect scoped `user` and `user_agent` credentials, while the tools still execute in the primary MindRoom runtime.
+GitHub managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
+Scoped tool settings live in primary stores, never the worker credential store, with existing OAuth and local-only placement unchanged.
+The primary builds every tool, including tools whose calls run in a worker, and each scoped worker-routed call receives its tool's settings through a [credential lease](../deployment/sandbox-proxy.md#credential-leases).
+Settings use per-agent storage for `shared` and requester-scoped storage for `user` and `user_agent`, with existing explicitly granted shared settings still available.
+Settings that exist only in a worker credential store are ignored by the primary, so save them again through the dashboard where it has a form for them, or configure them as described below.
+Startup deletes worker-store copies of settings for tools that never run in a worker, and deleting a tool's settings in the dashboard also deletes its worker copy.
+Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so authored config or granted shared settings configure them; values in a worker's own credential store apply only inside that worker.
+
+For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
 
 ## Shell env and PATH
 

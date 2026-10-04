@@ -57,7 +57,7 @@ MindRoom derives callback URLs from `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`
 The callback URL registered on the app must match exactly.
 
 Store the client ID and secret in the `atlassian_oauth_client` credential service through the dashboard credentials page.
-For non-interactive deployments, seed it at startup with a [credential seed](../configuration/index.md#credential-seeds):
+For non-interactive deployments, seed it at startup with a [credential seed](../oauth-framework.md#credential-seeds):
 
 ```json
 [

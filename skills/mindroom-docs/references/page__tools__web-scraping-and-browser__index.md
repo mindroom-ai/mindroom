@@ -803,4 +803,4 @@ open_page("https://matrix.org/blog/", new_window=True)
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)

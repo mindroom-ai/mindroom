@@ -63,7 +63,7 @@ To drive the user's signed-in browser, configure the separate [`browser`](https:
 
 Only the same requester with the same agent can confirm or use the pairing, and shared credentials are never used as a fallback.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
-Use `!desktop status`, `!desktop rotate`, and `!desktop disconnect` as described in [`!desktop`](https://docs.mindroom.chat/chat-commands/#desktop).
+Use `!desktop status`, `!desktop rotate`, and `!desktop disconnect` as described in [`!desktop`](#desktop).
 
 Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 Setup for a different controller starts without saved folders or shell access.
@@ -411,7 +411,7 @@ Never resubmit or rephrase a rejected or expired shell command.
 
 ## Require Matrix Approval for App Control
 
-The local lease is the hard authority boundary, but MindRoom's [tool approval](https://docs.mindroom.chat/configuration/#tool-approval) cards can add per-action confirmation in the Matrix conversation.
+The local lease is the hard authority boundary, but MindRoom's [tool approval](https://docs.mindroom.chat/tool-approval/#tool-approval) cards can add per-action confirmation in the Matrix conversation.
 Create `approval_scripts/desktop_control.py` beside the cloud config:
 
 ```python
@@ -460,6 +460,28 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge; see [Local Approval](#local-approval) for what that does to shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.
 - **Stronger isolation**: Run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one Desktop-enabled agent.
+
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` starts pairing, and `!desktop confirm` completes it with the exact command that local setup prints.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+`!desktop status`, or `!desktop` alone, reports whether a Desktop target is configured for you and this agent.
+`!desktop disconnect` asks for confirmation, and `!desktop disconnect confirm` removes your Desktop target for this agent, so its `desktop` calls need setup again.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
+See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for the pairing steps, local access choices, and running the bridge.
 
 ## Current Limits
 

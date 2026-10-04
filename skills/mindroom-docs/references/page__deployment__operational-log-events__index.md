@@ -5,6 +5,37 @@ Most event names are internal diagnostics and can change in any release.
 The events on this page are stable operator signals for log-based metrics and alerts.
 Their names and fields are pinned by `tests/test_operational_log_events.py`, which also checks the field tables on this page, so a rename or field change cannot land without updating this page in the same change.
 
+See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), and [Access Control](https://docs.mindroom.chat/authorization/).
+
+## Health & Readiness
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Liveness endpoint that returns `503` with `{"status": "unhealthy", "stale_sync_entities": [...]}` for stale Matrix sync after startup is ready, while `/api/ready` owns startup state before readiness. |
+| GET | `/api/ready` | Returns `{"status": "ready"}` when the orchestrator has finished startup. Returns `503` with `{"status": "<phase>", "detail": "..."}` otherwise |
+
+MindRoom tracks runtime phases internally:
+
+| Phase | Meaning |
+|-------|---------|
+| `idle` | Process not started |
+| `starting` | Startup in progress (detail message available) |
+| `ready` | Orchestrator booted, serving requests |
+| `failed` | Startup or runtime failure (detail message available) |
+
+When the semantic-search embedder is failing, the health payload additionally carries `"embedder": {"status": "failing", "detail": ...}` with the classified cause; this block is diagnostic only and never flips liveness.
+Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+While `mindroom run` waits for hosted pairing approval, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval`.
+Ordinary Matrix transport silence still reaches the watchdog after 120 seconds and makes `/api/health` return `503` after 180 seconds without a successful sync.
+While Nio commits durable ingestion progress, the watchdog and `/api/health` consume the same monotonic progress snapshot and defer for up to `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` (default 600).
+Both stop deferring when that grace expires or progress stops advancing for their respective silence timeout.
+Successful sync completion refreshes both liveness clocks and clears the ingestion grace window.
+After 90 seconds without sync or durable ingestion progress, `matrix_sync_stall_diagnostics` logs bounded await chains for that agent's sync, ingestion runner, ingestion pump, and delivery recovery tasks, including during first-sync and restarted-sync startup grace.
+Reports repeat at most every 90 seconds and include sync age, time without progress, and ingestion generation without changing watchdog or readiness behavior.
+Snapshots contain at most four tasks and 32 code locations per task, with strings capped at 240 characters; they exclude locals, message content, and source text, and stop at opaque Future or Task await boundaries.
+[Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/) lists this report's stable fields and a suggested alert condition.
+Configure liveness probe `failureThreshold` to allow sufficient time for watchdog self-healing.
+
 ## Collecting the events
 
 Set `MINDROOM_LOG_FORMAT=json` so each record is written as one JSON object per line to stderr and to the runtime log file under `<storage>/logs/`.
@@ -61,7 +92,7 @@ Repeated `large_streaming_edit_preview_prepared` records with a growing `origina
 
 Each agent, team, and router bot owns its own Matrix receive loop.
 When one of them goes 90 seconds without sync or durable ingestion progress, this record logs bounded await chains for that entity's tasks, and it repeats at most every 90 seconds while the stall lasts.
-It does not change watchdog, liveness, or readiness behavior, as described in [Health & Readiness](https://docs.mindroom.chat/dashboard/#health-readiness).
+It does not change watchdog, liveness, or readiness behavior, as described in [Health & Readiness](#health-readiness).
 
 | Field | Meaning |
 |-------|---------|
@@ -104,3 +135,26 @@ notify    at most once per hour
 Check whether the run was a runaway loop, such as the same tool call repeated or calls to unknown tools, or legitimate long work.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
 For legitimate long work in an agent or team turn, raise that entity's `max_tool_calls_per_turn`, as described in [Agents](https://docs.mindroom.chat/configuration/agents/).
+
+## Debug Logging
+
+Every completed model request logs an `LLM usage` event with provider and model identifiers and, when the provider reports usage, input tokens, uncached input tokens, and a cache-read ratio, without prompt content.
+
+Set `debug.log_llm_requests: true` to log provider requests as JSONL under `debug.llm_request_log_dir` (default `mindroom_data/logs/llm_requests`).
+Those records include prompts, messages, the tools sent to the provider, model parameters, and requester and source Matrix event metadata.
+The same flag records successful tool calls with timing in `mindroom_data/tracking/tool_calls.jsonl`; tool failures are always recorded there.
+Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
+
+Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.
+
+```bash
+LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run
+```
+
+To find what grows the primary process's memory, set `MINDROOM_HEAP_PROBE_INTERVAL_SECONDS` in the process environment or the config-adjacent `.env`.
+The primary then logs one `heap_type_probe` event per interval with the 25 most common object types and their counts, resident memory (`rss_bytes`), allocator totals under `malloc` (`arena_bytes`, `arena_in_use_bytes`, `arena_free_bytes`, `mmap_bytes`), and `python_allocated_blocks`.
+Resident memory that grows while `arena_in_use_bytes` plus `mmap_bytes` and `python_allocated_blocks` stay flat suggests freed memory the allocator keeps, and growth in those suggests live objects, which the type histogram may not show because it counts only garbage-collected container objects, not strings, bytes, or numbers.
+Each probe briefly pauses the event loop, so prefer intervals of several minutes on large processes.
+Unset or `0` disables the probe (the default), and any other value below `60` fails startup.
+
+See [Operational Log Events](https://docs.mindroom.chat/deployment/operational-log-events/) for stable log events to alert on.

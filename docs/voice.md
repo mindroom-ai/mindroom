@@ -160,6 +160,17 @@ You can specify a different model for faster or more accurate transcript normali
 
 ## Dispatch Behavior
 
+### Voice Message Processing
+
+Audio events are handled through the shared media pipeline on all bots.
+The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a room.
+When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
+By default, `voice.visible_router_echo: true` also lets the router post an immediate display-only transcription placeholder and replace it with the normalized transcript or fallback text when voice STT is enabled and it is allowed to reply.
+With STT disabled, the router posts the display-only fallback directly.
+Set `voice.visible_router_echo: false` to suppress that display-only echo.
+
+See [Voice Messages](voice.md) for the detailed dispatch behavior.
+
 ### Single-responder rooms or explicitly targeted audio
 
 If only one eligible agent or team is visible, that responder answers the normalized audio event directly.

@@ -123,6 +123,74 @@ With [`file_access`](architecture/security-posture.md#file-access) set to `unres
 Without a configured agent workspace, `workspace` mode only attaches `att_*` IDs.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
+`attachments` lets agents inspect and register files that are scoped to the current Matrix conversation.
+
+### What It Does
+
+`attachments` exposes `view_file(path=None, attachment_id=None)`, `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`view_file(path="plots/result.png")` delivers an image directly to the calling model in one call.
+`view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
+Supply exactly one source; keep `read_file` for ordinary text and code.
+Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
+Worker-routed viewing uses the same configured workspace as shell and file tools, even when the primary and worker mount storage at different paths.
+PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
+The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
+Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
+Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
+A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
+For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
+Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
+Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
+Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
+Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.
+`list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
+Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
+`get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
+`get_attachment(attachment_id, view=True)` sends image, audio, video, or document content (including PDF) to the model, including local files and attachments from earlier in the conversation.
+Image viewing uses the same preparation, size limits, transformation disclosures, and history replay as `view_file` and browser screenshots.
+Viewing requires a model and provider adapter that support the media type, and a readable, context-scoped file no larger than 20 MiB.
+Rejected media requests retry without the media and give the agent explicit guidance to use the attachment ID/path with other available tools; known adapter omissions receive the same guidance.
+It cannot be combined with `mindroom_output_path`.
+`get_attachment(attachment_id, mindroom_output_path="relative/path")` saves the attachment bytes into the agent workspace and returns a `mindroom_tool_output` save receipt with the saved path, byte count, binary format, and SHA256 digest.
+Use `mindroom_output_path` before handing attachments to worker-routed workspace tools such as `file`, `coding`, `python`, or `shell`, because the runtime-local path may not exist inside the worker workspace.
+In shell tools, the agent workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so a saved path like `incoming/file.txt` can also be read as `~/incoming/file.txt`.
+The path must be relative to the workspace and must not be empty, absolute, point at the workspace root, contain `..` or NUL bytes, start with `~`, or contain `$` or `%` characters.
+`register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
+`register_attachment()` paths follow the agent's [`file_access`](architecture/security-posture.md#file-access) setting: with the default `workspace`, they resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
+Absolute paths must point into the workspace, and `~` expands to the MindRoom process home rather than the worker workspace, so `~/incoming/file.txt` is rejected here.
+Without a configured agent workspace, `workspace` mode refuses path-based registration and only existing `att_*` IDs can be attached; `unrestricted` mode still accepts absolute paths.
+Registration copies the file's current bytes into managed attachment storage without following symbolic links, so later edits or replacement of the source file do not change the attachment.
+Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
+This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+
+### Example
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - attachments
+```
+
+```python
+list_attachments()
+list_attachments(target="att_abc123")
+get_attachment("att_abc123")
+get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
+register_attachment("incoming/plan.pdf")
+matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
+```
+
+### Notes
+
+- `attachment_id` values must be non-empty `att_*` IDs that are already present in the current tool runtime context.
+- Registering a new file attaches it to the current `room_id` and `thread_id`, which prevents accidental reuse across unrelated conversations.
+- For the full attachment lifecycle, media kinds, retention rules, and Matrix ingestion flow, use the dedicated [Attachments](attachments.md) guide.
+
 ### Why use this tool?
 
 Not all AI models support direct file inputs.
