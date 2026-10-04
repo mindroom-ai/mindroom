@@ -21,7 +21,7 @@ from mindroom.response_turn import (
 )
 from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import (
-    JOB_JOIN_LIMIT,
+    _JOB_JOIN_LIMIT,
     HeldContinuation,
     ReplyBoundaryReport,
     _JobJoin,
@@ -303,7 +303,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
 
 @pytest.mark.asyncio
 async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
-    """A resumed approval joins ready results at most `JOB_JOIN_LIMIT` times, then leaves its message holding nothing."""
+    """A resumed approval joins ready results at most `_JOB_JOIN_LIMIT` times, then leaves its message holding nothing."""
     paths = test_runtime_paths(tmp_path)
     owner = completed_delegation_job().owner
     runtime = await tool_job_runtime(tmp_path)
@@ -336,7 +336,7 @@ async def test_approval_join_stops_at_the_join_limit(tmp_path: Path) -> None:
                 is_complete=lambda _response: True,
                 continue_response=continue_response,
             )
-        assert len(continued) == JOB_JOIN_LIMIT
+        assert len(continued) == _JOB_JOIN_LIMIT
         # Past the limit the message holds nothing; the next reply in the conversation takes the work.
         assert report.boundary is not None
         assert report.boundary.notice is None

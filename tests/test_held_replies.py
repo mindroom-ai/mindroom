@@ -22,7 +22,7 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.stop import StopManager
 from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, ReplyBoundary
+from mindroom.tool_jobs.completion import ReplyBoundary
 from mindroom.tool_jobs.held_replies import (
     _APPROVAL_NOTICE,
     _WAITING_NOTICE,
@@ -433,13 +433,9 @@ async def test_resuming_shows_what_the_work_waits_for_now(held: _Held) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["nothing_outstanding", "join_limit"])
-async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _Held, reason: str) -> None:
-    """With no work left, or at the join limit, the wake releases the message and the next reply takes the rest."""
-    if reason == "join_limit":
-        await held.start("ready")
-        await wait_for_status(held.runtime, "ready", "completed")
-    await held.settle("$reply", "Started.", _WAITING_NOTICE, joins=JOB_JOIN_LIMIT if reason == "join_limit" else 0)
+async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _Held) -> None:
+    """With no work left, the wake releases the message."""
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
     hold = await held.hold()
     assert hold is not None
     assert await held.runner.held_messages.resume(replace(held.request, held_reply=hold)) is None

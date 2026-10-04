@@ -43,7 +43,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, _JobJoin
+from mindroom.tool_jobs.completion import _JOB_JOIN_LIMIT, _JobJoin
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 if TYPE_CHECKING:
@@ -2270,7 +2270,7 @@ async def test_job_join_follows_spent_dynamic_continuations(monkeypatch: pytest.
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch, streaming: bool) -> None:
-    """Endless ready results end the reply after `JOB_JOIN_LIMIT` joins, without exhausting dynamic continuations."""
+    """Endless ready results end the reply after `_JOB_JOIN_LIMIT` joins, without exhausting dynamic continuations."""
     log = _AdapterLog()
     attempts = 0
 
@@ -2294,7 +2294,7 @@ async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch
 
     async def join(attempted: set[str], *, joins: int, **_kwargs: object) -> _JobJoin:
         # The join owns its limit: at the limit it no longer continues the reply.
-        if joins >= JOB_JOIN_LIMIT:
+        if joins >= _JOB_JOIN_LIMIT:
             return _JobJoin()
         attempted.add(f"job{len(attempted)}")
         return _JobJoin(prompt="Retrieve the result")
@@ -2316,4 +2316,4 @@ async def test_job_joins_stop_at_their_own_limit(monkeypatch: pytest.MonkeyPatch
             TurnSinks(),
             continuation=_continuation(),
         )
-    assert attempts == JOB_JOIN_LIMIT + 1
+    assert attempts == _JOB_JOIN_LIMIT + 1

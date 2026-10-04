@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
 from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
-from mindroom.tool_jobs.completion import JOB_JOIN_LIMIT, HeldContinuation, completion_prompt
+from mindroom.tool_jobs.completion import HeldContinuation, completion_prompt
 from mindroom.tool_jobs.held_replies import (
     HeldReply,
     conversation_work,
@@ -264,7 +264,7 @@ class HeldReplyLifecycle:
             if job.consumed_by_source == envelope.source_event_id
         ]
         ready = (*work.ready, *reread)
-        if ready and hold.joins < JOB_JOIN_LIMIT:
+        if ready:
             prompt = completion_prompt(ready)
             return replace(
                 request,
@@ -284,7 +284,7 @@ class HeldReplyLifecycle:
                     interrupted=False,
                 ),
             )
-        if work.jobs and hold.joins < JOB_JOIN_LIMIT:
+        if work.jobs:
             # The work changed without becoming ready, so the message shows what it waits for now.
             await self.save(replace(hold, notice=waiting_notice(work.jobs)))
         elif await self.store.delete(hold.key.hold_id, generation=hold.generation) is not None:

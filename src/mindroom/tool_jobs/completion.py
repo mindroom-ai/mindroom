@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 # How many times one message may continue with ready job results, counted apart from dynamic tool continuations.
-JOB_JOIN_LIMIT = 20
+_JOB_JOIN_LIMIT = 20
 
 _DELEGATED_CHILD: ContextVar[bool] = ContextVar("delegated_child_reply", default=False)
 
@@ -133,11 +133,11 @@ async def join_conversation_jobs(
         participants=tuple(sorted({context.agent_name, *(agent_names or ())})),
     )
     work = await conversation_work(runtime, key, attempted=attempted)
-    if work.ready and joins < JOB_JOIN_LIMIT:
+    if work.ready and joins < _JOB_JOIN_LIMIT:
         attempted.update(job.job_id for job in work.ready)
         return _JobJoin(prompt=completion_prompt(work.ready))
     # At the join limit the message stops holding, and the next reply in the conversation takes the work.
-    holds = bool(work.jobs) and joins < JOB_JOIN_LIMIT
+    holds = bool(work.jobs) and joins < _JOB_JOIN_LIMIT
     report = _REPORT.get()
     if report is not None:
         notice = waiting_notice(work.jobs) if holds else None
@@ -152,9 +152,9 @@ async def join_approval_jobs[RunT](
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
     agent_names: Sequence[str] | None = None,
 ) -> RunT:
-    """Continue a reconstructed approval run with ready results, at most `JOB_JOIN_LIMIT` times."""
+    """Continue a reconstructed approval run with ready results, at most `_JOB_JOIN_LIMIT` times."""
     attempted: set[str] = set()
-    for joins in range(JOB_JOIN_LIMIT + 1):
+    for joins in range(_JOB_JOIN_LIMIT + 1):
         if not is_complete(response):
             break
         join = await join_conversation_jobs(attempted, joins=joins, agent_names=agent_names)

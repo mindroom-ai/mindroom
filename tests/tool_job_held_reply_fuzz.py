@@ -20,7 +20,7 @@ from mindroom.event_journal import EventKind, JournalEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.completion import (
-    JOB_JOIN_LIMIT,
+    _JOB_JOIN_LIMIT,
     ReplyBoundaryReport,
     join_conversation_jobs,
     reply_boundary_report,
@@ -215,7 +215,7 @@ class HeldReplyFuzzRunner:
         assert not self._held_messages(), self._held_messages()
 
     async def _wake_until_quiet(self) -> None:
-        for _ in range(4 * JOB_JOIN_LIMIT):
+        for _ in range(4 * _JOB_JOIN_LIMIT):
             await self.step(Step("wake"))
             if not self.woken_now and not self.pending_wakes:
                 return
@@ -346,7 +346,7 @@ class HeldReplyFuzzRunner:
             outcome = await self._attempts(turn, request, step, report)
             if report.boundary is not None:
                 self.model.latest_boundary_message = turn.message
-                self.model.unheld_allowed = self.model.unheld_allowed and report.boundary.joins >= JOB_JOIN_LIMIT
+                self.model.unheld_allowed = self.model.unheld_allowed and report.boundary.joins >= _JOB_JOIN_LIMIT
                 self.model.uncertain = False
             await self.runner.held_messages.settle(
                 request,
@@ -391,7 +391,7 @@ class HeldReplyFuzzRunner:
                         break
                     joins += 1
                     await self._retrieve(join.prompt, turn)
-                if joins >= JOB_JOIN_LIMIT:
+                if joins >= _JOB_JOIN_LIMIT:
                     self.model.unheld_allowed = True
         except asyncio.CancelledError:
             if self._crashing:
