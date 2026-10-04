@@ -120,6 +120,17 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     assert (listing.path.parent / "references" / "reference-index.md").exists()
 
 
+def test_bundled_open_knowledge_format_skill_is_discoverable() -> None:
+    """Ensure the bundled open-knowledge-format skill is discoverable."""
+    listing = skills_module.resolve_skill_listing(
+        "open-knowledge-format",
+        roots=[skills_module._get_bundled_skills_dir()],
+    )
+    assert listing is not None
+    assert listing.origin == "bundled"
+    assert listing.description.startswith("Use when")
+
+
 def test_get_bundled_skills_dir_uses_package_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

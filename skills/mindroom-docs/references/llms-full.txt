@@ -17905,6 +17905,61 @@ Scheduled refresh children receive the cached token and expiry only through thei
 The handoff includes the non-secret App, installation, repository, and key-path identity, and a child ignores the token if its current credentials no longer match.
 MindRoom never copies the token into the repository config, credential store, refresh-child launch environment, metadata, or logs.
 
+## Open Knowledge Format Bundles
+
+An [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) bundle is a folder of markdown concept files with YAML frontmatter.
+Each concept declares a `type` and can record who wrote it (`generated`), who confirmed it (`verified`), whether it is current (`status`), and when it goes stale (`stale_after`).
+`index.md` files list each folder's concepts, and `log.md` files record changes.
+Use `mode: files` for OKF bundles so agents follow the indexes and read the frontmatter directly.
+In `semantic` mode, frontmatter is embedded as ordinary text and cannot filter search results.
+
+Give agents the bundled `open-knowledge-format` skill.
+It teaches them to report trust and freshness from frontmatter, to use attested computations verbatim, and to keep provenance, indexes, and logs current when they write.
+
+### Reading a Published Bundle
+
+Mirror the bundle's repository inside the agent workspace and name the bundle root in the description:
+
+```yaml
+knowledge_bases:
+  acme_okf:
+    description: Acme Retail finance knowledge, an Open Knowledge Format (OKF) bundle mirrored from Git. Start at bundles/acme_retail/index.md.
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/acme
+    git:
+      repo_url: https://github.com/GoogleCloudPlatform/open-knowledge-format
+
+agents:
+  analyst:
+    display_name: Analyst
+    role: Answers questions from the team's knowledge bundles
+    memory_backend: file
+    tools: [file]
+    knowledge_bases: [acme_okf]
+    skills: [open-knowledge-format]
+```
+
+MindRoom clones the repository one `poll_interval_seconds` after startup, and agents see the base once the clone exists; trigger a sync from the dashboard to clone it right away.
+Agents can read the whole checkout; `include_patterns` only limits what MindRoom lists and indexes.
+Treat a Git-backed bundle as read-only, because [sync](#sync-behavior) discards edits to tracked files.
+
+### Maintaining a Bundle with Agents
+
+Keep a bundle that agents write in a local folder inside the agent workspace:
+
+```yaml
+knowledge_bases:
+  ops_wiki:
+    description: The team's ops wiki, an Open Knowledge Format (OKF) bundle that the team and its agents maintain.
+    mode: files
+    path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/ops_wiki
+    watch: false
+```
+
+Create the folder with a root `index.md` first, because agents see a files-mode base only once its folder exists.
+Add `ops_wiki` to the agent's `knowledge_bases`, and keep `open-knowledge-format` in its `skills`.
+Agents record themselves in `generated`, and add a `verified` entry only for a person who confirms the content in chat.
+
 ## Embedder Configuration
 
 Semantic knowledge bases use the embedder configured in the `memory` section.
