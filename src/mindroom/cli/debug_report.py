@@ -36,9 +36,17 @@ def _read_report(path: Path) -> dict[str, Any]:
     # UnicodeDecodeError, JSONDecodeError, and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
     except (OSError, ValueError, RecursionError) as exc:
         _fail(f"cannot read {path}: {exc}")
-    if not isinstance(data, dict) or data.get("type") != _BUG_REPORT_TYPE:
+    if not isinstance(data, dict) or data.get("type") != _BUG_REPORT_TYPE or not _has_valid_shape(data):
         _fail(f"{path} is not a MindRoom Chat bug report.")
     return data
+
+
+def _has_valid_shape(report: dict[str, Any]) -> bool:
+    """Return whether `target` is an object and `events` a list of objects, the shape `collect_ids` reads."""
+    target, events = report.get("target"), report.get("events")
+    return (target is None or isinstance(target, dict)) and (
+        events is None or (isinstance(events, list) and all(isinstance(entry, dict) for entry in events))
+    )
 
 
 def _read_config_source(runtime_paths: RuntimePaths) -> tuple[dict[str, Any], str | None]:

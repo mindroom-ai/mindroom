@@ -1009,3 +1009,24 @@ def test_cli_rejects_a_file_that_is_not_a_bug_report(tmp_path: Path) -> None:
     result = runner.invoke(app, ["debug-report", str(other), "-s", str(tmp_path)])
     assert result.exit_code == 1
     assert "not a MindRoom Chat bug report" in result.output
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param({"target": "!room:example.com"}, id="target-string"),
+        pytest.param({"target": ["!room:example.com"]}, id="target-list"),
+        pytest.param({"events": {"event": {"event_id": "$a"}}}, id="events-object"),
+        pytest.param({"events": "$a"}, id="events-string"),
+        pytest.param({"events": ["$a"]}, id="events-of-strings"),
+        pytest.param({"events": [{"event": {"event_id": "$a"}}, None]}, id="events-with-null"),
+    ],
+)
+def test_cli_rejects_a_bug_report_with_malformed_target_or_events(tmp_path: Path, shape: dict[str, object]) -> None:
+    """A report whose target is not an object or whose events are not a list of objects is refused up front."""
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text(json.dumps({"type": "io.mindroom.bug_report", **shape}), encoding="utf-8")
+    result = runner.invoke(app, ["debug-report", str(malformed), "-e", "$user", "-s", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "not a MindRoom Chat bug report" in result.output
+    assert "Traceback" not in result.output
