@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import re
 import shlex
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
-from tests.test_helm_instance_worker_isolation import _render_chart
+from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template, _values_files
 
 _NGINX_IMAGE = "nginx:alpine"
 _IMMUTABLE = "public, max-age=31536000, immutable"
@@ -100,3 +103,83 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
         for path, (status, cache_control, body) in zip(expected, responses, strict=True)
     }
     assert actual == expected
+
+
+_BUG_REPORT_ADMINS = ["@admin:chat.example.com", "@ops:chat.example.com"]
+_MATRIX_RTC = """
+matrixRTC:
+  enabled: true
+  livekitServiceUrl: https://chat.example.com/livekit/jwt
+"""
+
+
+def _matrix_client_well_known(tmp_path: Path, values: str) -> dict[str, Any] | None:
+    docs = _render_chart(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, values),
+    )
+    nginx_conf = next(doc["data"]["default.conf"] for doc in docs if "default.conf" in doc.get("data", {}))
+    _, found, location = nginx_conf.partition("location = /.well-known/matrix/client {")
+    if not found:
+        return None
+    body = re.search(r"return 200 '([^']*)';", location)
+    assert body is not None
+    return json.loads(body[1])
+
+
+@pytest.mark.parametrize("rtc", [False, True], ids=["no-rtc", "rtc"])
+@pytest.mark.parametrize("admins", [False, True], ids=["no-admins", "admins"])
+def test_client_chart_publishes_bug_report_admins_in_matrix_client_discovery(
+    tmp_path: Path,
+    *,
+    rtc: bool,
+    admins: bool,
+) -> None:
+    """MindRoom Chat sends one-click bug reports to the administrators its homeserver's well-known lists."""
+    values = "matrix:\n  homeserverUrl: https://chat.example.com\n"
+    if rtc:
+        values += _MATRIX_RTC
+    if admins:
+        values += f"bugReports:\n  admins: {json.dumps(_BUG_REPORT_ADMINS)}\n"
+
+    well_known = _matrix_client_well_known(tmp_path, values)
+
+    if not (rtc or admins):
+        assert well_known is None
+        return
+    assert well_known is not None
+    assert well_known["m.homeserver"] == {"base_url": "https://chat.example.com"}
+    assert ("org.matrix.msc4143.rtc_foci" in well_known) is rtc
+    assert well_known.get("io.mindroom.bug_reports") == ({"admins": _BUG_REPORT_ADMINS} if admins else None)
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        ('bugReports:\n  admins: "@admin:chat.example.com"\n', "bugReports.admins must be a list"),
+        ('bugReports:\n  admins: ["admin"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        # A quote would end the nginx return body and a $ would expand as an nginx variable.
+        ('bugReports:\n  admins: ["@a\'b:chat.example.com"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        ('bugReports:\n  admins: ["@admin:chat$host"]\n', "bugReports.admins entries must be Matrix user IDs"),
+        (
+            'matrix:\n  homeserverUrl: ""\n  defaultServerName: chat.example.com\nbugReports:\n  admins: ["@admin:chat.example.com"]\n',
+            "matrix.homeserverUrl is required when bugReports.admins is set",
+        ),
+        (
+            'nginx:\n  existingConfigMap: client-nginx\nbugReports:\n  admins: ["@admin:chat.example.com"]\n',
+            "bugReports.admins requires the chart-managed nginx config",
+        ),
+    ],
+    ids=["not-a-list", "no-sigil", "quote", "dollar", "no-homeserver-url", "existing-nginx"],
+)
+def test_client_chart_rejects_bug_report_admins_it_cannot_publish(tmp_path: Path, values: str, error: str) -> None:
+    """Administrators that cannot be published intact fail the render instead of silently disabling reports."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, values),
+    )
+
+    assert completed.returncode != 0
+    assert error in completed.stderr

@@ -26,6 +26,7 @@ Add the administrators to the homeserver's `/.well-known/matrix/client` file:
 }
 ```
 
+With the `mindroom-client` Helm chart, list them in `bugReports.admins` and the chart serves that file; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#bug-reports).
 Nothing changes in `config.yaml`.
 Without this key, the menu item is called **Download bug report** and saves the report as a file instead.
 

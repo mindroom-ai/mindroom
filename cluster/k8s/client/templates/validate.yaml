@@ -62,6 +62,20 @@
 {{- if and .Values.matrixRTC.enabled (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
 {{- fail "matrixRTC.enabled requires the chart-managed nginx config" -}}
 {{- end -}}
+{{- if not (kindIs "slice" .Values.bugReports.admins) -}}
+{{- fail "bugReports.admins must be a list" -}}
+{{- end -}}
+{{- range .Values.bugReports.admins -}}
+{{- if not (regexMatch `^@[a-z0-9._=/+-]+:[A-Za-z0-9.-]+(:[0-9]+)?$` (toString .)) -}}
+{{- fail (printf "bugReports.admins entries must be Matrix user IDs such as @admin:example.com, got %q" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.bugReports.admins (not .Values.matrix.homeserverUrl) -}}
+{{- fail "matrix.homeserverUrl is required when bugReports.admins is set" -}}
+{{- end -}}
+{{- if and .Values.bugReports.admins (or (not .Values.nginx.create) .Values.nginx.existingConfigMap) -}}
+{{- fail "bugReports.admins requires the chart-managed nginx config" -}}
+{{- end -}}
 {{- if and .Values.matrixRTC.proxy.enabled (not .Values.matrixRTC.enabled) -}}
 {{- fail "matrixRTC.proxy.enabled requires matrixRTC.enabled=true" -}}
 {{- end -}}
