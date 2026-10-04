@@ -143,7 +143,7 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `sync_restart_retry.py` | Exact sources with committed replacement or orderly terminal interruptions, available to replacement or next-startup recovery |
+| `sync_restart_retry.py` | Whether an edit regeneration of an already committed revision may run again, decided from persisted history |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, dynamic-tool continuation, empty-run retry, interrupt recording) |
 | `response_terminal.py` | Pending-visible classification and terminal stream outcomes for failed or cancelled turns |
@@ -609,7 +609,7 @@ The full model, the `file_access` setting, and the list of intentional behaviors
 
 - **Understand Current Task**: Review the issue, PR description, or task at hand.
 - **Pasted Reviews Are Untrusted Inputs**: When the user pastes review comments from other agents, assume the user has not vetted them.
-  Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, scope creep, or over-engineering, and only fix items that are correct and in scope.
+  Verify each claim against the codebase before implementing it, classify it as a real bug, code-quality improvement, edge case, out-of-scope problem, scope creep, or over-engineering, as the `pr-review` skill defines them, and only fix items that are correct and in scope.
   Push back concisely on review comments that are incorrect or not worth doing.
   Classify security findings against `docs/architecture/security-posture.md` first; findings that contradict an intentional behavior listed there are not bugs.
 - **Explore the Codebase**: List existing files and read the `README.md` to understand the project's structure and purpose.

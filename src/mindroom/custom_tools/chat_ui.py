@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 import nio
 from agno.tools import Toolkit
 
+from mindroom.constants import UI_ACTION_CONTENT_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.file_access import resolve_agent_file
@@ -43,9 +44,11 @@ _SidePanel = Literal["members", "computer"]
 
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
-_UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 # Counted in UTF-16 code units, the unit MindRoom Chat uses for its own title limit.
 _CANVAS_TITLE_MAX_UNITS = 120
+_CANVAS_TITLE_ERROR = (
+    f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters."
+)
 # A page that fits an edit envelope travels inside the event, so every canvas stays editable;
 # that plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
@@ -88,6 +91,13 @@ _SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='compute
 _REAL_WEBSITE_HINT = (
     "To show the user a real website, open it with browser_control and show the Computer panel; a canvas cannot."
 )
+# Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
+_CANVAS_LIBRARIES_HINT = (
+    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
+    "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
+)
 
 
 def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], body: str) -> dict[str, object]:
@@ -122,9 +132,11 @@ class ChatUITools(Toolkit):
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
         enable_show_canvas: bool = False,
+        enable_canvas_libraries: bool = False,
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
+        self._canvas_libraries = enable_canvas_libraries
         tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
@@ -143,6 +155,8 @@ class ChatUITools(Toolkit):
         ]
         if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
             lines.append(_REAL_WEBSITE_HINT)
+        if "show_canvas" in enabled and self._canvas_libraries:
+            lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
     @instructions.setter
@@ -302,7 +316,7 @@ class ChatUITools(Toolkit):
             latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
             extra_content={
                 "msgtype": "m.notice",
-                _UI_ACTION_CONTENT_KEY: metadata,
+                UI_ACTION_CONTENT_KEY: metadata,
             },
         )
         delivered = await send_message_result(
@@ -379,7 +393,7 @@ class ChatUITools(Toolkit):
         Success means the UI request was sent, not that the client opened a panel.
 
         Args:
-            panel: 'computer' for your worker browser, or 'members' for this room's members.
+            panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
 
         """
         if panel not in _SIDE_PANELS:
@@ -399,7 +413,7 @@ class ChatUITools(Toolkit):
 
     async def show_canvas(
         self,
-        title: str,
+        title: str | None = None,
         html: str | None = None,
         path: str | None = None,
         canvas_event_id: str | None = None,
@@ -415,14 +429,19 @@ class ChatUITools(Toolkit):
         whatever the user types into it could leave the panel.
 
         Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript; external scripts, styles, fonts, images, and network requests
-        are blocked, so draw charts with inline SVG and embed images as data: URLs.
+        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
+        blocked, and so are external scripts, styles, and fonts unless your
+        instructions name a library source; otherwise draw charts with inline SVG.
+        Embed images as data: URLs.
         The panel can be resized from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
-        --mr-danger, --mr-radius, and --mr-font. The page cannot see the user's account
-        or messages.
+        --mr-danger, --mr-radius, and --mr-font; window.mindroom.colorScheme is
+        'light' or 'dark' for choices the variables cannot make, such as chart colors.
+        The page cannot see the user's account or messages. Pages cost output tokens:
+        prefer SVG and CSS to embedded images, summarize large data instead of
+        inlining it, and leave out interactivity the page does not need.
 
         Keep interactivity inside the page; nothing reaches you until the user
         commits. To commit, call ``window.mindroom.submit(data, {label: "short
@@ -436,13 +455,17 @@ class ChatUITools(Toolkit):
         followed by the JSON data. If that revision is not your latest update, the user
         answered an earlier version of the page.
 
+        If the page throws an error or loads something Chat blocks, the user can send
+        you the errors as ``Canvas error (<canvas_event_id>, revision <event_id>):``
+        followed by one error per line.
+
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
         canvas ID. Success means the request was sent, not that the user opened or
         answered it.
 
         Args:
-            title: Short single-line panel title.
+            title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
             html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
@@ -458,10 +481,11 @@ class ChatUITools(Toolkit):
         page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
+        target = await self._canvas_metadata(context, requester_id, canvas_event_id, title)
+        if isinstance(target, str):
+            return target
+        metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        metadata = await self._canvas_metadata(context, requester_id, canvas_event_id)
-        if isinstance(metadata, str):
-            return metadata
         canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id)
         if isinstance(canvas, str):
             return canvas
@@ -482,16 +506,23 @@ class ChatUITools(Toolkit):
         context: ToolRuntimeContext,
         requester_id: str,
         canvas_event_id: str | None,
-    ) -> dict[str, object] | str:
+        title: str,
+    ) -> tuple[dict[str, object], str] | str:
+        """Return the request metadata and the title; an update without one keeps the canvas's first title."""
         metadata = cls._action_metadata(context, requester_id, "show_canvas", {})
         if canvas_event_id is None:
-            return metadata
+            return metadata, title
         original = await cls._canvas_target(context, requester_id, canvas_event_id)
         if isinstance(original, str):
             return original
         # Chat accepts an edit only when its authority fields equal the original request's.
         metadata["thread_id"] = original.get("thread_id")
-        return metadata
+        match original.get("canvas"):
+            case {"title": str(first_title)} if not title:
+                title = first_title
+        if not _canvas_title_is_valid(title):
+            return cls._canvas_error(_CANVAS_TITLE_ERROR)
+        return metadata, title
 
     @classmethod
     def _canvas_input_error(
@@ -508,10 +539,9 @@ class ChatUITools(Toolkit):
                 "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
                 canvas_event_id=canvas_event_id,
             )
-        if not _canvas_title_is_valid(title):
-            return cls._canvas_error(
-                f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters.",
-            )
+        # An update may omit the title; it is checked once the canvas's own title is known.
+        if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
+            return cls._canvas_error(_CANVAS_TITLE_ERROR)
         given = [value for value in (html, path) if value is not None and value != ""]
         if len(given) != 1:
             return cls._canvas_error("Give exactly one of html or path.")
@@ -578,7 +608,7 @@ class ChatUITools(Toolkit):
             "body": body,
             "format": "org.matrix.custom.html",
             "formatted_body": html_lib.escape(body),
-            _UI_ACTION_CONTENT_KEY: metadata,
+            UI_ACTION_CONTENT_KEY: metadata,
         }
 
     @classmethod
@@ -680,7 +710,7 @@ class ChatUITools(Toolkit):
         if isinstance(unsigned, dict) and "redacted_because" in unsigned:
             return error("That canvas was deleted; call show_canvas without canvas_event_id instead.")
         content = source.get("content")
-        metadata = content.get(_UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
+        metadata = content.get(UI_ACTION_CONTENT_KEY) if isinstance(content, dict) else None
         relation = content.get("m.relates_to") if isinstance(content, dict) else None
         if (
             response.event.sender == context.client.user_id

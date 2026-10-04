@@ -125,8 +125,13 @@ Returns JSON {"value": <rendered>} so scalars survive fromJson.
 
 {{- define "mindroom-client.matrixClientWellKnown" -}}
 {{- $wellKnown := dict "m.homeserver" (dict "base_url" .Values.matrix.homeserverUrl) -}}
+{{- if .Values.matrixRTC.enabled -}}
 {{- $focus := dict "type" "livekit" "livekit_service_url" .Values.matrixRTC.livekitServiceUrl -}}
 {{- $_ := set $wellKnown "org.matrix.msc4143.rtc_foci" (list $focus) -}}
+{{- end -}}
+{{- with .Values.bugReports.admins -}}
+{{- $_ := set $wellKnown "io.mindroom.bug_reports" (dict "admins" .) -}}
+{{- end -}}
 {{- $wellKnown | toJson -}}
 {{- end -}}
 
@@ -184,9 +189,15 @@ server {
     return 204;
   }
 {{- end }}
+{{- if or .Values.matrixRTC.enabled .Values.bugReports.admins }}
 {{- if .Values.matrixRTC.enabled }}
 
   # MatrixRTC backend discovery for Matrix voice and video calls.
+{{- end }}
+{{- if .Values.bugReports.admins }}
+
+  # Bug-report administrators for the client's Report a bug menu item.
+{{- end }}
   location = /.well-known/matrix/client {
     default_type application/json;
     add_header Cache-Control "no-store, max-age=0" always;

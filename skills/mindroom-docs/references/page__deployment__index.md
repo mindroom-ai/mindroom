@@ -1,64 +1,38 @@
 # Deployment
 
-MindRoom can be deployed in various ways depending on your needs.
-
-Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-nio-10).
+This page helps you choose how to run MindRoom and lists what every deployment needs.
+Each option links to the page with its setup steps.
 
 ## Deployment Options
 
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/) | Recommended and simplest: run only `uvx mindroom run` locally |
-| [NixOS LXC (Incus)](https://github.com/mindroom-ai/lxc-nixos) | Give a MindRoom agent full freedom over its own persistent NixOS virtual machine while the host controls what it sees |
-| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom locally while execution tools run in isolated workers |
-| [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
-| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime or when you already have Matrix |
+| [NixOS LXC (Incus)](https://docs.mindroom.chat/getting-started/#preferred-alternative-nixos-lxc-container-agent-controlled-machine) | Give a MindRoom agent full freedom over its own persistent NixOS machine while the host controls what it sees |
+| [Full Stack (Docker Compose)](https://docs.mindroom.chat/getting-started/#alternative-full-stack-docker-compose) | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/) | Single MindRoom runtime when you already have Matrix |
+| [Direct install](https://docs.mindroom.chat/getting-started/#manual-install-with-your-own-matrix-homeserver) | Development and simple setups with your own Matrix homeserver |
 | [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/) | Production clusters: a runtime with optional Tuwunel, client, and MatrixRTC charts, or the multi-tenant SaaS platform |
-| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted private agents behind an authenticated access layer |
-| Direct | Development, simple setups |
-
-## Bridges
-
-Connect external messaging platforms to Matrix:
-
-- [Bridges overview](https://docs.mindroom.chat/deployment/bridges/) - available bridges and how they work
-- [Telegram bridge](https://docs.mindroom.chat/deployment/bridges/telegram/) - bridge Telegram chats via mautrix-telegram
-
-## Google Services (Gmail/Calendar/Drive/Docs/Sheets/Tasks)
-
-Use these guides if you want users to connect Google accounts in the MindRoom frontend:
-
-- [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/) - optional custom setup for public and shared deployments
-- [Google Services OAuth (Local Install)](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - connect Google locally without Cloud setup
-
-For private personal-agent tools, use the generic [OAuth Framework](https://docs.mindroom.chat/oauth-framework/) and the Google Drive section in the individual setup guide.
-For hosted multi-user private agents, also configure [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) so agent-issued OAuth links authenticate as the requester that triggered them.
-
-## Quick Start
-
-See [Install & First Run](https://docs.mindroom.chat/getting-started/#hosted-matrix-local-mindroom-recommended) and [Docker (single container)](https://docs.mindroom.chat/deployment/docker/#docker-single-container).
-
-### Kubernetes
-
-See the [Kubernetes deployment guide](https://docs.mindroom.chat/deployment/kubernetes/) for Helm chart configuration.
+| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) | Run MindRoom while execution tools run in isolated workers |
+| [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) | Require static allowlists or human approval before Kubernetes workers reach external hostnames |
+| [Trusted upstream browser auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) | Hosted multi-user private agents behind an authenticated access layer |
 
 ## Required Configuration
 
-Full stack:
+The full stack needs only a model provider key in its `.env`; see [Full Stack Docker Compose](https://docs.mindroom.chat/getting-started/#alternative-full-stack-docker-compose).
 
-```bash
-# .env in the full stack repo
-ANTHROPIC_API_KEY=sk-ant-...
-# The default stack model uses Anthropic; selecting another provider also requires changing the model config.
-```
+Direct and single-container deployments need:
 
-Direct and single-container deployments:
+1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and give MindRoom a way to create agent accounts (see [Matrix account provisioning](https://docs.mindroom.chat/getting-started/#matrix-account-provisioning)).
+2. **Model credentials** - Configure credentials for the selected provider, using an API key or a supported CLI login (see [Model Configuration](https://docs.mindroom.chat/configuration/models/#environment-variables)); containers must mount or provide the matching auth state.
+3. **Persistent storage** - Mount the storage directory (`mindroom_data/` by default) so agent state survives restarts (see [Data Storage](https://docs.mindroom.chat/deployment/storage/#data-persistence)).
 
-1. **Matrix homeserver** - Set `MATRIX_HOMESERVER` and configure hosted provisioning, a registration/shared-secret token, or intentionally open registration for managed agent accounts
-2. **Model credentials** - Configure credentials that match the selected provider, using an API key or a supported CLI login; containers must mount or provide the corresponding auth state
-3. **Persistent storage** - Mount `mindroom_data/` to persist agent state (including `sessions/`, `learning/`, and memory data)
+Hosted `mindroom.chat` installs also need the credentials that pairing saves; see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/#what-pairing-saves).
+Every environment variable is listed in [Configuration — Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables).
 
-See the [Docker guide](https://docs.mindroom.chat/deployment/docker/#environment-variables) for the complete environment variable reference.
+## Related Setup
 
-Hosted `mindroom.chat` deployments additionally use values from `mindroom connect` (`MINDROOM_LOCAL_CLIENT_ID`, `MINDROOM_LOCAL_CLIENT_SECRET`, and `MINDROOM_NAMESPACE`) to bootstrap agent registrations and avoid collisions on shared homeservers.
+- [Bridges](https://docs.mindroom.chat/deployment/bridges/) - connect Telegram and other messaging platforms to Matrix.
+- [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Google tools on a paired local install, with no Google Cloud setup.
+- [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/) - your own Google OAuth client for remote, public, or shared deployments.
+- [Upgrade Notes](https://docs.mindroom.chat/deployment/upgrades/) - required steps when upgrading, including the [Nio 1.0 cutover](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-nio-10).

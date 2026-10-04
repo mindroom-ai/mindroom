@@ -21,6 +21,7 @@ from mindroom.attachments import (
     load_attachment,
     register_local_attachment,
 )
+from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
@@ -396,6 +397,9 @@ async def send_resolved_attachments(
     thread in this same execution. Each attachment after the first chains from
     the send response of the one before it; this is the same fact for the first,
     which the projection cannot supply until the earlier send echoes back.
+
+    Each event asks receivers to ignore its mentions, because its body is a file
+    name rather than an address, so a name like ``@agent.txt`` wakes no entity.
     """
     attachment_event_ids: list[str] = []
     latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
@@ -413,6 +417,7 @@ async def send_resolved_attachments(
                 mimetype=attachment.mime_type,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
+                extra_content={SKIP_MENTIONS_KEY: True},
             )
             attachment_label = attachment.attachment_id
         else:
@@ -422,6 +427,7 @@ async def send_resolved_attachments(
                 attachment,
                 thread_id=thread_id,
                 latest_thread_event_id=latest_thread_event_id,
+                extra_content={SKIP_MENTIONS_KEY: True},
             )
             attachment_label = attachment.attachment_id
         if attachment_event_id is None:

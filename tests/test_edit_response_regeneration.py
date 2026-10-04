@@ -21,7 +21,6 @@ from agno.session.team import TeamSession
 
 from mindroom import interactive
 from mindroom.agent_storage import get_agent_session
-from mindroom.agents import remove_run_by_event_id
 from mindroom.coalescing_batch import tagged_coalesced_prompt
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
@@ -43,6 +42,7 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
+from mindroom.history.storage import remove_run_by_event_id
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo

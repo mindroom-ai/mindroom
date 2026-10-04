@@ -1,5 +1,5 @@
 ---
-icon: lucide/plug-2
+icon: lucide/puzzle
 ---
 
 # Plugins
@@ -9,66 +9,67 @@ icon: lucide/plug-2
 > A malicious plugin has full access to your credentials, Matrix sessions, file system, and network.
 > Only install plugins you trust and have reviewed.
 
-MindRoom plugins extend agents with custom tools, [hooks](hooks.md), and skills.
-A plugin is a directory with a `mindroom.plugin.json` manifest and optional Python modules or skill directories.
-Plugins are loaded from paths listed under `plugins:` in `config.yaml`.
+Plugins extend MindRoom with custom tools, [hooks](hooks.md), OAuth providers, and skills without changing MindRoom itself.
+Use one to add an integration MindRoom does not ship, react to or transform events, or connect an additional Google or Atlassian account.
+A plugin is a directory with a `mindroom.plugin.json` manifest, loaded from the paths listed under `plugins:` in `config.yaml`.
 
-## Plugin structure
+## Installing plugins
 
-A plugin is a directory containing `mindroom.plugin.json`:
+Vendor a plugin from GitHub into `<config dir>/plugins/<repo name>`:
 
-```
-my-plugin/
-├── mindroom.plugin.json   # Required manifest
-├── tools.py               # Tool factories (optional)
-├── oauth.py               # OAuth providers (optional)
-├── hooks.py               # Event hooks (optional)
-└── skills/                # Skill directories (optional)
-    └── my-skill/
-        └── SKILL.md
+```bash
+mindroom plugins install ping-hook-plugin
+mindroom plugins install mindroom-ai/ping-hook-plugin@v1.2.0
 ```
 
-Capability fields are optional, but the `name` field is required.
-A name-only manifest loads but contributes no tools, hooks, OAuth providers, or skills.
-A tools-only plugin exposes callable functions to agents.
-A plugin with `oauth_module` registers OAuth providers whose state, callbacks, and scoped credential storage are handled by MindRoom core.
-A hooks-only plugin observes or transforms events without adding agent-facing tools.
-Many plugins combine both.
+The spec is `NAME`, `OWNER/REPO`, or `OWNER/REPO@REF`.
+Bare names install from the `mindroom-ai` organization, and `@REF` pins a branch, tag, or commit; without it the repository's default branch is used.
+A plugin is installed only after it passes the [compatibility check](#compatibility-checks).
+The installed directory records the repository, requested reference, and exact commit in `.mindroom-plugin.lock.json`.
+Installing into an existing directory fails with `Plugin directory already exists: ... Use 'mindroom plugins update' instead.`
+Plugin Python dependencies are not installed; the command prints a note when the plugin has a `pyproject.toml`.
 
-## Manifest format
+Then add the plugin to `config.yaml`:
 
-The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
-
-```json
-{
-  "name": "my-plugin",
-  "tools_module": "tools.py",
-  "oauth_module": "oauth.py",
-  "hooks_module": "hooks.py",
-  "skills": ["skills"]
-}
+```yaml
+plugins:
+  - path: plugins/ping-hook-plugin
 ```
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | string | **yes** | Plugin identifier. Must be lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). Must be unique across resolved plugin manifests. |
-| `tools_module` | string | no | Relative path to the Python module containing `@register_tool_with_metadata` factories. Must exist on disk if declared. |
-| `oauth_module` | string | no | Relative path to the Python module containing `register_oauth_providers(settings, runtime_paths)`. Must exist on disk if declared. |
-| `hooks_module` | string | no | Relative path to the Python module containing `@hook`-decorated functions. Must exist on disk if declared. |
-| `skills` | list of strings | no | Relative directories containing skill subdirectories (each with a `SKILL.md`). Each directory must exist on disk. |
+Update vendored plugins:
 
-Unknown fields are silently ignored.
-Strict checks (`mindroom config validate` and `mindroom plugins check`) reject invalid or malformed manifests.
-Normal `mindroom run` startup logs and skips broken entries and disables affected unresolved tools, as described under [Live development](#live-development-hot-reload).
-Duplicate names among successfully resolved manifests abort loading the configured plugin set, including during tolerant startup.
-All declared module files and skill directories must exist on disk.
+```bash
+mindroom plugins update ping-hook-plugin
+mindroom plugins update --all
+mindroom plugins update ping-hook-plugin --ref v1.3.0
+```
 
-If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
-If both fields point at the same file, MindRoom imports it once and reuses it for both tool registration and hook discovery.
+An update fetches the latest commit of the pinned reference, or repins with `--ref`, and skips plugins already at that commit.
+Installing a new commit replaces the whole plugin directory and discards local edits to it, so copy any changes you want to keep first.
+A failed update leaves the installed version untouched.
+Both commands accept `--path` to select the config file whose directory is used and `--plugins-dir` to override the vendor directory.
+Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
+
+### Community plugins
+
+The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these open-source plugins.
+
+| Plugin | Provides | Description |
+| --- | --- | --- |
+| [ping-hook-plugin](https://github.com/mindroom-ai/ping-hook-plugin) | Hooks | Minimal example that answers `!ping-hook` with a pong; a good starting point for learning hooks. |
+| [shell-guard-plugin](https://github.com/mindroom-ai/shell-guard-plugin) | Hooks | Blocks dangerous shell commands, such as `systemctl restart mindroom-chat`, through `tool:before_call` gating. |
+| [voice-enrich-plugin](https://github.com/mindroom-ai/voice-enrich-plugin) | Hooks | Warns the model about possible transcription errors in voice-transcribed messages. |
+| [location-enrich-plugin](https://github.com/mindroom-ai/location-enrich-plugin) | Hooks | Adds real-time GPS location from [Dawarich](https://dawarich.app/) to prompts, with place matching and movement classification. |
+| [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Hooks | Re-activates threads tagged `pending-restart` after a bot restart. |
+| [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Hooks and tools | Temporarily resolves a thread and wakes it at a specified time. |
+| [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
+| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
+| [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 
 ## Configure plugins
 
-Add plugin paths under `plugins:` in `config.yaml`:
+List plugins under `plugins:` in `config.yaml`.
+An entry is either a path string or an object with options, and both forms can be mixed:
 
 ```yaml
 plugins:
@@ -88,55 +89,32 @@ plugins:
 
 ### Entry formats
 
-Plugin entries can be **strings** (path only) or **objects** (with options).
-Both forms can be mixed in the same list.
-
-**String entry** — just the path:
-
-```yaml
-plugins:
-  - ./plugins/my-plugin
-```
-
-**Object entry** — path plus options:
-
-```yaml
-plugins:
-  - path: ./plugins/my-plugin
-    enabled: true
-    settings:
-      api_key: secret
-    hooks:
-      my_hook:
-        enabled: false
-```
-
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `path` | string | *required* | Plugin path (see resolution rules below) |
-| `enabled` | bool | `true` | Set to `false` to disable the plugin without removing it from the list |
-| `settings` | dict | `{}` | Free-form key-value config passed to the plugin at load time |
+| `path` | string | *required* | Plugin directory or Python package spec (see [Path resolution](#path-resolution)) |
+| `enabled` | bool | `true` | Set to `false` to disable the plugin without removing the entry |
+| `settings` | dict | `{}` | Free-form values passed to the plugin's hooks and OAuth module; masked as secret in the dashboard |
 | `hooks` | dict | `{}` | Per-hook overrides keyed by hook function name |
 
 Each hook override supports:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | Disable a specific hook without removing it from the plugin |
-| `priority` | int | `null` | Override the hook's default execution priority |
-| `timeout_ms` | int | `null` | Override the hook's default timeout |
+| `enabled` | bool | `true` | Set to `false` to disable that hook |
+| `priority` | int | `null` | Override the hook's execution priority |
+| `timeout_ms` | int | `null` | Override the hook's timeout in milliseconds |
+
+Adding, removing, or changing a `plugins:` entry takes effect through config hot reload.
 
 ### Path resolution
 
-Paths are resolved in this order:
-
-1. **Absolute paths** — used as-is
-2. **Relative paths** — resolved relative to the directory containing `config.yaml`
-3. **Python package specs** — see below
+- Absolute paths and paths starting with `~` are used as-is.
+- Relative paths resolve against the directory containing `config.yaml`.
+- A bare name without `/` that does not start with `.` uses a matching config-relative directory if one exists, otherwise an importable Python package.
 
 ## Python package plugins
 
-MindRoom can resolve plugins from installed Python packages:
+Plugins can ship inside installed Python packages:
 
 ```yaml
 plugins:
@@ -146,40 +124,119 @@ plugins:
   - module:my_skill_pack:plugins/demo
 ```
 
-Rules:
+The `python:`, `pkg:`, and `module:` prefixes always resolve a package, and `:sub/path` after the package name points to a subdirectory inside it.
+The resolved directory must contain `mindroom.plugin.json`.
 
-- A bare package name (no slashes, no `.` or `..` prefix) uses an existing config-relative path first, then falls back to an importable Python package.
-- `python:`, `pkg:`, and `module:` are explicit prefixes that force package resolution.
-- `:sub/path` after the package name points to a subdirectory inside the package.
+## Live development (hot reload)
 
-MindRoom resolves the package location via `importlib` and looks for `mindroom.plugin.json` in that directory.
+Plugins hot-reload automatically.
+Saving any file inside a configured plugin directory makes the new hooks and tools live for the next event, usually 1-2 seconds after the save.
+No service restart or agent session reset is needed.
+Edits to `__pycache__/`, `*.pyc`, `*.pyo`, editor swap and backup files (`*.swp`, `*.swo`, `*~`, `.#*`, `*.tmp`), `.git/`, and tool caches (`.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`) are ignored.
+
+> [!IMPORTANT]
+> Every plugin reload, automatic or manual, interrupts all unfinished [background scripts](tools/background-scripts.md), including scripts that do not use the changed plugin.
+
+Watch reloads in the logs:
+
+```bash
+journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload complete'
+```
+
+Keep in mind:
+
+- Only plugins already listed under `plugins:` are watched; a new plugin directory on disk is not loaded until you add it to `config.yaml`.
+- Callbacks already running finish on the old code; the new code applies to new events.
+- An editor that saves a file in two writes can briefly trigger an import error, followed by a successful reload on the second write.
+- Reload cancels `asyncio` tasks the plugin keeps in module-level variables; close connections and other resources yourself.
+
+### Broken plugins
+
+`mindroom run` startup does not crash on a broken plugin.
+It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
+If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
+Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
+`mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
+
+When a save breaks a plugin during hot reload, MindRoom logs `Plugin reload failed; active plugin set degraded` and keeps the other plugins active, or logs `Plugin reload failed; all plugins deactivated` when no valid set remains.
+The next valid save reloads normally.
+For hooks that raise while handling an event, see [Errors and timeouts](hooks.md#errors-and-timeouts).
+
+MindRoom logs `Loading non-bundled plugin` once for each plugin outside the MindRoom source tree; this is informational.
+
+### `!reload-plugins`
+
+Force-reload every configured plugin from disk, for example when the watcher missed a change:
+
+```
+!reload-plugins
+```
+
+The reply lists the active plugins and the number of cancelled background tasks:
+
+```
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+```
+
+Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
+A failed reload replies `❌ Plugin reload failed: <error>`.
+`!reload_plugins` is an alias.
+
+## Compatibility checks
+
+Validate a plugin against the installed MindRoom version before deployment:
+
+```bash
+mindroom plugins check ./my-plugin
+```
+
+The check strictly validates the manifest, imports declared modules, validates tool, hook, and OAuth registrations, and verifies that declared skill directories exist.
+It prints the discovered tools, hooks, and skill directories, and exits nonzero on failure.
+It does not parse `SKILL.md` contents or evaluate skill eligibility, and it does not touch your running configuration.
+
+## Plugin structure
+
+```
+my-plugin/
+├── mindroom.plugin.json   # Required manifest
+├── tools.py               # Tool factories (optional)
+├── oauth.py               # OAuth providers (optional)
+├── hooks.py               # Event hooks (optional)
+└── skills/                # Skill directories (optional)
+    └── my-skill/
+        └── SKILL.md
+```
+
+Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, OAuth providers, and skills.
+
+## Manifest format
+
+```json
+{
+  "name": "my-plugin",
+  "tools_module": "tools.py",
+  "oauth_module": "oauth.py",
+  "hooks_module": "hooks.py",
+  "skills": ["skills"]
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | **yes** | Plugin identifier using only lowercase ASCII letters, digits, `-`, and `_`; must be unique among configured plugins |
+| `tools_module` | string | no | Relative path to the module with `@register_tool_with_metadata` factories |
+| `oauth_module` | string | no | Relative path to the module defining `register_oauth_providers(settings, runtime_paths)` |
+| `hooks_module` | string | no | Relative path to the module with `@hook` functions; when omitted, `tools_module` is scanned for hooks |
+| `skills` | list of strings | no | Relative directories containing skill subdirectories |
+
+Every declared module file and skill directory must exist.
+Unknown fields are ignored.
+Pointing `tools_module` and `hooks_module` at the same file is allowed.
 
 ## Tools module
 
-A tools module is a Python file that registers one or more tool factories using the `@register_tool_with_metadata` decorator.
-Each factory function returns a **Toolkit class** (not an instance).
-MindRoom instantiates the class when building agents.
-
-Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
-The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
-Agent runs without a room also hide these tools using the same metadata.
-These toolkits stay in the primary runtime because workers do not provide live room context.
-This requirement describes runtime compatibility; it does not grant or replace tool authorization.
-
-Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
-This also applies to toolkits that retain session state or an in-memory resource between calls: the generic worker runner creates a fresh toolkit for each request.
-This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`.
-Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants.
-For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`.
-Only those declared functions receive `None` in place of the injected agent when routed to a worker.
-Do not use this declaration for functions that depend on agent identity, configuration, or session state.
-This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
-
-### Tool runtime context
-
-When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
-This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
-`thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
+A tools module registers tool factories with `@register_tool_with_metadata`.
+Each factory returns a **Toolkit class**, not an instance, and MindRoom constructs it when building agents.
 
 ### Minimal example
 
@@ -223,7 +280,7 @@ def greeter_tools() -> type[Toolkit]:
     return GreeterTools
 ```
 
-After registering the plugin, assign the tool to agents in `config.yaml`:
+Assign the tool to agents like any built-in tool:
 
 ```yaml
 plugins:
@@ -243,17 +300,16 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | Tool identifier — used to reference the tool in `config.yaml` agent `tools:` lists |
-| `display_name` | string | Human-readable name shown in the dashboard |
-| `description` | string | Brief description of what the tool does |
-| `category` | `ToolCategory` | Category for dashboard grouping (see values below) |
-| `file_access` | `ToolFileAccess` | How the tool reaches local files, which decides how the agent `file_access` setting and worker routing apply to it (see values below) |
-
-`ToolCategory` values: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SMART_HOME`, `SOCIAL`.
+| `name` | string | Tool identifier used in agent `tools:` lists |
+| `display_name` | string | Name shown in the dashboard |
+| `description` | string | Brief description of the tool |
+| `category` | `ToolCategory` | Dashboard grouping: `COMMUNICATION`, `DEVELOPMENT`, `EMAIL`, `ENTERTAINMENT`, `INFORMATION`, `INTEGRATIONS`, `PRODUCTIVITY`, `RESEARCH`, `SMART_HOME`, or `SOCIAL` |
+| `file_access` | `ToolFileAccess` | How the tool reaches local files (see below) |
 
 `ToolFileAccess` values:
+
 - `NONE`: the tool takes no local file paths.
-- `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file` and follows the agent's `file_access` setting; add it to `tests/test_file_access_contract.py` when contributing it to MindRoom.
+- `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file`, so it follows the agent's `file_access` setting.
 - `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
 
 See [Security Posture](architecture/security-posture.md#file-access) for how each class is treated.
@@ -262,60 +318,57 @@ See [Security Posture](architecture/security-posture.md#file-access) for how eac
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `status` | `ToolStatus` | `AVAILABLE` | `AVAILABLE` or `REQUIRES_CONFIG` — controls whether the tool appears as ready or needs setup in the dashboard |
-| `setup_type` | `SetupType` | `NONE` | `NONE`, `API_KEY`, `OAUTH`, or `SPECIAL` — tells the dashboard what kind of setup flow to show |
-| `config_fields` | list of `ConfigField` | `None` | Describes constructor parameters configurable through the dashboard (see [ConfigField](#configfield)) |
+| `status` | `ToolStatus` | `AVAILABLE` | `AVAILABLE` or `REQUIRES_CONFIG`; whether the dashboard shows the tool as ready or needing setup |
+| `setup_type` | `SetupType` | `NONE` | `NONE`, `API_KEY`, `OAUTH`, or `SPECIAL`; which setup flow the dashboard shows |
+| `config_fields` | list of `ConfigField` | `None` | Constructor parameters configurable through the dashboard (see [ConfigField](#configfield)) |
+| `agent_override_fields` | list of `ConfigField` | `None` | Constructor parameters an agent can set in its own `tools:` entry but `defaults.tools` cannot |
 | `dependencies` | list of strings | `None` | Python packages the tool requires (see [Dependencies](#dependencies)) |
 | `docs_url` | string | `None` | Link to external documentation |
-| `icon` | string | `None` | Icon name for the dashboard (e.g., `"FaGoogle"`, `"Home"`) |
-| `icon_color` | string | `None` | Tailwind color class for the icon (e.g., `"text-blue-500"`) |
-| `helper_text` | string | `None` | Markdown help text shown in the dashboard setup panel |
-| `auth_provider` | string | `None` | OAuth provider identifier when using OAuth-based setup |
-| `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
-| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
-| `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
-| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose unused injected `agent` parameter can safely receive `None` during worker execution |
+| `icon` | string | `None` | Dashboard icon name, such as `"FaGoogle"` or `"Home"` |
+| `icon_color` | string | `None` | Tailwind color class for the icon, such as `"text-blue-500"` |
+| `helper_text` | string | `None` | Markdown help shown in the dashboard setup panel |
+| `auth_provider` | string | `None` | OAuth provider ID for OAuth-backed tools (see [OAuth providers](#oauth-providers)) |
+| `oauth_fallback_fields` | tuple of strings | `()` | `config_fields` names that let the dashboard offer manual credentials as an alternative to OAuth and count the tool as configured once they are all set; requires `setup_type=OAUTH`; list token-named fields such as `access_token` in the provider's `tool_config_oauth_fallback_fields` too |
+| `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | MindRoom-managed values passed to the constructor (see [Managed init args](#managed-init-args)) |
+| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; worker routing configuration can override it |
+| `requires_primary_runtime` | bool | `False` | Never route the tool to a worker, even when `worker_tools` lists it |
+| `consumes_workspace_paths` | bool | `False` | The tool opens workspace files by path; when it runs in a worker, attachments are saved to the worker workspace so the tool can open them |
+| `requires_room_context` | bool | `False` | The tool needs a live Matrix room, so it is hidden where none exists, such as the MCP gateway, the OpenAI-compatible API, and room-less runs, and it always runs in the primary runtime |
+| `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
+| `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](tools/index.md#filtering-toolkit-functions) inline overrides |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+
+Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or reads or changes an injected `Agent`, `Team`, or `RunContext`.
+A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
+If an SDK function accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
+`requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
 
 ### Dependencies
 
-The `dependencies` field lists Python packages that the tool requires at runtime.
-MindRoom checks whether each package is importable before the tool is instantiated.
-
-**For built-in tools** (those shipped inside `src/mindroom/tools/`), missing dependencies trigger automatic installation via `uv sync` or `pip install` using the matching optional extra from MindRoom's `pyproject.toml`.
-
-**For plugin tools**, automatic installation does **not** apply — there is no matching optional extra in MindRoom's package metadata.
-If the listed dependencies are not already installed in the environment, MindRoom raises an `ImportError` with a message listing the missing packages.
-Plugin authors should document their dependencies in their README so users can install them manually:
-
-```bash
-pip install openviking-client aiohttp
-```
-
-Even though plugin dependencies are not auto-installed, listing them in the decorator is still useful: MindRoom surfaces a clear error at tool load time rather than failing with an obscure traceback when an agent tries to call the tool mid-conversation.
-
-You can disable automatic dependency installation entirely (for built-in tools too) by setting the environment variable `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`.
+Plugin tool dependencies are never installed automatically.
+When a listed package is missing, the tool fails to load with `Missing dependencies for tool '<name>': <packages>` instead of failing mid-conversation.
+Document the dependencies in the plugin README so users can install them, for example `pip install openviking-client aiohttp`.
+Built-in tools install their own dependencies as described in [Automatic Dependency Installation](tools/index.md#automatic-dependency-installation).
 
 ### ConfigField
 
-Each `ConfigField` describes one constructor parameter that can be configured through the dashboard or credentials store.
+Each `ConfigField` describes one constructor parameter that users can set through the dashboard or credentials store.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `name` | string | *required* | Constructor kwarg name (e.g., `"api_key"`) |
-| `label` | string | *required* | Display label shown in the dashboard |
-| `type` | string | `"text"` | Input type: `text`, `password`, `url`, `number`, `boolean`, or `select` |
+| `name` | string | *required* | Constructor keyword argument, such as `"api_key"` |
+| `label` | string | *required* | Label shown in the dashboard |
+| `type` | string | `"text"` | `text`, `password`, `url`, `number`, `boolean`, `select`, or `string[]` |
 | `required` | bool | `True` | Whether the field must be set before the tool can be used |
-| `default` | any | `None` | Initial value in the dashboard configuration form |
-| `placeholder` | string | `None` | Placeholder text shown in the input |
+| `default` | any | `None` | Initial value in the dashboard form |
+| `placeholder` | string | `None` | Placeholder text in the input |
 | `description` | string | `None` | Help text for the field |
-| `options` | list | `None` | For `select` type: list of `{"label": "...", "value": "..."}` dicts |
-| `validation` | dict | `None` | Optional validation rules (min, max, pattern, etc.) |
+| `options` | list | `None` | For `select`: a list of `{"label": "...", "value": "..."}` dicts |
+| `validation` | dict | `None` | Validation rules such as min, max, or pattern |
+| `authored_override` | bool | `True` | Set to `False` to forbid setting the field inline in `config.yaml`; `password` fields are never allowed inline (see [Per-Agent Tool Configuration](tools/index.md#per-agent-tool-configuration)) |
 
-Metadata defaults are not automatically passed to generic plugin constructors.
-When a value is absent from stored or explicit configuration, the constructor's Python default applies.
-Give optional constructor parameters matching Python defaults, such as `units: str = "metric"` for the example below.
-
-Example — a tool that requires an API key:
+A `ConfigField` `default` only pre-fills the dashboard form and is not passed to the constructor.
+When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.
 
 ```python
 from mindroom.tool_system.declarations import (
@@ -356,20 +409,21 @@ def weather_tools() -> type[Toolkit]:
 
 ### Managed init args
 
-If your toolkit constructor needs MindRoom-managed runtime values, declare them with `managed_init_args`.
-MindRoom does **not** auto-detect constructor parameter names — undeclared managed args are not passed through.
+Declare MindRoom-managed constructor values with `managed_init_args`.
+Only declared values are passed; MindRoom does not detect them from parameter names.
 
 | Value | Constructor kwarg | Description |
 | --- | --- | --- |
 | `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
+| `RUNTIME_CONFIG` | `runtime_config` | The active MindRoom config, when available |
+| `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
+| `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
 | `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
-| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's resolved state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
-
-Example:
+| `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 ```python
 from agno.tools import Toolkit
@@ -394,10 +448,15 @@ def needs_runtime_tools() -> type[Toolkit]:
     return NeedsRuntimeTools
 ```
 
+### Tool runtime context
+
+Inside a Matrix-connected agent run, `mindroom.tool_system.runtime_context.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
+It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
+`thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+
 ### Dispatch-time worker targets
 
-`WORKER_TARGET` covers toolkits that receive their worker target at construction.
-Tools that compose other registered tools while handling a call (for example building a sub-toolkit with `get_tool_by_name`) resolve the same target from the live runtime context instead:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
 
 ```python
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -406,15 +465,11 @@ context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
 ```
 
-This returns the exact worker target that agent toolkit construction uses, so worker-scoped state such as OAuth MCP sessions and scoped credentials resolves identically.
-`resolve_worker_target()` raises `ValueError` for team and router dispatches, because those contexts have no single agent execution scope to mirror; catch it if your tool can run inside a team.
+`resolve_worker_target()` raises `ValueError` in team and router dispatches, which have no single agent scope; catch it if the tool can run inside a team.
 
 ## OAuth providers
 
-An OAuth module registers provider definitions without registering FastAPI routes.
-MindRoom core owns state generation, callback consumption, authenticated requester binding, scoped OAuth token writes, status checks, and disconnect handling.
-The provider module supplies only provider-specific details such as endpoint URLs, scopes, token credential service names, optional tool config service names, optional PKCE requirements, token parsing, optional claim validators, and display metadata.
-
+An OAuth module defines providers, and MindRoom core handles the connect, callback, credential storage, status, and disconnect flows described in the [OAuth framework](oauth-framework.md#oauth-framework).
 Declare the module in the manifest:
 
 ```json
@@ -425,7 +480,7 @@ Declare the module in the manifest:
 }
 ```
 
-Then expose `register_oauth_providers(settings, runtime_paths)`:
+Then define `register_oauth_providers(settings, runtime_paths)`, which receives the plugin entry's `settings`:
 
 ```python
 from __future__ import annotations
@@ -453,20 +508,14 @@ def register_oauth_providers(settings, runtime_paths):
     ]
 ```
 
-OAuth provider IDs are exposed through `/api/oauth/{provider}/connect`, `/api/oauth/{provider}/authorize`, `/api/oauth/{provider}/callback`, `/api/oauth/{provider}/status`, `/api/oauth/{provider}/disconnect`, and the authenticated `GET`/`POST` `/api/oauth/{provider}/reset` confirmation flow.
-Dashboard flows normally call `connect` and use the returned provider authorization URL.
-Conversation flows should show the browser-openable `authorize` URL, because that URL first authenticates the MindRoom user and then redirects to the external provider.
-Conversation-issued links include an opaque connect token so the callback can verify the requester before storing scoped credentials.
-The connect token is also bound to the runtime requester, and redemption fails unless the authenticated dashboard user resolves to that requester.
-The callback stores tokens under `credential_service` using the resolved requester and agent execution scope, including private `user` and `user_agent` scopes.
-Every OAuth token `credential_service` must end with `_oauth` so core can enforce primary-runtime isolation and reject worker grants without loading plugin code.
-If the tool also has editable dashboard settings, declare `tool_config_service` and store those settings separately through the normal credentials API.
-Set `pkce_code_challenge_method="S256"` when the upstream OAuth provider requires PKCE.
-MindRoom stores the verifier in pending state and passes it as the fifth argument to custom `token_exchanger` callbacks.
-For example, an Acme Drive provider can store OAuth tokens in `acme_drive_oauth` while the `acme_drive` tool settings document contains only options such as file-size limits or capability toggles.
-Tokens and client secrets must never be written to `config.yaml`, prompt files, logs, or tool responses.
+The [OAuth framework](oauth-framework.md#oauth-framework) owns the service naming rules and the PKCE option.
 
-Providers that publish protected-resource metadata can resolve endpoints and optionally register a client lazily with the generic discovery bootstrapper:
+- `tool_config_service` is optional and holds the tool's editable dashboard settings, such as size limits or capability toggles, separately from the tokens.
+- `allowed_email_domains` and `allowed_hosted_domains` restrict which accounts may connect; read them from plugin `settings` so each deployment sets its own.
+
+Never write tokens or client secrets to `config.yaml`, prompt files, logs, or tool responses.
+
+Providers that publish protected-resource metadata can discover their endpoints and optionally register a client automatically:
 
 ```python
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
@@ -491,25 +540,16 @@ provider = OAuthProvider(
 )
 ```
 
-Automatic discovery checks protected-resource metadata at the resource origin and path, then uses the advertised authorization server or falls back to authorization-server metadata at the resource origin.
-Dynamic client registration requires a provider-specific `client_config_services` entry and runs only in the primary runtime.
-
-OAuth-backed tools should set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"` in `@register_tool_with_metadata`.
-When credentials are missing, return a concise instruction containing a browser-openable URL built with `mindroom.oauth.build_oauth_connect_instruction(provider, runtime_paths, worker_target=...)`.
-The user can complete OAuth and retry the same tool request.
-
-Deployment restrictions belong in plugin settings.
-Use `allowed_email_domains` to restrict verified email claims by domain.
-Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
-If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
+OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
+When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.
+Build the link with `oauth_connect_url(provider, runtime_paths, worker_target=...)` and the message with `build_oauth_connect_instruction(provider, connect_url)`, both from `mindroom.oauth.service`.
 
 ### Additional Google workspaces
 
-Use `GoogleWorkspaceConfig` to expose another Google account alongside the built-in tools.
-Each workspace gets separate OAuth providers, stored connections, and function names while reusing the existing Google tool implementations and Connections page.
-Existing tools and saved logins remain unchanged; no credential migration is needed.
+Use `GoogleWorkspaceConfig` to add another Google account alongside the built-in Google tools.
+Each workspace gets its own OAuth providers, stored connections, Connections page cards, and prefixed tool and function names, while reusing the built-in Google tool implementations.
 
-For example, a plugin can use one module for both registrations:
+One module can register both the tools and the OAuth providers:
 
 ```json
 {
@@ -549,34 +589,33 @@ def register_oauth_providers(settings, runtime_paths):
     )
 ```
 
-Enable the plugin and add `secondary_gmail` beside `gmail` in the agent's tools.
-The additional Connections card is labeled **Secondary Gmail**.
-When it needs a login, the tool returns its own chat authorization link.
-Google must verify a hosted domain from `allowed_hosted_domains`; choosing a personal account or another organization's account fails without saving credentials.
+| Field | Description |
+| --- | --- |
+| `name` | Prefix for tool, provider, and function names: a lowercase letter followed by up to 15 lowercase letters, digits, or `_`; keep it stable because it identifies stored connections |
+| `display_name` | Label prefix in the dashboard, such as **Secondary Gmail** |
+| `client_config_service` | Credential service holding the workspace's OAuth client; must end with `_oauth_client` |
+| `allowed_hosted_domains` | At least one Google hosted domain; signing in with a personal account or another organization's account fails without saving credentials |
+| `services` | Any of `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`, without duplicates; defaults to all six |
 
-Provision the workspace's OAuth client through a [shared credential seed](oauth-framework.md#credential-seeds) with `client_id` and `client_secret` under `secondary_google_oauth_client`.
-Enable the Gmail API and register the exact callback `https://your-host/api/oauth/secondary_google_gmail/callback` on that client before exposing the tool.
-Workspace tools require their own OAuth connection and never fall back to the default Google client or a global service account.
-Like the built-in Google tools, they always execute in the primary runtime, where their OAuth credentials are managed.
+To set up a workspace:
 
-Function names are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`.
-Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
+1. Provision its OAuth client through a [shared credential seed](oauth-framework.md#credential-seeds) with `client_id` and `client_secret` under the `client_config_service`.
+2. For each service, enable the matching Google API and register its callback on that client, such as `https://your-host/api/oauth/secondary_google_gmail/callback`.
+3. Enable the plugin and add the prefixed tools, such as `secondary_gmail` beside `gmail`, to the agent's tools.
 
-Add more workspace definitions with distinct names and client services as needed.
-Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, `google_sheets`, and `google_tasks`.
-Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
-Keep workspace names stable because they identify stored connections.
+When a workspace tool needs a login, it returns its own chat authorization link.
+Workspace tools never fall back to the default Google client or a global service account, and like the built-in Google tools they always run in the primary runtime.
+Functions are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`, so approval rules, script-tool allowlists, and function filters must use those names; a rule for `send_email` does not match `secondary_send_email`.
 
 ### Additional Atlassian connections
 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
-Each connection gets its own OAuth provider, stored connection, site pin, requested scopes, and prefixed function names such as `partner_confluence_search`.
 See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin example, fields, and callback setup.
 
 ## MCP via plugins (advanced)
 
-MindRoom supports native MCP servers in `config.yaml` — see [MCP](mcp.md) for the normal setup path.
-This plugin pattern is still useful when you want a custom wrapper around Agno `MCPTools`:
+Configure MCP servers directly in `config.yaml` as described in [MCP](mcp.md).
+Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
 
 ```python
 from agno.tools.mcp import MCPTools
@@ -611,199 +650,15 @@ def mcp_filesystem_tools():
     return FilesystemMCPTools
 ```
 
-Reference the plugin and tool in `config.yaml`:
-
-```yaml
-plugins:
-  - ./plugins/mcp-filesystem
-
-agents:
-  assistant:
-    tools:
-      - mcp_filesystem
-```
-
-The factory function must return the toolkit class, not an instance.
-MCP toolkits are async; Agno's async agent runs (`arun`, `aprint_response`) handle MCP connect and disconnect automatically.
+Add the plugin and assign `mcp_filesystem` to agents as in the [minimal example](#minimal-example).
+MindRoom connects and disconnects the MCP session around each agent run.
 
 ## Plugin skills
 
-List skill directories in the manifest `skills` array.
-Each listed directory is added to MindRoom's skill search roots.
-Skill subdirectories must contain a `SKILL.md` file.
-YAML frontmatter is optional: discovery falls back to the directory name, and a missing description falls back to the resolved skill name.
-Requirements are declared only when needed.
+Each directory listed in the manifest `skills` array becomes a skill search root, and each skill subdirectory needs a `SKILL.md`.
+See [Skills](skills.md) for the `SKILL.md` format, precedence, and the per-agent `skills:` allowlist that plugin skills also require.
 
 ## Hooks
 
-Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool call gating, reactions, schedules, and custom events.
-See the [Hooks](hooks.md) page for full documentation including:
-
-- The `@hook` decorator and all parameters
-- The built-in events and their execution modes
-- The enrichment pipeline (`message:enrich`)
-- Custom events
-- Error handling without cooldowns or circuit breakers
-- Testing patterns
-
-## Installing plugins
-
-Vendor a plugin directly from GitHub into your local plugins directory:
-
-```bash
-mindroom plugins install ping-hook-plugin
-mindroom plugins install mindroom-ai/ping-hook-plugin@v1.2.0
-```
-
-Bare names install from the `mindroom-ai` organization, and `@ref` pins a branch, tag, or exact commit (the default follows the repository default branch).
-The command resolves the reference to an exact commit, downloads that commit's archive, validates it with the strict compatibility check, and only then moves it into `<config dir>/plugins/<name>`.
-Each vendored plugin carries a `.mindroom-plugin.lock.json` file recording the repository, the requested reference, and the exact installed commit.
-Plugin Python dependencies are not installed automatically; installs report a note when the plugin declares a `pyproject.toml`.
-
-After installing, reference the plugin from `config.yaml`:
-
-```yaml
-plugins:
-  - path: plugins/ping-hook-plugin
-```
-
-Update vendored plugins with:
-
-```bash
-mindroom plugins update ping-hook-plugin
-mindroom plugins update --all
-mindroom plugins update ping-hook-plugin --ref v1.3.0
-```
-
-Updates re-resolve the pinned reference, skip plugins already at the resolved commit, and atomically replace the plugin directory only after the new revision passes the strict check.
-A failed update leaves the installed version untouched.
-Both commands accept `--path` to target a specific config file's directory and `--plugins-dir` to override the vendor directory.
-Set `GITHUB_TOKEN` to authenticate GitHub requests, which raises API rate limits and allows private repositories.
-
-## Compatibility checks
-
-Validate a plugin against the installed MindRoom version before deployment:
-
-```bash
-mindroom plugins check ./my-plugin
-```
-
-The command strictly checks the manifest, imports declared Python modules, validates tool, hook, and OAuth registration surfaces, and verifies that declared skill-root directories exist, using isolated temporary runtime paths.
-It reports discovered tools and hooks plus the declared skill directories; it does not parse `SKILL.md` contents or evaluate skill eligibility.
-Validation failures exit nonzero, and the check restores plugin registration state before returning.
-
-## Live development (hot reload)
-
-Plugins hot-reload automatically.
-When you edit any file inside a configured plugin directory, MindRoom notices the change on the next poll, waits out the debounce window, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code.
-In practice the new code is usually live about 1-2 seconds after a save.
-No service restart or agent session reset is required, but unfinished durable background scripts are interrupted before code replacement.
-
-### How it works
-
-- A background watcher polls each configured plugin root every ~1s and debounces saves over a ~1s window.
-- Before either watcher-triggered or manual reload replaces plugin code, MindRoom interrupts every unfinished durable background script run, even if it did not use the changed plugin; replacement fails if any run remains unfinished.
-- On change, the synthetic plugin package subtree is evicted from `sys.modules`, `load_plugins()` re-runs, a fresh `HookRegistry` is built, and the live registry is swapped atomically.
-- Module-level `asyncio.Task` objects, and one-level containers like `dict[..., Task]`, on the old module are best-effort cancelled before the swap.
-- The watcher ignores `__pycache__/`, `*.pyc`, `*.pyo`, editor swap files (`*.swp`, `*~`, `.#*`, `*.tmp`), and tool caches (`.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`).
-
-### Iterating on a plugin
-
-```bash
-# 1. Edit any file under your plugin
-$EDITOR ~/.mindroom/plugins/my-plugin/hooks.py
-
-# 2. Save. Watch the journal:
-journalctl -u mindroom.service -f | grep -E 'Reloading plugins|Plugin reload complete'
-
-# 3. Trigger your hook (send a message, fire the matching event, etc.)
-#    The new code path is live.
-```
-
-You can break and fix a plugin freely.
-A normal `mindroom run` startup skips broken plugins and disables tools known to belong to them rather than crash-looping.
-If a broken tools module prevents MindRoom from resolving its complete tool namespace, otherwise-unknown authored tool names are also disabled with a warning; `mindroom config validate` remains strict.
-A broken save that prevents reload, such as an import error or plugin validation error, can deactivate the affected plugin set, and the next valid save reloads it successfully.
-A hook that only raises at runtime is different: that failure is logged for that event, and the hook is tried again on the next matching event.
-There is no quarantine, failure threshold, or cooldown.
-Each save just reloads.
-
-### Manual reload
-
-If you need to force a reload, for example because the watcher missed something or you want to confirm a swap explicitly, an admin user can send the chat command:
-
-```
-!reload-plugins
-```
-
-The bot replies with the active plugin set and the count of cancelled background tasks.
-Admin gating uses `administrators` from `config.yaml`.
-
-#### `!reload-plugins`
-
-Force-reload every configured plugin from disk. Admin-only.
-
-```
-!reload-plugins
-```
-
-Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](plugins.md#live-development-hot-reload) for details.
-This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
-
-**Reply format:**
-
-```
-✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
-```
-
-**Permission:** Caller must be a platform administrator. Aliases: `!reload-plugins`, `!reload_plugins`.
-
-### Caveats and tradeoffs
-
-The hot-reload path is intentionally best-effort, not transactional.
-
-- **Ordinary in-flight callbacks keep their old code:** a reload swaps the registry for new events, while callbacks already running on the old module finish there, subject to the background-task cleanup described below.
-- **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
-- **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
-- **Background resources held by the old module can leak until natural cleanup.** Reload cancels direct module-global `asyncio.Task` objects and tasks in one-level built-in dict, tuple, list, or set containers; deeper or custom containers and non-task resources need their own cleanup bookkeeping.
-- **New plugins added to disk are not auto-enabled.** You still have to add them under `plugins:` in `config.yaml`, because the watcher only reloads plugins that are already configured.
-
-### Production tip
-
-Hot reload is enabled by default in production.
-Edit any configured plugin directory directly while `mindroom.service` is running.
-`~/.mindroom/plugins/<name>/` is the common local layout.
-Agent sessions are retained, but plan for the interruption of all unfinished durable background script runs before each reload.
-
-## Community plugins
-
-The [mindroom-ai](https://github.com/mindroom-ai) organization maintains a collection of open-source plugins.
-Clone any of them into your plugins directory and add the path to `config.yaml`:
-
-```bash
-git clone https://github.com/mindroom-ai/ping-hook-plugin.git ~/.mindroom/plugins/ping-hook
-```
-
-```yaml
-plugins:
-  - ~/.mindroom/plugins/ping-hook
-```
-
-### Hooks-only plugins
-
-| Plugin | Description |
-| --- | --- |
-| [ping-hook-plugin](https://github.com/mindroom-ai/ping-hook-plugin) | Minimal example — responds to `!ping-hook` with a pong message. Good starting point for learning the hook system. |
-| [shell-guard-plugin](https://github.com/mindroom-ai/shell-guard-plugin) | Blocks dangerous shell commands (e.g., `systemctl restart mindroom`) via `tool:before_call` gating. |
-| [voice-enrich-plugin](https://github.com/mindroom-ai/voice-enrich-plugin) | Injects AI-only metadata when a voice-transcribed message arrives, warning the model about possible transcription errors. |
-| [location-enrich-plugin](https://github.com/mindroom-ai/location-enrich-plugin) | Enriches prompts with real-time GPS location from [Dawarich](https://dawarich.app/), including place matching and movement classification. |
-| [restart-resume-plugin](https://github.com/mindroom-ai/restart-resume-plugin) | Re-activates threads tagged `pending-restart` after a bot restart. |
-
-### Hooks + tools plugins
-
-| Plugin | Description |
-| --- | --- |
-| [thread-snooze-plugin](https://github.com/mindroom-ai/thread-snooze-plugin) | Snooze and unsnooze threads — temporarily resolves a thread and wakes it at a specified time. |
-| [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Persistent per-thread goals stored in Matrix room state that survive context compaction and restarts. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Legacy external workloop implementation; native per-thread todo plans and auto-poke behavior are now built into MindRoom, so this plugin is not needed for that workflow. |
-| [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Long-term memory via [OpenViking](https://github.com/volcengine/OpenViking) — automatic memory extraction, recall, and compaction archiving. |
+Plugins can ship typed event hooks for message enrichment, response transformation, lifecycle observation, tool-call gating, reactions, schedules, and custom events.
+See [Hooks](hooks.md) for the `@hook` decorator, events, execution modes, timeouts and errors, the hook context and Matrix helpers, and testing.

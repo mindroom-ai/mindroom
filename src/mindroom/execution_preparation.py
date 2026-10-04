@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     TOOL_TRACE_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -42,7 +43,13 @@ from mindroom.history.types import ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.streaming import clean_partial_reply_text, is_interrupted_partial_reply, strip_visible_tool_markers
+from mindroom.streaming import (
+    PROGRESS_PLACEHOLDER,
+    TEAM_PROGRESS_PLACEHOLDER,
+    clean_partial_reply_text,
+    is_interrupted_partial_reply,
+    strip_visible_tool_markers,
+)
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.timing import timed
 
@@ -70,8 +77,9 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
-# Lifecycle notices describe the runtime, not the conversation, so no model sees them as a turn.
-_LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY)
+# Notices that are not turns: lifecycle notices describe the runtime, and a Chat UI request is a tool
+# call's fallback text for other clients (answers and error reports name the canvas themselves).
+_NON_TURN_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, UI_ACTION_CONTENT_KEY)
 
 
 class _PartialReplyKind(str, Enum):
@@ -688,6 +696,18 @@ def _get_unseen_event_ids_for_metadata(
     return event_ids
 
 
+def _has_nothing_to_read(msg: ResolvedVisibleMessage) -> bool:
+    """Return whether one message is a notice rather than a turn, or a streamed reply showing only its placeholder.
+
+    MindRoom redacts a placeholder that ends empty, so recording one as consumed would let that tidy-up remove
+    the history of whoever read it.
+    """
+    content = msg.content
+    if isinstance(content, dict) and any(key in content for key in _NON_TURN_NOTICE_CONTENT_KEYS):
+        return True
+    return msg.stream_status is not None and msg.body.strip() in {PROGRESS_PLACEHOLDER, TEAM_PROGRESS_PLACEHOLDER}
+
+
 def _get_unseen_messages_for_sender(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
@@ -703,12 +723,11 @@ def _get_unseen_messages_for_sender(
     for msg in thread_history:
         event_id = msg.event_id
         sender = msg.sender
-        content = msg.content
         if event_id and event_id in seen_event_ids:
             continue
         if current_event_id and event_id == current_event_id:
             continue
-        if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
+        if _has_nothing_to_read(msg):
             continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(

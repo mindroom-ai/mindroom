@@ -57,7 +57,10 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
 
     assert metadata.requires_room_context
     assert metadata.function_names == ("show_computer", "open_settings", "open_panel", "show_canvas")
-    assert [(field.name, field.default) for field in metadata.config_fields] == [("enable_show_canvas", False)]
+    assert [(field.name, field.default) for field in metadata.config_fields] == [
+        ("enable_show_canvas", False),
+        ("enable_canvas_libraries", False),
+    ]
     assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
     assert "show_canvas" in ChatUITools(enable_show_canvas=True).async_functions
     assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
@@ -859,6 +862,42 @@ async def test_canvas_update_edits_the_agents_own_canvas_in_place(tmp_path: Path
         "thread_id": THREAD_ID,
         "tool": "chat_ui",
     }
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_without_a_title_keeps_the_first_title(tmp_path: Path) -> None:
+    """An update may omit the title; a new canvas may not."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>"))
+
+    assert result["status"] == "ok"
+    replacement = _sent_content(context)["m.new_content"]
+    assert replacement["body"] == CANVAS_BODY
+    assert replacement["io.mindroom.ui_action"]["canvas"] == {"title": "Plans", "html": "<p>2</p>"}
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+
+
+@pytest.mark.asyncio
+async def test_canvas_update_without_a_title_needs_a_valid_first_title(tmp_path: Path) -> None:
+    """A canvas whose first title is unusable needs a title on every update."""
+    context = _context(tmp_path)
+    _serve_event(context, _canvas_source(context, canvas={"title": "", "html": "<p>1</p>"}))
+    context.client.room_send.return_value = nio.RoomSendResponse("$edit", ROOM_ID)
+
+    with tool_runtime_context(context):
+        missing = json.loads(await ChatUITools().show_canvas(html="<p>2</p>", canvas_event_id="$canvas"))
+        given = json.loads(await ChatUITools().show_canvas(title="Seats", html="<p>2</p>", canvas_event_id="$canvas"))
+
+    assert missing["status"] == "error"
+    assert "Canvas title must be one line" in missing["message"]
+    assert given["status"] == "ok"
+    assert _sent_content(context)["m.new_content"]["io.mindroom.ui_action"]["canvas"]["title"] == "Seats"
 
 
 @pytest.mark.asyncio

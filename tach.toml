@@ -743,6 +743,7 @@ path = "mindroom.response_turn"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.helper_usage",
+    "mindroom.history.storage",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",
@@ -2055,6 +2056,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.constants",
     "mindroom.file_access",
     "mindroom.media_delivery",
     "mindroom.tool_system.media_attachments",
@@ -2069,6 +2071,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.chat_ui"
 depends_on = [
+    "mindroom.constants",
     "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
     "mindroom.file_access",
@@ -4200,6 +4203,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.cli.config"
 depends_on = [
+    "mindroom.cli.local_model_config",
     "mindroom.atomic_file",
     "mindroom.cli.agent_docs",
     "mindroom.cli.env_file",
@@ -4968,7 +4972,6 @@ depends_on = [
 path = "mindroom.turn_store"
 depends_on = [
     "mindroom.agent_storage",
-    "mindroom.agents",
     "mindroom.constants",
     "mindroom.handled_turns",
     "mindroom.history.storage",
@@ -5489,7 +5492,6 @@ expose = [
     "enable_all_history_replay",
     "ensure_default_agent_workspaces",
     "get_agent_toolkit_names",
-    "remove_run_by_event_id",
     "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
 ]
@@ -5896,7 +5898,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 
 [[interfaces]]
 expose = [
-    "OpaqueEncryptedThreadHistoryError",
     "RoomThreadsPageError",
     "UnresolvedOpaqueRoomHistoryError",
     "bulk_scan_thread_event_sources",
@@ -6360,7 +6361,6 @@ expose = [
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
-    "earlier_tool_trace_content",
     "extract_tool_completed_info",
     "format_tool_combined",
     "format_tool_completed_event",
@@ -7961,3 +7961,8 @@ depends_on = [
     "mindroom.tool_system.skills",
 ]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.cli.local_model_config"
+depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
+visibility = ["mindroom.cli.config"]

@@ -34,6 +34,7 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
+from tests.conftest import push_stream_chunk
 
 
 class MockClient:
@@ -258,7 +259,7 @@ async def test_streaming_initial_message_under_limit() -> None:
     )
 
     # Small initial content
-    await streaming.update_content("Hello streaming world", client)
+    await push_stream_chunk(streaming, "Hello streaming world", client)
 
     # Should trigger initial send
     assert len(client.messages_sent) == 1

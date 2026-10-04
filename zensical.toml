@@ -45,7 +45,9 @@ nav = [
     { "Image Messages" = "images.md" },
     { "File & Video Attachments" = "attachments.md" },
     { "Interactive Questions" = "interactive.md" },
+    { "Interactive Canvases" = "canvases.md" },
     { "Thread Exports" = "thread-exports.md" },
+    { "Bug Reports" = "bug-reports.md" },
     { "Usage Tracking" = "usage.md" },
   ] },
   { "Matrix" = [
@@ -176,6 +178,16 @@ repo = "fontawesome/brands/github"
 
 [project.extra]
 generator = false
+
+# Icons for sidebar sections that have no index page; used by docs/overrides/partials/nav-item.html.
+[project.extra.nav_icons]
+"Get Started" = "lucide/compass"
+"Features" = "lucide/layers"
+"Matrix" = "simple/matrix"
+"Tool Catalog" = "lucide/library"
+"Security & Access" = "lucide/lock"
+"Extend & Integrate" = "lucide/blocks"
+"About" = "lucide/info"
 
 [project.extra.analytics]
 provider = "custom"

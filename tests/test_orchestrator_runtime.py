@@ -481,11 +481,9 @@ class TestAgentBot(AgentBotTestBase):
         assert shutdown_requested.is_set()
         assert server.should_exit is True
         assert server._captured_signals == []
-        mock_info.assert_any_call(
-            "embedded_api_server_signal_received",
-            signal_number=int(signal.SIGTERM),
-            signal_name="SIGTERM",
-        )
+        assert server.received_signal_name == "SIGTERM"
+        # A signal can interrupt a log write, so the handler itself must not log.
+        mock_info.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_embedded_uvicorn_publishes_actual_bound_port_after_startup(self) -> None:
@@ -534,6 +532,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = False
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -583,6 +582,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -623,6 +623,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -688,6 +689,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -750,6 +752,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -813,6 +816,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -871,6 +875,7 @@ class TestAgentBot(AgentBotTestBase):
         class ReturningServer:
             should_exit = True
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -912,6 +917,7 @@ class TestAgentBot(AgentBotTestBase):
         class ExitingServer:
             should_exit = False
             force_exit = False
+            received_signal_name = None
 
             def __init__(
                 self,
@@ -3961,7 +3967,6 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
             patch.object(orchestrator, "_start_sync_task"),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
         ):
             await orchestrator._run_bot_start_retry("general")
 
@@ -4011,7 +4016,6 @@ class TestMultiAgentOrchestrator:
                 side_effect=lambda *_args: order.append("sync_started"),
             ),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         ):
             await orchestrator._run_bot_start_retry("general")

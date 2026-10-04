@@ -79,6 +79,24 @@ The optional proxy strips `/livekit/jwt/` and `/livekit/sfu/` before forwarding 
 This chart does not deploy either backend, expose LiveKit media ports, configure TURN, issue TLS certificates, or manage backend credentials.
 See [Voice Calls](../../../docs/voice-calls.md) for the MindRoom agent configuration and complete backend requirements.
 
+## Bug Reports
+
+The client's **Report a bug** message-menu item sends a JSON report to the deployment's administrators in a private room shared with them.
+List the administrators to publish them in `/.well-known/matrix/client` as `io.mindroom.bug_reports`:
+
+```yaml
+matrix:
+  homeserverUrl: https://matrix.example.com
+
+bugReports:
+  admins:
+    - "@admin:example.com"
+```
+
+nginx then serves that well-known path even without MatrixRTC; route it from the Matrix server-name origin to this Service as described above.
+Without administrators the item is called **Download bug report** and saves the report as a file.
+See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and where it goes.
+
 ## Base Path
 
 Set `basePath` to serve the client under a URL prefix instead of the origin root:

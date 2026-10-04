@@ -1014,7 +1014,7 @@ class TestAgentBot(AgentBotTestBase):
         close_order: list[str] = []
         bot.prepare_for_sync_shutdown = AsyncMock(side_effect=failure)
         bot._journal_dispatcher = AsyncMock()
-        bot._journal_dispatcher.stop.side_effect = lambda: close_order.append("dispatcher")
+        bot._journal_dispatcher.stop.side_effect = lambda **_kwargs: close_order.append("dispatcher")
         bot._ingestion_session = AsyncMock()
         bot._ingestion_session.close.side_effect = lambda: close_order.append("ingestion")
         bot.client = _make_matrix_client_mock()

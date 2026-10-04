@@ -92,35 +92,16 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 Never give an instance the Supabase service-role key; the runtime authenticates with the anon key only.
 
-Only enable trusted upstream auth when the instance is behind a verified access layer that strips client-supplied copies of those headers and injects authenticated values itself:
-
-```bash
-helm upgrade --install instance-1 ./cluster/k8s/instance \
-  --namespace mindroom-instances \
-  --reset-then-reuse-values \
-  --set-string trustedUpstreamAuth.enabled=true \
-  --set trustedUpstreamAuth.userIdHeader=X-MindRoom-User-Id \
-  --set trustedUpstreamAuth.emailHeader=X-MindRoom-User-Email \
-  --set trustedUpstreamAuth.matrixUserIdHeader=X-MindRoom-Matrix-User-Id \
-  --set trustedUpstreamAuth.emailToMatrixUserIdTemplate='@{localpart}:example.org' \
-  --set trustedUpstreamAuth.emailDomain=example.com
-```
-
-When using the provisioner, configure the platform chart with `provisioner.trustedUpstreamAuth.enabled="true"` and the matching `provisioner.trustedUpstreamAuth.*Header` values.
-If your access layer cannot supply a Matrix ID header, configure `provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate` with the same template and `provisioner.trustedUpstreamAuth.emailDomain` with the allowed email domain.
-The email-to-Matrix template must contain exactly one `{localpart}` placeholder and requires the matching `emailHeader` and `emailDomain` values in both the instance and platform chart configuration.
+Only enable trusted upstream auth behind a verified access layer; see [Trusted Upstream Browser Auth](trusted-upstream-auth.md#helm-charts) for the instance and provisioner chart values.
 
 ## Secrets Management
 
-See [Runtime-Only Deployment](kubernetes.md#runtime-only-deployment).
+The instance chart mounts provider keys as files under `/etc/secrets/` and sets the matching [`*_API_KEY_FILE`](../configuration/models.md#file-based-secrets) variables.
 
-For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
-After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
-Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+Provisioned instances keep their credentials in the Secret `mindroom-api-keys-{instance_id}`, which the platform backend writes outside Helm, so tenant API keys and OIDC client secrets never enter Helm release values or history.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
 The one exception is the platform-wide Matrix OIDC client secret, which only Synapse mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
 The sandbox proxy token is random per instance.
-Each provision removes Secret keys the provisioner no longer writes, because `kubectl apply` keeps keys dropped from `stringData`.
 Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
 Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
 
@@ -144,6 +125,8 @@ helm upgrade --install platform ./cluster/k8s/platform \
   --namespace staging --create-namespace
 ```
 
+`monitoring.enabled` defaults to `true` and renders a `ServiceMonitor` and `PrometheusRule`, so the install fails on clusters without the Prometheus Operator CRDs; install the operator first or set `monitoring.enabled=false`.
+
 For a fresh install, `staging` stores Helm release records; the chart creates application resources in `mindroom-{environment}`, with `environment` set in values.
 For an existing release, retain its original release name and namespace when upgrading.
 Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
@@ -155,6 +138,7 @@ This external-Secret option is also available in staging; omit credential materi
 Provisioning that external Secret requires the application namespace to exist with ownership compatible with the chart, which still declares `mindroom-{environment}` regardless of `platformSecrets.create`.
 Switching to the external-Secret option does not remove credentials from earlier release revisions.
 The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
+Tiers with an included AI budget need an OpenRouter management key in `apiKeys.openrouterProvisioning` (`openrouter_provisioning_key` in an external Secret), which the platform uses to create each instance's spending-limited OpenRouter key; without it, provisioning those tiers fails with `OPENROUTER_PROVISIONING_API_KEY is required to create included-budget OpenRouter keys`.
 
 Platform ingress hosts:
 
@@ -168,6 +152,13 @@ The default lists the private IPv4 ranges, so an in-cluster ingress-nginx contro
 Narrow the list to the controller's pod network when you know it, and include only proxies that set `X-Real-IP` from the client connection rather than from client-supplied `X-Forwarded-For` or PROXY protocol headers.
 The reference Terraform configures ingress-nginx that way, with `use-forwarded-headers` and `use-proxy-protocol` off and the controller Service's `externalTrafficPolicy` set to `Local` so the controller sees the client's address instead of the node's.
 Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is keyed by its connection address.
+
+### Matrix SSO
+
+With `matrixOidc.enabled: "true"` (default `"false"`), instance owners sign into their instance's Synapse server with their platform login.
+Enabling it requires `matrixOidc.clientSecret`, a random shared secret, and `matrixOidc.privateKey`, a PEM-encoded RSA private key such as one from `openssl genrsa 2048`; an external Secret holds them as `matrix_oidc_client_secret` and `matrix_oidc_private_key`.
+`matrixOidc.issuer` defaults to `https://api.{domain}/matrix-oidc`, `matrixOidc.clientId` to `mindroom-synapse`, and `matrixOidc.keyId` to `mindroom-platform`.
+Existing instances pick up the setting when they are re-provisioned, for example with `deploy-release.sh`.
 
 ## Local Development with Kind
 
@@ -224,7 +215,8 @@ curl -X POST "https://api.mindroom.chat/system/provision" \
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
 For provisioned instance charts, set `provisioner.instanceCredentialsEncryptionSecret` to a stable high-entropy value so the provisioner can derive stable per-instance `credentials_encryption_key` chart values.
 If `provisioner.instanceCredentialsEncryptionSecret` is unset, the provisioner falls back to `PROVISIONER_API_KEY` when generating keys for new instances or explicit existing-instance opt-ins.
-Keep this source stable because changing it changes future derived credential encryption keys.
+Keep this source stable because changing it changes future derived credential encryption keys and each instance's dashboard login signing secret.
+Rotating `PROVISIONER_API_KEY` while `provisioner.instanceCredentialsEncryptionSecret` is unset breaks existing dashboard logins with `Invalid platform login` until instances are re-provisioned, so first copy the current key into `provisioner.instanceCredentialsEncryptionSecret`.
 New provisioned instances receive a derived credential encryption key by default.
 When re-provisioning an existing instance, the provisioner preserves the current encryption state by reusing `credentials_encryption_key` from the existing instance Secret when present.
 An existing instance whose MindRoom storage PVC no longer exists, such as one torn down after its grace period, starts on an empty volume and also receives the derived key.
@@ -236,53 +228,36 @@ If an already-encrypted instance has lost its instance Secret, pass `"enable_cre
 
 ## Subscription Lifecycle
 
-Hosted instances follow their subscription, and one backend module (`services/instance_lifecycle.py`) owns that behavior.
-Stripe subscription and invoice webhooks reconcile the account's instances in a background task after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
+Hosted instances follow their subscription.
+Stripe subscription and invoice webhooks reconcile the account's instances after the webhook response, so Kubernetes or OpenRouter trouble never fails a webhook.
 The nightly cleanup job at 03:00 UTC reconciles every subscription that owns an instance the same way, which also catches missed webhooks and retries failed steps.
 
 See [Hosted Subscriptions](../support.md#hosted-subscriptions).
 
-A failed step is stored in `instances.lifecycle_error` and retried on the next run.
-Before stopping, resuming, or redeploying a Stripe-billed instance, and for every Stripe-billed subscription during the nightly run, the lifecycle asks Stripe for the current subscription and corrects its stored status, tier, price, limits, and billing periods, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped except the instances of an account pending deletion.
-A correction is only written while the row is still bound to the Stripe subscription that was queried, so a resubscription that lands during the query is never overwritten.
-A delayed creation event for a Stripe subscription older than the account's current one is ignored.
-
-If OpenRouter reports that the stored key is gone or its instance Secret has no key value, provisioning revokes and clears the stale key before creating a replacement.
-
-When a price cannot be mapped to a tier, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
-
-Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
-
-After migration `007` the database allows one instance per subscription (`instances.subscription_id` is unique), so concurrent provision requests on several backend replicas create at most one instance; the losing request gets `409`.
-A customer's provision request for a `deprovisioned` instance claims the row only while it is still `deprovisioned`, and every lifecycle redeploy, whether it resumes a held instance or applies a plan change, claims it only while it keeps the status the lifecycle read, so such a run loses to a provision that claimed the instance after the run read it, instead of deploying it again and minting another OpenRouter key.
-A losing provision request gets `409`, and a losing lifecycle run, including a resume a provision request started for a held instance, skips the instance without enabling a key, clearing the hold, or recording an error.
-Every provision records a newly created OpenRouter key only while the instance records no key, and before it writes the key into the instance Secret, so when concurrent redeploys of one instance each create a key, the first recorded key is kept and the others are deleted before their run publishes them or deploys the instance; a key whose record fails to save is deleted too.
-Operator reprovisioning (`/system/provision`, admin provision) claims the row without a condition, and a lifecycle resume that redeploys a held instance it read while another provision already had it `provisioning`, such as a resume on another replica, claims it too, because claiming leaves that status unchanged.
-When either starts while another provision of the same instance has recorded its key but not yet written it into the Secret, it can revoke that key, which the other provision then still publishes, and the instance's hosted AI calls fail.
-If writing the instance Secret then fails, the provision deletes its key and, once OpenRouter confirms the key is gone, clears the recorded key, unless another run has recorded a different key in the meantime; a key whose deletion fails stays recorded, so revoking or disabling the instance's key still reaches it.
-A new instance or a redeploy that the lifecycle holds while it is being provisioned is scaled back to zero with its key disabled.
-When a subscription with a trial is created for a customer who had an earlier trial, it is cancelled while that earlier subscription still runs and otherwise has its trial ended at once, so checkout sessions opened side by side can neither yield a second trial nor bill the customer twice; a redelivered event for such a cancelled subscription leaves the account's subscription alone.
-Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the platform chart enables it by default, and a backend without the variable leaves it off.
+The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
 Each nightly task runs independently, so one failure does not skip the others, and every run is recorded in the `cleanup_runs` table.
-The cleanup job only runs when `cleanupScheduler.enabled` is true (`ENABLE_CLEANUP_SCHEDULER`); the backend defaults it to off.
 Admins see the last run, instances pending teardown, and stuck states on the admin portal's Lifecycle page (`GET /admin/instance-lifecycle`).
 
-The backend runs the scheduler in every replica, so keep the platform backend at one replica while the cleanup scheduler is enabled.
+A failed step is stored in `instances.lifecycle_error` and retried on the next run.
+For Stripe-billed subscriptions the lifecycle rechecks the subscription with Stripe, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped except the instances of an account pending deletion.
+When a price cannot be mapped to a tier, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
+Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
+Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
+If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
+Each subscription has at most one instance, so a concurrent second provision request for it gets `409`.
 
 ### Account Deletion
 
 See [Account Deletion](../support.md#account-deletion).
 
-The nightly job then claims the account with `claim_account_hard_delete`, which uses the same clock and makes `restore_account` refuse the account from then on, so a restore can never land during its teardown.
-It then cancels every remaining Stripe subscription at once and uninstalls every instance of the account (Helm release, PVCs, instance Secrets, and the platform OpenRouter key).
-`hard_delete_account`, which only acts on a claimed account, then deletes the account's instance, subscription, and audit-log rows.
-Last, the job deletes the account's Supabase auth user through the admin API, which also removes the `accounts` row (`ON DELETE CASCADE`), so the email and login are gone and signing in cannot recreate the account.
-Payment records and Stripe webhook event records are kept after the account is deleted with only their `account_id` cleared (`ON DELETE SET NULL`); they keep the Stripe customer and subscription identifiers, and webhook payloads can include the account ID (subscription metadata) and invoice contact details.
+After the cancellation window, the nightly job cancels every remaining Stripe subscription of the account and uninstalls every instance (Helm release, PVCs, instance Secrets, and the platform OpenRouter key).
+It then deletes the account's instance, subscription, and audit-log rows, and finally the account's Supabase auth user and `accounts` row, so the email and login are gone and signing in cannot recreate the account.
+Payment records and Stripe webhook event records are kept after the account is deleted with only their `account_id` cleared; they keep the Stripe customer and subscription identifiers, and webhook payloads can include the account ID (subscription metadata) and invoice contact details.
 
-If a teardown, the hard delete, or the auth user deletion fails, the account keeps its `accounts` row, the run is recorded as failed with the error, and the next run retries from the start.
-The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) marks the account pending deletion and claims it at once, runs the same teardown, calls `hard_delete_account`, and then deletes the auth user, which takes the account row with it.
+If a teardown, the row deletion, or the auth user deletion fails, the account keeps its `accounts` row, the run is recorded as failed with the error, and the next run retries from the start.
+The admin portal's complete deletion (`DELETE /admin/accounts/{account_id}/complete`) runs the same teardown and deletions at once, without waiting for the cancellation window.
 When a step fails it answers `500` and keeps the account row, although Stripe billing may already be cancelled and some instances uninstalled, so retry it.
-The nightly run, and any reconcile of an account pending deletion, marks instances that an older release's soft delete left `deprovisioned` while their deployment kept running as `running` again; the lifecycle then holds them, or keeps them running for an entitled subscription.
 
 ## Release Deployment
 
@@ -308,6 +283,8 @@ It reads the domain, environment, Supabase URL, and platform Secret name from th
 `--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
 `NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select the Helm release to upgrade.
 Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
+Tenant Synapse runs `matrixdotorg/synapse:latest` with pull policy `Always` unless the platform chart sets `provisioner.instanceSynapseImage` and `provisioner.instanceSynapseImagePullPolicy`.
+Set them there to pin or upgrade Synapse; the script keeps them across releases, and each instance switches when it is re-provisioned.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
 The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.

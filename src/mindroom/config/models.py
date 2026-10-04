@@ -411,10 +411,6 @@ class DefaultsConfig(BaseModel):
             "other agents and teams; a message from a person resets the count"
         ),
     )
-    auto_resume_after_restart: bool = Field(
-        default=True,
-        description="Whether restart cleanup should post a real system message to resume interrupted threaded conversations",
-    )
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     compaction: CompactionConfig | None = Field(

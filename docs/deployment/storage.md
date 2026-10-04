@@ -1,46 +1,46 @@
 ---
-icon: lucide/database
+icon: lucide/hard-drive
 ---
 
 # Data Storage & Journal
 
+This page covers where MindRoom keeps its data, what to back up, how to configure the event journal, and how to move or rebind the journal with `mindroom journal adopt`.
+
 ## Data Persistence
 
-MindRoom stores data in the `mindroom_data` directory by default:
+MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `MINDROOM_STORAGE_PATH` to use another directory.
 
-- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
+- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
+- `agents/*/learning/` - Per-agent Agno Learning state when learning is enabled
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `knowledge_db/` - Knowledge base vector stores
-- `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
-- `credentials/` - Synchronized secrets from `.env`
+- `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
+- `credentials/` - Secrets synchronized from `.env`
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
-These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
-`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
 
-Keep `tracking/` on persistent storage and include it in backups.
-Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
-When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
+### Backups
 
-Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
-If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
-These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
-Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
-This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
-Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
+Back up the whole storage directory, and keep `tracking/` on persistent storage.
+When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
 
-Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
-The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
-Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
-Checkpoint invalidation can force a no-`since` limited sync that backfills older events, and opaque Matrix tokens provide no safe ordering frontier for pruning those exact keys.
-Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](../architecture/bot-runtime.md#durable-dispatch-boundary).
+`tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
+These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
+See [Bot Runtime Architecture](../architecture/bot-runtime.md#durable-dispatch-boundary) to inspect the records or remediate a corrupted one.
+
+### Incompatible session databases
+
+If an upgraded Agno version requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
+The archive is kept intact for inspection or manual recovery; back it up and delete it when you no longer need it.
 
 ## Event Journal
 
-`event_journal.backend` defaults to `sqlite`, which stores the Matrix event journal at `<storage>/tracking/event_journal.db` with no separate path setting.
+The event journal records which Matrix events were already handled and delivered, so restarts do not produce duplicate replies.
+By default it is SQLite at `<storage>/tracking/event_journal.db`, a location that cannot be changed separately.
 To use PostgreSQL, install the `postgres` extra (for example `uvx --from 'mindroom[postgres]' mindroom run`, or `--extra postgres` when syncing a source checkout), then select the backend and provide a connection URL:
 
 ```yaml
@@ -55,68 +55,48 @@ event_journal:
 | `database_url_env` | string | `MINDROOM_EVENT_CACHE_DATABASE_URL` | Variable holding the PostgreSQL URL, read from the process environment or the config-adjacent `.env` (process environment wins); custom names must be `DATABASE_URL` or end in `_DATABASE_URL` |
 | `database_url` | string or `null` | `null` | Inline PostgreSQL URL that takes precedence over the variable |
 
-Changes to the event journal apply after restarting MindRoom.
-See the [journal binding and migration commands](#journal) before moving, restoring, or adopting a journal.
+Changes to `event_journal` apply after restarting MindRoom.
+Read [Journal binding](#journal) before pointing an existing install at a different database.
 
-## journal
+<a id="journal"></a>
 
-Inspect and rebind the durable event journal.
-See [Event Journal configuration](#event-journal) for backend selection, the SQLite location, and PostgreSQL URL resolution.
+## Journal binding
 
-The event journal is the database that holds turn deduplication, delivery ownership, and recovery ownership.
-Every install is bound to exactly one, and MindRoom refuses to start against any other one, because using a stranger's journal does not fail — it answers every question confidently and about somebody else's history.
+Each install is bound to one event-journal database the first time it opens one, and records that binding in `<storage>/tracking/event_journal_binding.json`.
+MindRoom refuses to start against any other journal, because another database would silently lose turn deduplication, delivery ownership, and recovery ownership.
+A refused database is left untouched.
 
-An install is bound the first time it opens a journal.
-The database mints a generation when it is first used and never rewrites it, so the generation names the database rather than the process, and the binding recorded in `<storage>/tracking/event_journal_binding.json` names that generation.
-A later start reads the configured database's generation before it opens the store and refuses when the two do not match.
-Refusal happens before anything is created, so a database that gets refused is left exactly as it was found.
-
-Each refusal is a different problem and says so:
-
-| Message | What happened | What to do |
+| Startup error contains | Cause | Fix |
 | --- | --- | --- |
-| `has never been used by this install` | The configured database carries no generation at all. | Usually a connection pointing somewhere new. Point `event_journal` back, or adopt deliberately. |
-| `is a different journal from the one this install is bound to` | The configured database carries someone else's generation. | Usually a connection pointing at another install. Point `event_journal` back, or adopt deliberately. |
-| `could not be read` | The binding file itself is corrupt or truncated. | Repair or delete `<storage>/tracking/event_journal_binding.json`, then adopt. |
+| `has never been used by this install` | The configured database is new or empty, usually because the connection URL points somewhere new. | Check `event_journal` and the variable named by `database_url_env` and point them back at the bound database; adopt only if you want to start the journal's history fresh. |
+| `is a different journal from the one this install is bound to` | The configured database belongs to another install, usually because the connection URL points at it. | Point `event_journal` back at the bound database, or adopt deliberately. |
+| `could not be read` or `does not name a generation` | The binding file is corrupt or truncated. | Delete `<storage>/tracking/event_journal_binding.json`, then run `mindroom journal adopt` against the database you want; the file holds nothing the database does not. |
 
-## journal adopt
+Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.
 
-Bind this install to the event-journal database that is configured right now.
+<a id="journal-adopt"></a>
 
-This is the deliberate override of the startup refusal, and the only repair for an install whose binding has been lost.
-Adopting gives up the deduplication, delivery, and recovery history held in the previously bound journal, so it asks for confirmation unless `--yes` is passed.
+## Adopting a journal
 
-Stop MindRoom before adopting.
-A running MindRoom keeps writing to the database it opened at startup, so adopting under it does not move the running install — it splits the install's history across two databases, and nothing will ever read the older one again.
-A process that has the journal open holds an advisory claim on `<storage>/tracking/event_journal_store.lock` for as long as it has it open, and adoption refuses while that claim is held.
-The claim ends when the store is closed, and the operating system withdraws it if the process dies, so a crashed MindRoom leaves nothing to clean up.
-`--force` adopts anyway, for the case where the claim cannot be trusted: it is advisory, and it does not travel between hosts sharing one storage root over a network filesystem.
+`mindroom journal adopt` binds the install to the event-journal database configured right now.
+It is the deliberate override of the startup refusal and the only fix for a lost or corrupt binding file.
+Adopting the database the install was already using keeps its history, but adopting a different database abandons the deduplication, delivery, and recovery history in the previously bound journal.
+It asks for confirmation when the install is already bound, unless `--yes` is passed.
 
-Adoption keeps the old binding until the new one is ready.
-If the candidate cannot be opened — an unreachable server, a bad DSN, a full disk — the command fails with the previous binding still in place, and the install starts exactly as it did before.
+Stop MindRoom before adopting, because a running MindRoom keeps writing to the journal it started with and adopting under it would split the install's history across two databases.
+Adoption refuses with `Another process still has this install's event journal open` while MindRoom is running; a crashed MindRoom does not block it.
+`--force` adopts anyway; use it only when you are certain nothing is running, for example when several hosts share one storage root over a network filesystem, where the running check does not work across hosts.
+
+If adoption fails, for example because the database is unreachable, the previous binding stays in place.
 
 ### Moving a journal safely
 
-Copying a database the supported way carries its generation with it, so a copy is accepted by the same binding and needs no adoption.
-That cuts both ways: a stale clone taken weeks ago carries the same generation as the live database and will be accepted without complaint, even though every turn since the clone was taken is missing from it.
-The generation proves the database is the same lineage, not that it is up to date, and nothing else checks.
-
-For a quiesced migration:
+A full copy of a journal database keeps its identity, so the binding accepts it without adoption.
+This also means a stale copy is accepted without complaint, even though every turn since it was taken is missing, so copy only from a stopped install.
 
 1. Stop MindRoom, and any `mindroom threads export --watch` running against the same storage root.
 2. Copy or dump-and-restore the database in full.
-3. Configure the destination PostgreSQL backend and URL, or move the SQLite journal with its storage root; SQLite always uses `<storage>/tracking/event_journal.db`.
-4. Start MindRoom. No adoption is needed, because the generation travelled with the data.
+3. Configure the destination PostgreSQL backend and URL, or move the SQLite journal together with its storage root.
+4. Start MindRoom.
 
 Adopt instead of copying only when you accept beginning the journal's history fresh.
-
-### Recovering from a failure
-
-An install refuses to start and you did not move anything.
-Check `event_journal` and the environment variable named by `event_journal.database_url_env` before adopting: a DSN that has drifted to a fresh database is the common cause, and adopting would throw the real journal's history away rather than find it.
-
-An install refuses to start with `could not be read`.
-The binding file is corrupt. Delete it and run `mindroom journal adopt` against the database you actually want; there is nothing recoverable inside it that the database does not already know.
-
-Adoption refuses because the journal is in use.
-Stop MindRoom and try again. Use `--force` only when you are certain nothing is running, for example after a host has been rebooted with a stale storage root on a network filesystem.

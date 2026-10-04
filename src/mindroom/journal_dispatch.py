@@ -40,6 +40,7 @@ from mindroom.matrix.journal_ingress import (
 )
 from mindroom.matrix.media import MATRIX_MEDIA_EVENT_TYPES, MatrixMediaEvent
 from mindroom.pending_event_worker import PendingEventWorker
+from mindroom.runtime_shutdown import GENERIC_SHUTDOWN
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -130,9 +131,9 @@ class JournalDispatcher:
         """Signal that newly admitted work is waiting."""
         self._worker.wake()
 
-    async def stop(self) -> None:
+    async def stop(self, *, shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN) -> None:
         """Stop draining, leaving unfinished work pending for the next start."""
-        await self._worker.stop()
+        await self._worker.stop(shutdown_intent=shutdown_intent)
 
     def begin_shutdown(self, *, shutdown_intent: RuntimeShutdownIntent) -> None:
         """Close semantic admission before the runtime withdraws its capabilities."""

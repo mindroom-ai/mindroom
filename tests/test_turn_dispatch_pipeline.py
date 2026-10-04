@@ -33,7 +33,6 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
-    AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -1298,16 +1297,11 @@ class TestAgentBot(AgentBotTestBase):
         fallback_relay = self._router_relay_event(reply_to="$latest:localhost", is_falling_back=True)
         replyless_relay = self._router_relay_event(reply_to=None)
         non_router_relay = self._router_relay_event(sender="@mindroom_general:localhost")
-        auto_resume_relay = self._router_relay_event(
-            reply_to="$interrupted_bot_message:localhost",
-            body=AUTO_RESUME_MESSAGE,
-        )
 
         assert validator.router_relay_original_event_id(explicit_relay) == "$user_msg:localhost"
         assert validator.router_relay_original_event_id(fallback_relay) is None
         assert validator.router_relay_original_event_id(replyless_relay) is None
         assert validator.router_relay_original_event_id(non_router_relay) is None
-        assert validator.router_relay_original_event_id(auto_resume_relay) is None
 
     @pytest.mark.asyncio
     async def test_external_trigger_to_private_agent_uses_trigger_owner_as_requester(

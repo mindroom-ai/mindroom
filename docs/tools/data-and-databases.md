@@ -1,119 +1,80 @@
 ---
-icon: lucide/wrench
+icon: lucide/database
 ---
 
 # Data & Databases
 
-Use these tools to query SQL and graph databases, analyze tabular files, work with Google datasets, Docs, Drive files, and spreadsheets, and fetch financial or business data.
+This page covers the built-in tools that query SQL and graph databases, analyze local data files, work with Google Drive, Docs, Sheets, and BigQuery, and fetch financial market data.
+Use it to pick a tool, configure its connection, and understand why a tool is unavailable or refused a request.
 
-## What This Page Covers
+## Choosing a Tool
 
-This page documents the built-in tools in the `data-and-databases` group.
-Use these tools when you need database access, dataframe-style analysis, Google document editing, Drive file lookup, spreadsheet automation, or market and company data.
+| Tool | Use it for | Setup |
+| --- | --- | --- |
+| [`sql`](#sql) | Generic SQL over any database SQLAlchemy can open | Connection URL or fields |
+| [`postgres`](#postgres) | Read-only PostgreSQL inspection, query plans, queries, and CSV export | Host, database, user, password |
+| [`redshift`](#redshift) | Amazon Redshift inspection, queries, and export | Host, database, user, password |
+| [`neo4j`](#neo4j) | Neo4j labels, relationship types, schema, and Cypher queries | URI, user, password |
+| [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
+| [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
+| [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
+| [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud credentials |
+| [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
+| [`google_docs`](#google_docs) | Creating, reading, and editing Google Docs | Google Docs OAuth |
+| [`google_sheets`](#google_sheets) | Reading, creating, and updating spreadsheets | Google Sheets OAuth |
+| [`openbb`](#openbb) | Stock quotes, symbol search, news, profiles, and price targets from switchable providers | Optional OpenBB PAT |
+| [`yfinance`](#yfinance) | Yahoo Finance quotes, fundamentals, statements, news, and history | None |
+| [`financial_datasets_api`](#financial_datasets_api) | Financial statements, filings, ownership, earnings, and crypto prices | API key |
 
-## Tools On This Page
+## Setup and Trust
 
-- [`sql`] - Generic SQLAlchemy-backed SQL access for databases that can be reached by URL or engine.
-- [`postgres`] - PostgreSQL-specific table inspection, query analysis, querying, and export.
-- [`redshift`] - Amazon Redshift warehouse access with password or IAM-based authentication.
-- [`neo4j`] - Neo4j graph inspection and Cypher queries.
-- [`duckdb`] - Local analytical SQL with file loading, exports, and full-text helpers.
-- [`csv`] - Pre-registered CSV reading and DuckDB-backed SQL queries over CSV files.
-- [`pandas`] - In-memory dataframe creation and dataframe method execution.
-- [`google_bigquery`] - BigQuery dataset inspection and SQL queries.
-- [`google_drive`] - Google Drive file listing, metadata search, file reading, workspace downloads, uploads, folder creation, moves, renames, and trashing through the per-service Google Drive OAuth provider.
-- [`google_docs`] - Google Docs creation, tab-aware structure reads, text insertion, and text replacement through the per-service Google Docs OAuth provider.
-- [`google_sheets`] - Google Sheets read, create, and update access through the per-service Google Sheets OAuth provider.
-- [`openbb`] - Stock prices, company search, news, profiles, and price targets through OpenBB.
-- [`yfinance`] - Yahoo Finance market data, fundamentals, news, and history.
-- [`financial_datasets_api`] - Structured financial statements, filings, ownership, and crypto data from Financial Datasets.
-
-## Common Setup Notes
-
-`sql`, `postgres`, `redshift`, `neo4j`, `google_bigquery`, `google_drive`, `google_docs`, `google_sheets`, and `financial_datasets_api` are registered as `requires_config`, so they stay unavailable in the dashboard until their required config or auth is present.
-`duckdb`, `csv`, `pandas`, `openbb`, and `yfinance` are `setup_type: none`, so they can be enabled immediately once their optional Python dependencies are installed.
-MindRoom validates inline tool overrides against the declared `config_fields`, and `type="password"` fields such as `password`, `secret_access_key`, `api_key`, `db_url`, and `openbb_pat` must go through the dashboard or credential store instead of inline YAML.
-Several fields on this page are advanced constructor inputs rather than normal `config.yaml` values, including `db_engine`, `connection`, `credentials`, `duckdb_connection`, `duckdb_kwargs`, and `obb`.
-`src/mindroom/api/integrations.py` currently contains Spotify-specific OAuth endpoints only, while Google Drive, Docs, and Sheets use the generic `/api/oauth/google_drive/*`, `/api/oauth/google_docs/*`, and `/api/oauth/google_sheets/*` flows.
-`google_drive`, `google_docs`, and `google_sheets` declare per-service `auth_provider` values and store OAuth tokens separately from editable tool settings.
-`csv` queries use DuckDB under the hood, and `duckdb` is the better fit when you need to create tables from files, export results, or load local and S3 data repeatedly.
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
+Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](index.md#security-restrictions).
+`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, `credentials`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
+`sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](../architecture/security-posture.md#file-access).
+The Google tools connect through per-service OAuth; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
+Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
 
 ## [`sql`]
 
-`sql` is the generic SQL toolkit for database engines that SQLAlchemy can open directly.
+`sql` provides `list_tables()`, `describe_table(table_name)`, and `run_sql_query(query, limit=10)`.
+`run_sql_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
+Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
+The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
+For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
 
-### What It Does
-
-`sql` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`.
-The toolkit can connect through `db_url`, an existing `db_engine`, or a URL assembled from `user`, `password`, `host`, `port`, `schema`, and `dialect`.
-`list_tables()` and `describe_table()` use SQLAlchemy inspection, and `run_sql_query()` returns JSON rows with a default limit of 10 unless you pass `limit=None`.
-If you pass a `tables` mapping, `list_tables()` returns that mapping directly instead of live database introspection.
-For dialects where database name and schema are distinct concepts, `db_url` is the safest configuration because the generic `schema` field is used both in the constructed URL path and in later table inspection calls.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `db_url` | `password` | `no` | `null` | Preferred connection string, stored through the dashboard or credential store because it can carry a password. |
-| `db_engine` | `text` | `no` | `null` | Advanced programmatic SQLAlchemy `Engine` input, not the normal YAML path. |
-| `user` | `text` | `no` | `null` | Username for URL assembly when not using `db_url`. |
-| `password` | `password` | `no` | `null` | Database password stored through the dashboard or credential store. |
-| `host` | `url` | `no` | `null` | Database host for URL assembly. |
-| `port` | `number` | `no` | `null` | Database port for URL assembly. |
-| `schema` | `text` | `no` | `null` | Schema name, and also the path segment in the assembled generic URL. |
-| `dialect` | `text` | `no` | `null` | SQLAlchemy dialect prefix such as `postgresql`, `mysql`, or `sqlite`. |
-| `tables` | `text` | `no` | `null` | Advanced predeclared table metadata mapping. |
-| `enable_list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
-| `enable_describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
-| `enable_run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream SQL tool surface. |
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - sql:
-          enable_run_sql_query: true
-```
-
-```python
-list_tables()
-describe_table("events")
-run_sql_query("SELECT * FROM events ORDER BY created_at DESC", limit=20)
-```
-
-### Notes
-
-- Store `db_url` through the dashboard or credential store, because `db_engine` expects a live SQLAlchemy object rather than a string and connection strings often carry passwords.
-- This generic toolkit is useful for simple SQL inspection, but `postgres` and `redshift` expose richer warehouse-style helpers such as query inspection and exports.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `db_url` | `password` | `null` | SQLAlchemy connection URL, such as `postgresql://user:pass@host/db`. |
+| `dialect` | `text` | `null` | SQLAlchemy dialect prefix such as `postgresql`, `mysql`, or `sqlite`. |
+| `user` | `text` | `null` | Username for the assembled URL. |
+| `password` | `password` | `null` | Password for the assembled URL. |
+| `host` | `url` | `null` | Host for the assembled URL. |
+| `port` | `number` | `null` | Port for the assembled URL. |
+| `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
+| `db_engine` | `text` | `null` | Programmatic only: a live SQLAlchemy `Engine`. |
+| `tables` | `text` | `null` | Programmatic only: a table mapping that `list_tables()` returns instead of inspecting the database. |
+| `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
+| `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
+| `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`postgres`]
 
-`postgres` is the PostgreSQL-specific toolkit for read-only schema inspection, query review, querying, and CSV export.
-
-### What It Does
-
-`postgres` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
-The toolkit opens a Psycopg connection, sets `search_path` to `table_schema`, and marks the connection read-only.
-`inspect_query()` runs `EXPLAIN`, which makes it the safe first step before a larger `run_query()`.
-`export_table_to_path()` writes queryable table output to a local file path from the running process.
-
-### Configuration
+`postgres` provides `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+The connection is read-only, so queries cannot modify the database.
+`inspect_query()` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
+`export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `connection` | `text` | `no` | `null` | Programmatic existing Psycopg connection object, not usable from the UI or normal YAML authoring. |
-| `host` | `url` | `yes` | `null` | PostgreSQL server hostname. |
-| `port` | `number` | `no` | `5432` | PostgreSQL server port. |
-| `db_name` | `text` | `yes` | `null` | Database name. |
-| `user` | `text` | `yes` | `null` | PostgreSQL username. |
-| `password` | `password` | `yes` | `null` | PostgreSQL password stored through the dashboard or credential store. |
-| `table_schema` | `text` | `no` | `public` | Schema used for table operations and connection `search_path`. |
-
-### Example
+| `host` | `url` | yes | `null` | Server hostname. |
+| `port` | `number` | no | `5432` | Server port. |
+| `db_name` | `text` | yes | `null` | Database name. |
+| `user` | `text` | yes | `null` | Username. |
+| `password` | `password` | yes | `null` | Password. |
+| `table_schema` | `text` | no | `public` | Schema for table operations and the connection search path. |
+| `connection` | `text` | no | `null` | Programmatic only: an existing Psycopg connection. |
 
 ```yaml
 agents:
@@ -121,58 +82,35 @@ agents:
     tools:
       - postgres:
           host: warehouse.internal
-          port: 5432
           db_name: analytics
           user: analyst
           table_schema: reporting
 ```
 
-```python
-show_tables()
-describe_table("daily_revenue")
-inspect_query("SELECT * FROM daily_revenue WHERE day >= CURRENT_DATE - INTERVAL '7 days'")
-run_query("SELECT day, total FROM daily_revenue ORDER BY day DESC LIMIT 7")
-export_table_to_path("daily_revenue", "/tmp/daily_revenue.csv")
-```
-
-### Notes
-
-- `postgres` is read-only by design in the upstream toolkit, which makes it a safer default than generic unrestricted SQL access.
-- Use `connection` only for programmatic instantiation where you already have a Psycopg connection object.
-- Secrets such as `password` must be stored outside authored YAML.
-
 ## [`redshift`]
 
-`redshift` is the warehouse-oriented toolkit for Amazon Redshift clusters with either password or IAM authentication.
-
-### What It Does
-
-`redshift` exposes `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
-The upstream connector supports standard `user` and `password` authentication, IAM authentication through `profile`, and IAM authentication through explicit AWS credentials.
-When IAM auth is enabled, the toolkit can fall back to environment variables such as `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
-`table_schema` defaults to `public`, and `ssl` defaults to `true`.
-
-### Configuration
+`redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
+It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
+Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `host` | `url` | `yes` | `null` | Redshift cluster endpoint. |
-| `port` | `number` | `no` | `5439` | Redshift port. |
-| `database` | `text` | `yes` | `null` | Database name. |
-| `user` | `text` | `yes` | `null` | Username; current dashboard configured-state checks require it even when `iam` is enabled. |
-| `password` | `password` | `yes` | `null` | Password; current dashboard configured-state checks require it even when `iam` is enabled. |
-| `iam` | `boolean` | `no` | `false` | Use IAM-based auth instead of password auth. |
-| `cluster_identifier` | `text` | `no` | `null` | Cluster identifier, required for IAM auth against provisioned clusters. |
-| `region` | `text` | `no` | `null` | AWS region for IAM auth. |
-| `db_user` | `text` | `no` | `null` | Database user for IAM auth. |
-| `access_key_id` | `password` | `no` | `null` | Optional AWS access key for IAM auth. |
-| `secret_access_key` | `password` | `no` | `null` | Optional AWS secret key for IAM auth. |
-| `session_token` | `password` | `no` | `null` | Optional AWS session token for temporary credentials. |
-| `profile` | `text` | `no` | `null` | AWS profile name for IAM auth. |
-| `ssl` | `boolean` | `no` | `true` | Enable SSL. |
-| `table_schema` | `text` | `no` | `public` | Schema used for table operations. |
-
-### Example
+| `host` | `url` | yes | `null` | Cluster endpoint. |
+| `port` | `number` | no | `5439` | Port. |
+| `database` | `text` | yes | `null` | Database name. |
+| `user` | `text` | yes | `null` | Username. |
+| `password` | `password` | yes | `null` | Password. |
+| `iam` | `boolean` | no | `false` | Use IAM authentication instead of the password. |
+| `cluster_identifier` | `text` | no | `null` | Cluster identifier, required for IAM against provisioned clusters. |
+| `region` | `text` | no | `null` | AWS region for IAM. |
+| `db_user` | `text` | no | `null` | Database user for IAM. |
+| `access_key_id` | `password` | no | `null` | AWS access key for IAM. |
+| `secret_access_key` | `password` | no | `null` | AWS secret key for IAM. |
+| `session_token` | `password` | no | `null` | AWS session token for temporary credentials. |
+| `profile` | `text` | no | `null` | AWS profile name for IAM. |
+| `ssl` | `boolean` | no | `true` | Use SSL. |
+| `table_schema` | `text` | no | `public` | Schema for table operations. |
 
 ```yaml
 agents:
@@ -185,45 +123,22 @@ agents:
           table_schema: reporting
 ```
 
-```python
-show_tables()
-describe_table("fact_orders")
-inspect_query("SELECT COUNT(*) FROM fact_orders WHERE created_at >= current_date - 30")
-run_query("SELECT created_at::date, COUNT(*) FROM fact_orders GROUP BY 1 ORDER BY 1 DESC")
-export_table_to_path("fact_orders", "/tmp/fact_orders.csv")
-```
-
-### Notes
-
-- The upstream toolkit supports IAM through `profile` or explicit AWS credentials, but MindRoom's current dashboard configured-state check still requires stored `user` and `password` values before the tool becomes available.
-- If you use password auth, store `password` through the dashboard or credential store rather than inline YAML.
-- `redshift` is the better fit than generic `sql` when you want Redshift-aware connection options and warehouse export helpers.
-
 ## [`neo4j`]
 
-`neo4j` is the graph database toolkit for labels, relationship types, schema discovery, and Cypher queries.
-
-### What It Does
-
-`neo4j` exposes `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
-It uses the Neo4j Python driver and can target a specific database when `database` is set.
-The individual enable flags let you expose schema discovery without allowing arbitrary Cypher execution.
-
-### Configuration
+`neo4j` provides `list_labels()`, `list_relationship_types()`, `get_schema()`, and `run_cypher_query()`.
+Set `enable_run_cypher: false` to give an agent schema visibility without free-form graph queries.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `uri` | `url` | `no` | `null` | Neo4j connection URI such as `bolt://localhost:7687`. |
-| `user` | `text` | `yes` | `null` | Neo4j username. |
-| `password` | `password` | `yes` | `null` | Neo4j password stored through the dashboard or credential store. |
-| `database` | `text` | `no` | `null` | Optional target database name. |
-| `enable_list_labels` | `boolean` | `no` | `true` | Enable `list_labels()`. |
-| `enable_list_relationships` | `boolean` | `no` | `true` | Enable `list_relationship_types()`. |
-| `enable_get_schema` | `boolean` | `no` | `true` | Enable `get_schema()`. |
-| `enable_run_cypher` | `boolean` | `no` | `true` | Enable `run_cypher_query()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full Neo4j toolkit. |
-
-### Example
+| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`; set it in practice. |
+| `user` | `text` | yes | `null` | Username. |
+| `password` | `password` | yes | `null` | Password. |
+| `database` | `text` | no | `null` | Target database. |
+| `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
+| `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
+| `enable_get_schema` | `boolean` | no | `true` | Enable `get_schema()`. |
+| `enable_run_cypher` | `boolean` | no | `true` | Enable `run_cypher_query()`. |
+| `all` | `boolean` | no | `false` | Enable every function. |
 
 ```yaml
 agents:
@@ -233,44 +148,23 @@ agents:
           uri: bolt://graph.internal:7687
           user: neo4j
           database: analytics
-          enable_run_cypher: true
+          enable_run_cypher: false
 ```
-
-```python
-list_labels()
-list_relationship_types()
-get_schema()
-run_cypher_query("MATCH (u:User)-[:PLACED]->(o:Order) RETURN u.id, count(o) AS orders LIMIT 10")
-```
-
-### Notes
-
-- `uri` is optional in metadata, but in practice you should supply it unless the runtime injects a connection some other way.
-- Store the Neo4j password through the dashboard or credential store instead of inline YAML.
-- Disable `enable_run_cypher` when you want schema visibility without free-form graph queries.
 
 ## [`duckdb`]
 
-`duckdb` is the local analytical SQL engine for file-backed analytics, table creation, exports, and full-text indexing.
+`duckdb` is the best choice for repeatable local analytics over files.
+It provides `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
+Without `db_path`, the database lives in memory and is not saved.
+`export_table_to_path()` writes Parquet unless the call passes another format such as `CSV`.
 
-### What It Does
-
-`duckdb` exposes `show_tables()`, `describe_table()`, `inspect_query()`, `run_query()`, `summarize_table()`, `create_table_from_path()`, `export_table_to_path()`, `load_local_path_to_table()`, `load_local_csv_to_table()`, `load_s3_path_to_table()`, `load_s3_csv_to_table()`, `create_fts_index()`, and `full_text_search()`.
-If `db_path` is unset, DuckDB runs in memory.
-`create_table_from_path()` can load CSV or other file formats directly into a table, and `export_table_to_path()` defaults to `PARQUET`.
-`init_commands`, `connection`, and `config` are advanced constructor inputs that are passed directly to the upstream toolkit.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `db_path` | `text` | `no` | `null` | Path to a persistent DuckDB database file. |
-| `connection` | `text` | `no` | `null` | Advanced existing DuckDB connection object, not normal YAML input. |
-| `init_commands` | `text` | `no` | `null` | Advanced startup commands passed through to the toolkit. |
-| `read_only` | `boolean` | `no` | `false` | Open the database in read-only mode. |
-| `config` | `text` | `no` | `null` | Advanced raw DuckDB config mapping. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `db_path` | `text` | `null` | Path to a persistent DuckDB database file. |
+| `read_only` | `boolean` | `false` | Open the database read-only. |
+| `connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
+| `init_commands` | `text` | `null` | Programmatic only: a list of startup SQL commands. |
+| `config` | `text` | `null` | Programmatic only: a DuckDB config mapping. |
 
 ```yaml
 agents:
@@ -278,140 +172,66 @@ agents:
     tools:
       - duckdb:
           db_path: data/analytics.duckdb
-          read_only: false
 ```
 
 ```python
-show_tables(True)
 create_table_from_path("/workspace/data/orders.parquet", table="orders", replace=True)
-inspect_query("SELECT customer_id, COUNT(*) FROM orders GROUP BY 1")
 run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
 export_table_to_path("orders", format="CSV", path="/tmp")
 ```
 
-### Notes
-
-- Use `duckdb` when you need repeatable local analytics over files, especially Parquet, CSV, or S3-backed datasets.
-- If you only need quick reads and SQL over a few predeclared CSVs, `csv` is lighter.
-- The upstream `show_tables()` signature currently expects `show_tables=True`.
-
 ## [`csv`]
 
-`csv` is the lightweight CSV analysis toolkit for pre-registered files with optional DuckDB-backed SQL queries.
+`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over a pre-registered list of CSV files, each named by its filename stem.
+`config.yaml` and the dashboard accept `csvs` only as a string, so they cannot register a file list and the tool has no files to read; use [`duckdb`](#duckdb) to query CSV files.
+`query_csv_file()` runs only the first SQL statement it receives.
 
-### What It Does
-
-`csv` exposes `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()`.
-The toolkit works with a preconfigured list of CSV paths and exposes each one by its filename stem.
-`read_csv_file()` returns JSON rows and respects either the per-call `row_limit` or the configured default `row_limit`.
-`query_csv_file()` loads the target CSV into DuckDB and runs one SQL statement against it.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `csvs` | `text` | `no` | `null` | Advanced pre-registered CSV path list passed through to the toolkit. |
-| `row_limit` | `number` | `no` | `null` | Default row cap for `read_csv_file()`. |
-| `duckdb_connection` | `text` | `no` | `null` | Advanced existing DuckDB connection object. |
-| `duckdb_kwargs` | `text` | `no` | `null` | Advanced DuckDB connection kwargs mapping. |
-| `enable_read_csv_file` | `boolean` | `no` | `true` | Enable `read_csv_file()`. |
-| `enable_list_csv_files` | `boolean` | `no` | `true` | Enable `list_csv_files()`. |
-| `enable_get_columns` | `boolean` | `no` | `true` | Enable `get_columns()`. |
-| `enable_query_csv_file` | `boolean` | `no` | `true` | Enable `query_csv_file()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full CSV toolkit. |
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - csv:
-          row_limit: 200
-```
-
-```python
-list_csv_files()
-read_csv_file("sales_2025", row_limit=50)
-get_columns("sales_2025")
-query_csv_file("sales_2025", 'SELECT "region", COUNT(*) FROM sales_2025 GROUP BY 1')
-```
-
-### Notes
-
-- `csv` is most useful when the runtime or a higher-level wrapper has already pre-registered the CSV paths for the tool.
-- `query_csv_file()` requires DuckDB and only runs the first SQL statement you provide.
-- If you need richer file loading or exports, use `duckdb` instead.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `csvs` | `text` | `null` | Programmatic only: the list of CSV paths. |
+| `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
+| `duckdb_connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
+| `duckdb_kwargs` | `text` | `null` | Programmatic only: DuckDB connection arguments. |
+| `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
+| `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
+| `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
+| `enable_query_csv_file` | `boolean` | `true` | Enable `query_csv_file()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## [`pandas`]
 
-`pandas` is the in-memory dataframe toolkit for creating named dataframes and running dataframe methods on them.
+`pandas` provides `create_pandas_dataframe()` and `run_dataframe_operation()`.
+`create_pandas_dataframe()` calls a Pandas constructor such as `read_csv` or `read_json` and stores the result under a name, rejecting empty dataframes and names already in use.
+`run_dataframe_operation()` calls a dataframe method such as `head`, `describe`, or `groupby` on a stored dataframe.
+Dataframes live only in memory and are lost on restart.
 
-### What It Does
-
-`pandas` exposes `create_pandas_dataframe()` and `run_dataframe_operation()`.
-`create_pandas_dataframe()` calls a top-level Pandas constructor such as `read_csv` or `read_json` and stores the resulting dataframe under a caller-chosen name.
-`run_dataframe_operation()` then calls a dataframe method such as `head`, `tail`, `describe`, or `groupby` on that stored dataframe.
-Stored dataframes live in the current process memory only and are not persisted to disk.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_create_pandas_dataframe` | `boolean` | `no` | `true` | Enable `create_pandas_dataframe()`. |
-| `enable_run_dataframe_operation` | `boolean` | `no` | `true` | Enable `run_dataframe_operation()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full Pandas toolkit. |
-
-### Example
-
-```yaml
-agents:
-  analyst:
-    tools:
-      - pandas
-```
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enable_create_pandas_dataframe` | `boolean` | `true` | Enable `create_pandas_dataframe()`. |
+| `enable_run_dataframe_operation` | `boolean` | `true` | Enable `run_dataframe_operation()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```python
-create_pandas_dataframe(
-    "sales",
-    "read_csv",
-    {"filepath_or_buffer": "/workspace/data/sales.csv"},
-)
-run_dataframe_operation("sales", "head", {"n": 5})
+create_pandas_dataframe("sales", "read_csv", {"filepath_or_buffer": "/workspace/data/sales.csv"})
 run_dataframe_operation("sales", "describe", {})
 ```
 
-### Notes
-
-- The toolkit keeps dataframe state in memory on the current runtime process, so a restart clears it.
-- `create_pandas_dataframe()` rejects empty dataframes and duplicate dataframe names.
-- Use `pandas` when you want dataframe-native operations rather than SQL.
-
 ## [`google_bigquery`]
 
-`google_bigquery` is the BigQuery toolkit for listing tables, describing schemas, and running SQL inside one dataset.
-
-### What It Does
-
-`google_bigquery` exposes `list_tables()`, `describe_table()`, and `run_sql_query()`.
-The toolkit builds a `bigquery.Client` at initialization and scopes query jobs to `project.dataset` through the default query job configuration.
-MindRoom's metadata marks `dataset`, `project`, and `location` as required, even though the upstream toolkit can fall back to `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` if those values are omitted.
-`credentials` is an advanced programmatic Google credentials object for cases where the process should not rely on default application credentials.
-
-### Configuration
+`google_bigquery` provides `list_tables()`, `describe_table()`, and `run_sql_query()` for the configured dataset.
+The dataset is only the default for unqualified table names, so queries can still reference other datasets that the Google Cloud credentials can read.
+It authenticates with the MindRoom process's default Google Cloud credentials, not with MindRoom's Google OAuth connections.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `dataset` | `text` | `yes` | `null` | BigQuery dataset name. |
-| `project` | `text` | `yes` | `null` | Google Cloud project ID. |
-| `location` | `text` | `yes` | `null` | BigQuery location such as `US` or `EU`. |
-| `credentials` | `text` | `no` | `null` | Advanced programmatic Google credentials object passed directly to the BigQuery client; not accepted as an inline override. |
-| `list_tables` | `boolean` | `no` | `true` | Enable `list_tables()`. |
-| `describe_table` | `boolean` | `no` | `true` | Enable `describe_table()`. |
-| `run_sql_query` | `boolean` | `no` | `true` | Enable `run_sql_query()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full BigQuery toolkit. |
-
-### Example
+| `project` | `text` | yes | `null` | Google Cloud project ID. |
+| `dataset` | `text` | yes | `null` | Dataset name. |
+| `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
+| `credentials` | `text` | no | `null` | Programmatic only: a Google credentials object; rejected as an inline override. |
+| `list_tables` | `boolean` | no | `true` | Enable `list_tables()`. |
+| `describe_table` | `boolean` | no | `true` | Enable `describe_table()`. |
+| `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |
+| `all` | `boolean` | no | `false` | Enable every function. |
 
 ```yaml
 agents:
@@ -423,18 +243,6 @@ agents:
           location: US
 ```
 
-```python
-list_tables()
-describe_table("events")
-run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER BY total DESC LIMIT 20")
-```
-
-### Notes
-
-- Configure `dataset`, `project`, and `location` explicitly in MindRoom, because that is the documented and validated path in the live metadata.
-- `google_bigquery` does not use a MindRoom Google OAuth provider.
-- If `credentials` is unset, the BigQuery SDK falls back to the process's default Google Cloud authentication behavior.
-
 ## [`google_drive`]
 
 <video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%">
@@ -442,71 +250,39 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
   <source src="https://github.com/user-attachments/assets/58281caf-f956-4584-87ec-15bd2a2242cb#t=0.1" type="video/mp4">
 </video>
 
-`google_drive` is the Google Drive toolkit for listing, searching, reading, downloading, uploading, and organizing files in the connected user's Drive account.
+`google_drive` works with files in the connected Google account, including shared drives the account can access.
 
-### What It Does
+| Function | What it does |
+| --- | --- |
+| `google_drive_list_files()` | Lists recently modified files. |
+| `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
+| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files up to `max_read_size`; PDFs and Office files need a download and a reader for that format. |
+| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
+| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
+| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
+| `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
+| `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
+| `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `google_drive_read_file()`, `google_drive_download_file()`, `google_drive_upload_file()`, `google_drive_update_file()`, `google_drive_create_folder()`, `google_drive_move_file()`, and `google_drive_trash_file()` through the Google Drive OAuth provider.
-`google_drive_list_files()` returns recent Drive files visible to the connected account.
-`google_drive_search_files()` searches Drive metadata.
-`google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
-`google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
-Downloads and exports larger than `max_download_size` are refused before they are saved, and a stream that grows past the limit is discarded without leaving a file.
-`google_drive_upload_file()` uploads a local file, resolves relative paths from the agent workspace, and follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting for which local files it may read.
-`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a local file under the same `file_access` rule.
-Native Google Workspace files require their respective Workspace APIs for content updates.
-`google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
-`google_drive_move_file()` moves a file to a new parent and can rename it in the same request.
-`google_drive_trash_file()` moves a file to trash and never permanently deletes it.
-Downloads always land in the `google-drive-downloads/` directory inside the agent workspace, so the destination cannot be redirected elsewhere.
-When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to a local token flow.
+Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
+Downloads larger than `max_download_size` are refused without leaving a partial file.
+Uploads and content replacement read local files according to the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
+Downloads need an agent workspace; for an agent without one, `download_file` is ignored and a warning is logged.
+To change the content of a native Google Doc, use [`google_docs`](#google_docs).
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
+A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).
 
-### Configuration
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `list_files` | `boolean` | `true` | Enable file listing. |
+| `search_files` | `boolean` | `true` | Enable metadata search. |
+| `read_file` | `boolean` | `true` | Enable content reads. |
+| `download_file` | `boolean` | `false` | Enable downloads and exports into the agent workspace. |
+| `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file to read, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export to download, in bytes. |
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `list_files` | `boolean` | `no` | `true` | Enable recent file listing. |
-| `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
-| `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
-| `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
-| `write` | `boolean` | `no` | `true` | Enable uploads, binary content replacement, folder creation, file moves or renames, and trashing. |
-| `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
-| `max_download_size` | `number` | `no` | `104857600` | Maximum file or export size to download into the agent workspace in bytes. |
-
-### Example
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - google_drive:
-          download_file: true
-          write: true
-          max_read_size: 10485760
-```
-
-```python
-google_drive_list_files()
-google_drive_search_files("name contains 'budget'")
-google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
-google_drive_download_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
-google_drive_upload_file("reports/launch-plan.pdf", folder_id="1FolderId")
-google_drive_update_file("1FileId", "reports/launch-plan.pdf")
-google_drive_create_folder("Launch", parent_id="1FolderId")
-google_drive_move_file("1FileId", "1NewFolderId", name="Final plan.pdf")
-google_drive_trash_file("1OldFileId")
-```
-
-### Notes
-
-- `google_drive` uses the per-service `google_drive` OAuth provider and always runs in the primary MindRoom runtime.
-- Downloads require an agent workspace; when the agent has none (for example the default `mem0` memory backend without a `private` workspace), `download_file` is ignored and a warning is logged.
-- The provider requests full Drive access plus OpenID email/profile scopes.
-- Existing connections that granted `drive.readonly` keep working for read operations, while write operations return a structured reconnect-required result until the connection grants full Drive access.
-- Full Drive scope authorizes permanent deletion at the Google API layer, but this toolkit exposes only `google_drive_trash_file()` and no permanent-delete function.
-- Set `write: false` to remove all Drive mutation functions from the agent's tool surface.
-- MindRoom's `tool_approval` rules can gate each write call behind a Matrix approval card.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
+To require a person to approve each Drive change, add [Tool Approval](../tool-approval.md) rules:
 
 ```yaml
 tool_approval:
@@ -525,177 +301,96 @@ tool_approval:
 
 ## [`google_docs`]
 
-`google_docs` is the native Google Docs API toolkit for creating documents, reading their tab-aware structure and content, and editing text.
+`google_docs` creates, reads, and edits Google Docs through its own OAuth connection, separate from Google Drive.
 
-### What It Does
+| Function | What it does |
+| --- | --- |
+| `google_docs_create_document(title, initial_text="")` | Creates a document, optionally with initial text. |
+| `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
+| `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
+| `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
 
-`google_docs_create_document()` creates a blank document and can insert optional initial text in the same tool call.
-`google_docs_get_document()` returns the complete Google Docs API document resource with `includeTabsContent` enabled, including tabs, structural elements, paragraphs, text runs, styles, tables, lists, and other returned structure.
-`google_docs_insert_text()` inserts at a Docs API body index or appends at the end of the selected tab.
-`google_docs_replace_text()` replaces every matching occurrence across all tabs or an explicit list of tab IDs and reports Google's replacement counts.
-Every successful operation returns the document edit URL.
-When no usable scoped OAuth credentials exist, the tool returns a structured `OAuthConnectionRequired` result with the provider-specific connection link.
+Each `document_id` accepts either a document ID or a full Google Docs URL.
+Every successful call returns the document's edit URL.
+If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
+Before public production use, the Docs scope needs Google verification; see [Production Verification Follow-up](../deployment/google-services-oauth.md#production-verification-follow-up).
 
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `create_document` | `boolean` | `no` | `true` | Enable document creation and optional initial-text insertion. |
-| `read_document` | `boolean` | `no` | `true` | Enable complete tab-aware structure and content reads. |
-| `edit_document` | `boolean` | `no` | `true` | Enable text insertion and replacement. |
-
-### Example
-
-```yaml
-agents:
-  writer:
-    worker_scope: user_agent
-    tools:
-      - google_docs:
-          create_document: true
-          read_document: true
-          edit_document: true
-```
-
-```python
-google_docs_create_document("Launch plan", "DRAFT\n")
-google_docs_get_document("1AbCdEfGhIjKlMnOpQrStUvWxYz")
-google_docs_insert_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "Next step\n")
-google_docs_replace_text("1AbCdEfGhIjKlMnOpQrStUvWxYz", "DRAFT", "FINAL", match_case=True)
-```
-
-### Notes
-
-- `google_docs` uses its own `google_docs` OAuth provider and `google_docs_oauth` token service, separate from Google Drive.
-- The provider requests `documents` plus OpenID email/profile scopes and does not request any Drive scope.
-- `google_drive` has its own full Drive grant and does not reuse the separate Docs grant when `google_docs` is enabled.
-- Google classifies the `documents` scope as sensitive, so public production clients need the verification follow-up described in [Google Services OAuth](../deployment/google-services-oauth.md#production-verification-follow-up).
-- `google_docs` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `create_document` | `boolean` | `true` | Enable document creation. |
+| `read_document` | `boolean` | `true` | Enable structure and content reads. |
+| `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
 
 ## [`google_sheets`]
 
-`google_sheets` is the Google Sheets toolkit for spreadsheet access through the Google Sheets OAuth provider.
+`google_sheets` provides `read_sheet(spreadsheet_id=None, spreadsheet_range=None)`, `create_sheet(title)`, and `update_sheet(data, spreadsheet_id=None, range_name=None)`.
+When `spreadsheet_id` or `spreadsheet_range` is configured, `read_sheet()` always uses it and ignores the value passed in the call, so leave both unset to read from many spreadsheets.
+`update_sheet()` ignores both settings and needs an explicit `spreadsheet_id` and `range_name` on every call.
+`update_sheet()` writes values literally, so a formula such as `=SUM(A1:A3)` is stored as text and does not calculate.
+The tool is available only once the stored Google Sheets connection includes the Sheets scope; if the account is not connected, calls return an `OAuthConnectionRequired` result with a connect link.
 
-### What It Does
-
-MindRoom exposes Agno's `read_sheet()`, `create_sheet()`, and `update_sheet()` operations.
-MindRoom wraps Agno's Google Sheets toolkit with `ScopedOAuthClientMixin`, so it loads stored Google credentials from MindRoom's credential store instead of relying only on local token files.
-MindRoom's `google_sheets` OAuth provider requests Sheets access, and dashboard flags only gate which Agno methods are exposed.
-If `spreadsheet_id` or `spreadsheet_range` is unset, you can still pass them per call.
-MindRoom maps the dashboard config fields `read`, `create`, and `update` onto Agno's constructor flags.
-When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `spreadsheet_id` | `text` | `no` | `null` | Default spreadsheet ID. Leave unset to work with multiple spreadsheets by passing IDs per call. |
-| `spreadsheet_range` | `text` | `no` | `null` | Default range such as `Sheet1!A1:Z100`. |
-| `read` | `boolean` | `no` | `true` | Enable read operations. |
-| `create` | `boolean` | `no` | `true` | Enable spreadsheet creation. |
-| `update` | `boolean` | `no` | `true` | Enable sheet updates. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `spreadsheet_id` | `text` | `null` | Spreadsheet ID used by every `read_sheet()` call. |
+| `spreadsheet_range` | `text` | `null` | Range used by every `read_sheet()` call, such as `Sheet1!A1:Z100`. |
+| `read` | `boolean` | `true` | Enable `read_sheet()`. |
+| `create` | `boolean` | `true` | Enable `create_sheet()`. |
+| `update` | `boolean` | `true` | Enable `update_sheet()`. |
 
 ```yaml
 agents:
   ops:
-    worker_scope: shared
     tools:
       - google_sheets:
           spreadsheet_id: 1AbCdEfGhIjKlMnOpQrStUvWxYz
           spreadsheet_range: Sheet1!A1:G200
 ```
 
-```python
-read_sheet()
-read_sheet(
-    spreadsheet_id="1AbCdEfGhIjKlMnOpQrStUvWxYz",
-    spreadsheet_range="Sheet1!A1:B20",
-)
-```
-
-### Notes
-
-- `google_sheets` uses the per-service `google_sheets` OAuth provider and always runs in the primary MindRoom runtime.
-- Configure Google OAuth through [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md).
-- The dashboard marks the tool available only when stored Google Sheets credentials include the required Sheets scope.
-
 ## [`openbb`]
 
-`openbb` is the finance toolkit for stock quotes, symbol lookup, company news, company profiles, and price targets through OpenBB providers.
+`openbb` provides `get_stock_price(symbol)`, `search_company_symbol()`, `get_company_news(symbol, num_stories=10)`, `get_company_profile()`, and `get_price_targets()`.
+Symbols can be comma-separated, such as `AAPL,MSFT`.
+The default `yfinance` provider works without an OpenBB account; set `openbb_pat` or the `OPENBB_PAT` environment variable for premium providers.
+Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data providers.
 
-### What It Does
-
-`openbb` exposes `get_stock_price()`, `search_company_symbol()`, `get_company_news()`, `get_company_profile()`, and `get_price_targets()`.
-The toolkit logs into OpenBB when `openbb_pat` or `OPENBB_PAT` is available, but it still works without a PAT when the selected provider supports unauthenticated access.
-The default provider is `yfinance`, which makes the tool usable without premium OpenBB credentials for many common quote lookups.
-You can selectively enable additional research functions without exposing the full OpenBB surface.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `obb` | `text` | `no` | `null` | Advanced preconfigured OpenBB instance object. |
-| `openbb_pat` | `password` | `no` | `null` | Optional OpenBB PAT for premium providers, stored through the dashboard or credential store instead of inline YAML. |
-| `provider` | `text` | `no` | `yfinance` | Data provider such as `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
-| `enable_get_stock_price` | `boolean` | `no` | `true` | Enable `get_stock_price()`. |
-| `enable_search_company_symbol` | `boolean` | `no` | `false` | Enable `search_company_symbol()`. |
-| `enable_get_company_news` | `boolean` | `no` | `false` | Enable `get_company_news()`. |
-| `enable_get_company_profile` | `boolean` | `no` | `false` | Enable `get_company_profile()`. |
-| `enable_get_price_targets` | `boolean` | `no` | `false` | Enable `get_price_targets()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full OpenBB toolkit. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
+| `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
+| `obb` | `text` | `null` | Programmatic only: a configured OpenBB instance. |
+| `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
+| `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
+| `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |
+| `enable_get_company_profile` | `boolean` | `false` | Enable `get_company_profile()`. |
+| `enable_get_price_targets` | `boolean` | `false` | Enable `get_price_targets()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
 agents:
   market:
     tools:
       - openbb:
-          provider: yfinance
           enable_search_company_symbol: true
           enable_get_company_news: true
 ```
 
-```python
-get_stock_price("AAPL,MSFT")
-search_company_symbol("Nvidia")
-get_company_news("AAPL", num_stories=5)
-get_company_profile("MSFT")
-get_price_targets("NVDA")
-```
-
-### Notes
-
-- `openbb_pat` is optional, and the default `provider: yfinance` keeps the tool useful even without premium OpenBB access.
-- Use `obb` only when you are constructing the toolkit programmatically with a live OpenBB object.
-- This tool overlaps with `yfinance`, but `openbb` is the better fit when you want provider switching or OpenBB-specific data sources.
-
 ## [`yfinance`]
 
-`yfinance` is the direct Yahoo Finance toolkit for quotes, company info, fundamentals, statements, recommendations, news, and price history.
+`yfinance` reads Yahoo Finance data with no credentials.
+Only the current stock price is enabled by default, so enable each additional function the agent needs.
 
-### What It Does
-
-`yfinance` exposes `get_current_stock_price()`, `get_company_info()`, `get_historical_stock_prices()`, `get_stock_fundamentals()`, `get_income_statements()`, `get_key_financial_ratios()`, `get_analyst_recommendations()`, `get_company_news()`, and `get_technical_indicators()`.
-Unlike `openbb`, it does not require a PAT or provider selection.
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_stock_price` | `boolean` | `no` | `true` | Enable `get_current_stock_price()`. |
-| `enable_company_info` | `boolean` | `no` | `false` | Enable `get_company_info()`. |
-| `enable_stock_fundamentals` | `boolean` | `no` | `false` | Enable `get_stock_fundamentals()`. |
-| `enable_income_statements` | `boolean` | `no` | `false` | Enable `get_income_statements()`. |
-| `enable_key_financial_ratios` | `boolean` | `no` | `false` | Enable `get_key_financial_ratios()`. |
-| `enable_analyst_recommendations` | `boolean` | `no` | `false` | Enable `get_analyst_recommendations()`. |
-| `enable_company_news` | `boolean` | `no` | `false` | Enable `get_company_news()`. |
-| `enable_technical_indicators` | `boolean` | `no` | `false` | Enable `get_technical_indicators()`. |
-| `enable_historical_prices` | `boolean` | `no` | `false` | Enable `get_historical_stock_prices()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full Yahoo Finance toolkit. |
-
-### Example
+| Option | Type | Default | Enables |
+| --- | --- | --- | --- |
+| `enable_stock_price` | `boolean` | `true` | `get_current_stock_price()` |
+| `enable_company_info` | `boolean` | `false` | `get_company_info()` |
+| `enable_stock_fundamentals` | `boolean` | `false` | `get_stock_fundamentals()` |
+| `enable_income_statements` | `boolean` | `false` | `get_income_statements()` |
+| `enable_key_financial_ratios` | `boolean` | `false` | `get_key_financial_ratios()` |
+| `enable_analyst_recommendations` | `boolean` | `false` | `get_analyst_recommendations()` |
+| `enable_company_news` | `boolean` | `false` | `get_company_news()` |
+| `enable_technical_indicators` | `boolean` | `false` | `get_technical_indicators()` |
+| `enable_historical_prices` | `boolean` | `false` | `get_historical_stock_prices()` |
+| `all` | `boolean` | `false` | Every function |
 
 ```yaml
 agents:
@@ -707,59 +402,19 @@ agents:
           enable_company_news: true
 ```
 
-```python
-get_current_stock_price("AAPL")
-get_company_info("MSFT")
-get_historical_stock_prices("NVDA", period="6mo", interval="1d")
-get_company_news("TSLA", num_stories=5)
-```
-
-### Notes
-
-- `yfinance` has no required setup fields for normal use.
-- Choose `yfinance` when you want the widest Yahoo Finance surface with the fewest setup requirements.
-
 ## [`financial_datasets_api`]
 
-`financial_datasets_api` is the structured market-data toolkit for company info, statements, ownership, filings, news, search, and crypto prices.
+`financial_datasets_api` reads structured data from Financial Datasets through `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
+Set `api_key` or the `FINANCIAL_DATASETS_API_KEY` environment variable; without a key, every call returns `API key not set`.
 
-### What It Does
-
-`financial_datasets_api` exposes methods such as `get_income_statements()`, `get_balance_sheets()`, `get_cash_flow_statements()`, `get_segmented_financials()`, `get_financial_metrics()`, `get_company_info()`, `get_stock_prices()`, `get_earnings()`, `get_insider_trades()`, `get_institutional_ownership()`, `get_news()`, `get_sec_filings()`, `get_crypto_prices()`, and `search_tickers()`.
-The toolkit sends authenticated HTTP requests to `https://api.financialdatasets.ai` with `X-API-KEY`.
-If `api_key` is unset, it falls back to `FINANCIAL_DATASETS_API_KEY`, and otherwise the tool returns an API-key-not-set error instead of working partially.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Financial Datasets API key stored through the dashboard, credential store, or environment. |
-
-### Example
-
-```yaml
-agents:
-  market:
-    tools:
-      - financial_datasets_api
-```
-
-```python
-search_tickers("cloud software", limit=5)
-get_company_info("MSFT")
-get_stock_prices("AAPL", interval="1d", limit=30)
-get_income_statements("NVDA", period="quarterly", limit=4)
-get_news("TSLA", limit=10)
-```
-
-### Notes
-
-- Configure the API key through the dashboard or credential store, or provide `FINANCIAL_DATASETS_API_KEY` in the environment.
-- Use this tool when you need more structured financial datasets than `yfinance` or the default OpenBB provider exposes.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Financial Datasets API key. |
+| `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 ## Related Docs
 
 - [Tools Overview](index.md)
 - [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
-- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)
+- [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md)
+- [Google Services OAuth](../deployment/google-services-oauth.md)

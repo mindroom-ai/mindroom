@@ -4,7 +4,7 @@ icon: lucide/users
 
 # Team Configuration
 
-Teams allow multiple agents to collaborate on tasks. MindRoom supports two collaboration modes.
+A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
 <video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/b6ea7dff-8542-409f-823a-0cd3590a9555#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -13,9 +13,14 @@ Teams allow multiple agents to collaborate on tasks. MindRoom supports two colla
 
 ## Team Modes
 
-### Coordinate Mode
+| Mode | What happens | Use when | Example |
+|------|--------------|----------|---------|
+| `coordinate` (default) | The team model splits the task into subtasks, assigns each to the member whose role fits, runs them in sequence or in parallel depending on their dependencies, and synthesizes the results | Members need to do different parts of the work | "Get weather and news": one agent fetches weather, another fetches news |
+| `collaborate` | Every member works on the same task independently, and the team model synthesizes their answers | You want several perspectives on one question | "What do you think about X?": every agent answers, then the views are combined |
 
-The team coordinator analyzes the task and delegates different subtasks to specific team members:
+A team reply opens with a `🤝 Team Response (<members>)` header, shows each member's contribution under its name, and ends with a **Team Consensus** section; without a consensus it notes that only the individual responses are shown.
+
+## Named Teams
 
 ```yaml
 teams:
@@ -24,123 +29,49 @@ teams:
     role: Development team for building features
     agents: [architect, coder, reviewer]
     mode: coordinate
-```
+    rooms: [dev]
+    model: sonnet
 
-In coordinate mode, the coordinator analyzes the task and selects which agents should handle which subtasks based on their roles. The coordinator decides whether to run tasks sequentially or in parallel based on dependencies, then synthesizes all outputs into a cohesive response.
-
-### Collaborate Mode
-
-All agents work on the same task simultaneously and their outputs are synthesized:
-
-```yaml
-teams:
   research_team:
     display_name: Research Team
     role: Research team for comprehensive analysis
     agents: [researcher, analyst, writer]
     mode: collaborate
-```
-
-In collaborate mode, the task is delegated to all team members simultaneously. Each agent works on the same task independently, and the coordinator synthesizes all perspectives into a final response. This is useful when you want diverse perspectives on the same problem.
-
-## Full Configuration
-
-```yaml
-teams:
-  super_team:
-    # Display name shown in Matrix
-    display_name: Super Team
-
-    # Description of the team's purpose (required)
-    role: Multi-disciplinary team for complex tasks
-
-    # Agents in this team (must be defined in agents section)
-    agents:
-      - code
-      - research
-      - finance
-
-    # Collaboration mode: coordinate or collaborate (default: coordinate)
-    mode: collaborate
-
-    # Rooms the team responds in
-    rooms:
-      - team-room
-
-    # Accept all, none, or matching inviter ID patterns
-    accept_invites: true
-
-    # Model for team coordination (default: "default")
-    model: sonnet
-
-
-    # Team-scoped replay controls (optional; inherit from defaults when omitted)
     num_history_runs: 8
-    num_history_messages: null
-    max_tool_calls_from_history: 6
-    max_tool_calls_per_turn: 200
-
-    # Team-scoped required-compaction overrides (optional)
-    # Soft thresholds do not compact by themselves while history still fits.
     compaction:
       enabled: true
       threshold_percent: 0.8
-      reserve_tokens: 16384
-      timeout_seconds: 600
 ```
 
-## Configuration Fields
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `display_name` | string | *required* | Name shown in Matrix |
+| `role` | string | *required* | Description of the team's purpose |
+| `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
+| `mode` | string | `coordinate` | `coordinate` or `collaborate` |
+| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |
+| `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID; this is separate from the members' own settings. Joining a room never grants its members access; see [Invitations](../authorization.md#invitations) |
+| `access` | object | `null` | Who may converse with the team: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the team's own managed `rooms` have access. See [Responder access](../authorization.md#responder-access) |
+| `model` | string | `"default"` | Key under `models:` used for coordination and synthesis |
+| `max_tool_calls_per_turn` | int, >= 1 | `defaults.max_tool_calls_per_turn` | Tool calls the team may execute in one turn, delegations to members included; each member keeps its own budget, and the end-of-budget behavior matches [agents](agents.md#configuration-options) |
+| `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, `compaction` | | | History replay and compaction for the team's shared history; see [Team History and Compaction](history.md#team-history-and-compaction) |
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `display_name` | Yes | - | Human-readable name shown in Matrix |
-| `role` | Yes | - | Description of the team's purpose |
-| `agents` | Yes | - | List of agent names that compose this team |
-| `mode` | No | `coordinate` | Collaboration mode: `coordinate` or `collaborate` |
-| `rooms` | No | `[]` | List of room names the team responds in |
-| `accept_invites` | No | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID after human-only alias resolution; non-human accounts retain their exact transport ID |
-| `access` | No | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this team's own managed `rooms`. See [Authorization](../authorization.md) |
-| `model` | No | `default` | Model used for team coordination and synthesis |
-| `num_history_runs` | | | See [History & Compaction](history.md#team-history-and-compaction) |
-| `num_history_messages` | | | See [History & Compaction](history.md#team-history-and-compaction) |
-| `max_tool_calls_from_history` | | | See [History & Compaction](history.md#team-history-and-compaction) |
-| `max_tool_calls_per_turn` | No | `defaults.max_tool_calls_per_turn` | Tool calls the team coordinator may execute in one turn, delegations to members included; each member keeps its own `max_tool_calls_per_turn`, and the same end-of-budget behavior as for [agents](agents.md) applies |
-| `compaction` | | | See [History & Compaction](history.md#team-history-and-compaction) |
+Team keys follow the agent [naming rules](agents.md#naming-rules), and a key cannot be used under both `agents:` and `teams:`.
+Private agents, and agents that can reach a private agent through `delegate_to`, cannot be team members; see [Private Instances](agents.md#private-instances).
 
-Team YAML keys follow the same naming rules as agents: alphanumeric characters and underscores only, and no overlap with agent names.
-Each configured team must contain at least one unique, known agent.
-Private agents, and agents whose delegation closure reaches private agents, are not supported in configured teams.
+## Ad Hoc Teams
 
-Invitation acceptance is independent from team conversation access.
-After joining, the team applies its ordinary `access` policy to every interaction.
+MindRoom forms a team without any `teams:` entry when:
 
-See [Team History and Compaction](history.md#team-history-and-compaction).
+1. **Several agents are tagged in one message**, for example `@code @research analyze this`.
+2. **An untagged follow-up in a thread** where several agents were mentioned earlier or several agents have replied.
+3. **An untagged message in the main timeline of a DM room** that contains several agents.
 
-## When to Use Each Mode
+Tagging exactly one agent gets a reply from that agent alone.
+Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](threads.md#multi-human-thread-protection)).
 
-| Mode | Use Case | Example |
-|------|----------|---------|
-| `coordinate` | Agents need to do different subtasks | "Get weather and news" - coordinator assigns weather to one agent, news to another |
-| `collaborate` | Want diverse perspectives on the same problem | "What do you think about X?" - all agents analyze the same question and share their views |
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
-## Dynamic Team Formation
-
-When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
-In threads with multiple human participants, stale thread context does not auto-form a team.
-A fresh explicit `@mention` in the current message is required for team responses in those threads.
-An eligible individual agent that already replied can separately opt into [Adaptive Participation](threads.md#adaptive-participation) and answer an untagged turn after approval; this does not automatically form a team.
-
-1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
-2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
-3. **Thread with multiple agent participants** - Continuing a conversation where multiple agents have responded, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention
-4. **DM room with multiple agents** - Messages in a DM room containing multiple agents (main timeline only)
-
-### Mode Selection
-
-For dynamic teams, the collaboration mode is selected by AI based on the task:
-
-- Tasks with different subtasks for each agent use **coordinate** mode
-- Tasks asking for opinions or brainstorming use **collaborate** mode
-
-Before model selection completes, explicit mentions carry a provisional **coordinate** heuristic and thread-derived groups carry a provisional **collaborate** heuristic.
-The execution layer asks the model to refine that choice; when model selection fails or returns an unexpected result, MindRoom falls back to **collaborate**.
+The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.
+Ad hoc teams take their history and compaction settings from `defaults`; see [Team History and Compaction](history.md#team-history-and-compaction).

@@ -39,7 +39,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import StreamingDeliveryError, UnfinishedStreamedReply
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -317,6 +317,49 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
     assert len(target_contexts) == 1
     assert "!test:localhost" in target_contexts[0]
     assert "$thread-root" in target_contexts[0]
+
+
+@pytest.mark.asyncio
+async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path) -> None:
+    """Team turns ask the response's room which events their history derives from were redacted."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    lookups: list[tuple[str, tuple[str, ...]]] = []
+
+    async def redacted_event_ids(room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        lookups.append((room_id, event_ids))
+        return frozenset()
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        turn_context = kwargs["ctx"]
+        assert turn_context.redacted_event_ids is not None
+        await turn_context.redacted_event_ids(("$event",))
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps = replace(coordinator.deps, redacted_event_ids=redacted_event_ids)
+        _install_inert_post_response_effects(coordinator)
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert lookups == [("!test:localhost", ("$event",))]
 
 
 @pytest.mark.asyncio
@@ -1353,6 +1396,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=recorder,
         accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
         tool_trace=[],
+        resumed=None,
     )
 
     snapshot = recorder.interrupted_snapshot()
@@ -1366,6 +1410,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=paused_recorder,
         accumulated_text="delivery failed",
         tool_trace=[],
+        resumed=None,
     )
     assert paused_recorder.original_status is RunStatus.paused
 
@@ -1374,8 +1419,43 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=empty_recorder,
         accumulated_text="",
         tool_trace=[],
+        resumed=None,
     )
     assert empty_recorder.original_status is RunStatus.error
+
+
+def test_record_stream_delivery_error_leaves_out_the_resumed_attempt(tmp_path: Path) -> None:
+    """A continuation that fails to deliver records only its own work; the stopped attempt above it is in the saved account."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    stopped_call = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="counter",
+        args_preview="{}",
+        result_preview="1",
+    )
+    new_call = ToolTraceEntry(type="tool_call_completed", tool_name="search", args_preview="q=x", result_preview="hit")
+    resumed = UnfinishedStreamedReply(visible_text="🔧 `counter` [1]\n\nHalf of the report", tool_trace=(stopped_call,))
+    recorder = TurnRecorder(user_message="Hello")
+
+    assert coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text=f"{resumed.resumed_text}🔧 `search` [2]\n\nThe second half",
+        tool_trace=[stopped_call, new_call],
+        resumed=resumed,
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.partial_text == "The second half"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["search"]
 
 
 @pytest.mark.asyncio

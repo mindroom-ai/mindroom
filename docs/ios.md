@@ -1,10 +1,10 @@
 ---
-icon: fontawesome/brands/apple
+icon: simple/apple
 ---
 
 # iOS App
 
-MindRoom AI is available on the App Store for iPhone, iPad, and Apple silicon Macs.
+MindRoom AI is the MindRoom Chat client for iPhone, iPad, and Apple silicon Macs, available on the App Store.
 It requires iOS or iPadOS 16.4 or later, or macOS 13.3 or later on a Mac with an M1 chip or newer.
 
 <p>
@@ -13,16 +13,11 @@ It requires iOS or iPadOS 16.4 or later, or macOS 13.3 or later on a Mac with an
 
 ## Sign In
 
-MindRoom is a Matrix client.
-After installing the app, sign in with the Matrix homeserver and account you normally use.
+The app is a Matrix client, so sign in with the Matrix homeserver and account you normally use.
+For hosted MindRoom, the homeserver is `https://mindroom.chat`.
 
-For the hosted MindRoom flow, use:
-
-- Homeserver: `https://mindroom.chat`
-- Client URL for desktop pairing: `https://chat.mindroom.chat`
-
-Then follow the [Getting Started](getting-started.md) guide to pair your local MindRoom runtime from the chat UI.
+To pair a local MindRoom runtime with that account, follow [Getting Started](getting-started.md#2-approve-pairing); on a computer, approve the pairing at `https://chat.mindroom.chat`.
 
 ## Reporting Issues
 
-Use the [support page](support.md), and include your device model, iOS version, app version, and homeserver URL.
+Report problems through the [support page](support.md#what-to-include-in-a-support-request), which lists the device, app, and homeserver details to include.

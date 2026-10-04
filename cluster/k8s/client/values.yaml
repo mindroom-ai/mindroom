@@ -79,6 +79,12 @@ matrixRTC:
     # Internal LiveKit SFU URL, for example http://matrixrtc-mindroom-matrixrtc-livekit:7880.
     sfuUpstream: ""
 
+# One-click bug reports from the client's message menu go to a private room shared with these administrators.
+bugReports:
+  # Matrix user IDs published in /.well-known/matrix/client as io.mindroom.bug_reports.
+  # Empty keeps the menu item as Download bug report, which saves the report as a file.
+  admins: []
+
 serviceWorker:
   # Register the client service worker, scoped to basePath.
   enabled: true

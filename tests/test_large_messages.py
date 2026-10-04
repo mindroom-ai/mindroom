@@ -13,7 +13,6 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     CONFIG_CONFIRMATION_REACTION_KEY,
     DURABLE_FINAL_OUTCOME_KEY,
-    EARLIER_TOOL_TRACE_CONTENT_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
@@ -1282,11 +1281,8 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("trace_key", [_TOOL_TRACE_KEY, EARLIER_TOOL_TRACE_CONTENT_KEY])
-async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace(
-    trace_key: str,
-) -> None:
-    """Huge tool traces, including those carried from stopped attempts, go to the sidecar instead of the preview."""
+async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace() -> None:
+    """Huge tool traces should go to the sidecar instead of shrinking visible preview."""
 
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
@@ -1322,7 +1318,7 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
             "formatted_body": "<p>streaming <strong>markdown</strong></p>" * 2000,
             "msgtype": "m.text",
             STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
-            trace_key: huge_tool_trace,
+            _TOOL_TRACE_KEY: huge_tool_trace,
         },
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$abc"},
         "msgtype": "m.text",
@@ -1335,13 +1331,12 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
     assert "<strong>markdown</strong>" in result["m.new_content"]["formatted_body"]
     assert "Streaming preview truncated" in result["m.new_content"]["formatted_body"]
     assert len(result["m.new_content"]["body"]) > 5000
-    assert trace_key not in result["m.new_content"]
-    assert trace_key not in result
+    assert _TOOL_TRACE_KEY not in result["m.new_content"]
     assert result["m.new_content"]["io.mindroom.long_text"]["version"] == 2
     assert result["m.new_content"]["url"] == "mxc://server/huge-trace"
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
-    assert uploaded_payload["m.new_content"][trace_key] == huge_tool_trace
+    assert uploaded_payload["m.new_content"][_TOOL_TRACE_KEY] == huge_tool_trace
     assert calculate_event_size(result) <= 64000
 
 

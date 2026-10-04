@@ -63,8 +63,17 @@
 {{- if not $selectedBundle -}}
 {{- fail (printf "config.bootstrapContentBundle.name %q must match a contentBundles entry" $bootstrapContentBundle.name) -}}
 {{- end -}}
-{{- if or (and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite)) (and $selectedBundle.seed $selectedBundle.seed.enabled) $selectedBundle.volumeMounts -}}
-{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, with no seed or volumeMounts, so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- if and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- $bundlePaths := dict "targetPath" (include "mindroom-runtime.contentBundleTargetPath" (list $ $selectedBundle)) "sourcePath" (include "mindroom-runtime.contentBundleSourcePath" (list $ $selectedBundle)) -}}
+{{- range $mount := $selectedBundle.volumeMounts -}}
+{{- $mountPath := clean (printf "/%s" $mount.mountPath) -}}
+{{- range $key, $path := $bundlePaths -}}
+{{- if or (eq $mountPath $path) (hasPrefix (printf "%s/" (trimSuffix "/" $mountPath)) $path) (hasPrefix (printf "%s/" (trimSuffix "/" $path)) $mountPath) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q volumeMounts to stay clear of its %s %s; mountPath %s overlaps it" $bootstrapContentBundle.name $key $path $mountPath) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if or (hasPrefix "/" $bootstrapContentBundle.subPath) (has ".." (splitList "/" $bootstrapContentBundle.subPath)) -}}
 {{- fail "config.bootstrapContentBundle.subPath must be a relative path without .. segments" -}}

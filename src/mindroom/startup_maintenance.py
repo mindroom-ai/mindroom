@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 type _StartupBot = AgentBot | TeamBot
 type _SetupRooms = Callable[[list[_StartupBot]], Awaitable[None]]
-type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int, set[str]], Awaitable[None]]
+type _RecoverStaleStreams = Callable[[list[_StartupBot], Config, int], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _RunningBots = Callable[[], list[_StartupBot]]
@@ -98,8 +98,6 @@ class StartupMaintenanceController:
         *,
         room_setup_completion: asyncio.Future[None],
     ) -> None:
-        scanned_room_ids: set[str] = set()
-
         async def setup_rooms_and_publish_result() -> None:
             try:
                 await self._run_phase(
@@ -118,23 +116,13 @@ class StartupMaintenanceController:
         try:
             await self._run_phase(
                 "startup_maintenance.stale_stream_recovery.initial",
-                lambda: self.recover_stale_streams(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                ),
+                lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms),
                 failure_message="Initial startup stale stream recovery failed",
             )
             await room_setup_task
             await self._run_phase(
                 "startup_maintenance.stale_stream_recovery.joined_room_delta",
-                lambda: self.recover_stale_streams(
-                    bots,
-                    config,
-                    startup_cutoff_ms,
-                    scanned_room_ids,
-                ),
+                lambda: self.recover_stale_streams(bots, config, startup_cutoff_ms),
                 failure_message="Joined-room delta stale stream recovery failed",
             )
         finally:
