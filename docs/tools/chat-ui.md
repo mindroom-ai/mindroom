@@ -99,12 +99,52 @@ Operators must reserve and control the agent username namespace on any homeserve
 `show_canvas` shows a web page the agent wrote beside the conversation and returns what the user chose.
 Use it when seeing or clicking beats reading or typing: dashboards, reports, charts, slides, menus, forms, pickers, and multi-step flows.
 
-<video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: an agent builds a scheduling grid, a data fit, a slide deck, and a trip planner beside the conversation" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
-</video>
-<video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: an agent builds a scheduling grid, a data fit, a slide deck, and a trip planner beside the conversation" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
-</video>
+=== "Overview · 27 s"
+
+    A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
+
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    </video>
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    </video>
+
+=== "Scheduling"
+
+    A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
+    </video>
+
+=== "Data"
+
+    An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
+    </video>
+
+=== "Slides"
+
+    A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
+
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
+    </video>
+
+=== "Trip planner"
+
+    One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
+
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
+    </video>
 
 ```python
 chat_ui.show_canvas(
@@ -160,11 +200,6 @@ Canvases open automatically under the same conditions as other requests; otherwi
 
 ### Pages and files
 
-<video controls playsinline preload="metadata" aria-label="An agent writes a slide deck to its workspace, shows it, and updates it in place after a change request" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/15d64a9a-cf64-4f60-89ea-9249ea35bee0#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/bfe89d42-9d05-4554-b0dc-d731d73f9da3#t=0.1" type="video/mp4">
-</video>
-
 `title` is one line of at most 120 characters.
 Pass the page as either `html` or a `path`, never both.
 A `path` such as `slides/deck.html` suits pages the agent builds and refines: edit the file, then call `show_canvas` again with the same `path` and the canvas ID.
@@ -179,11 +214,6 @@ Agents should only show pages they wrote.
 A canvas always appears as the agent's own, so a downloaded or untrusted page would be presented under the agent's name, and what the user types into it could leave the panel.
 
 ### Design
-
-<video controls playsinline preload="metadata" aria-label="An agent shows a kinetics fit; the user leaves out an outlier and sends back the fit" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/28b4b4a2-fc73-4521-b93e-ff6dd8b35aa5#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/6abc66b1-73ae-4692-9c7c-0bdb986bac73#t=0.1" type="video/mp4">
-</video>
 
 Write self-contained HTML with inline CSS and JavaScript.
 External scripts, styles, fonts, images, and network requests are blocked, so draw charts with inline SVG or a `<canvas>` element and embed images as `data:` URLs.
@@ -203,11 +233,6 @@ MindRoom Chat exposes its current theme as CSS variables, so a page can match li
 
 ### How the answer reaches the agent
 
-<video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/12aed795-793e-4de2-96fa-979f04d9545f#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/8fcc4a9d-73f6-4fd6-9b13-c5f456397cbc#t=0.1" type="video/mp4">
-</video>
-
 Typing, toggling, dragging, and moving between steps inside the canvas send nothing.
 When the page calls `window.mindroom.submit(data, {label})`, or the user submits a `<form>` (its fields become the data and its `data-mindroom-label` attribute the label), Chat shows what will be sent and the user confirms with **Send**.
 While an answer waits for confirmation, the page cannot change it; the user discards it to choose again.
@@ -225,11 +250,6 @@ Decimal numbers and integers too large for JSON arrive as text.
 MindRoom Chat shows the message as a one-line receipt that expands to the exact data; other clients show the text.
 
 ### Updating a canvas in place
-
-<video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/02f40dbd-6e39-463a-831d-d941ef32ecf9#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/e9c04cf1-74c2-48de-866b-b43ac529146d#t=0.1" type="video/mp4">
-</video>
 
 `show_canvas` returns the canvas `event_id`.
 To show the next step of the same flow, call `show_canvas` again with `canvas_event_id` set to that ID, not a revision ID.
