@@ -2054,6 +2054,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.constants",
     "mindroom.file_access",
     "mindroom.media_delivery",
     "mindroom.tool_system.media_attachments",
