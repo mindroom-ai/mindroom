@@ -773,6 +773,7 @@ Set `jobNaming: contentHash` for those workflows.
 The chart then drops the hook and appends a hash of each Job's rendered pod spec, plus the grant config for the access-grant Job, to the Job name.
 The grants ConfigMap name gets a hash of its config too, so each access-grant Job reads the grants it was created for; `kubectl apply` leaves earlier grants ConfigMaps in place until you delete them or apply with `--prune`.
 Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
+A chart upgrade that leaves those inputs unchanged keeps the Job names, so it does not rerun the Jobs.
 Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
 To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
 
