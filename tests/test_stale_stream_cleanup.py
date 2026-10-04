@@ -256,7 +256,7 @@ async def _run_cleanup(  # noqa: C901 - Adapts static originals, edits and react
     bot_user_ids: set[str] | None = None,
     now_ms: int = NOW_MS,
     startup_cutoff_ms: int | None = None,
-    target_thread_ids: dict[str, str | None] | None = None,
+    target_event_ids: tuple[str, ...] | None = None,
 ) -> int:
     """Exercise exact cleanup using the existing static Matrix event fixtures."""
     client.user_id = BOT_USER_ID
@@ -309,20 +309,20 @@ async def _run_cleanup(  # noqa: C901 - Adapts static originals, edits and react
 
     client.room_get_event.side_effect = get_event
     client.room_get_event_relations = MagicMock(side_effect=relations)
-    targets = {
-        event.event_id: EventInfo.from_event(event.source).thread_id
+    targets = tuple(
+        event.event_id
         for event in events
         if isinstance(event, nio.RoomMessageText | nio.RoomMessageNotice)
         and event.sender == BOT_USER_ID
         and not EventInfo.from_event(event.source).is_edit
-    }
+    )
     with patch("mindroom.matrix.stale_stream_cleanup.time.time", return_value=now_ms / 1000):
         return await cleanup_stale_streaming_room(
             client,
             response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors={BOT_USER_ID: client},
-            target_thread_ids=targets if target_thread_ids is None else target_thread_ids,
+            target_event_ids=targets if target_event_ids is None else target_event_ids,
             bot_user_ids={BOT_USER_ID} if bot_user_ids is None else bot_user_ids,
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -1299,7 +1299,7 @@ async def test_shared_room_cleanup_routes_edits_through_each_message_owner(tmp_p
             response_recovery_scope=_permitted_recovery_scope,
             room_id=ROOM_ID,
             actors=actors,
-            target_thread_ids={"$first": None, "$second": None},
+            target_event_ids=("$first", "$second"),
             bot_user_ids=set(actors),
             config=config,
             runtime_paths=runtime_paths_for(config),

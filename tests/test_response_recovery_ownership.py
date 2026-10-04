@@ -444,7 +444,7 @@ async def test_startup_snapshot_cannot_overwrite_completed_final(
                 client,
                 room_id=ROOM_ID,
                 actors={BOT_USER_ID: client},
-                target_thread_ids={INITIAL: "$thread"},
+                target_event_ids=(INITIAL,),
                 bot_user_ids={BOT_USER_ID},
                 config=config,
                 runtime_paths=runtime_paths_for(config),

@@ -74,7 +74,7 @@ def reject_legacy_agent_fields(value: object) -> object:
 # Coverage: tests/test_agents.py::test_config_rejects_legacy_defaults_toolkit_fields.
 # LEGACY_COMPAT: Retired defaults.auto_resume_after_restart switch.
 # Legacy format: Defaults accepted auto_resume_after_restart to allow router resume messages after restarts.
-# Last legacy release: v2026.10.111; replacement: the next release continues interrupted replies in place and removes the field.
+# Last legacy release: v2026.10.113; replacement: the next release continues interrupted replies in place and removes the field.
 # Handling: Reject it with a note that interrupted replies now always continue in place.
 # Coverage: tests/test_agents.py::test_config_rejects_retired_auto_resume_after_restart.
 def reject_legacy_defaults_fields(value: object) -> object:

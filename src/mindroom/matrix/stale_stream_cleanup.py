@@ -77,16 +77,15 @@ class _MessageState:
     latest_timestamp: int = 0
     latest_event_id: str = ""
     latest_content: dict[str, Any] | None = None
-    thread_id: str | None = None
     stream_status: str | None = None
     bot_user_id: str | None = None
 
 
 async def _recovery_room_targets(
     principals: dict[str, PrincipalStore],
-) -> dict[str, dict[str, tuple[str, str | None]]]:
-    """Page durable candidates without waiting on individual response locks."""
-    room_targets: dict[str, dict[str, tuple[str, str | None]]] = {}
+) -> dict[str, dict[str, str]]:
+    """Page durable candidates, each event mapped to its bot, without waiting on individual response locks."""
+    room_targets: dict[str, dict[str, str]] = {}
     for bot_user_id, principal in principals.items():
         cursor: tuple[int, str] | None = None
         while batch := await principal.recovery_initial_deliveries(after=cursor):
@@ -97,7 +96,7 @@ async def _recovery_room_targets(
                     continue
                 event_id = delivery.acknowledged_event_id
                 assert event_id is not None
-                room_targets.setdefault(delivery.room_id, {})[event_id] = (bot_user_id, delivery.thread_id)
+                room_targets.setdefault(delivery.room_id, {})[event_id] = bot_user_id
     return room_targets
 
 
@@ -125,11 +124,11 @@ async def recover_stale_streaming_messages(
 
     semaphore = asyncio.Semaphore(max(1, room_concurrency))
 
-    async def recover_room(room_id: str, targets: dict[str, tuple[str, str | None]]) -> int:
+    async def recover_room(room_id: str, targets: dict[str, str]) -> int:
         async with semaphore:
             cleaned = 0
             prior_edit_succeeded_by_bot: set[str] = set()
-            for event_id, (bot_user_id, thread_id) in targets.items():
+            for event_id, bot_user_id in targets.items():
                 try:
                     async with response_recovery_scope(agent_names[bot_user_id], room_id, event_id) as permitted:
                         if not permitted:
@@ -138,7 +137,7 @@ async def recover_stale_streaming_messages(
                         actors[bot_user_id],
                         room_id=room_id,
                         actors={bot_user_id: actors[bot_user_id]},
-                        target_thread_ids={event_id: thread_id},
+                        target_event_ids=(event_id,),
                         prior_edit_succeeded_by_bot=prior_edit_succeeded_by_bot,
                         bot_user_ids=set(actors),
                         config=config,
@@ -173,7 +172,7 @@ async def _cleanup_stale_streaming_room(
     *,
     room_id: str,
     actors: dict[str, nio.AsyncClient],
-    target_thread_ids: dict[str, str | None],
+    target_event_ids: tuple[str, ...],
     bot_user_ids: set[str],
     config: Config,
     runtime_paths: RuntimePaths,
@@ -188,7 +187,7 @@ async def _cleanup_stale_streaming_room(
     message_states = await _load_recovery_message_states(
         scan_client,
         room_id=room_id,
-        target_thread_ids=target_thread_ids,
+        target_event_ids=target_event_ids,
         cleanup_bot_user_ids=set(actors),
         bot_user_ids=bot_user_ids,
         config=config,
@@ -424,7 +423,7 @@ async def _load_recovery_message_states(
     client: nio.AsyncClient,
     *,
     room_id: str,
-    target_thread_ids: dict[str, str | None],
+    target_event_ids: tuple[str, ...],
     cleanup_bot_user_ids: set[str],
     bot_user_ids: set[str],
     config: Config,
@@ -433,7 +432,7 @@ async def _load_recovery_message_states(
     """Resolve only exact outbox targets, including their newest replacements."""
     trusted = _cleanup_trusted_sender_ids(bot_user_ids=bot_user_ids, config=config, runtime_paths=runtime_paths)
     states: dict[str, _MessageState] = {}
-    for event_id, thread_id in target_thread_ids.items():
+    for event_id in target_event_ids:
         message = await fetch_latest_visible_message(
             client,
             room_id=room_id,
@@ -453,7 +452,6 @@ async def _load_recovery_message_states(
         state.latest_timestamp = message.edited_timestamp or message.timestamp
         state.latest_event_id = message.visible_event_id
         state.latest_content = {key: value for key, value in message.content.items() if isinstance(key, str)}
-        state.thread_id = message.thread_id or thread_id
         state.stream_status = message.stream_status
         state.bot_user_id = message.sender
     return states
