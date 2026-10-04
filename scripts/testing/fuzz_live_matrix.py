@@ -4971,6 +4971,19 @@ class ExactReplyOracle:
         record = self._ledger_records.get(event_id)
         return record.response_event_id if record is not None else None
 
+    def saw_only_deleted(self, source_event_id: str, redaction_event_id: str | None) -> bool:
+        """Return whether MindRoom settled a redaction of a source it never journaled.
+
+        MindRoom reads each room in order, so it only ever saw that source already
+        deleted, started no turn for it, and owes it no tombstone.
+        """
+        states = self.journal_event_states
+        return (
+            source_event_id not in states
+            and redaction_event_id is not None
+            and states.get(redaction_event_id) == "settled"
+        )
+
     def source_tombstoned(self, event_id: str) -> bool:
         """Return whether one source has its exact durable redaction tombstone."""
         record = self._ledger_records.get(event_id)
@@ -6021,7 +6034,12 @@ class FinalStateAuditor:
                         f"record {event_id!r} is incomplete without exact supersession proof",
                         strict=True,
                     )
-            redacted_sources = set(redacted) & set(self.oracle.expected_sources)
+            # A source MindRoom only ever saw deleted started no turn, so it has no tombstone to audit.
+            redacted_sources = {
+                source
+                for source in set(redacted) & set(self.oracle.expected_sources)
+                if not self.oracle.saw_only_deleted(source, redacted[source] or None)
+            }
             ledger_metrics = self._assert_ledger_attribution(
                 replies,
                 records=records,
@@ -8347,21 +8365,12 @@ class LiveFuzzRunner:
             )
 
     def _source_tombstone_settled(self, target_event_id: str) -> bool:
-        """Return whether MindRoom durably settled one redaction target.
-
-        MindRoom reads each room in order, so a settled redaction of a source it never
-        admitted means it only saw that source already deleted and owes it no turn.
-        """
-        records = self.oracle._ledger_observations
-        if _redaction_target_state(target_event_id, records, self.source_revision_markers)[0]:
+        """Return whether MindRoom durably settled one redaction target."""
+        if self.oracle.saw_only_deleted(target_event_id, self.redacted_targets.get(target_event_id)):
             return True
-        states = self.oracle.journal_event_states
-        redaction_event_id = self.redacted_targets.get(target_event_id)
-        return (
-            target_event_id not in states
-            and redaction_event_id is not None
-            and states.get(redaction_event_id) == "settled"
-        )
+        return _redaction_target_state(target_event_id, self.oracle._ledger_observations, self.source_revision_markers)[
+            0
+        ]
 
     def _current_pending_edit_marker(self, source_id: str) -> str | None:
         """Choose the newest observed live debt by canonical Matrix replacement order."""
@@ -9811,8 +9820,13 @@ def _capture_error_text(artifact: str, error: BaseException) -> str:
 
 
 def _durable_store_paths(storage_path: Path) -> tuple[Path, ...]:
-    """Find the managed accounts' durable Nio SQLite stores."""
-    return tuple(sorted((storage_path / "encryption_keys").rglob("*.db")))
+    """Find the managed accounts' durable Nio SQLite stores; an account that never ingested durably has none."""
+    paths = []
+    for path in sorted((storage_path / "encryption_keys").rglob("*.db")):
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            if database.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='NioDurableMeta'").fetchone():
+                paths.append(path)
+    return tuple(paths)
 
 
 def _reset_durable_sync_cursors(storage_path: Path) -> None:
@@ -9842,9 +9856,6 @@ def _nio_recovery_snapshot(storage_path: Path) -> dict[str, object]:
     stores: dict[str, object] = {}
     for path in _durable_store_paths(storage_path):
         with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
-            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "NioDurableMeta" not in tables:
-                continue
             version_number, stream_id, acknowledged, cursor_present = database.execute(
                 "SELECT version, stream_id, acked_sequence, cursor IS NOT NULL FROM NioDurableMeta WHERE id=1",
             ).fetchone()

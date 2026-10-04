@@ -9636,6 +9636,49 @@ async def test_chaos_checkpoint_releases_tombstone_for_source_mindroom_only_saw_
             await runner._wait_for_pending_mutation_effects(deadline_seconds=0.05, batch_index=4)
 
 
+def test_cold_restart_resets_only_durable_nio_stores(tmp_path: Path) -> None:
+    """An account store without durable ingestion tables has no sync cursor to reset."""
+    keys = tmp_path / "encryption_keys"
+    (keys / "agent").mkdir(parents=True)
+    (keys / "user").mkdir()
+    durable = keys / "agent" / "agent.db"
+    with closing(sqlite3.connect(durable)) as database:
+        database.executescript(
+            "CREATE TABLE NioDurableMeta (id INTEGER PRIMARY KEY, cursor TEXT);"
+            "INSERT INTO NioDurableMeta VALUES (1, 'since');"
+            "CREATE TABLE NioDurableInput (id INTEGER PRIMARY KEY);"
+            "CREATE TABLE NioDurableBatch (sequence INTEGER PRIMARY KEY);",
+        )
+    with closing(sqlite3.connect(keys / "user" / "user.db")) as database:
+        database.execute("CREATE TABLE accounts (id INTEGER PRIMARY KEY)")
+
+    assert live_fuzz._durable_store_paths(tmp_path) == (durable,)
+    live_fuzz._reset_durable_sync_cursors(tmp_path)
+    with closing(sqlite3.connect(durable)) as database:
+        assert database.execute("SELECT cursor FROM NioDurableMeta").fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    ("journal_event_states", "seen_only_deleted"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$source": "settled"}, False),
+        ({}, False),
+    ],
+    ids=["settled_unadmitted", "redaction_unsettled", "source_admitted", "redaction_unseen"],
+)
+def test_oracle_knows_a_source_mindroom_only_saw_deleted(
+    journal_event_states: dict[str, str],
+    seen_only_deleted: bool,
+) -> None:
+    """Only a settled redaction of a source MindRoom never journaled proves it saw the source already deleted."""
+    oracle = ExactReplyOracle(Mock(spec=LiveMatrixClient), "@agent:example")
+    oracle.journal_event_states = journal_event_states
+
+    assert oracle.saw_only_deleted("$source", "$redaction") is seen_only_deleted
+
+
 @pytest.mark.asyncio
 async def test_chaos_checkpoint_tombstone_releases_same_source_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     """A source tombstone supersedes a concurrently landed edit obligation."""
