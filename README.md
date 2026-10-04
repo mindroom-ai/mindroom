@@ -248,9 +248,6 @@ Coming from OpenClaw? MindRoom [imports OpenClaw workspaces](docs/openclaw.md) (
 
 MindRoom runs on your machine; Matrix is hosted at `mindroom.chat` and the chat UI at [chat.mindroom.chat](https://chat.mindroom.chat).
 The only prerequisite is [uv](https://github.com/astral-sh/uv), which installs Python automatically if needed.
-Watch the 2-minute setup video:
-
-<a href="https://youtu.be/jR3xLUxyWhg"><img src="https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg" alt="MindRoom: installing and talking to my first AI agent in 2 minutes" width="480"></a>
 
 ```bash
 uvx mindroom run
