@@ -24,6 +24,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     TOOL_TRACE_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
@@ -70,8 +71,9 @@ _PARTIAL_REPLY_SENDER_LABELS = {
     "in_progress": "You (reply still streaming)",
 }
 _PARTIAL_REPLY_GUIDANCE_LABELS = frozenset({*_PARTIAL_REPLY_SENDER_LABELS.values(), "You (partial reply)"})
-# Lifecycle notices describe the runtime, not the conversation, so no model sees them as a turn.
-_LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY)
+# Lifecycle notices describe the runtime, not the conversation, and a Chat UI request is the sending
+# agent's tool call, already in its history; no model sees either as a turn.
+_LIFECYCLE_NOTICE_CONTENT_KEYS = (COMPACTION_NOTICE_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, UI_ACTION_CONTENT_KEY)
 
 
 class _PartialReplyKind(str, Enum):
