@@ -215,7 +215,7 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
 
     if thread_known:
         rows = query(
-            "SELECT * FROM matrix_delivery_outbox WHERE room_id = ? AND thread_id = ?",
+            "SELECT * FROM matrix_delivery_outbox WHERE room_id = ? AND thread_id = ? ORDER BY created_at_ns",
             [ids.room_id, ids.thread_id],
         )
         results["delivery_outbox"].items = [_decode_json_columns(row) for row in rows]
