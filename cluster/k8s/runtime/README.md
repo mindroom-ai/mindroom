@@ -315,9 +315,9 @@ The bootstrap source is the named bundle's `targetPath` joined with `subPath`, s
 The revision is the sha256 of the bundle image digest and the selected image directory, `sourcePath` joined with `subPath`.
 Pin the digest once in `contentBundles`; a new image or a different `sourcePath` or `subPath` becomes a new revision.
 The chart rejects an unknown bundle name and an absolute or `..` subPath.
-It also rejects a selected bundle with `overwrite: false`, `seed`, or `volumeMounts`, because the source would no longer match the image digest.
+It also rejects a selected bundle with `overwrite: false`, or with a `volumeMounts` path that equals, contains, or lies inside its `targetPath` or `sourcePath`, because the source would no longer match the image digest.
 The derived form is for trees that only the selected image writes.
-Do not point another bundle, a seed script, raw `initContainers`, or `extraVolumeMounts` at the selected source, because the revision would not change with their content.
+Do not point another bundle, any seed script (including the selected bundle's own), raw `initContainers`, or `extraVolumeMounts` at the selected source, because the revision would not change with their content.
 A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks.
 A changed revision validates and installs the candidate under the native installer's non-force drift rules.
 

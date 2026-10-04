@@ -695,6 +695,13 @@ _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
 )
 
 
+def _bootstrap_bundle_mount(mount_path: str) -> tuple[str, ...]:
+    return (
+        "contentBundles[1].volumeMounts[0].name=scratch",
+        f"contentBundles[1].volumeMounts[0].mountPath={mount_path}",
+    )
+
+
 @pytest.mark.parametrize(
     ("sub_path", "source", "image_dir"),
     [
@@ -759,17 +766,23 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
             ("config.bootstrapContentBundle.subPath=environments/../../active",),
             "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
         ),
+        (("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"), None),
+        (_bootstrap_bundle_mount("/scratch"), None),
+        (_bootstrap_bundle_mount("/bundle-cache"), None),
         (
-            ("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"),
-            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+            _bootstrap_bundle_mount("/bundle"),
+            'contentBundles entry "team-config" volumeMounts to stay clear of its sourcePath /bundle; mountPath /bundle',
+        ),
+        (_bootstrap_bundle_mount("/bundle/environments/"), "sourcePath /bundle; mountPath /bundle/environments"),
+        (
+            _bootstrap_bundle_mount("/app/agent_data/config-source"),
+            "targetPath /app/agent_data/config-source; mountPath /app/agent_data/config-source overlaps",
         ),
         (
-            (
-                "contentBundles[1].volumeMounts[0].name=config-input",
-                "contentBundles[1].volumeMounts[0].mountPath=/bundle",
-            ),
-            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+            _bootstrap_bundle_mount("/app/agent_data/config-source/cache"),
+            "targetPath /app/agent_data/config-source; mountPath /app/agent_data/config-source/cache overlaps",
         ),
+        (_bootstrap_bundle_mount("/app"), "targetPath /app/agent_data/config-source; mountPath /app overlaps"),
         (
             ("contentBundles[1].targetPath=/app/agent_data/active/incoming",),
             "config.bootstrapContentBundle must not overlap the config.path directory",
@@ -791,15 +804,16 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
         ),
     ],
 )
-def test_runtime_chart_rejects_invalid_bootstrap_content_bundle(settings: tuple[str, ...], message: str) -> None:
-    """A derived bootstrap must name one digest-pinned, fully replaced bundle and a contained subPath."""
+def test_runtime_chart_validates_bootstrap_content_bundle(settings: tuple[str, ...], message: str | None) -> None:
+    """A derived bootstrap needs a digest-pinned, fully replaced bundle with unmounted paths and a contained subPath."""
     result = _run_helm_template(
         Path("cluster/k8s/runtime"),
         *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
         *settings,
     )
-    assert result.returncode != 0
-    assert message in result.stderr
+    assert (result.returncode == 0) is (message is None), result.stderr
+    if message is not None:
+        assert message in result.stderr
 
 
 @pytest.mark.parametrize(("replicas", "allowed"), [(0, True), (1, True), (2, False)])
