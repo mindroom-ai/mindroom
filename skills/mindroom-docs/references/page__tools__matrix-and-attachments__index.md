@@ -501,7 +501,7 @@ matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
 ## Related Matrix Runtime Features
 
 Automatic thread summaries are still implemented in `src/mindroom/thread_summary.py` as bot runtime behavior.
-The summarizer posts one `m.notice` summary after a successful response brings a thread to the configured first threshold (one message by default), and then again every ten additional messages by default, using `defaults.thread_summary_model` or `default`.
+The summarizer posts one `m.notice` summary after a successful response brings a thread to `defaults.thread_summary_first_threshold` messages (default `1`), and then again every `defaults.thread_summary_subsequent_interval` additional messages (default `10`), using `defaults.thread_summary_model` or `default`.
 Set `room_thread_summary_models` to override the automatic summary model for a managed room alias or raw Matrix room ID.
 MindRoom uses `defaults.thread_summary_temperature` for automatic summaries when the provider supports runtime temperature overrides.
 MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite summaries.

@@ -731,7 +731,7 @@ The tunnel there names the hostname, because an approved-egress proxy decides by
 | `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `browser/` in the agent's state root as the runtime default when omitted. |
 | `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
 | `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
-| `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
+| `device_user_id` | `text` | `desktop only` | `null` | Matrix user the local desktop bridge signs in as. |
 | `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |
 | `device_ed25519` | `text` | `desktop only` | `null` | Exact Ed25519 fingerprint for the local Matrix device. |
 | `timeout_seconds` | `number` | `no` | `90` | Matrix and local Playwright MCP timeout from 1 to 120 seconds. |
@@ -762,6 +762,7 @@ browser_control(action="screenshot", target="desktop", fullPage=True, returnAtta
 - The host target uses MindRoom's managed Playwright profile, while the desktop target uses the user's connected local browser profile through Matrix.
 - Host-only options such as `profile`, `targetId`, snapshot formatting hints, `inputRef`, and `timeoutMs` are rejected for the desktop target instead of being silently ignored.
 - `returnAttachment` is accepted only by `action="screenshot"` with `target="desktop"`, and the returned handle expires when the current turn ends.
+- Calls that resolve to `target="desktop"` always run in the primary process, so listing `browser` in `worker_tools` isolates host-target calls while desktop-target calls keep working.
 - See the [Matrix Desktop Bridge](desktop.md) guide for extension installation, Brave paths, the local lease, and the full trust model.
 
 ### [`web_browser_tools`]

@@ -104,6 +104,7 @@ MindRoom grants missing room admins but does not demote existing power-level 100
 Removing an admin from configuration therefore stops future grants; lowering an existing grant requires a Matrix authority with greater power.
 
 `join_policy` accepts `invite`, `knock`, or `public`.
+Publishing managed rooms to the room directory with `listed: true` requires the managing service account (typically the router) to have moderator or admin power in each room.
 MindRoom reconciles join policy, directory visibility, invitations, and power levels for existing managed rooms.
 Encryption can be enabled but never disabled because enabling Matrix room encryption is irreversible.
 

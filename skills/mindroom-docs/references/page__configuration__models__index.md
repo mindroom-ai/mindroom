@@ -339,7 +339,7 @@ MindRoom maps the legacy `gpt-5.6` alias to `gpt-5.6-sol` and passes other slugs
 
 Older or preview slugs can also work when the logged-in Codex account exposes them.
 The LLM-plugin-style form `openai-codex/gpt-6.1-sol` is accepted as an alternative to the bare alias.
-If you keep Codex state outside `~/.codex`, pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
+If you keep Codex state outside `~/.codex`, set `CODEX_HOME` in the process environment or pass `extra_kwargs.codex_home`; user-home prefixes such as `~/custom-codex` are expanded.
 For starter config generation, use `mindroom config init --provider codex`.
 The starter defines GPT-6.1 Sol as `default`, GPT-6 Astra as `astra`, and GPT-6 Luna at low reasoning effort as `luna`, with the display names Sol, Astra, and Luna, and runs the router and thread summaries (with their one-shot tags) on `luna`.
 
@@ -667,10 +667,15 @@ For Vertex AI Claude, set these instead of an API key:
 ```bash
 ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
 CLOUD_ML_REGION=global
+# Optional custom Vertex AI endpoint:
+# ANTHROPIC_VERTEX_BASE_URL=https://...
 ```
 
 For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
+
+For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`), authenticate the same way and set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or pass `extra_kwargs.project_id` and `extra_kwargs.location`.
+Gemini reads these variables and `GOOGLE_APPLICATION_CREDENTIALS` only from the process environment, not from `.env`.
 
 ### File-based Secrets
 

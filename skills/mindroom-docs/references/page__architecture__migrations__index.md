@@ -316,6 +316,12 @@ For the same reason the unversioned and pre-seccomp recovery-signature migration
 Kubernetes workers pick up their new pod template when they are next recreated.
 Plugin directories beside a file-sourced config are no longer visible to the sidecar or Kubernetes workers, so install proxied plugins as Python packages in the runner image.
 
+### Requester-scoped worker keys
+
+v2026.9.33 changed the key of every `user` and `user_agent` worker, and workers or scoped integrations from earlier releases are not reused or migrated.
+After upgrading from an earlier release, reprovision every existing `user` and `user_agent` worker and reconnect every integration connected for those scopes.
+Shared and unscoped workers are unaffected.
+
 [access-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/config/legacy_access.py
 [agent-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/agent_storage.py
 [agentql]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tools/agentql.py

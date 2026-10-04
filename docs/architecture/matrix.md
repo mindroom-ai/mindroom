@@ -198,7 +198,7 @@ Returns content with `m.mentions` and `formatted_body` containing clickable link
 
 ## Large Messages
 
-Messages exceeding the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
+Messages approaching the 64KB Matrix event limit are automatically handled by `prepare_large_message()`:
 
 - Messages > 55,000 bytes and edits > 27,000 bytes use a fallback event
 - Full original Matrix message content is uploaded as a JSON sidecar (`message-content.json`)

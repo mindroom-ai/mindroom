@@ -6,7 +6,6 @@ icon: lucide/terminal-square
 
 MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
 Commands start with `!` and are normally handled by the router agent.
-`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
 
 ## Quick Reference
 
@@ -31,7 +30,7 @@ Commands start with `!` and are normally handled by the router agent.
 ## Who Handles Commands
 
 The **router** normally handles commands.
-`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
+`!desktop` has its own room requirements; see [`!desktop`](#desktop).
 Commands work in both main room messages and within threads.
 
 Voice transcription is not rewritten into chat-command syntax; commands must arrive as text commands.
@@ -197,14 +196,12 @@ Run these commands in a private Matrix room containing only the requester and on
 !desktop disconnect confirm
 ```
 
-`!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
-The local pairing command presents that code through an authenticated encrypted Matrix device event.
-It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
-Successful terminal setup also saves the connection for the macOS app; choose and save allowed apps in **Computer access**, then start observation there or with `mindroom desktop run`.
-Only the same Matrix requester in the same agent scope can confirm the matching claim.
+`!desktop setup` starts pairing, and `!desktop confirm` completes it with the exact command that local setup prints.
 `!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+`!desktop status`, or `!desktop` alone, reports whether a Desktop target is configured for you and this agent.
+`!desktop disconnect` asks for confirmation, and `!desktop disconnect confirm` removes your Desktop target for this agent, so its `desktop` calls need setup again.
 The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
-See [Matrix Desktop Bridge](tools/desktop.md) for local login and allowlist instructions.
+See [Matrix Desktop Bridge](tools/desktop.md) for the pairing steps, local access choices, and running the bridge.
 
 ### `!mode`
 
@@ -398,6 +395,7 @@ MindRoom supports cancelling in-progress responses via a reaction-based stop but
 
 When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating.
 React with 🛑 on the message to cancel the response.
+Setting `show_stop_button: false` hides only that reaction: responses still stream, and a 🛑 reaction you add yourself still cancels.
 The agent finalizes the partial text with `**[Response cancelled by user]**`.
 
 The stop button only works on messages currently being generated.

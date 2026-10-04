@@ -123,6 +123,7 @@ A saved setup shows **Connection saved · Access off** and opens the next incomp
    Search accepts partial names and reordered words, such as `chr goo` for Google Chrome.
    For folders and shell commands, see [Folders and Shell Commands](#folders-and-shell-commands) and select **Save Folder and Shell Access**.
 7. If you saved applications, allow Accessibility and Screen Recording for this copy of MindRoom in **Permissions**.
+   Each missing permission offers **Request** and **Open Settings**, which opens its System Settings pane.
    Restart the app if macOS requires it, then select **Check Again**.
    Folder and shell access need neither permission, so **Permissions** shows **Not needed** without saved applications.
 8. Select **Start Observe Only**, or **Start Access** when folders or shell commands are saved.
@@ -133,7 +134,7 @@ For homeservers behind Cloudflare Access, the app opens the organization sign-in
 
 The terminal `mindroom desktop setup` command saves the same connection used by the app.
 An already open app refreshes that setup automatically while computer access is stopped, preserving unsaved edits.
-After confirming pairing in chat, choose and save access here or with `mindroom desktop access`, then start from either the app or `mindroom desktop run`.
+After confirming pairing in chat, choose and save access here, or save folders and shell access with `mindroom desktop access`, then start from either the app or `mindroom desktop run`.
 Stop the bridge in the interface that started it before starting it in the other interface.
 Terminal setup can also save app choices with repeated `--allow-app` options; omitting them preserves choices for the same controller.
 Both interfaces default to `~/.mindroom`; a terminal `--config` or `--storage-path` override creates a separate setup.
@@ -173,6 +174,7 @@ Save both with **Save Folder and Shell Access**; while access is running, **Stop
     The working folder does not confine it.
 
 While access runs with shell requests allowed, each command request appears on an approval card above the steps unless you have already chosen **Approve & Allow…** or **Allow Without Asking…** for it.
+Each request also opens a separate approval window that does not take keyboard focus from your current app; closing it or choosing **Later** leaves the command waiting until it expires.
 The card shows the whole command with its length, working folder, agent, requester, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and each line kept left to right.
 If any of them contains a non-ASCII character, the card warns that it can look like ASCII and repeats each such field, labeled, with every non-ASCII character escaped.
 **Approve Once** and **Approve & Allow…** become available one second after a request appears or replaces another one.

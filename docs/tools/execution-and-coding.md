@@ -103,7 +103,7 @@ This is defense in depth: code-execution tools and tools that accept arbitrary o
 `read_file()` enforces `max_file_length` and `max_file_lines`, and it tells the caller to use chunk reads when a file is too large.
 `search_files()` uses glob patterns relative to `base_dir` rather than full-text search.
 `search_content()` searches text-file contents and skips paths matching `exclude_patterns`.
-MindRoom marks `file` as worker-routed by default, so it usually executes in the sandboxed worker runtime unless you override `worker_tools`.
+MindRoom marks `file` as worker-routed by default, so it runs in a worker when a Docker or Kubernetes worker backend or a sandbox proxy URL is configured, unless `worker_tools` or the [execution mode](../deployment/sandbox-proxy.md#execution-modes) says otherwise.
 
 ### Configuration
 
@@ -170,7 +170,7 @@ If the timeout is exceeded, the process keeps running in the background and the 
 Use `check_shell_command(handle)` to poll a backgrounded command and `kill_shell_command(handle)` to stop it.
 MindRoom keeps up to 16 backgrounded shell processes per runner and automatically sweeps finished handle records after roughly 10 minutes.
 Unlike upstream Agno's simple shell wrapper, proxied MindRoom shell execution uses a deny-by-default env, supports explicit exported-process-env passthrough patterns, and supports PATH prepends.
-MindRoom marks `shell` as worker-routed by default, so it usually executes in the sandboxed worker runtime.
+MindRoom marks `shell` as worker-routed by default, so it runs in a worker when a Docker or Kubernetes worker backend or a sandbox proxy URL is configured, unless `worker_tools` or the [execution mode](../deployment/sandbox-proxy.md#execution-modes) says otherwise.
 
 ### Configuration
 

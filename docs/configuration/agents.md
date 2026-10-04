@@ -562,7 +562,7 @@ The supported `worker_scope` values are:
 - `user`: one runtime per user, shared across that user's agents.
 - `user_agent`: one runtime per user+agent pair.
 
-Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one.
+Leave `worker_scope` unset for unscoped execution: dedicated Docker and Kubernetes workers still keep one persistent worker per agent, while the shared `static_runner` uses no worker-specific storage.
 `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 ### Filesystem Isolation

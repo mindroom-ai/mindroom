@@ -214,7 +214,7 @@ Deploy the runtime chart in a namespace of its own when an instance needs dedica
 The shared sidecar is the default in both charts.
 The primary runtime talks to a shared sidecar over `localhost`.
 This keeps the deployment simple, but all proxied tool calls share the same runner process.
-The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories over its own `sandbox-runner` directory.
+The runner reads and writes the same agent storage directories as the main process by mounting only the storage PVC's `agents` and `private_instances` directories at their usual paths, next to its own `sandbox-runner` storage root.
 It cannot see the credential store, Matrix state, or other primary runtime state, and it never receives the credential encryption key.
 The primary leases each proxied tool's saved settings to the runner per call.
 The runner mounts no config, so each call carries the primary's [live config snapshot](sandbox-proxy.md#live-config-snapshots), limited to the fields runners resolve, and the runner resolves the requesting agent and its settings from it.
@@ -297,7 +297,7 @@ Important behavior and constraints:
 
 - `workers.kubernetes.image` defaults to the main MindRoom image settings when its repository is left empty.
 - `workers.cleanupIntervalSeconds` controls how often the primary runtime runs idle-worker cleanup.
-- Worker pod-template drift (image, env, resources) is reconciled automatically: each cleanup pass recreates scaled-down worker Deployments whose pod template no longer matches the configured spec, and running workers are recreated on their next provisioning after they scale down.
+- Worker pod-template drift (image, env, resources) is reconciled automatically: each cleanup pass recreates scaled-down worker Deployments whose pod template no longer matches the configured spec, and running workers are recreated on their next use.
 - Reconciliation is controlled by `workers.kubernetes.reconcilePodTemplates` in the runtime chart (`MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES`, default on), so worker Deployments do not need manual recycling after image or pod-template changes.
 - `workers.kubernetes.idleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `workers.kubernetes.readyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
