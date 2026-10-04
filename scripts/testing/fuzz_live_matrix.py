@@ -5289,16 +5289,17 @@ class ExactReplyOracle:
             self.latest_reply_bodies[reply_event_id] = (order, body)
         return True
 
-    def _reply_body_complete(self, body: str) -> bool:
+    def _reply_body_complete(self, body: str, *, source_event_id: str) -> bool:
         """Return whether one reply body is a settled terminal state.
 
-        A body is terminal when it is the exact completed stream for its model
-        call, or a by-design interrupted note (supersession proof and the final
-        audit own the validity of those). Placeholders and partial streams are
-        not terminal, so they must keep settlement open.
+        A body is terminal when its newest attempt is the exact completed stream
+        for its model call. Replay continues an interrupted reply in place, so a
+        body ending in an interruption note is terminal only once deliberate
+        supersession is proven for its source. Placeholders and partial streams
+        are not terminal, so they must keep settlement open.
         """
         if body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)):
-            return True
+            return self._supersession_proven(source_event_id)
         body = _final_attempt_body(body)
         call_id = _body_call_id(body)
         return call_id is not None and body == self.expected_body_for(call_id)
@@ -5320,7 +5321,7 @@ class ExactReplyOracle:
             if reply_event_id is None:
                 continue
             latest = self.latest_reply_bodies.get(reply_event_id)
-            if latest is None or not self._reply_body_complete(latest[1]):
+            if latest is None or not self._reply_body_complete(latest[1], source_event_id=event_id):
                 blocking.append(event_id)
         return blocking
 

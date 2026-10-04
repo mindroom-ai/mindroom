@@ -6945,14 +6945,27 @@ async def test_completed_streaming_reply_settles_after_edit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupted_note_reply_does_not_block_settlement() -> None:
-    """A by-design interrupted note is terminal; restart recovery owns its validity."""
+@pytest.mark.parametrize("superseded", [False, True], ids=["awaiting_continuation", "superseded"])
+async def test_interrupted_note_reply_settles_only_when_superseded(superseded: bool) -> None:
+    """Replay continues a reply below its restart note, so the note is terminal only after proven supersession."""
     oracle = _streaming_oracle()
     try:
         note_body = f"partial stream {RESTART_INTERRUPTED_RESPONSE_NOTE}"
         oracle._ingest_event(_agent_reply_event("$source", "$reply", note_body))
+        if superseded:
+            oracle.supersession_proofs["$source"] = live_fuzz.SupersessionProof(
+                source_event_id="$source",
+                newer_event_id="$newer",
+                anchor_source_event_id="$newer",
+                anchor_response_event_id="$anchor",
+                interrupted_response_event_id="$reply",
+                principal_id="agent@test",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                requester_user_id="@user:localhost",
+            )
 
-        assert oracle.incomplete_streaming_sources() == []
+        assert oracle.incomplete_streaming_sources() == ([] if superseded else ["$source"])
     finally:
         await oracle.client.close()
 
