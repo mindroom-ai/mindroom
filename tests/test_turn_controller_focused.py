@@ -439,6 +439,7 @@ def _build_harness(
     *,
     agent_name: str = "general",
     thread_history: ThreadHistoryResult | None = None,
+    debounce_seconds: float = 0.0,
 ) -> _Harness:
     """Construct a TurnController from typed collaborators without booting a bot."""
     runtime_paths = runtime_paths_for(config)
@@ -590,7 +591,7 @@ def _build_harness(
 
     gate = CoalescingGate(
         dispatch_turn=_dispatch_batch,
-        debounce_seconds=lambda: 0.0,
+        debounce_seconds=lambda: debounce_seconds,
         is_shutting_down=lambda: False,
         on_dispatch_failure=_retry_failed_coalesced_dispatch,
     )
@@ -758,6 +759,7 @@ def _managed_file_event(
     *,
     event_id: str,
     thread_id: str,
+    sender_name: str = "general",
 ) -> nio.RoomMessageFile:
     """Return an unmentioned threaded file event authored by a managed agent."""
     return cast(
@@ -765,7 +767,7 @@ def _managed_file_event(
         nio.RoomMessageFile.from_dict(
             {
                 "event_id": event_id,
-                "sender": _entity_user_id(config, "general"),
+                "sender": _entity_user_id(config, sender_name),
                 "origin_server_ts": 1_000,
                 "room_id": _ROOM_ID,
                 "type": "m.room.message",
@@ -1953,6 +1955,40 @@ async def test_router_voice_echo_for_a_bot_account_is_display_only(tmp_path: Pat
     await harness.deliver(room, event)
 
     assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_file_that_ignores_mentions_keeps_the_mention_in_text_batched_with_it(
+    config: Config,
+    tmp_path: Path,
+) -> None:
+    """An agent's file and its recipient text share one batch, and the file's flag must not erase the text's mention."""
+    harness = _build_harness(config, tmp_path, debounce_seconds=1.0)
+    room = _room_with_members(config, "general", "research")
+    file_event = _managed_file_event(
+        config,
+        event_id="$research-file:localhost",
+        thread_id=_THREAD_ROOT,
+        sender_name="research",
+    )
+    file_event.source["content"][constants.SKIP_MENTIONS_KEY] = True
+    text_event = _text_event(
+        "@general please review the attached report",
+        event_id="$research-text:localhost",
+        thread_id=_THREAD_ROOT,
+        origin_server_ts=1_001,
+        sender=_entity_user_id(config, "research"),
+    )
+    text_event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+
+    await harness.controller.handle_media_event(room, file_event)
+    await harness.deliver(room, text_event)
+
+    assert [turn.handled_turn.source_event_ids for turn in harness.gate_batches] == [
+        (file_event.event_id, text_event.event_id),
+    ]
+    assert len(harness.runner.requests) == 1
 
 
 _OWNER = "@owner:localhost"
