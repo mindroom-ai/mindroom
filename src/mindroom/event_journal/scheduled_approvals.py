@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.logging_config import get_logger
 from mindroom.tool_approval_grants import approval_timestamp
 
-from . import approval_card_state, background_approvals, outbox
+from . import approval_card_state, approval_grants, background_approvals, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -172,7 +172,9 @@ def arm(
 
 def withdraw(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
     """Withdraw a cancelled or edited task's approval for good and deny its card if still pending."""
-    # Lock the card's row before the binding, in the same order as a card decision.
+    # Serialize with consumption, which runs under this lock during card reservation,
+    # then lock the card's row before the binding, in the same order as a card decision.
+    approval_grants.lock(transaction, principal_id)
     recorded = background_approvals.resolve_call(
         transaction,
         principal_id,

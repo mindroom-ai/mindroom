@@ -2009,22 +2009,11 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         thread_id=thread_id,
         room_id=room_id,
     )
-    created_at = datetime.now(UTC).isoformat()
+    # Publish the task only once its card exists, so no cancel or edit can reach a task whose
+    # card is still being prepared; a card whose task never published is withdrawn.
+    task_published = False
     try:
-        await _persist_scheduled_task_state(
-            client=runtime.client,
-            room_id=room_id,
-            task_id=task_id,
-            workflow=workflow,
-            timezone=config.timezone,
-            created_at=created_at,
-            matrix_admin=runtime.matrix_admin,
-        )
-    except ValueError as e:
-        return (None, f"❌ Failed to schedule: {e!s}")
-    card_posted = False
-    try:
-        card_posted = await request_scheduled_call_approval(
+        if not await request_scheduled_call_approval(
             task_id=task_id,
             room_id=room_id,
             thread_id=thread_id,
@@ -2036,23 +2025,23 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             execute_at=send_at,
             workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
+        ):
+            return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
+        await _persist_scheduled_task_state(
+            client=runtime.client,
+            room_id=room_id,
+            task_id=task_id,
+            workflow=workflow,
+            timezone=config.timezone,
+            created_at=datetime.now(UTC).isoformat(),
+            matrix_admin=runtime.matrix_admin,
         )
+        task_published = True
+    except ValueError as e:
+        return (None, f"❌ Failed to schedule: {e!s}")
     finally:
-        if not card_posted:
-            # A stop can land after the card was reserved but before the request returned.
+        if not task_published:
             await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
-            await _persist_scheduled_task_state(
-                client=runtime.client,
-                room_id=room_id,
-                task_id=task_id,
-                workflow=workflow,
-                timezone=config.timezone,
-                status="cancelled",
-                created_at=created_at,
-                matrix_admin=runtime.matrix_admin,
-            )
-    if not card_posted:
-        return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
     scheduled_for = _format_scheduled_time(send_at, config.timezone)
     _start_scheduled_task(
         runtime.client,

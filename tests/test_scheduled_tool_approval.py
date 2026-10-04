@@ -760,28 +760,33 @@ async def test_schedule_tool_call_rejects_what_it_cannot_bind(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("request_outcome", "error"),
-    [(False, "approval card"), (ToolApprovalTransportError("router missing"), "router missing")],
-    ids=["refused", "raised"],
+    ("request_outcome", "raised"),
+    [
+        (False, RuntimeError),
+        (ToolApprovalTransportError("router missing"), ToolApprovalTransportError),
+        (asyncio.CancelledError(), asyncio.CancelledError),
+    ],
+    ids=["refused", "raised", "interrupted"],
 )
-async def test_schedule_tool_call_cancels_the_task_when_its_card_cannot_be_posted(
-    request_outcome: bool | Exception,
-    error: str,
+async def test_no_task_is_published_when_its_card_cannot_be_posted(
+    request_outcome: bool | BaseException,
+    raised: type[BaseException],
 ) -> None:
-    """A schedule whose approval card never appeared must not fire as an ordinary send."""
-    config = _gated_config()
-    context = _tool_context(config)
+    """The task becomes visible only after its card exists, and any card left by a failed request is withdrawn."""
+    context = _tool_context(_gated_config())
     request = (
         AsyncMock(side_effect=request_outcome)
-        if isinstance(request_outcome, Exception)
+        if isinstance(request_outcome, BaseException)
         else AsyncMock(return_value=request_outcome)
     )
+    withdraw = AsyncMock()
 
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
         patch("mindroom.scheduling._start_scheduled_task") as start,
         tool_runtime_context(context),
-        pytest.raises((RuntimeError, ToolApprovalTransportError), match=error),
+        pytest.raises(raised),
     ):
         await SchedulerTools().schedule_tool_call(
             tool_name="post_slack_message",
@@ -790,28 +795,25 @@ async def test_schedule_tool_call_cancels_the_task_when_its_card_cannot_be_poste
             description="Morning DM",
         )
 
-    assert [status for status, _record in _persisted_workflows(context)] == ["pending", "cancelled"]
+    context.client.room_put_state.assert_not_awaited()
+    withdraw.assert_awaited_once_with(request.await_args.kwargs["task_id"], reason="Schedule cancelled.")
     start.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_interrupted_card_request_cancels_the_task_and_withdraws_its_card() -> None:
-    """A stop while the card is being delivered leaves neither a runnable task nor an actionable card."""
-    config = _gated_config()
-    context = _tool_context(config)
-    order: list[str] = []
-    withdraw = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("withdraw"))
-    put_state = context.client.room_put_state.return_value
-    context.client.room_put_state.side_effect = lambda **kwargs: (
-        order.append(str(kwargs["content"]["status"])) or put_state
-    )
+async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
+    """A card whose task never reached Matrix state cannot stay approvable."""
+    context = _tool_context(_gated_config())
+    context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    request = AsyncMock(return_value=True)
+    withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.request_scheduled_call_approval", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
         patch("mindroom.scheduling._start_scheduled_task") as start,
         tool_runtime_context(context),
-        pytest.raises(asyncio.CancelledError),
+        pytest.raises(RuntimeError, match="Failed to schedule"),
     ):
         await SchedulerTools().schedule_tool_call(
             tool_name="post_slack_message",
@@ -820,10 +822,7 @@ async def test_interrupted_card_request_cancels_the_task_and_withdraws_its_card(
             description="Morning DM",
         )
 
-    [(_status, record), (cancelled_status, _cancelled)] = _persisted_workflows(context)
-    assert cancelled_status == "cancelled"
-    withdraw.assert_awaited_once_with(record.task_id, reason="Schedule cancelled.")
-    assert order == ["pending", "withdraw", "cancelled"]
+    withdraw.assert_awaited_once_with(request.await_args.kwargs["task_id"], reason="Schedule cancelled.")
     start.assert_not_called()
 
 

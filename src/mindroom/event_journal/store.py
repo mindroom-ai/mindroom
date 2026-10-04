@@ -1300,10 +1300,15 @@ class PrincipalStore:
         )
 
     async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]:
-        """Retire spent payloads and enqueue revocations after their approval edits."""
-        return await self._backend.write(
-            lambda transaction: approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id),
-        )
+        """Retire spent payloads, enqueue revocations after their approval edits, and prune old scheduled calls."""
+
+        def maintain(transaction: Transaction) -> tuple[str, ...]:
+            deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
+            if grant_id is None:
+                scheduled_approvals.prune(transaction, self._principal_id, time.time_ns())
+            return deliveries
+
+        return await self._backend.write(maintain)
 
     async def revoke_approval_grant(
         self,
