@@ -2006,6 +2006,9 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
         return (None, f"❌ Could not evaluate the approval policy for `{tool_name}`: {exc}")
     if not requires_approval:
         return (None, f"❌ `{tool_name}` does not require approval; use `schedule` instead.")
+    responders = await runtime.responder_candidates_for_room(runtime.room, scheduled_by)
+    if entity_identity_registry(config, runtime_paths).current_id(agent_name) not in responders:
+        return (None, f"❌ `{agent_name}` cannot receive a scheduled call from you in this room.")
 
     task_id = str(uuid.uuid4())[:8]
     workflow = ScheduledWorkflow(

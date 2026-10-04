@@ -18,6 +18,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
@@ -44,14 +45,19 @@ from mindroom.scheduling import (
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError
 from mindroom.tool_approval_grants import ApprovalOperation
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import test_runtime_paths
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_scheduling_runtime_from_tool_runtime_context,
+    tool_runtime_context,
+)
+from tests.conftest import runtime_paths_for, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.scheduling_helpers import joined_member_state
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from mindroom.approval_manager import ApprovalActionResult
 
@@ -631,6 +637,20 @@ def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolR
     )
 
 
+def _responders(config: Config, *entity_names: str) -> AbstractContextManager[object]:
+    """Let only these agents or teams reply to the requester in the scheduling room."""
+    registry = entity_identity_registry(config, runtime_paths_for(config))
+    responder_ids = [registry.current_id(name) for name in entity_names]
+    build_runtime = build_scheduling_runtime_from_tool_runtime_context
+    return patch(
+        "mindroom.custom_tools.scheduler.build_scheduling_runtime_from_tool_runtime_context",
+        side_effect=lambda context: replace(
+            build_runtime(context),
+            responder_candidates_for_room=AsyncMock(return_value=responder_ids),
+        ),
+    )
+
+
 def _persisted_workflows(context: ToolRuntimeContext) -> list[tuple[str, ScheduledTaskRecord]]:
     records = []
     for put in context.client.room_put_state.await_args_list:
@@ -652,6 +672,7 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling._start_scheduled_task") as start,
         tool_runtime_context(context),
+        _responders(context.config, "general"),
     ):
         result = await SchedulerTools().schedule_tool_call(
             tool_name="post_slack_message",
@@ -693,6 +714,29 @@ async def test_schedule_tool_call_saves_the_exact_call_and_requests_its_card() -
 
 
 @pytest.mark.asyncio
+async def test_schedule_tool_call_requires_the_agent_to_be_able_to_reply_in_the_room() -> None:
+    """An agent that cannot receive the trigger, such as a delegated child outside the room, cannot schedule it."""
+    context = _tool_context(_gated_config())
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        tool_runtime_context(context),
+        _responders(context.config),
+        pytest.raises(RuntimeError, match="cannot receive"),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    request.assert_not_awaited()
+    context.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_schedule_tool_call_binds_the_arguments_the_call_will_run_with() -> None:
     """The card and digest show arguments as the model runtime decodes them, so the fire-time call can match."""
     context = _tool_context(_gated_config())
@@ -702,6 +746,7 @@ async def test_schedule_tool_call_binds_the_arguments_the_call_will_run_with() -
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         patch("mindroom.scheduling._start_scheduled_task"),
         tool_runtime_context(context),
+        _responders(context.config, "general"),
     ):
         await SchedulerTools().schedule_tool_call(
             tool_name="post_slack_message",
@@ -746,6 +791,7 @@ async def test_schedule_tool_call_rejects_what_it_cannot_bind(
     with (
         patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
         tool_runtime_context(context),
+        _responders(context.config, "general"),
         pytest.raises(RuntimeError, match=error),
     ):
         await SchedulerTools().schedule_tool_call(
@@ -787,6 +833,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
         patch("mindroom.scheduling._start_scheduled_task") as start,
         tool_runtime_context(context),
+        _responders(context.config, "general"),
         pytest.raises(raised),
     ):
         await SchedulerTools().schedule_tool_call(
@@ -814,6 +861,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
         patch("mindroom.scheduling._start_scheduled_task") as start,
         tool_runtime_context(context),
+        _responders(context.config, "general"),
         pytest.raises(RuntimeError, match="Failed to schedule"),
     ):
         await SchedulerTools().schedule_tool_call(
