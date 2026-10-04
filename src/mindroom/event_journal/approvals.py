@@ -165,7 +165,7 @@ def reserve_deliveries(
             card_principal_id,
             continuation_principal_id=continuation_principal_id,
             continuation=continuation,
-            card=card,
+            card=approval_grants.unscoped(card),
             membership_epoch=membership_epoch,
         ):
             continue
@@ -1071,13 +1071,16 @@ def _card(row: Row) -> StoredApprovalCard | None:
             card_identity = _native_identity(card)
             continuation_entity_name = cast("str | None", row["continuation_entity_name"])
         else:
-            target_kind = (
-                "scheduled_call" if content.get("approval_target") == "scheduled_call" else "background_script"
-            )
             continuation_entity_name = None
             background_call_id = _required_background_call_id(row)
             stored_identity = (background_run_id, -1, background_call_id)
-            card_run_id, card_call_id = background_approvals.background_identity(card)
+            scheduled_identity = scheduled_approvals.card_identity(card)
+            if scheduled_identity is None:
+                target_kind = "background_script"
+                card_run_id, card_call_id = background_approvals.background_identity(card)
+            else:
+                target_kind = "scheduled_call"
+                card_run_id, card_call_id = scheduled_identity
             card_identity = (card_run_id, -1, card_call_id)
         resolution = approval_card_state.decode_resolution(row["resolution_json"])
     except (json.JSONDecodeError, TypeError, ValueError):

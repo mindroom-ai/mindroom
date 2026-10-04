@@ -457,8 +457,8 @@ class ApprovalManager:
         if self.cards is None or self.send_delivery is None:
             return
         recorded = await self.cards.withdraw_scheduled_call_approval(task_id=task_id, reason=reason)
-        if recorded.recorded:
-            await self.recover_cards_on_startup()
+        if recorded.recorded and recorded.delivery_id is not None:
+            await self._flush_card_delivery(recorded.delivery_id, recorded.card_event_id)
 
     async def _prepare_approval_card(
         self,
@@ -808,7 +808,7 @@ class ApprovalManager:
         if revocation is None:
             return ApprovalActionResult(consumed=True)
         await self._flush_card_delivery(revocation.original_delivery_id, card_event_id, room_id=room_id)
-        await self._maintain_grants(grant_id=grant_id)
+        await self._maintain_automatic_approvals(grant_id=grant_id)
         self._ensure_deadline_sweep()
         return ApprovalActionResult(
             consumed=True,
@@ -883,7 +883,13 @@ class ApprovalManager:
             await self._wake_continuation(recorded)
         return await self._flush_card_delivery(stored.delivery_id, pending.card_event_id, room_id=pending.room_id)
 
-    async def _flush_card_delivery(self, delivery_id: str, card_event_id: str | None, *, room_id: str) -> bool:
+    async def _flush_card_delivery(
+        self,
+        delivery_id: str,
+        card_event_id: str | None,
+        *,
+        room_id: str | None = None,
+    ) -> bool:
         """Deliver one committed card decision, preserving INITIAL before FINAL."""
         assert self.cards is not None
         try:
@@ -1002,11 +1008,11 @@ class ApprovalManager:
             return await self._expire_stored(room_id, stored)
         return None
 
-    async def _maintain_grants(self, *, grant_id: str | None = None) -> set[tuple[str, DeliveryStage]]:
+    async def _maintain_automatic_approvals(self, *, grant_id: str | None = None) -> set[tuple[str, DeliveryStage]]:
         """Retire spent payloads and flush newly unblocked acknowledgements."""
         assert self.cards is not None
         failed: set[tuple[str, DeliveryStage]] = set()
-        for delivery_id in await self.cards.maintain_approval_grants(grant_id=grant_id):
+        for delivery_id in await self.cards.maintain_automatic_approvals(grant_id=grant_id):
             try:
                 acknowledged = await self._worker().flush(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
             except Exception:
@@ -1023,7 +1029,7 @@ class ApprovalManager:
         outcome = await self._worker().recover()
         transport_failures = set(outcome.failed_deliveries)
         failed = outcome.failed - len(transport_failures)
-        transport_failures.update(await self._maintain_grants())
+        transport_failures.update(await self._maintain_automatic_approvals())
         scanned = 0
         retired = 0
         for room_id in await self.cards.pending_approval_room_ids():

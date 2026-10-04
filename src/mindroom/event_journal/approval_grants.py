@@ -16,7 +16,7 @@ from mindroom.tool_approval_grants import (
     valid_auto_approve_seconds,
 )
 
-from . import approval_card_state, outbox
+from . import approval_card_state, automatic_approvals, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -47,6 +47,14 @@ def _epoch(transaction: Transaction, principal_id: str, room_id: str) -> int | N
     return 0 if row is None else None if row["departure_fenced"] else int(row["membership_epoch"])
 
 
+def unscoped(card: ApprovalCardReservation) -> ApprovalCardReservation:
+    """Drop a card's unbound timed-grant scope and offer, for a card no grant may cover."""
+    payload = {
+        key: value for key, value in card.payload.items() if key not in {"approval_scope", "auto_approve_options"}
+    }
+    return replace(card, payload=payload, grant_operation=None)
+
+
 def reserve_identity(
     transaction: Transaction,
     principal_id: str,
@@ -61,10 +69,7 @@ def reserve_identity(
     call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
     responder_epoch = _epoch(transaction, continuation_principal_id, continuation.room_id)
     if responder_epoch is None:
-        payload = dict(card.payload)
-        payload.pop("approval_scope", None)
-        payload.pop("auto_approve_options", None)
-        return replace(card, payload=payload, grant_operation=None)
+        return unscoped(card)
     scope = json.dumps(
         [
             continuation.room_id,
@@ -212,35 +217,19 @@ def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalC
     )
     if grant_row is None or not _current(transaction, principal_id, grant_row):
         return False
-    decided = transaction.fetchone(
-        """
-        UPDATE approval_continuation_calls SET decision = 'approved'
-        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND tool_call_id = ?
-          AND decision IS NULL AND expires_at_ns > ?
-        RETURNING tool_call_id
-        """,
-        (
-            row["responder_principal_id"],
-            row["continuation_id"],
-            row["continuation_generation"],
-            row["tool_call_id"],
-            now,
-        ),
-    )
-    if decided is None:
-        return False
-    transaction.execute(
-        "UPDATE approval_grant_cards SET grant_id = ? WHERE principal_id = ? AND delivery_id = ?",
-        (grant_row["grant_id"], principal_id, delivery_id),
-    )
     grant_resolution = approval_card_state.decode_object_payload(
         grant_row["resolution_json"],
         description="grant resolution",
     )
-    receipt = approval_card_state.terminal_content(
-        card.payload,
-        status="approved",
-        reason=None,
+    if not automatic_approvals.apply(
+        transaction,
+        principal_id,
+        continuation_principal_id=str(row["responder_principal_id"]),
+        call_identity=(str(row["continuation_id"]), int(row["continuation_generation"]), str(row["tool_call_id"])),
+        card=card,
+        room_id=str(row["room_id"]),
+        thread_id=str(row["thread_id"]),
+        membership_epoch=int(row["membership_epoch"]),
         metadata=approval_card_state.ApprovalDecisionMetadata(
             resolved_by=str(grant_row["requester_id"]),
             resolved_at=approval_timestamp(now),
@@ -254,19 +243,12 @@ def apply_active(transaction: Transaction, principal_id: str, *, card: ApprovalC
                 "expires_at": approval_timestamp(int(grant_row["expires_at_ns"])),
             },
         ),
-        publication="receipt",
-    )
-    outbox.enqueue(
-        transaction,
-        principal_id,
-        delivery_id=delivery_id,
-        stage=DeliveryStage.INITIAL,
-        event_type=card.event_type,
-        room_id=str(row["room_id"]),
-        thread_id=str(row["thread_id"]),
-        membership_epoch=int(row["membership_epoch"]),
-        payload=receipt,
-        edits_event_id=None,
+        now_ns=now,
+    ):
+        return False
+    transaction.execute(
+        "UPDATE approval_grant_cards SET grant_id = ? WHERE principal_id = ? AND delivery_id = ?",
+        (grant_row["grant_id"], principal_id, delivery_id),
     )
     return True
 

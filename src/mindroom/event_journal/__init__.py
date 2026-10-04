@@ -26,7 +26,7 @@ from .approvals import (
     StoredApprovalCard,
     UnreadableApprovalCard,
 )
-from .background_approvals import BackgroundApprovalDecision, scheduled_call_run_id
+from .background_approvals import BackgroundApprovalDecision
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .journal import validate_ingestion_batch_admission
 from .models import (
@@ -64,7 +64,12 @@ from .models import (
 )
 from .outbox import matrix_delivery_payload
 from .projection import ProjectedEvent, replacement_target, thread_root, visible_content
-from .scheduled_approvals import SCHEDULED_APPROVAL_WINDOW_NS, ScheduledApprovalArmState, ScheduledCallBinding
+from .scheduled_approvals import (
+    SCHEDULED_APPROVAL_WINDOW_NS,
+    ScheduledApprovalArmState,
+    ScheduledCallBinding,
+    scheduled_call_run_id,
+)
 from .store import EventJournalStore, PrincipalStore, TurnRecordStore
 from .views import (
     AdmissionView,

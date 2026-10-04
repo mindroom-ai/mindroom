@@ -1124,7 +1124,7 @@ class PrincipalStore:
     ) -> bool:
         """Atomically reserve one exact background-call approval card."""
         return await self._backend.write(
-            lambda transaction: background_approvals.reserve_delivery(
+            lambda transaction: background_approvals.reserve_script_delivery(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
@@ -1301,8 +1301,8 @@ class PrincipalStore:
             ),
         )
 
-    async def maintain_approval_grants(self, *, grant_id: str | None = None) -> tuple[str, ...]:
-        """Retire spent payloads, enqueue revocations after their approval edits, and prune old scheduled calls."""
+    async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]:
+        """Retire settled automatic receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
 
         def maintain(transaction: Transaction) -> tuple[str, ...]:
             if grant_id is None:

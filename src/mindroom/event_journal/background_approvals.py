@@ -1,7 +1,8 @@
 """Exact durable transactions for detached approval calls.
 
-Background-script calls and scheduled tool calls share this lifecycle; a
-scheduled call is the single call of the detached run named by its task.
+A detached call is decided on its own card rather than inside a paused run.
+Background-script calls and scheduled tool calls share this lifecycle; each
+kind's owner names its runs and reads its own card payloads.
 """
 
 from __future__ import annotations
@@ -24,13 +25,11 @@ __all__ = [
     "decision",
     "prune_calls",
     "reserve_delivery",
+    "reserve_script_delivery",
     "resolve",
     "resolve_call",
     "resolve_pending_calls",
-    "scheduled_call_run_id",
 ]
-
-_SCHEDULED_CALL_RUN_PREFIX = "scheduled-task:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,20 +40,9 @@ class BackgroundApprovalDecision:
     reason: str | None
 
 
-def scheduled_call_run_id(task_id: str) -> str:
-    """Return the detached run that owns one scheduled task's single approval call."""
-    return _SCHEDULED_CALL_RUN_PREFIX + task_id
-
-
 def background_identity(card: Mapping[str, Any]) -> tuple[str, str]:
-    """Extract strict detached exact-call identity from one card."""
+    """Extract strict background-script exact-call identity from one card."""
     content = card.get("content")
-    if isinstance(content, dict) and content.get("approval_target") == "scheduled_call":
-        task_id = content.get("scheduled_task_id")
-        if not isinstance(task_id, str) or not task_id:
-            msg = "Approval card is missing scheduled-call target identity."
-            raise ValueError(msg)
-        return scheduled_call_run_id(task_id), task_id
     if not isinstance(content, dict) or content.get("approval_target") != "background_script":
         msg = "Approval card is missing background-script target identity."
         raise TypeError(msg)
@@ -77,9 +65,9 @@ def reserve_delivery(
     expires_at_ns: int,
     card: ApprovalCardReservation,
 ) -> bool:
-    """Atomically reserve one exact background-call target and frozen card."""
-    if card.tool_call_id != call_id or background_identity({"content": card.payload}) != (run_id, call_id):
-        msg = f"Background approval delivery {card.delivery_id!r} changed exact-call identity"
+    """Atomically reserve one exact detached call and its frozen card, which its caller verified names that call."""
+    if card.tool_call_id != call_id:
+        msg = f"Detached approval delivery {card.delivery_id!r} changed exact-call identity"
         raise ValueError(msg)
     epoch = transaction.fetchone(
         "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
@@ -121,6 +109,33 @@ def reserve_delivery(
         card=card,
     )
     return True
+
+
+def reserve_script_delivery(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str | None,
+    run_id: str,
+    call_id: str,
+    expires_at_ns: int,
+    card: ApprovalCardReservation,
+) -> bool:
+    """Atomically reserve one background-script call and the card that names it."""
+    if background_identity({"content": card.payload}) != (run_id, call_id):
+        msg = f"Background approval delivery {card.delivery_id!r} changed exact-call identity"
+        raise ValueError(msg)
+    return reserve_delivery(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        call_id=call_id,
+        expires_at_ns=expires_at_ns,
+        card=card,
+    )
 
 
 def resolve(

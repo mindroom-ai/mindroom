@@ -314,7 +314,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
         await _fire_time_call(journal, manager, "first")
         cards = journal.principal("router@shared")
 
-        await cards.maintain_approval_grants()
+        await cards.maintain_automatic_approvals()
 
         remaining = await journal.backend.read(
             lambda transaction: transaction.fetchone(
@@ -841,7 +841,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
             ),
         )
 
-        await cards.maintain_approval_grants()
+        await cards.maintain_automatic_approvals()
         assert await binding_present()
 
         await journal.backend.write(
