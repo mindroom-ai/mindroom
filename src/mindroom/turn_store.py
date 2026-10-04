@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
@@ -19,7 +20,7 @@ from mindroom.handled_turns import (
     same_turn_identity,
     with_user_stop,
 )
-from mindroom.history.storage import remove_run_by_event_id
+from mindroom.history.storage import remove_history_of_redacted_events, remove_run_by_event_id
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
 from mindroom.session_ids import create_session_id
@@ -1100,13 +1101,39 @@ class TurnStore:
             imported_record,
         )
 
-    def remove_stale_runs_for_edit(
+    async def remove_stale_runs_for_edit(
         self,
         *,
         turn_record: TurnRecord,
         requester_user_id: str,
     ) -> None:
-        """Remove stale persisted runs before regenerating one edited turn."""
+        """Remove stale persisted runs before regenerating one edited turn.
+
+        History derived from redacted events goes first, so a compaction rollback
+        cannot restore the edited turn's old runs after they were pruned.
+        """
+        target = turn_record.conversation_target
+        scope = turn_record.history_scope
+        if target is not None and scope is not None:
+            storage = self.deps.state_writer.create_storage(
+                self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
+                scope=scope,
+            )
+            try:
+                session = (
+                    get_team_session(storage, target.session_id)
+                    if self.deps.state_writer.session_type_for_scope(scope) is SessionType.TEAM
+                    else get_agent_session(storage, target.session_id)
+                )
+                if session is not None:
+                    await remove_history_of_redacted_events(
+                        storage,
+                        session,
+                        scope,
+                        partial(self.redacted_history_events, target),
+                    )
+            finally:
+                storage.close()
         self._remove_stale_runs_for_turn_record(
             turn_record=turn_record,
             requester_user_id=requester_user_id,

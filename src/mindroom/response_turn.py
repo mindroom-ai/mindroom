@@ -46,7 +46,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.storage import read_scope_history_event_ids, remove_redacted_event_from_history
+from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -882,42 +882,20 @@ async def _remove_history_of_redacted_events(
     This is the only cleanup after a redaction: every event this scope's history derives
     from is checked against the room's and the conversation's tombstones each time a
     response opens it, which also covers a message no turn answered but a later turn read
-    as context. A rollback can restore older runs, so the check repeats until it removes
-    nothing new.
+    as context.
     """
     if ctx.redacted_history_events is None or scope_context is None or scope_context.session is None:
         return
-    session = scope_context.session
-    removed_event_ids: list[str] = []
-    while True:
-        event_ids = await run_blocking_until_complete(
-            read_scope_history_event_ids,
-            scope_context.storage,
-            session,
-            scope_context.scope,
-        )
-        if not event_ids:
-            break
-        redacted = await ctx.redacted_history_events(tuple(sorted(event_ids)))
-        newly_removed: list[str] = []
-        for event_id in sorted(set(redacted).difference(removed_event_ids)):
-            removal = partial(
-                remove_redacted_event_from_history,
-                scope_context.storage,
-                session,
-                scope_context.scope,
-                event_id=event_id,
-                legacy_source_event_id=redacted[event_id],
-            )
-            if await run_blocking_until_complete(removal):
-                newly_removed.append(event_id)
-        if not newly_removed:
-            break
-        removed_event_ids.extend(newly_removed)
+    removed_event_ids = await remove_history_of_redacted_events(
+        scope_context.storage,
+        scope_context.session,
+        scope_context.scope,
+        ctx.redacted_history_events,
+    )
     if removed_event_ids:
         logger.info(
             "Removed history derived from redacted events",
-            session_id=session.session_id,
+            session_id=scope_context.session.session_id,
             history_scope=scope_context.scope.key,
             redacted_event_ids=removed_event_ids,
         )

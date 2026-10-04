@@ -1217,6 +1217,66 @@ async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJ
 
 
 @pytest.mark.asyncio
+async def test_edit_pruning_follows_a_redaction_rollback(
+    journal_store: EventJournalStore,
+    tmp_path: Path,
+) -> None:
+    """A rollback that restores the edited turn's compacted run happens before pruning, not after."""
+    target = MessageTarget.resolve("!room:example.org", "$thread", "$a")
+    scope = HistoryScope(kind="agent", scope_id="agent")
+
+    def run(event_id: str) -> RunOutput:
+        return RunOutput(
+            run_id=f"{event_id}-run",
+            agent_id="agent",
+            session_id=target.session_id,
+            metadata={
+                constants.MATRIX_EVENT_ID_METADATA_KEY: event_id,
+                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [event_id],
+                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [event_id],
+            },
+        )
+
+    storage = _seeded_storage_with_runs(
+        tmp_path,
+        AgentSession(session_id=target.session_id, agent_id="agent", runs=[run("$a"), run("$b")]),
+    )
+    stored = get_agent_session(storage, target.session_id)
+    assert stored is not None
+    archive_compaction_chunk(
+        storage=storage,
+        session=stored,
+        scope=scope,
+        summary=SessionSummary(summary="summary of a and b"),
+        summary_model="summary-model",
+        archived_runs=list(stored.runs or []),
+    )
+    store = await _store_with_storage(journal_store, storage)
+    records = {
+        event_id: TurnRecord.create(
+            [event_id],
+            response_event_id=f"{event_id}-reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            history_scope=scope,
+            conversation_target=target,
+        )
+        for event_id in ("$a", "$b")
+    }
+    for record in records.values():
+        await store.record_turn(record)
+    await store.mark_source_redacted("$b", room_id=target.room_id)
+
+    await store.remove_stale_runs_for_edit(turn_record=records["$a"], requester_user_id="@user:example.org")
+    await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
+
+    persisted = get_agent_session(storage, target.session_id)
+    assert persisted is not None
+    assert [stored_run.run_id for stored_run in persisted.runs or []] == []
+    assert persisted.summary is None
+
+
+@pytest.mark.asyncio
 async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     journal_store: EventJournalStore,
     tmp_path: Path,
@@ -1262,7 +1322,7 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     )
     await store.record_turn(source_record)
 
-    store.remove_stale_runs_for_edit(
+    await store.remove_stale_runs_for_edit(
         turn_record=source_record,
         requester_user_id="@user:example.org",
     )

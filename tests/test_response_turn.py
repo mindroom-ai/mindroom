@@ -29,6 +29,7 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history import storage as history_storage
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.participation import ParticipationGate
@@ -836,8 +837,8 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
     async def redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
         return dict.fromkeys(set(event_ids) & {"$x", "$z"})
 
-    monkeypatch.setattr(response_turn_module, "read_scope_history_event_ids", read_history)
-    monkeypatch.setattr(response_turn_module, "remove_redacted_event_from_history", remove)
+    monkeypatch.setattr(history_storage, "_read_scope_history_event_ids", read_history)
+    monkeypatch.setattr(history_storage, "_remove_redacted_event_from_history", remove)
     scope_context = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="general"),
         storage=Mock(spec=BaseDb),

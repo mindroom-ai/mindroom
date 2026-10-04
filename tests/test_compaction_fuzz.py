@@ -27,10 +27,10 @@ from mindroom import constants
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history import archive
 from mindroom.history.storage import (
+    _remove_redacted_event_from_history,
     archive_compaction_chunk,
     read_scope_seen_event_ids,
     reconcile_compaction_state,
-    remove_redacted_event_from_history,
 )
 from mindroom.history.types import HistoryScope
 from tests.conftest import seed_session
@@ -216,7 +216,7 @@ class _Runner:
         if not self._events:
             return None
         event_id = self._events[action.index % len(self._events)]
-        remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
+        _remove_redacted_event_from_history(self._storage, self._load(), _SCOPE, event_id=event_id)
         self._redacted.add(event_id)
         return event_id
 

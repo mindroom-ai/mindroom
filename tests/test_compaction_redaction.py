@@ -17,12 +17,12 @@ from mindroom import constants
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.history import archive
 from mindroom.history.storage import (
+    _read_scope_history_event_ids,
     _remove_redacted_event_from_compaction,
+    _remove_redacted_event_from_history,
     archive_compaction_chunk,
-    read_scope_history_event_ids,
     read_scope_seen_event_ids,
     reconcile_compaction_state,
-    remove_redacted_event_from_history,
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope
@@ -217,12 +217,12 @@ def test_compacted_history_that_read_a_redacted_event_is_found_and_removed(stora
     _compact(storage, session, ["r1"], "summary that quotes the context")
     loaded = _stored(storage)
 
-    assert "$context" in read_scope_history_event_ids(storage, loaded, _SCOPE)
-    assert remove_redacted_event_from_history(storage, loaded, _SCOPE, event_id="$context") is True
+    assert "$context" in _read_scope_history_event_ids(storage, loaded, _SCOPE)
+    assert _remove_redacted_event_from_history(storage, loaded, _SCOPE, event_id="$context") is True
 
     assert loaded.runs == []
     assert loaded.summary is None
-    assert "$context" not in read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
+    assert "$context" not in _read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
 
 
 def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: SqliteDb) -> None:
@@ -238,7 +238,7 @@ def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: Sq
     )
     _compact(storage, session, ["r1"], "summary of r1")
 
-    event_ids = read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
+    event_ids = _read_scope_history_event_ids(storage, _stored(storage), _SCOPE)
 
     assert {"$coalesced", "$r1", "$r2", "$r3"} <= event_ids
     assert "$coalesced" not in read_scope_seen_event_ids(storage, _stored(storage), _SCOPE)

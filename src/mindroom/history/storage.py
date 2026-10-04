@@ -75,7 +75,7 @@ from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from agno.db.base import BaseDb
     from agno.models.base import Model
@@ -296,7 +296,7 @@ def read_scope_seen_event_ids(
     return seen_event_ids
 
 
-def read_scope_history_event_ids(
+def _read_scope_history_event_ids(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
@@ -413,7 +413,7 @@ def remove_run_by_event_id(
     return True
 
 
-def remove_redacted_event_from_history(
+def _remove_redacted_event_from_history(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,
@@ -446,6 +446,42 @@ def remove_redacted_event_from_history(
     )
     _adopt_session_fields(session, latest_session)
     return removed_run or removed_compacted
+
+
+async def remove_history_of_redacted_events(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]],
+) -> list[str]:
+    """Remove the part of one scope's history derived from events since redacted, and return those events.
+
+    ``redacted_history_events`` maps each redacted event to the source a legacy summary
+    consumed it through, or None. A rollback can restore older runs that read another
+    redacted event, so the check repeats until a pass removes nothing new. ``session``
+    is synced to the stored result.
+    """
+    removed_event_ids: list[str] = []
+    while True:
+        event_ids = await run_blocking_until_complete(_read_scope_history_event_ids, storage, session, scope)
+        if not event_ids:
+            return removed_event_ids
+        redacted = await redacted_history_events(tuple(sorted(event_ids)))
+        newly_removed: list[str] = []
+        for event_id in sorted(set(redacted).difference(removed_event_ids)):
+            removal = partial(
+                _remove_redacted_event_from_history,
+                storage,
+                session,
+                scope,
+                event_id=event_id,
+                legacy_source_event_id=redacted[event_id],
+            )
+            if await run_blocking_until_complete(removal):
+                newly_removed.append(event_id)
+        if not newly_removed:
+            return removed_event_ids
+        removed_event_ids.extend(newly_removed)
 
 
 def _remove_redacted_event_from_compaction(
