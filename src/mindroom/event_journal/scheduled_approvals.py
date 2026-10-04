@@ -309,13 +309,14 @@ def apply_armed(
 ) -> bool:
     """Approve one call matching an armed binding and publish its receipt instead of a card.
 
-    An any-arguments approval covers only a call whose card a timed approval
-    could cover, so a call no card could approve, such as one with arguments
-    too large to show, still asks.
+    An any-arguments approval covers only the scheduling agent's own call whose
+    card a timed approval could cover, so a team member's or delegated agent's
+    call, or one with arguments too large to show, still asks.
     """
     call = next(call for call in continuation.calls if call.tool_call_id == card.tool_call_id)
     if call.arguments_digest is None or continuation.thread_id is None:
         return False
+    any_arguments = any_arguments_eligible and call.invoking_agent == continuation.entity_name
     now = time.time_ns()
     row = transaction.fetchone(
         """
@@ -344,7 +345,7 @@ def apply_armed(
             call.tool_name,
             call.arguments_digest,
             # NULL matches no scope, leaving only an exact-arguments match.
-            ANY_ARGUMENTS if any_arguments_eligible else None,
+            ANY_ARGUMENTS if any_arguments else None,
             membership_epoch,
             now - SCHEDULED_APPROVAL_WINDOW_NS,
             now + SCHEDULED_APPROVAL_WINDOW_NS,

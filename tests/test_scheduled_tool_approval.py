@@ -14,7 +14,7 @@ import pytest
 
 from mindroom.approval_inbound import parse_approval_response_event
 from mindroom.approval_manager import ApprovalManager
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -771,6 +771,35 @@ async def test_team_member_call_consumes_the_team_approval(
 
 
 @pytest.mark.asyncio
+async def test_any_arguments_covers_only_the_scheduling_agents_own_calls(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A team member or delegated agent cannot borrow an any-arguments approval; an exact call still runs."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager, any_arguments_offered=True)
+        await _decide(manager, "approved", scheduled_scope="any_arguments")
+        assert await _arm(manager) == "armed"
+
+        borrowed = await _fire_time_call(
+            journal,
+            manager,
+            "borrowed",
+            arguments={"channel": "U999", "text": "Other"},
+            member="writer",
+        )
+        exact = await _fire_time_call(journal, manager, "exact", member="writer")
+
+        assert borrowed.calls[0].decision is None
+        assert exact.calls[0].decision is not None
+        assert exact.calls[0].decision.value == "approved"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_cancelling_an_armed_task_revokes_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -1169,6 +1198,39 @@ async def test_schedule_tool_call_offers_any_arguments_only_to_a_requester_appro
 
     kwargs = request.await_args.kwargs
     assert kwargs["approver_user_id"] == "@owner:localhost"
+    assert kwargs["any_arguments_offered"] is False
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_call_offers_only_exact_approval_for_a_team() -> None:
+    """Any member may make a team's call, so a team's card never offers approving any arguments."""
+    config = _bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+            tool_approval=ToolApprovalConfig(
+                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+            ),
+        ),
+    )
+    context = replace(_tool_context(config), agent_name="crew")
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling._start_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(context.config, "crew"),
+    ):
+        await SchedulerTools().schedule_tool_call(
+            tool_name="post_slack_message",
+            arguments_json='{"text": "Good morning!", "channel": "U123"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Morning DM",
+        )
+
+    kwargs = request.await_args.kwargs
+    assert kwargs["agent_name"] == "crew"
     assert kwargs["any_arguments_offered"] is False
 
 

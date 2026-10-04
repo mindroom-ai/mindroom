@@ -129,9 +129,10 @@ _TABLES = (
     """,
     """
     CREATE TABLE IF NOT EXISTS scheduled_call_approvals (
-        -- One exact tool call a requester approved while scheduling it. The
+        -- One tool call a requester approved while scheduling it. The
         -- decision lives on the shared detached-card row; this row holds the
-        -- binding a later call must match and its one-shot consumption.
+        -- binding a later call must match and its one-shot consumption, whose
+        -- receipt maintenance looks up by its delivery.
         principal_id TEXT NOT NULL,
         task_id TEXT NOT NULL,
         delivery_id TEXT NOT NULL,
@@ -153,7 +154,8 @@ _TABLES = (
         consumed_at_ns BIGINT,
         consumed_delivery_id TEXT,
         PRIMARY KEY (principal_id, task_id),
-        UNIQUE (principal_id, delivery_id)
+        UNIQUE (principal_id, delivery_id),
+        UNIQUE (principal_id, consumed_delivery_id)
     )
     """,
     """

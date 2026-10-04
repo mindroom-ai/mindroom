@@ -4053,10 +4053,10 @@ schedule_tool_call(
 MindRoom posts an approval card in the thread showing the tool, its arguments, and the send time; only the requester can approve or deny it, and it expires at the send time.
 The requester approves either the exact arguments shown or, when the card offers it, any arguments to the same tool.
 Approving any arguments lets the agent send whatever it decides through that tool when the task runs, so choose it only when the exact wording may change.
-The card offers it only when requesters approve their own calls, operators can stop offering it with [`tool_approval.scheduled_any_arguments`](https://docs.mindroom.chat/tool-approval/), and generic MCP `*_call_tool` calls are always approved exactly.
+The card offers it only for an agent's own calls, not a team's, and only when requesters approve their own calls; operators can stop offering it with [`tool_approval.scheduled_any_arguments`](https://docs.mindroom.chat/tool-approval/), and generic MCP `*_call_tool` calls are always approved exactly.
 When the task runs, the first matching call from the same agent or team, requester, and thread within 15 minutes of the scheduled time runs once without a new card, and an approved receipt names who approved it, when, and for which scope.
 The call must be the only one in that step needing approval.
-Anything else asks for approval as usual, including a call outside the approved scope, a second call, a late run, an edited task, a card nobody answered, and an any-arguments call whose arguments a card could not show in full.
+Anything else asks for approval as usual, including a call outside the approved scope, a second call, a late run, an edited task, a card nobody answered, and an any-arguments call made by another agent, such as a delegated one, or whose arguments a card could not show in full.
 If the requester denies the card, the task does not run, and cancelling or editing the task withdraws the approval.
 The trigger message and the stored task contain the arguments without redaction, so do not schedule calls whose arguments contain secrets.
 Recurring schedules cannot pre-approve calls.

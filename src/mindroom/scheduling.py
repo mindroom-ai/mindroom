@@ -2071,8 +2071,10 @@ async def schedule_approved_tool_call(  # noqa: PLR0911
             execute_at=send_at,
             workflow_digest=_scheduled_call_workflow_digest(task_id, workflow),
             scheduled_for_text=_format_local_time(send_at, config.timezone),
-            # Like a timed approval, the broader scope needs the requester to approve their own calls.
+            # Like a timed approval, the broader scope needs the requester to approve their own calls,
+            # and it covers only the scheduling agent's own call, which a team never makes itself.
             any_arguments_offered=approver_id == scheduled_by
+            and agent_name not in config.teams
             and scheduled_call_offers_any_arguments(config, tool_name, arguments),
         ):
             return (None, "❌ Could not post an approvable approval card for this call; nothing was scheduled.")
