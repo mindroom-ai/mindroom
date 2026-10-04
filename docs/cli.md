@@ -993,6 +993,7 @@ Nothing is redacted, and the newest matches are kept: up to 100 Agno runs, 1,000
 Run it on the MindRoom host, with the same `--config` and `--storage-path` the service uses, and hand both JSON files to a coding agent.
 A relative `debug.llm_request_log_dir` is relative to the working directory, as it is for the runtime, so run the command from the service's working directory in that case.
 A `--config` that does not exist is an error, and without `--config` a missing default config means the default storage locations, with a note on stderr.
+Agno sessions and outbound deliveries are found through the conversation, so `--event` alone does not reach them: pass `--room` and `--thread`, or a bug report file.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -1016,7 +1017,9 @@ A `--config` that does not exist is an error, and without `--config` a missing d
 │                         message.                                                       │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --event         -e      TEXT  Matrix event ID; repeatable.                             │
+│ --event         -e      TEXT  Matrix event ID; repeatable. Conversation-wide sources   │
+│                               (Agno sessions, deliveries) need --room/--thread, or a   │
+│                               report file.                                             │
 │ --room          -r      TEXT  Matrix room ID.                                          │
 │ --thread        -t      TEXT  Thread root event ID.                                    │
 │ --config        -c      PATH  Use this config file path.                               │

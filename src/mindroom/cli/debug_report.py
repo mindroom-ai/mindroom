@@ -127,7 +127,15 @@ def debug_report(
         None,
         help="MindRoom Chat bug report JSON, as attached to a Report a bug message.",
     ),
-    event: list[str] | None = typer.Option(None, "--event", "-e", help="Matrix event ID; repeatable."),  # noqa: B008
+    event: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--event",
+        "-e",
+        help=(
+            "Matrix event ID; repeatable. Conversation-wide sources (Agno sessions, deliveries) "
+            "need --room/--thread, or a report file."
+        ),
+    ),
     room: str | None = typer.Option(None, "--room", "-r", help="Matrix room ID."),
     thread: str | None = typer.Option(None, "--thread", "-t", help="Thread root event ID."),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Use this config file path."),  # noqa: B008
