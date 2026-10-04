@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import EARLIER_TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import markdown_to_html
 
@@ -28,7 +29,7 @@ _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
 # Useful for rebuilding model context, but not part of the visible answer. A
 # long tool trace would otherwise push a segmentable response into a sidecar.
-_INTERNAL_STREAM_KEYS = frozenset({"io.mindroom.tool_trace", "io.mindroom.visible_body"})
+_INTERNAL_STREAM_KEYS = frozenset({TOOL_TRACE_CONTENT_KEY, EARLIER_TOOL_TRACE_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY})
 # Rebuilt per segment from the chunk it carries, or dropped as internal.
 _SEGMENT_DROPPED_KEYS = _INTERNAL_STREAM_KEYS | {
     "body",

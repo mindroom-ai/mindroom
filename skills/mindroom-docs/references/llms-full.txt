@@ -2889,6 +2889,7 @@ defaults:
   max_preload_chars: 50000              # Hard cap for preloaded context from context_files
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true                # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+  max_consecutive_agent_replies: 50    # Agent or team messages in a row before agents stop waking each other (global-only; see authorization.md)
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)
   enable_streaming: true                # Stream agent responses via progressive message edits
@@ -18716,7 +18717,7 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
-A running `run_shell_command` stops with it, including one that runs in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+Tool calls running in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/), such as `run_shell_command` or `run_python_code`, stop with it, apart from the exceptions listed there.
 The partial text stays in the message, followed by a note explaining how it ended:
 
 | Note | Cause |
@@ -19484,6 +19485,10 @@ The `!help`, `!model`, `!mode`, and schedule commands in such a reply likewise r
 MindRoom refuses every other command in such a reply, including `!desktop`, `!config`, `!encrypt`, `!room_model`, and `!thread_mode`, so the requester must send those personally.
 A scheduled task's text never runs as a chat command when it fires, so an agent cannot send one for the requester by scheduling it either.
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
+A mention counts once the reply is finished, including a streamed reply whose final text replaces its placeholder, and never in a reply that was stopped or failed.
+A mention in an agent's or team's message wakes the mentioned entity only while the person it acts for is a joined member of the room; an invited or departed requester, or membership MindRoom cannot confirm, wakes nobody.
+Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, and continue after the next message from a person.
+The setting is global, defaults to `50`, and accepts any positive integer; `1` stops agents from waking each other, and a room-level conversation counts the room's messages outside threads.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
@@ -20721,7 +20726,8 @@ Correctness-critical timeline callbacks cross durable journal admission before o
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
-Edits from other agents are ignored, and the feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
+Edits from other agents never trigger regeneration; another agent's completed reply that mentions this entity is dispatched to it as a reply instead.
+The feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio).
 Downloads and decrypts media data, then processes it through the selected responder.
@@ -23878,8 +23884,8 @@ Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll it and `kill_shell_command(handle)` to stop it.
 Handles survive across requests to the same runner, but not a runner or worker restart, which also stops the commands.
 
-Stopping a response also stops its in-flight `run_shell_command` calls in workers.
-Synchronous worker calls, such as the `python` and `file` tools, run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, and persistent browser actions also run to completion.
+Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+In the runner's `inprocess` execution mode, a tool that runs inside the runner itself, such as `file`, finishes before the stop takes effect, and persistent browser actions also run to completion.
 
 ## Browsers in workers
 

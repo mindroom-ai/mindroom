@@ -16,6 +16,7 @@ from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    EARLIER_TOOL_TRACE_CONTENT_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
@@ -70,6 +71,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
         TOOL_TRACE_CONTENT_KEY,
+        EARLIER_TOOL_TRACE_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )

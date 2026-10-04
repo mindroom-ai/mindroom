@@ -1714,6 +1714,8 @@ class DeliveryGateway:
             }
 
         if request.existing_event_id is not None:
+            # The answer replaces an earlier visible message, so mark it finished as a streamed final does.
+            delivery_extra_content[constants.STREAM_STATUS_KEY] = constants.STREAM_STATUS_COMPLETED
             edited = await self.edit_text(
                 EditTextRequest(
                     target=request.target,

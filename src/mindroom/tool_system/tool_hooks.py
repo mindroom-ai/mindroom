@@ -425,10 +425,11 @@ def _resolve_deferred_sync_result(result: _ToolHookResult) -> _ToolHookResult:
     return result
 
 
-async def _run_sync_tool_entrypoint(
+async def run_sync_tool_entrypoint(
     entrypoint: Callable[..., _ToolHookResult],
     arguments: dict[str, Any],
 ) -> _ToolHookResult:
+    """Run one synchronous tool entrypoint off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
 
     def invoke() -> _ToolHookResult:
@@ -465,13 +466,13 @@ async def run_async_entrypoint_blocking_call(
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
     if tracker is None or tracker.executor is None:
         return await asyncio.get_running_loop().run_in_executor(executor, copy_context().run, call)
-    return await _run_sync_tool_entrypoint(call, {})
+    return await run_sync_tool_entrypoint(call, {})
 
 
 agno_compat_tool_hooks.install_patch(
     resolve_sync_result=_resolve_deferred_sync_result,
     resolve_async_result=_resolve_async_tool_hook_result,
-    run_sync_entrypoint=_run_sync_tool_entrypoint,
+    run_sync_entrypoint=run_sync_tool_entrypoint,
     has_completion_tracker=lambda: _SYNC_TOOL_COMPLETION_TRACKER.get() is not None,
 )
 
@@ -494,7 +495,7 @@ async def _call_tool(
     if async_entrypoint:
         result = await func(**args)
     else:
-        result = await _run_sync_tool_entrypoint(func, args)
+        result = await run_sync_tool_entrypoint(func, args)
     if inspect.isawaitable(result):
         return await result
     return result

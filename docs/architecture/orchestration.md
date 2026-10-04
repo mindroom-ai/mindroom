@@ -201,7 +201,8 @@ Correctness-critical timeline callbacks cross durable journal admission before o
 
 **Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
 The agent edits its own previous reply in place rather than sending a new message.
-Edits from other agents are ignored, and the feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
+Edits from other agents never trigger regeneration; another agent's completed reply that mentions this entity is dispatched to it as a reply instead.
+The feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio).
 Downloads and decrypts media data, then processes it through the selected responder.

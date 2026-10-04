@@ -5535,6 +5535,7 @@ expose = [
     "is_errored_run_output",
     "resolve_team_turn_models",
     "select_model_for_team",
+    "strip_team_display",
     "team_response",
     "team_response_stream",
     "resolve_live_shared_agent_names",
@@ -6332,6 +6333,7 @@ expose = [
     "build_interrupted_replay_snapshot",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
+    "render_stopped_attempt",
     "split_interrupted_tool_trace",
     "tool_execution_call_id",
 ]
@@ -6352,6 +6354,7 @@ expose = [
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
+    "earlier_tool_trace_content",
     "extract_tool_completed_info",
     "format_tool_combined",
     "format_tool_completed_event",
@@ -6361,11 +6364,12 @@ expose = [
     "render_tool_trace_for_context",
     "serialize_tool_trace",
     "tool_markers_match_trace",
+    "tool_trace_from_content",
 ]
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_function_tool_hook", "prepend_tool_hook_bridge", "run_async_entrypoint_blocking_call", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_function_tool_hook", "prepend_tool_hook_bridge", "run_async_entrypoint_blocking_call", "run_sync_tool_entrypoint", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]

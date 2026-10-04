@@ -83,7 +83,7 @@ With tool calls hidden, the agent still shows typing activity, and a tool that n
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button)).
-A running `run_shell_command` stops with it, including one that runs in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+Tool calls running in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/), such as `run_shell_command` or `run_python_code`, stop with it, apart from the exceptions listed there.
 The partial text stays in the message, followed by a note explaining how it ended:
 
 | Note | Cause |

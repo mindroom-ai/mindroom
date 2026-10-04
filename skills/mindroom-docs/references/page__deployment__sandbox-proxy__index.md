@@ -453,8 +453,8 @@ Shell commands that exceed their timeout return a background handle.
 Use `check_shell_command(handle)` to poll it and `kill_shell_command(handle)` to stop it.
 Handles survive across requests to the same runner, but not a runner or worker restart, which also stops the commands.
 
-Stopping a response also stops its in-flight `run_shell_command` calls in workers.
-Synchronous worker calls, such as the `python` and `file` tools, run until they finish or reach `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS`, and persistent browser actions also run to completion.
+Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
+In the runner's `inprocess` execution mode, a tool that runs inside the runner itself, such as `file`, finishes before the stop takes effect, and persistent browser actions also run to completion.
 
 ## Browsers in workers
 
