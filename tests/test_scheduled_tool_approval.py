@@ -118,8 +118,9 @@ async def _fire_time_call(
     arguments: dict[str, object] = _ARGUMENTS,
     thread: str = _THREAD,
     agent: str = _AGENT,
+    member: str | None = None,
 ) -> ApprovalContinuation:
-    """Pause one agent run on a gated call, the way the fire-time turn does."""
+    """Pause one agent or team run on a gated call, the way the fire-time turn does."""
     responder = journal.principal("agent@" + agent)
     await responder.admit(
         InboundEvent(
@@ -148,7 +149,7 @@ async def _fire_time_call(
             ApprovalCall(
                 tool_call_id="call-" + name,
                 tool_name="post_slack_message",
-                invoking_agent=agent,
+                invoking_agent=member or agent,
                 expires_at_ns=9_000_000_000_000_000_000,
                 arguments_digest=approval_arguments_digest(arguments),
             ),
@@ -170,7 +171,7 @@ async def _fire_time_call(
         requester_id=_REQUESTER,
         approver_user_id=_REQUESTER,
         expires_at_ns=9_000_000_000_000_000_000,
-        agent_name=agent,
+        agent_name=member or agent,
         thread_id=thread,
         grant_operation=ApprovalOperation("binding", "post_slack_message"),
     )
@@ -434,6 +435,50 @@ async def test_new_room_tenure_does_not_inherit_the_approval(
         continuation = await _fire_time_call(journal, manager, "rejoined")
 
         assert continuation.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_team_member_call_consumes_the_team_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A team schedules as itself, while the member that makes the call is recorded on the paused run."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager)
+        await _decide(manager, "approved")
+        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+
+        continuation = await _fire_time_call(journal, manager, "team-call", member="writer")
+
+        assert continuation.calls[0].invoking_agent == "writer"
+        assert continuation.calls[0].decision is not None
+        assert continuation.calls[0].decision.value == "approved"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_armed_task_revokes_its_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A task cancelled after it armed cannot lend its approval to a later identical call."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await _schedule(manager)
+        await _decide(manager, "approved")
+        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+
+        await manager.cancel_scheduled_call_approval(_TASK)
+        continuation = await _fire_time_call(journal, manager, "after-cancel")
+
+        assert continuation.calls[0].decision is None
+        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "denied"
     finally:
         await manager.shutdown()
 

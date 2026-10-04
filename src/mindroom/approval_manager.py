@@ -24,7 +24,6 @@ from mindroom.event_journal import (
     StoredApprovalCard,
     UnreadableApprovalCard,
     approval_arguments_digest,
-    scheduled_call_run_id,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix_delivery import MatrixDeliveryWorker
@@ -428,7 +427,7 @@ class ApprovalManager:
             room_id=room_id,
             thread_id=thread_id,
             requester_id=requester_id,
-            invoking_agent=agent_name,
+            entity_name=agent_name,
             tool_name=tool_name,
             arguments_digest=approval_arguments_digest(arguments),
             workflow_digest=workflow_digest,
@@ -450,15 +449,10 @@ class ApprovalManager:
         return await self.cards.arm_scheduled_call_approval(task_id=task_id, workflow_digest=workflow_digest)
 
     async def cancel_scheduled_call_approval(self, task_id: str) -> None:
-        """Deny a still-pending scheduling-time card once its task is cancelled."""
+        """Withdraw a cancelled task's approval and deny its card if it is still pending."""
         if self.cards is None or self.send_delivery is None:
             return
-        recorded = await self.cards.resolve_background_approval_call(
-            run_id=scheduled_call_run_id(task_id),
-            call_id=task_id,
-            requested_status="denied",
-            reason="Schedule cancelled.",
-        )
+        recorded = await self.cards.revoke_scheduled_call_approval(task_id=task_id, reason="Schedule cancelled.")
         if recorded.recorded:
             await self.recover_cards_on_startup()
 

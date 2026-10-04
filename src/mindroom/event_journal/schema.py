@@ -138,7 +138,7 @@ _TABLES = (
         room_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         requester_id TEXT NOT NULL,
-        invoking_agent TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
         tool_name TEXT NOT NULL,
         arguments_digest TEXT NOT NULL,
         workflow_digest TEXT NOT NULL,
@@ -147,6 +147,7 @@ _TABLES = (
         card_event_id TEXT,
         decided_at_ns BIGINT,
         armed_at_ns BIGINT,
+        revoked_at_ns BIGINT,
         consumed_at_ns BIGINT,
         consumed_delivery_id TEXT,
         PRIMARY KEY (principal_id, task_id),
@@ -487,7 +488,7 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS scheduled_call_approvals_scope ON scheduled_call_approvals (
-        principal_id, room_id, thread_id, requester_id, invoking_agent, tool_name, arguments_digest
+        principal_id, room_id, thread_id, requester_id, entity_name, tool_name, arguments_digest
     )
     """,
     """

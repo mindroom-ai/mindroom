@@ -975,6 +975,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                 task_id=task_id,
                 created_by=task.workflow.created_by,
             )
+            await cancel_scheduled_call_approval(task_id)
             return None
 
 

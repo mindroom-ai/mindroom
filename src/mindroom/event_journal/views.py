@@ -492,6 +492,8 @@ class ApprovalDeliveryView(MatrixDeliveryView, Protocol):
         workflow_digest: str,
     ) -> ScheduledApprovalArmState: ...
 
+    async def revoke_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision: ...  # noqa: D102
+
     async def resolve_continuation_approval_card(  # noqa: D102
         self,
         *,

@@ -111,18 +111,21 @@ async def test_departed_owner_cancels_persisted_schedule(
     membership: str,
     owner_membership_runtime_paths: RuntimePaths,
 ) -> None:
-    """Leaving, removal, or deactivation must retire the creator's pending task."""
+    """Leaving, removal, or deactivation must retire the creator's pending task and its approval card."""
     client, workflow, state = _owner_schedule([{"membership": membership}])
+    cancel_approval = AsyncMock()
 
-    task = await scheduling._reconcile_runnable_task_retrying(
-        client,
-        "!test:server",
-        "owner_task",
-        config=Config(),
-        runtime_paths=owner_membership_runtime_paths,
-    )
+    with patch("mindroom.scheduling.cancel_scheduled_call_approval", new=cancel_approval):
+        task = await scheduling._reconcile_runnable_task_retrying(
+            client,
+            "!test:server",
+            "owner_task",
+            config=Config(),
+            runtime_paths=owner_membership_runtime_paths,
+        )
 
     assert task is None
+    cancel_approval.assert_awaited_once_with("owner_task")
     assert state["status"] == "cancelled"
     assert state["workflow"] == workflow.model_dump_json()
     assert state["created_at"] == "2026-09-01T00:00:00+00:00"

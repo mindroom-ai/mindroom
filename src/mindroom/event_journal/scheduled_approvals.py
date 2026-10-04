@@ -19,7 +19,7 @@ from . import approval_card_state, background_approvals, outbox
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
-    from .approval_card_state import ApprovalCardReservation
+    from .approval_card_state import ApprovalCardReservation, RecordedApprovalDecision
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
@@ -30,6 +30,7 @@ __all__ = [
     "apply_armed",
     "arm",
     "reserve",
+    "revoke",
 ]
 
 SCHEDULED_APPROVAL_WINDOW_NS = 15 * 60 * 1_000_000_000
@@ -46,7 +47,8 @@ class ScheduledCallBinding:
     room_id: str
     thread_id: str
     requester_id: str
-    invoking_agent: str
+    # The responding agent or team; a team's call is made by one of its members.
+    entity_name: str
     tool_name: str
     arguments_digest: str
     workflow_digest: str
@@ -99,7 +101,7 @@ def reserve(
     transaction.execute(
         """
         INSERT INTO scheduled_call_approvals (
-            principal_id, task_id, delivery_id, room_id, thread_id, requester_id, invoking_agent,
+            principal_id, task_id, delivery_id, room_id, thread_id, requester_id, entity_name,
             tool_name, arguments_digest, workflow_digest, execute_at_ns, membership_epoch
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, task_id) DO NOTHING
@@ -111,7 +113,7 @@ def reserve(
             binding.room_id,
             binding.thread_id,
             binding.requester_id,
-            binding.invoking_agent,
+            binding.entity_name,
             binding.tool_name,
             binding.arguments_digest,
             binding.workflow_digest,
@@ -133,7 +135,7 @@ def arm(
     """Arm an approved binding for the unchanged task firing on time."""
     row = transaction.fetchone(
         """
-        SELECT scheduled.workflow_digest, scheduled.execute_at_ns, background.decision
+        SELECT scheduled.workflow_digest, scheduled.execute_at_ns, scheduled.revoked_at_ns, background.decision
         FROM scheduled_call_approvals AS scheduled
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
@@ -143,6 +145,8 @@ def arm(
     )
     if row is None:
         return "none"
+    if row["revoked_at_ns"] is not None:
+        return "denied"
     if str(row["workflow_digest"]) != workflow_digest:
         return "unarmed"
     if row["decision"] == "denied":
@@ -157,6 +161,25 @@ def arm(
         (now_ns, principal_id, task_id),
     )
     return "armed"
+
+
+def revoke(transaction: Transaction, principal_id: str, *, task_id: str, reason: str) -> RecordedApprovalDecision:
+    """Withdraw a cancelled task's approval for good and deny its card if still pending."""
+    transaction.execute(
+        """
+        UPDATE scheduled_call_approvals SET revoked_at_ns = ?
+        WHERE principal_id = ? AND task_id = ? AND revoked_at_ns IS NULL
+        """,
+        (time.time_ns(), principal_id, task_id),
+    )
+    return background_approvals.resolve_call(
+        transaction,
+        principal_id,
+        run_id=background_approvals.scheduled_call_run_id(task_id),
+        call_id=task_id,
+        requested_status="denied",
+        reason=reason,
+    )
 
 
 def apply_armed(
@@ -180,9 +203,10 @@ def apply_armed(
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
         WHERE scheduled.principal_id = ? AND scheduled.room_id = ? AND scheduled.thread_id = ?
-          AND scheduled.requester_id = ? AND scheduled.invoking_agent = ? AND scheduled.tool_name = ?
+          AND scheduled.requester_id = ? AND scheduled.entity_name = ? AND scheduled.tool_name = ?
           AND scheduled.arguments_digest = ? AND scheduled.membership_epoch = ?
-          AND scheduled.armed_at_ns IS NOT NULL AND scheduled.consumed_at_ns IS NULL
+          AND scheduled.armed_at_ns IS NOT NULL AND scheduled.revoked_at_ns IS NULL
+          AND scheduled.consumed_at_ns IS NULL
           AND scheduled.execute_at_ns BETWEEN ? AND ?
           AND background.decision = 'approved'
         ORDER BY scheduled.execute_at_ns, scheduled.task_id
@@ -193,7 +217,7 @@ def apply_armed(
             continuation.room_id,
             continuation.thread_id,
             continuation.requester_id,
-            call.invoking_agent,
+            continuation.entity_name,
             call.tool_name,
             call.arguments_digest,
             membership_epoch,

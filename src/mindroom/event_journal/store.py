@@ -1231,6 +1231,17 @@ class PrincipalStore:
             ),
         )
 
+    async def revoke_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
+        """Withdraw one cancelled task's approval and deny its card if still pending."""
+        return await self._backend.write(
+            lambda transaction: scheduled_approvals.revoke(
+                transaction,
+                self._principal_id,
+                task_id=task_id,
+                reason=reason,
+            ),
+        )
+
     async def resolve_continuation_approval_card(
         self,
         *,
