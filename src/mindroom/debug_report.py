@@ -413,7 +413,8 @@ def _read_postgres_journal(database_url: str, ids: _DebugReportIds) -> dict[str,
 def _read_journal_source(sources: DebugReportSources, path: Path, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
     if sources.journal_error is not None:
-        return _journal_results("error", "postgres", sources.journal_error)
+        # No journal was located, so there is no path or backend to name.
+        return _journal_results("error", "event journal", sources.journal_error)
     if sources.journal_postgres_url is not None:
         return _read_postgres_journal(sources.journal_postgres_url, ids)
     try:

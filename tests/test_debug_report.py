@@ -580,6 +580,7 @@ def test_build_debug_report_marks_journal_sources_with_the_given_journal_error(t
     for name in ("turn_records", "journal_events", "delivery_outbox"):
         assert document["sources"][name]["status"] == "error"
         assert document["sources"][name]["error"] == "no database URL"
+        assert document["sources"][name]["paths"] == ["event journal"]
         assert document["sources"][name]["items"] == []
     assert document["sources"]["tool_calls"]["status"] == "ok"
 
@@ -924,6 +925,7 @@ def test_cli_reports_journal_errors_when_the_config_exists_but_cannot_be_read(tm
         assert sources[name]["status"] == "error"
         assert sources[name]["items"] == []
         assert sources[name]["error"].startswith("config could not be read: ")
+        assert sources[name]["paths"] == ["event journal"]
     # The request-log directory stays at its default, so the sources that do not depend on the config are still read.
     assert sources["llm_requests"]["status"] == "ok"
     assert [item["request_log_id"] for item in sources["llm_requests"]["items"]] == ["r1"]
