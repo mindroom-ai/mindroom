@@ -4,19 +4,15 @@ icon: lucide/plug
 
 # MCP
 
-Model Context Protocol (MCP) is a standard way for AI applications to connect to external tool servers.
-MindRoom acts as an MCP client for tools.
-It connects to configured servers, discovers their tool catalogs, and exposes those tools to agents.
-MindRoom does not yet consume MCP resources or prompts.
+MindRoom is a Model Context Protocol (MCP) client: it connects to the MCP servers you configure, discovers their tools, and lets agents call them.
+MindRoom uses MCP tools only; it does not use MCP resources or prompts.
+To go the other way and expose your agents' tools to external MCP clients, use the [MCP Gateway](deployment/mcp-gateway.md).
 
-To expose your selected agents' tools to external clients through one endpoint, enable the optional [MCP Gateway](deployment/mcp-gateway.md).
-It reuses personal Connections accounts and exposes search, schema lookup, and invocation without placing every tool schema into initial model context.
+## Add an MCP Server
 
-## Configuration Overview
-
-Configure MCP servers in the top-level `mcp_servers` block in `config.yaml`.
-Each key is the server ID.
-Server IDs must use only letters, numbers, and underscores because MindRoom uses them in tool names.
+Configure servers in the top-level `mcp_servers` block of `config.yaml`.
+Each key is a server ID made of letters, numbers, and underscores.
+Each enabled server becomes one MindRoom tool named `mcp_<server_id>`; add that name to an agent's `tools:` list to give the agent the server's tools.
 
 ```yaml
 mcp_servers:
@@ -26,154 +22,7 @@ mcp_servers:
     args:
       - -y
       - chrome-devtools-mcp@latest
-```
-
-Each configured server creates one dynamic MindRoom tool named `mcp_<server_id>`.
-Add that tool name to an agent's `tools:` list to let the agent use the server's discovered MCP tools.
-
-## Transport Types
-
-MindRoom supports three MCP transport types:
-
-- `stdio`
-- `sse`
-- `streamable-http`
-
-### `stdio`
-
-Use `stdio` when MindRoom should start the MCP server as a subprocess.
-
-```yaml
-mcp_servers:
-  echo:
-    transport: stdio
-    command: python
-    args:
-      - ./echo_mcp_server.py
-    cwd: .
-    env:
-      ECHO_PREFIX: "echo:"
-```
-
-For `stdio` servers, `command` is required.
-`args`, `cwd`, and `env` are optional.
-`url` and `headers` are not allowed on this transport.
-
-### `sse`
-
-Use `sse` for MCP servers that expose a Server-Sent Events endpoint.
-
-```yaml
-mcp_servers:
-  remote_sse:
-    transport: sse
-    url: https://mcp.example.com/sse
-    headers:
-      Authorization: Bearer ${MCP_API_TOKEN}
-```
-
-For `sse` servers, `url` is required.
-`headers` are optional.
-`command`, `args`, `cwd`, and `env` are not allowed on this transport.
-
-### `streamable-http`
-
-Use `streamable-http` for MCP servers that expose the newer streamable HTTP endpoint.
-
-```yaml
-mcp_servers:
-  remote_http:
-    transport: streamable-http
-    url: https://mcp.example.com/mcp
-    headers:
-      Authorization: Bearer ${MCP_API_TOKEN}
-```
-
-For `streamable-http` servers, `url` is required.
-`headers` are optional.
-`command`, `args`, `cwd`, and `env` are not allowed on this transport.
-
-Both remote transports reject loopback and private-network destinations.
-Use `stdio` for local subprocess servers.
-
-`env` and `headers` values support `${ENV_VAR}` interpolation.
-MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
-Pass `stdio` credentials through `env`, preferably as `${ENV_VAR}` placeholders, never through `args`.
-Configuration displays such as `config_manager` inspection and `!config show` mask every `env` and `headers` value except whole `${ENV_VAR}` placeholders, but show `args` as written, and `args` support no placeholders.
-Static `headers` are process-global and shared by every requester.
-Use the OAuth `auth` block plus `worker_scope: user` or `worker_scope: user_agent` for remote MCP servers that need different bearer tokens by requester.
-Use `worker_scope: shared` when one connected account belongs to the agent and every authorized caller should use it.
-
-## Per-Server Options
-
-| Option | Type | Default | Notes |
-|--------|------|---------|-------|
-| `enabled` | bool | `true` | Set to `false` to disable one server without removing its config |
-| `display_name` | string | `null` | Dashboard and catalog name; defaults to `auth.display_name`, then a name derived from the server ID |
-| `summary` | string | `null` | Short capability summary for the dashboard and tool catalog, with or without OAuth |
-| `icon` | string | `null` | Optional dashboard icon name, such as `SiConfluence` or `Calendar` |
-| `description` | string | `null` | What the server provides; appended to the OAuth bridge tool descriptions shown to the model; requires `auth` |
-| `required` | bool | `false` | Block dependent agent startup while this server is unavailable instead of degrading |
-| `transport` | string | *required* | One of `stdio`, `sse`, or `streamable-http` |
-| `command` | string | `null` | Required for `stdio` |
-| `args` | list[string] | `[]` | Optional `stdio` arguments; shown unmasked, so never put credentials here |
-| `cwd` | string | `null` | Optional `stdio` working directory |
-| `env` | map[string,string] | `{}` | Optional `stdio` environment variables; supports `${ENV_VAR}` placeholders |
-| `url` | string | `null` | Required for `sse` and `streamable-http` |
-| `headers` | map[string,string] | `{}` | Optional remote transport headers; supports `${ENV_VAR}` placeholders |
-| `auth` | object | `null` | Optional OAuth configuration for worker-scoped remote MCP access |
-| `tool_prefix` | string | server ID | Prefix for model-visible function names |
-| `include_tools` | list[string] | `[]` | Optional allowlist of remote tool names to expose |
-| `exclude_tools` | list[string] | `[]` | Optional denylist of remote tool names to hide |
-| `startup_timeout_seconds` | float | `20.0` | Maximum time to open the transport, initialize, and discover tools |
-| `call_timeout_seconds` | float | `120.0` | Default timeout for each tool call |
-| `max_concurrent_calls` | int | `1` | Maximum concurrent tool calls for that server |
-| `auto_reconnect` | bool | `true` | Refresh the connection for future calls after eligible connection or timeout failures; never replay an ambiguous call automatically |
-
-`tool_prefix` must use only letters, numbers, and underscores.
-`include_tools` and `exclude_tools` are matched against the remote MCP tool names, not the MindRoom-prefixed function names.
-`include_tools` and `exclude_tools` cannot overlap.
-
-Use `display_name` and `summary` to explain what people can do with a connection.
-Keep detailed model instructions in the OAuth-only `description` field; those instructions are not shown on the Connections page.
-Display metadata does not change tool IDs, function names, or permissions.
-
-```yaml
-mcp_servers:
-  team_wiki:
-    display_name: Team Wiki
-    summary: Search and edit team documentation
-    transport: streamable-http
-    url: https://wiki.example.com/mcp
-```
-
-Set `icon` to choose how an MCP server appears in the dashboard and on Connections, including OAuth connection cards:
-
-```yaml
-mcp_servers:
-  knowledge:
-    transport: streamable-http
-    url: https://example.com/mcp
-    icon: SiConfluence
-```
-
-Use a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
-Connections uses the explicit icon first, then matches the server's name when the icon is omitted or unavailable, and finally falls back to a plug icon.
-This setting is display metadata and works with every transport, with or without OAuth.
-
-## Agent Access
-
-Each MCP server becomes one MindRoom tool named `mcp_<server_id>`.
-Add that name to an agent's `tools:` list to expose the server's discovered tools.
-
-```yaml
-mcp_servers:
-  chrome_devtools:
-    transport: stdio
-    command: npx
-    args:
-      - -y
-      - chrome-devtools-mcp@latest
+    tool_prefix: chrome
 
 agents:
   browser:
@@ -184,7 +33,51 @@ agents:
       - mcp_chrome_devtools
 ```
 
-You can also apply per-agent overrides when you assign the MCP tool:
+MCP tools work on every worker scope, including private agents.
+
+## Transports
+
+| `transport` | Use for | Required | Optional | Not allowed |
+| --- | --- | --- | --- | --- |
+| `stdio` | A local server that MindRoom starts as a subprocess | `command` | `args`, `cwd`, `env` | `url`, `headers`, `auth` |
+| `sse` | A remote server with a Server-Sent Events endpoint | `url` | `headers`, `auth` | `command`, `args`, `cwd`, `env` |
+| `streamable-http` | A remote server with a streamable HTTP endpoint | `url` | `headers`, `auth` | `command`, `args`, `cwd`, `env` |
+
+```yaml
+mcp_servers:
+  remote_http:
+    transport: streamable-http
+    url: https://mcp.example.com/mcp
+    headers:
+      Authorization: Bearer ${MCP_API_TOKEN}
+```
+
+Remote transports refuse loopback and private-network addresses; run local servers with `stdio` instead.
+
+### Credentials in Server Config
+
+`env` and `headers` values support `${ENV_VAR}` placeholders, resolved from MindRoom's environment when the connection opens.
+Pass `stdio` credentials through `env`, never through `args`.
+`config_manager` and `!config show` mask `env` and `headers` values, except values that are a whole `${ENV_VAR}` placeholder, but show `args` as written, and `args` support no placeholders.
+
+Without OAuth, every agent and requester shares one server session and the same static `headers`, and MindRoom never passes the requester's identity or credentials to the server.
+For per-user or per-agent accounts on a remote server, use [OAuth](#oauth-backed-remote-mcp).
+
+## Tool Names
+
+There are two names to keep apart:
+
+1. The tool entry in an agent's `tools:` list is `mcp_<server_id>`.
+2. The function names the model sees are `<prefix>_<remote_tool_name>`, where the prefix is `tool_prefix` or, if unset, the server ID.
+
+With `tool_prefix: chrome`, a remote tool named `navigate_page` becomes `chrome_navigate_page`.
+A final function name must be 64 characters or fewer.
+MindRoom rejects duplicate function names within one server and across the tools and servers visible to the same agent; agents that do not share the colliding surfaces may use identical names.
+
+## Choose Which Tools an Agent Sees
+
+`include_tools` and `exclude_tools` on the server filter the catalog for every agent.
+To narrow it for one agent, set overrides where you assign the tool:
 
 ```yaml
 agents:
@@ -198,25 +91,56 @@ agents:
           call_timeout_seconds: 180
 ```
 
-These per-agent overrides filter the already discovered catalog for that agent assignment.
-They are useful when one server exposes many tools but one agent should see only a focused subset.
+Per-agent overrides accept `include_tools`, `exclude_tools`, and `call_timeout_seconds` (greater than 0).
+Filters match remote MCP tool names, not prefixed function names, and a name cannot appear in both `include_tools` and `exclude_tools`.
 
-MCP tools are available on every worker scope, including private per-user agents.
-Non-OAuth `mcp_<server_id>` tools always execute through the shared MCP server session; requester identity and requester credentials are never passed to the server.
-OAuth-backed remote MCP servers resolve credentials against the selected agent's effective execution scope at tool-call time.
-They keep one session per canonical credential target and server configuration generation.
-With `shared`, one connection belongs to the selected agent and is used by every authorized caller.
-With `user`, one connection belongs to the requester and is reused across that requester's agents.
-With `user_agent`, each requester and agent pair has its own connection, so one requester can connect different accounts for different agents.
-With no execution scope, one installation-level connection is used.
-Private agents derive this same ownership from `private.per`.
-Changing an agent's effective scope changes its OAuth credential owner, and MindRoom never copies a credential from another scope into the new target.
-If the new target has no credential, reconnect it explicitly.
+## Dashboard Name and Icon
+
+`display_name`, `summary`, and `icon` control how the server appears in the dashboard tool catalog and on Connections; they do not change tool names or permissions.
+
+```yaml
+mcp_servers:
+  team_wiki:
+    display_name: Team Wiki
+    summary: Search and edit team documentation
+    icon: SiConfluence
+    transport: streamable-http
+    url: https://wiki.example.com/mcp
+```
+
+`icon` takes a Lucide icon name such as `Book` or `Calendar`, or a bundled React Icons name such as `SiConfluence` or `SiGooglecalendar`.
+Without a usable icon, Connections picks one matching the server's name, or a plug icon.
+
+## Server Options
+
+| Option | Type | Default | Notes |
+|--------|------|---------|-------|
+| `enabled` | bool | `true` | Set to `false` to disable the server without removing its config |
+| `transport` | string | *required* | `stdio`, `sse`, or `streamable-http` |
+| `command` | string | `null` | Required for `stdio` |
+| `args` | list[string] | `[]` | `stdio` arguments; shown unmasked, so never put credentials here |
+| `cwd` | string | `null` | `stdio` working directory |
+| `env` | map[string,string] | `{}` | `stdio` environment variables; supports `${ENV_VAR}` |
+| `url` | string | `null` | Required for `sse` and `streamable-http` |
+| `headers` | map[string,string] | `{}` | Remote request headers; supports `${ENV_VAR}` |
+| `auth` | object | `null` | OAuth settings for remote servers; see [OAuth Settings](#oauth-settings) |
+| `tool_prefix` | string | server ID | Prefix for model-visible function names; letters, numbers, and underscores |
+| `include_tools` | list[string] | `[]` | Allowlist of remote tool names |
+| `exclude_tools` | list[string] | `[]` | Denylist of remote tool names; must not overlap `include_tools` |
+| `display_name` | string | `null` | Catalog name; falls back to `auth.display_name`, then a name derived from the server ID |
+| `summary` | string | `null` | Short capability summary for the dashboard and catalog |
+| `icon` | string | `null` | Dashboard and Connections icon name |
+| `description` | string | `null` | What the server offers, added to the OAuth bridge tool descriptions the model sees; requires `auth` |
+| `required` | bool | `false` | Keep dependent agents and teams from starting while the server is unavailable |
+| `startup_timeout_seconds` | float | `20.0` | Time allowed to connect, initialize, and list tools; must be greater than 0 |
+| `call_timeout_seconds` | float | `120.0` | Default timeout per tool call; must be greater than 0 |
+| `max_concurrent_calls` | int | `1` | Maximum concurrent tool calls to the server; at least 1 |
+| `auto_reconnect` | bool | `true` | Reconnect for later calls after a dropped connection or timeout; the failed call is never replayed |
 
 ## OAuth-Backed Remote MCP
 
-Use `auth.type: oauth` for a remote MCP server that requires an OAuth bearer token resolved for the selected agent's effective credential scope.
-OAuth-backed MCP requires `sse` or `streamable-http`; `stdio` servers cannot use this mode.
+Use `auth.type: oauth` when a remote MCP server needs an OAuth bearer token, so each connection belongs to the right user or agent.
+OAuth requires `sse` or `streamable-http`.
 
 ```yaml
 mcp_servers:
@@ -227,63 +151,46 @@ mcp_servers:
     description: Example workspace search, documents, and calendar for the signed-in user.
     auth:
       type: oauth
-      provider_id: mcp_example
       display_name: Example MCP
-      resource: https://mcp.example.com/mcp
       discovery: auto
-      token_endpoint_auth_method: none
-      pkce_code_challenge_method: S256
-      dynamic_client_registration: true
-      scopes: []
 
 agents:
   assistant:
     display_name: Assistant
-    role: Use worker-scoped MCP tools
+    role: Use the user's Example workspace
     model: sonnet
     worker_scope: user_agent
     tools:
       - mcp_example
 ```
 
-MindRoom registers a generated OAuth provider for the server.
-If `provider_id` is omitted, the provider ID defaults to `mcp_<server_id>`.
-When the provider ID starts with `mcp_`, OAuth tokens are stored under `<provider_id>_oauth`, and OAuth client configuration is read from `<provider_id>_oauth_client` unless you specify `client_config_services` or `shared_client_config_services`.
-When a custom provider ID does not start with `mcp_`, MindRoom prefixes `mcp_` for the generated credential service names so the tokens remain classified as MCP-owned runtime credentials.
+The connection follows the agent's effective scope (`private.per`, then `worker_scope`, then `defaults.worker_scope`), as described in [Where Connections Are Stored](oauth-framework.md#where-connections-are-stored).
+Changing an agent's scope changes whose connection it uses, and MindRoom never copies a credential into the new scope, so reconnect there.
 
-OAuth-backed MCP servers always expose a stable bridge surface:
+### Connecting and Bridge Tools
+
+Every OAuth-backed server always exposes three functions:
 
 - `<prefix>_connection_status`
 - `<prefix>_list_tools`
 - `<prefix>_call_tool`
 
-The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a catalog for the active credential scope.
-When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-When token refresh fails without a terminal credential rejection, the bridge raises an ordinary tool error that says OAuth token refresh failed and asks callers to retry shortly.
-MindRoom retains the credentials and does not return an OAuth-required payload or reconnect link for that temporary failure.
-MindRoom sends the authorization code and later refresh tokens only to the token endpoint that discovery resolved when the connection started.
-If a later discovery resolves a different token endpoint, for example because the server's protected-resource metadata now names another authorization server, the callback fails or the stored credential is deleted, and the user must reconnect.
-Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
-Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
-After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
-After MindRoom has cached a scoped catalog, the toolkit also exposes typed `<prefix>_<remote_tool_name>` functions for that credential scope in addition to the bridge functions.
+Before the account is connected, these are the only functions the model sees, so set `description` to tell the model what connecting unlocks.
+When no account is connected, they return a connect link (see [OAuth onboarding in conversation](oauth-framework.md#mindroom-managed-oauth-onboarding-in-conversation)).
+After connecting, `<prefix>_list_tools` returns the server's tools and `<prefix>_call_tool` calls them with that connection's token.
+Once MindRoom has loaded the catalog for that connection, the agent also gets typed `<prefix>_<remote_tool_name>` functions.
 
-`discovery: auto` performs protected-resource metadata discovery from the configured `resource` or server `url`, then resolves authorization-server metadata.
-MindRoom tries `/.well-known/oauth-protected-resource` at the resource origin and at the resource path.
-It then reads the advertised authorization server and fetches OAuth authorization-server metadata.
-If the protected-resource metadata does not advertise an authorization server, MindRoom also looks for OAuth authorization-server metadata at the protected-resource origin.
-The discovered metadata supplies the authorization endpoint, token endpoint, optional registration endpoint, supported token endpoint auth methods, and supported PKCE methods.
+A temporary token refresh failure returns `MCP server '<server_id>' OAuth token refresh failed; retry shortly` and keeps the stored credentials.
+To reset a stuck or revoked connection, see [Reset A Connection](oauth-framework.md#reset-a-connection).
 
-If `dynamic_client_registration` is enabled and no client config has been stored yet, MindRoom registers a public client lazily when the first OAuth flow starts.
-The generated client registration is stored in the generated OAuth client config service with the token endpoint it was issued for, and reused for later users.
-When discovery later resolves a different token endpoint, MindRoom registers a new client at the new authorization server and logs `oauth_dynamic_client_reregistered` with both endpoint origins; credentials issued to the previous client must be reconnected.
-MindRoom refuses the flow instead when `dynamic_client_registration` is disabled or the new server offers no registration endpoint.
-MindRoom never re-registers an operator-configured client, so its `client_id` and `client_secret` would go to whatever token endpoint discovery resolves.
-For a confidential operator-configured client, pin `auth.authorization_server` or `auth.token_url` so the MCP server's protected-resource metadata cannot redirect those credentials.
-Public clients using `token_endpoint_auth_method: none` only need `client_id`; confidential methods still require `client_secret`.
-Use `extra_auth_params` and `extra_token_params` when the OAuth server requires additional parameters such as `resource` during authorization, code exchange, or refresh.
+### Endpoint Discovery
 
-Use `discovery: manual` when the provider does not publish metadata or when you want to pin endpoints explicitly:
+With `discovery: auto`, MindRoom reads the OAuth protected-resource metadata (`/.well-known/oauth-protected-resource`) for `resource`, or `url` when `resource` is unset, then fetches the advertised authorization server's metadata.
+If no authorization server is advertised, it looks for authorization-server metadata at the resource's origin.
+Setting `authorization_server` skips the protected-resource lookup, and explicit `authorization_url`, `token_url`, or `registration_url` values override the discovered endpoints.
+Discovery fails if the authorization server does not support the configured `token_endpoint_auth_method` or PKCE method.
+
+Use `discovery: manual` when the server publishes no metadata or you want fixed endpoints:
 
 ```yaml
 mcp_servers:
@@ -296,46 +203,52 @@ mcp_servers:
       authorization_url: https://mcp.example.com/oauth/authorize
       token_url: https://mcp.example.com/oauth/token
       registration_url: https://mcp.example.com/oauth/register
-      token_endpoint_auth_method: none
 ```
 
-OAuth discovery requires HTTPS by default and does not follow redirects.
-For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
-These options affect OAuth discovery only; they do not relax the address checks for SSE or streamable HTTP transport requests.
+Discovery requires HTTPS, refuses loopback and private-network hosts, and does not follow redirects.
+For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs and `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
+These variables do not relax the address rules for the MCP connection itself.
 
-## Tool Naming
+### OAuth Client Registration
 
-There are two names to keep in mind:
+With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
+See [Built-In Providers](oauth-framework.md#built-in-providers) for when a dynamically registered client works from a hosted address.
+If discovery later resolves a different token endpoint, MindRoom registers a new client there and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
+With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
 
-1. The MindRoom tool entry that you put in `tools:` is `mcp_<server_id>`.
-2. The model-visible function names inside that toolkit are `<prefix>_<remote_tool_name>`.
+To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
+Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.
+Public clients (`token_endpoint_auth_method: none`) need only `client_id`; confidential clients also need `client_secret`.
+MindRoom never re-registers an operator-configured client, so for a confidential client pin `authorization_server` or `token_url` to keep the server's metadata from redirecting its secret to another token endpoint.
+See [Provider And Credential Service Rules](oauth-framework.md#provider-and-credential-service-rules) for client config service rules.
 
-If `tool_prefix` is omitted, MindRoom uses the server ID as the prefix.
+### OAuth Settings
 
-For example, this config:
+| `auth` field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | string | *required* | Must be `oauth` |
+| `provider_id` | string | `mcp_<server_id>` | OAuth provider ID; letters, numbers, and underscores |
+| `display_name` | string | `null` | Provider name; defaults to `MCP <Server Id>` |
+| `resource` | string | server `url` | Protected resource used for discovery |
+| `discovery` | string | `auto` | `auto` or `manual` |
+| `authorization_server` | string | `null` | Authorization server issuer or base URL; skips protected-resource discovery |
+| `authorization_url` | string | `null` | Authorization endpoint; required for `manual` |
+| `token_url` | string | `null` | Token endpoint; required for `manual` |
+| `registration_url` | string | `null` | Dynamic client registration endpoint |
+| `dynamic_client_registration` | bool | `true` | Allow registering a client automatically |
+| `token_endpoint_auth_method` | string | `none` | `none`, `client_secret_post`, or `client_secret_basic` |
+| `pkce_code_challenge_method` | string | `S256` | `S256`, or `null` to disable PKCE |
+| `scopes` | list[string] | `[]` | Requested OAuth scopes |
+| `extra_auth_params` | map[string,string] | `{}` | Extra authorization request parameters, such as `resource` |
+| `extra_token_params` | map[string,string] | `{}` | Extra code-exchange and refresh parameters; treated as secret |
+| `client_config_services` | list[string] | `[]` | Credential services holding the OAuth client config, in lookup order; defaults to `<provider_id>_oauth_client` |
+| `shared_client_config_services` | list[string] | `[]` | Shared client config services checked after `client_config_services` |
 
-```yaml
-mcp_servers:
-  chrome_devtools:
-    transport: stdio
-    command: npx
-    args:
-      - -y
-      - chrome-devtools-mcp@latest
-    tool_prefix: chrome
-```
+## Examples
 
-means a remote MCP tool named `navigate_page` becomes `chrome_navigate_page` inside the agent's tool list.
+### Echo Server
 
-MindRoom rejects duplicate function names after prefixing.
-That includes collisions inside one server and across tool or server surfaces visible to the same agent.
-Identical final function names are allowed on disjoint agent surfaces.
-The final function name must also fit within 64 characters.
-
-## Example: Echo MCP Server
-
-This is the smallest useful local example.
-Save it as `echo_mcp_server.py`:
+A minimal local server, saved as `echo_mcp_server.py`:
 
 ```python
 from mcp.server.fastmcp import FastMCP
@@ -351,8 +264,6 @@ def echo(text: str) -> str:
 if __name__ == "__main__":
     server.run()
 ```
-
-Then point MindRoom at it:
 
 ```yaml
 mcp_servers:
@@ -371,43 +282,14 @@ agents:
       - mcp_echo
 ```
 
-With that setup, the remote `echo` tool is exposed to the model as `echo_echo`.
-If you prefer a shorter function name, set `tool_prefix` to something else.
-Use whatever Python interpreter has the `mcp` package installed.
-Inside this repository, `./.venv/bin/python` is usually the right choice.
+The model sees the remote `echo` tool as `echo_echo`.
+Use a Python interpreter that has the `mcp` package installed.
+To serve it remotely instead, run `server.run(transport="sse")` (endpoint `/sse`) or `server.run(transport="streamable-http")` (endpoint `/mcp`).
 
-The same server can also be run over HTTP transports.
-If you change the script to `server.run(transport="sse")`, the default FastMCP endpoint is `/sse`.
-If you change it to `server.run(transport="streamable-http")`, the default FastMCP endpoint is `/mcp`.
+### Chrome DevTools
 
-## Example: Chrome DevTools MCP
-
-Chrome DevTools MCP is a good fit for browser debugging, page inspection, performance work, and interactive web automation.
-
-```yaml
-mcp_servers:
-  chrome_devtools:
-    transport: stdio
-    command: npx
-    args:
-      - -y
-      - chrome-devtools-mcp@latest
-    tool_prefix: chrome
-    startup_timeout_seconds: 20
-
-agents:
-  browser:
-    display_name: Browser
-    role: Debug web apps with Chrome DevTools
-    model: sonnet
-    tools:
-      - mcp_chrome_devtools
-```
-
-This exposes Chrome DevTools functions with names like `chrome_<tool_name>`.
-By default, `chrome-devtools-mcp` starts its own Chrome instance with a dedicated profile.
-
-To attach to an already running debuggable Chrome instance instead, add `--browser-url=http://127.0.0.1:9222`:
+The [Add an MCP Server](#add-an-mcp-server) example starts `chrome-devtools-mcp`, which launches its own Chrome with a dedicated profile.
+To attach to an already running debuggable Chrome instead, add `--browser-url`:
 
 ```yaml
 mcp_servers:
@@ -421,15 +303,12 @@ mcp_servers:
     tool_prefix: chrome
 ```
 
-If Chrome startup is slow on your machine, increase `startup_timeout_seconds`.
-If individual browser operations can take a while, increase `call_timeout_seconds`.
+If Chrome starts slowly, increase `startup_timeout_seconds`; if browser operations run long, increase `call_timeout_seconds`.
 
-## Example: MemPalace AI Memory
+### MemPalace Memory
 
-[MemPalace](https://github.com/milla-jovovich/mempalace) is a local AI memory system that stores conversations in ChromaDB, organized as a navigable "palace" with wings, rooms, and halls.
-It exposes 19 MCP tools for search, knowledge graph operations, agent diaries, and more — all without API keys.
-
-Using `uvx` keeps MemPalace in an isolated virtual environment, avoiding dependency conflicts with MindRoom's own ChromaDB version:
+[MemPalace](https://github.com/milla-jovovich/mempalace) is a local memory store with MCP tools for search and adding memories.
+Running it through `uvx` keeps its ChromaDB version separate from MindRoom's:
 
 ```yaml
 mcp_servers:
@@ -456,58 +335,29 @@ agents:
       - mcp_mempalace
 ```
 
-Before the MCP server can return results, initialize and seed the same palace directory configured above:
+Initialize and seed the same palace before the server can return results:
 
 ```bash
 uvx mempalace --palace /path/to/.mempalace/palace init /path/to/content
 uvx mempalace --palace /path/to/.mempalace/palace mine /path/to/content
 ```
 
-The positional directory supplies content to scan or mine; `--palace` selects the destination store (see the [MemPalace CLI reference](https://mempalaceofficial.com/reference/cli)).
+See the [MemPalace CLI reference](https://mempalaceofficial.com/reference/cli) for these commands.
 
-Agents can also add memories on the fly via the `mempalace_add_drawer` tool.
-The palace enforces deduplication at a 0.9 similarity threshold.
+## Failures and Catalog Changes
 
-## Error Handling
+MindRoom connects to MCP servers at startup and whenever `config.yaml` changes, and logs a warning for each server that fails to start, initialize, or list valid tools.
+By default a failed server does not block anything: agents and teams that use it start without its tools.
+MindRoom keeps retrying a failed server without OAuth in the background and restarts the affected agents and teams once it recovers.
+An OAuth-backed server is retried on its next tool call.
+Set `required: true` to keep dependent agents and teams from starting until the server is available.
 
-MindRoom connects to MCP servers during startup and whenever `config.yaml` changes.
-If a server fails to start, initialize, or publish a valid tool catalog, MindRoom marks that server as failed and logs a warning for every affected server.
+A function-name collision is not retried, and the colliding servers' tools stay unavailable.
+Fix the remote tool names or `tool_prefix` values, then reload `config.yaml` or restart MindRoom.
 
-By default a failed server degrades gracefully: agents and teams that reference `mcp_<server_id>` still start, with that server's tools omitted from their tool schema.
-For servers without OAuth, MindRoom keeps retrying transport and discovery failures in the background with exponential backoff, and restarts the affected agents and teams once the server recovers so they pick up its tools.
-OAuth-backed servers retry discovery lazily on the next scoped call instead of scheduling a background refresh.
-Function-name collisions remain failed because retrying the same invalid catalog cannot recover; after fixing the remote catalog or configured prefixes, reload `config.yaml` or restart MindRoom to retry those servers.
-Collision invalidation is symmetric and atomic.
-If a scoped OAuth catalog collides with a shared non-OAuth catalog visible to the same agent, MindRoom marks both catalogs failed regardless of which catalog was published first.
-Because the non-OAuth catalog is shared, it remains unavailable to every agent until the collision is fixed and `config.yaml` is reloaded or MindRoom restarts.
-Set `required: true` on a server to restore hard-fail behavior, where dependent agents and teams stay blocked from starting until the server is available.
+Errors that the MCP server reports for a tool call return to the agent as tool errors and are not retried.
+If the connection drops or times out during a call, the call fails even when `auto_reconnect` restores the connection, and the action is never replayed.
+Check whether a call that changes something actually completed before retrying it.
 
-During tool execution, explicit MCP tool failures are surfaced as tool errors.
-Those explicit server-side errors are not retried automatically.
-
-A connection drop or timeout after dispatch can leave the remote action's outcome unknown.
-When `auto_reconnect: true`, MindRoom can refresh the connection and catalog for future calls, but it does not replay the failed action.
-The caller receives an error even if reconnection succeeds.
-Check whether a potentially mutating action completed before explicitly retrying it.
-Retries during authorization or catalog preparation before dispatch do not replay a tool invocation.
-
-If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
-These refreshes run at most once a minute per server, and notifications that arrive sooner are combined into the next refresh.
-If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
-The catalog-change callback schedules this replacement asynchronously so the triggering MCP tool call can finish before response draining starts.
-Changes reported while a replacement for that server is still waiting to apply are covered by it, so each server has at most one queued replacement.
-Configured servers with no dependent entity return before admission draining while still invalidating the worker validation snapshot cache.
-Referenced-entity replacement shares one serialized global response-admission owner with config reload.
-It waits up to 600 seconds for active Matrix responses to drain, then force-applies while keeping admission closed over the replacement window.
-
-## Limitations
-
-- Phase 1 supports MCP tools only.
-- MCP resources and prompts are not exposed in MindRoom yet.
-- Non-OAuth MCP integrations always use the shared server session, even on isolating worker scopes; per-requester isolation requires an OAuth-backed server.
-- OAuth-backed remote MCP credentials and sessions follow the selected agent's effective execution scope.
-- OAuth-backed remote MCP typed functions appear only after MindRoom has cached a catalog for the active credential target.
-- Agent-initiated `reset_oauth_connection()` supports `shared`, `user`, and `user_agent` MCP credential scopes; shared resets require configured credential-management authority and a one-time browser confirmation link.
-- Reset installation-level unscoped MCP connections from the authenticated dashboard.
-- `server_id` and `tool_prefix` must use letters, numbers, and underscores.
-- The final function name `<prefix>_<remote_tool_name>` must be 64 characters or fewer.
+When a server reports that its tool list changed, MindRoom reloads the list, at most once a minute per server.
+If the tools changed, the agents and teams that use the server restart to pick them up, waiting for active responses like a [config reload](configuration/index.md#configuration-file).

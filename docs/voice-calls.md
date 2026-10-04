@@ -1,41 +1,22 @@
 # Voice Calls
 
-MindRoom agents can join Element Call voice calls in their rooms and talk with you in real time.
-The `realtime` backend provides OpenAI realtime speech-to-speech.
-The `live` backend uses OpenAI Live for speech and delegates substantive requests to the normal MindRoom agent.
-The `cascaded` backend combines independently configured speech-to-text and text-to-speech services with the agent's normal MindRoom response path.
+MindRoom agents can join Element Call voice calls (MatrixRTC, also used by Element X and recent Cinny releases) in their rooms and talk with the caller in real time.
+Use this page to set up calls, choose a voice backend, and find out why an agent did or did not join a call.
+Voice messages (recorded audio clips) are covered on [Voice Messages](voice.md).
 
-## How it works
+Each calls-enabled agent uses one of three backends:
 
-Matrix group calls (MatrixRTC, used by Element Call, Element X, and recent Cinny releases) do not send media over Matrix itself.
-Matrix only carries the signaling: participants publish `org.matrix.msc3401.call.member` state events, and media flows through a LiveKit SFU that is deployed next to the homeserver.
+| Backend | What it does |
+|---------|--------------|
+| `realtime` | OpenAI realtime speech-to-speech runs the conversation with the agent's prompt and tools. |
+| `live` | OpenAI Live handles speech and delegates substantive requests to the normal MindRoom agent. |
+| `cascaded` | Separate speech-to-text and text-to-speech services wrap the agent's normal MindRoom response, so any model provider works, including fully local setups. |
 
-When a call starts in a room, the configured agent:
+## Setup
 
-1. Sees the call membership state event and re-reads the room state.
-2. Exchanges a Matrix OpenID token for a LiveKit JWT at the MatrixRTC authorization service (`lk-jwt-service`).
-3. Connects to the LiveKit SFU and publishes its own call membership state event, so it appears in the call roster.
-4. In encrypted rooms, distributes its media frame key over encrypted to-device messages and installs the other participants' keys, following the same per-sender key rotation policy as Element Call.
-5. Runs the selected voice backend until the managed session ends.
-
-The voice agent is the same agent you chat with.
-Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
-Live receives the normal agent's full rendered system prompt, including its configured context files and caller-specific workspace, plus voice delivery and delegation guidance when the combined instructions fit MindRoom's local budget of 16,000 estimated `o200k_base` tokens.
-When the full context fits, Live can answer from that context directly and is instructed to delegate requests needing tools, research, additional memory, or actions to the normal MindRoom agent.
-When the combined instructions exceed that budget, Live instead receives brief instructions to delegate every substantive request, including questions about identity and preferences, to the normal agent retaining the full caller-bound context.
-This is MindRoom's local estimate, not a provider tokenizer or context-limit guarantee.
-Tool schemas and execution remain in the delegated agent.
-The prompt is prepared before the first greeting, and the prepared agent is reused for delegated turns.
-The voice model relays the agent's results conversationally.
-Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving model resolution, the rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
-A cascaded profile may explicitly override the resolved LLM while preserving all other agent behavior.
-MindRoom keeps a managed call active only while its devices belong to one Matrix user, and uses that user's ID as the real requester for the room-scoped tool runtime.
-Multiple devices belonging to that same user are supported.
-Tools requiring confirmation, user input, external execution, or `tool_approval` are hidden in all backends because a voice call has no approval UI.
-
-The agent leaves the call and clears its membership state event when the caller leaves, a second distinct Matrix user joins, the voice session terminates, or the bot shuts down.
-
-## Configuration
+1. Install the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
+2. Make sure your Matrix deployment has a MatrixRTC backend; see [Server requirements](#server-requirements).
+3. Define call profiles and assign one to each calls-enabled agent:
 
 ```yaml
 calls:
@@ -48,64 +29,90 @@ calls:
       voice: marin
   agents:
     assistant: openai-realtime
-  # livekit_service_url: https://rtc.example.org   # same-server .well-known override
+  # livekit_service_url: https://rtc.example.org
 ```
 
-Voice calls require the `matrix_calls` extra (`pip install "mindroom[matrix_calls]"` or `uv sync --extra matrix_calls`).
-`calls.profiles` defines reusable, complete voice pipelines.
-`calls.agents` maps each enabled agent to exactly one profile name.
-The `model` in a realtime or Live profile is the provider-specific OpenAI speech model ID.
-Live profiles require an explicit `credentials_service` and `voice`, and do not use separate STT or TTS services.
-The optional `agent_model` in a Live profile references a named entry from the top-level `models` mapping for delegated agent turns.
-Cascaded profiles require complete STT and TTS settings.
-OpenAI speech legs require either `credentials_service` or `api_key`; OpenAI-compatible speech legs require `host` and may omit credentials.
-The optional `model` in a cascaded profile references a named entry from the top-level `models` mapping.
-An explicit cascaded call model takes precedence over room and agent models for the calls-enabled agent.
-Omitting it keeps the existing room and agent model resolution.
-There are no inherited backend defaults or credential fallbacks.
-`enabled` and `livekit_service_url` remain global and cannot be overridden per agent.
+Calls can also be configured in the dashboard's [Voice tab](dashboard.md#voice).
+A calls-enabled agent shows `📞 Voice calls` in its Matrix presence status when the extra is installed and its profile's credentials resolve, so clients can offer the call action only where it will be answered.
+
+## Calls configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `calls.enabled` | bool | `false` | Lets agents join voice calls. |
+| `calls.profiles` | map of name to profile | `{}` | Reusable, complete voice pipelines; each has a `backend` and the fields below. |
+| `calls.agents` | map of agent name to profile name | `{}` | Each calls-enabled agent uses exactly one profile. |
+| `calls.livekit_service_url` | string | discovered | MatrixRTC authorization service URL to use instead of discovering it from the agent homeserver's `.well-known/matrix/client`. |
+
+`enabled` and `livekit_service_url` are global and cannot be set per agent.
+Profiles have no inherited defaults and credentials never fall back to another key, so a missing credential service leaves calls unavailable rather than using a different OpenAI key.
 Set a dedicated credential service when voice and chat use different OpenAI credentials.
-A missing selected service does not fall back to another key.
-For example, these two agents use independent voice pipelines:
 
-```yaml
-calls:
-  enabled: true
-  profiles:
-    openai-realtime:
-      backend: realtime
-      model: gpt-realtime-2.1
-      credentials_service: openai-voice
-      voice: marin
-    local-cascaded:
-      backend: cascaded
-      stt:
-        provider: openai_compatible
-        model: whisper-large-v3
-        host: http://127.0.0.1:9000
-      tts:
-        provider: openai_compatible
-        model: kokoro
-        host: http://127.0.0.1:9001
-        extra_kwargs:
-          voice: af_heart
-  agents:
-    concierge: openai-realtime
-    local_assistant: local-cascaded
-```
+Configuration loading fails with one of these errors when references are wrong:
 
-MindRoom enforces at most one calls-enabled agent per room.
-Calls only join rooms configured for that agent and only while the sole caller passes the normal room and per-agent reply permissions.
-Calls-enabled agents also join calls in ad-hoc rooms they accepted through their normal authorized-invite policy. This lets Matrix clients create a private, temporary voice room and invite one agent without adding that room to `config.yaml` first.
-An explicit room assignment to one calls-enabled agent takes precedence over persisted invite records; invite-only ambiguity still fails closed.
-Calls-enabled agents advertise `📞 Voice calls` in their Matrix presence status only when their MatrixRTC runtime is available, so clients can show the call action only where it will be answered.
-Requester-private agents use the sole authorized caller's verified Matrix user ID to resolve their workspace, memory, credentials, history, knowledge, and tool execution scope.
-The same caller scope applies in configured rooms and authorized ad-hoc invite rooms.
+- `calls.agents references unknown profile(s): ...`
+- `calls.agents references unknown agent(s): ...`
+- `calls.agents configures multiple agents for room(s): ...`, because a room can have at most one calls-enabled agent.
+- `calls.profiles references unknown cascaded model(s): ...` or `calls.profiles references unknown Live agent model(s): ...`, when a profile's model alias is not in the top-level `models` mapping.
 
-## OpenAI Live with agent delegation
+### Realtime profile fields
 
-This example uses GPT-Live for speech and the configured `chat` model for the normal agent's delegated responses.
-The voice model uses its own named OpenAI credential service, independently of the agent's model provider and credentials.
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | yes | `realtime` |
+| `model` | yes | OpenAI realtime speech-to-speech model ID. |
+| `credentials_service` | yes | Named credential service holding the OpenAI API key. |
+| `voice` | yes | Realtime voice preset. |
+
+### Live profile fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | yes | `live` |
+| `model` | yes | OpenAI Live speech model ID, independent of `agent_model`. |
+| `credentials_service` | yes | Named credential service holding the OpenAI API key; Live needs no separate STT or TTS credentials. |
+| `voice` | yes | Live voice preset. |
+| `agent_model` | no | Name of a top-level `models` entry used for delegated agent turns; omitted keeps normal room and agent model resolution. |
+
+### Cascaded profile fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `backend` | yes | `cascaded` |
+| `model` | no | Name of a top-level `models` entry for call turns; it takes precedence over room and agent models, and omitting it keeps normal model resolution. |
+| `stt` | yes | Speech-to-text service. |
+| `tts` | yes | Text-to-speech service. |
+
+Each speech service (`stt` and `tts`) has these fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `provider` | `openai` | `openai` or `openai_compatible`. |
+| `model` | required | Speech model name. |
+| `credentials_service` | none | Named credential service holding the API key. |
+| `api_key` | none | Inline API key. |
+| `host` | none | Service root or its `/v1` base URL; must be an HTTP(S) URL. |
+| `extra_kwargs` | `{}` | Provider options such as `language` for STT or `voice` for TTS; must not set `api_key`, `base_url`, `client`, or `model`. |
+
+`openai` services require `credentials_service` or `api_key`.
+`openai_compatible` services require `host` and may omit credentials, in which case MindRoom sends a non-secret placeholder key.
+STT services must expose `/v1/audio/transcriptions` and TTS services `/v1/audio/speech`.
+The two legs may use the same credential service or different ones.
+
+## Choosing a backend
+
+### Realtime
+
+The realtime model runs the whole conversation itself, using the agent's rendered prompt and its tools.
+See the example in [Setup](#setup).
+
+### Live with agent delegation
+
+Live answers from the agent's full rendered system prompt, including its context files and caller-specific workspace, and delegates requests that need tools, research, more memory, or actions to the normal MindRoom agent, then relays the result conversationally.
+If the agent's prompt plus voice guidance exceeds about 16,000 tokens (a local estimate, not a provider limit), Live instead delegates every substantive request, including questions about identity and preferences, to the normal agent.
+Delegated turns keep their history while the call lasts, and each new call starts a fresh delegate session.
+
+This example uses GPT-Live for speech and the `chat` model for delegated turns, with a voice credential independent of the agent's model provider:
 
 ```yaml
 models:
@@ -131,19 +138,13 @@ calls:
     assistant: openai-live
 ```
 
-`agent_model` is optional; omitting it keeps normal room and agent model resolution.
-When set, it overrides that resolution for the calls-enabled agent and must name an entry in `models`.
-An unknown alias fails configuration loading.
-The `model` field selects the OpenAI Live speech model and is independent of `agent_model`.
-The named `credentials_service` must resolve an API key; a missing service does not fall back to another OpenAI key.
-Live needs no separate STT or TTS credentials.
-Media reconnects reuse the delegate's history for the current call; once the caller leaves, the next call starts a new delegate session.
-Configuration reload rebuilds the call runtime when delegate model definitions or room model routing change.
+### Cascaded
 
-## Cascaded LLM model override
+Each finalized transcript goes through the agent's normal response path, with the same model resolution, system prompt, instructions, knowledge, skills, hooks, tools, requester identity, and history.
+The profile's `model` changes only the LLM; speech services, prompts, history, memory, and tools stay the same.
+Turn ends are detected locally, and the caller can interrupt the agent by speaking.
 
-This example uses a large model for text conversations and a faster model for cascaded call turns.
-The override changes only the calls-enabled agent's LLM selection, while STT, TTS, prompts, history, memory, tools, and delegated-agent model selection remain unchanged.
+This example uses OpenAI speech services and a faster model for call turns than for text chat:
 
 ```yaml
 models:
@@ -169,6 +170,8 @@ calls:
         provider: openai
         model: gpt-transcribe
         credentials_service: openai-voice
+        extra_kwargs:
+          language: en
       tts:
         provider: openai
         model: gpt-4o-mini-tts
@@ -179,45 +182,11 @@ calls:
     assistant: fast-cascaded
 ```
 
-The configured `call_fast` alias is validated when MindRoom loads the configuration.
-An unknown alias fails configuration loading instead of falling back to the normal agent model.
+OpenAI documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-4o-mini-tts`](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts) for text-to-speech.
 
-## Cascaded cloud example
+### Completely local cascaded setup
 
-This example omits the cascaded `model` override and uses OpenAI speech services while the agent keeps its normally resolved model.
-The agent can therefore use Anthropic, Gemini, OpenAI, or any other MindRoom model provider without changing the call configuration.
-
-```yaml
-calls:
-  enabled: true
-  profiles:
-    openai-cascaded:
-      backend: cascaded
-      stt:
-        provider: openai
-        model: gpt-transcribe
-        credentials_service: openai-voice
-        extra_kwargs:
-          language: en
-      tts:
-        provider: openai
-        model: gpt-4o-mini-tts
-        credentials_service: openai-voice
-        extra_kwargs:
-          voice: ash
-  agents:
-    assistant: openai-cascaded
-```
-
-Each speech component has its own `provider`, `model`, `credentials_service`, `api_key`, `host`, and `extra_kwargs`.
-The two speech legs may select the same named credential or different ones.
-The current OpenAI model catalog documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-4o-mini-tts`](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts) for text-to-speech.
-
-## Completely local example
-
-This configuration sends STT, LLM, and TTS requests only to separately managed localhost services and needs no real cloud API key.
-The STT service must expose an OpenAI-compatible `/v1/audio/transcriptions` endpoint.
-The TTS service must expose an OpenAI-compatible `/v1/audio/speech` endpoint, such as a narrow local Kokoro server using a configured model alias.
+This configuration sends STT, LLM, and TTS requests only to localhost services and needs no cloud API key:
 
 ```yaml
 models:
@@ -249,25 +218,55 @@ calls:
           language: en
       tts:
         provider: openai_compatible
-        model: tts-1
+        model: kokoro
         host: http://127.0.0.1:9001
         extra_kwargs:
-          voice: ash
+          voice: af_heart
   agents:
     assistant: local-cascaded
 ```
 
-`host` accepts either the service root or its `/v1` base URL.
-MindRoom supplies a non-secret placeholder key when an OpenAI-compatible speech endpoint has no configured key.
-LiveKit's local Silero VAD controls turn boundaries and barge-in, and preemptive agent generation stays disabled so an interrupted or speculative turn cannot execute tools twice.
+Different agents can use different profiles, for example one agent on `realtime` and another on this local profile.
+
+## When an agent joins a call
+
+An agent joins a call when it starts in one of the agent's configured rooms, or in an ad-hoc room whose invitation the agent accepted under its [`accept_invites`](configuration/agents.md) setting.
+Ad-hoc rooms let a Matrix client create a private voice room and invite one agent without adding the room to `config.yaml`.
+A configured room assignment wins over invites; if several calls-enabled agents were only invited to the same room, none of them answers calls there.
+
+The agent stays in a call only while one Matrix user is in it (that user may join from several devices) and only while that user passes the normal room and per-agent reply permissions.
+That user is the requester for tools, and requester-private agents use that user's workspace, memory, credentials, history, and knowledge.
+
+Tools that need confirmation, user input, external execution, or [`tool_approval`](tool-approval.md) are hidden during calls in every backend, because a call has no approval UI.
+[Deferred tools](tools/dynamic-tools.md) are available from the start of a call in every backend, with no search or loading step.
+
+The agent leaves the call when the caller leaves, a second Matrix user joins, the voice session ends, or MindRoom shuts down.
+A restart, or a configuration reload that restarts the call agent, also drops it from the call.
+
+If the agent joins but cannot hear or speak, look for a `Voice call error:` notice in the room, which names the failing service and how to fix it.
+For a rejected credential, update the credential MindRoom uses, restart MindRoom, then leave and rejoin the call; retrying with the same credential does not help.
+
+## Transcripts and memory
+
+Every call writes a markdown transcript as it goes.
+
+| Agent | Transcript location |
+|-------|---------------------|
+| Shared, file memory | `calls/` in the agent's workspace, readable later by its file tools |
+| Shared, other memory | `<storage>/calls/<agent>/` |
+| Requester-private, file memory | `calls/` in the requester's workspace |
+| Requester-private, other memory | `calls/` in the requester-scoped state directory |
+
+When the call ends, file memory stores a reference to the transcript, Mem0 stores the transcript as recallable context, and `memory: none` keeps only the transcript file.
 
 ## Server requirements
 
+Matrix carries only call signaling; audio flows through a LiveKit SFU deployed next to the homeserver.
 Your Matrix deployment needs the standard Element Call backend:
 
 - A [LiveKit SFU](https://github.com/livekit/livekit) reachable by call participants.
-- The [MatrixRTC authorization service](https://github.com/element-hq/lk-jwt-service) (`lk-jwt-service`) that exchanges Matrix OpenID tokens for LiveKit JWTs.
-- The Matrix server-name domain's `.well-known/matrix/client` must advertise the service:
+- The [MatrixRTC authorization service](https://github.com/element-hq/lk-jwt-service) (`lk-jwt-service`).
+- A `.well-known/matrix/client` on the Matrix server-name domain that advertises the service:
 
 ```json
 {
@@ -279,35 +278,19 @@ Your Matrix deployment needs the standard Element Call backend:
 
 On Kubernetes, the [MatrixRTC chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/matrixrtc) deploys LiveKit and the authorization service, and the [client chart](https://github.com/mindroom-ai/mindroom/tree/main/cluster/k8s/client) publishes the `.well-known` announcement and proxies `/livekit/jwt` and `/livekit/sfu` to them.
 LiveKit media still needs a static public IP and open TCP and UDP media ports, which the chart README describes.
-Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
+Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables it with `matrix_rtc_enabled: true`.
 
-MindRoom joins only calls whose oldest membership advertises the locally configured or discovered MatrixRTC focus.
-It does not connect the server-hosted agent to participant-selected remote focuses; remaining participants may still inherit and advertise the trusted local focus after the original founder leaves.
+The agent joins only calls started on your own MatrixRTC backend, meaning the one in `calls.livekit_service_url` or the agent homeserver's `.well-known`; calls started through a different backend are ignored.
+[Managed rooms](rooms.md#room-management) already let every member join calls.
+In other rooms, such as ad-hoc rooms, the power levels must let members send `org.matrix.msc3401.call.member` state events, which Element Call-capable clients set up when they create rooms.
+Calls work in both encrypted and unencrypted rooms.
 
-The room's power levels must allow members to send `org.matrix.msc3401.call.member` state events (Element Call-capable clients set this up when they create rooms).
-
-## Homeserver notes
-
-- Synapse supports the full MatrixRTC stack, including MSC4140 delayed events for automatic membership cleanup.
-- Tuwunel works with Element Call but does not support delayed events yet ([tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)), so memberships of crashed clients linger until their `expires` window passes.
-
-## Encrypted rooms
-
-Element Call encrypts call media with per-sender frame keys distributed over olm-encrypted to-device messages.
-MindRoom sends its own frame key this way, so participants can always hear the agent.
-Hearing the participants in an encrypted room requires mindroom-nio 0.27.0 or newer, which surfaces unknown decrypted to-device events and is required by MindRoom's dependency metadata ([mindroom-nio#5](https://github.com/mindroom-ai/mindroom-nio/pull/5)).
-Calls in unencrypted rooms need none of this and work with plain SFU media.
-
-## Transcripts and memory
-
-Every call writes a markdown transcript incrementally.
-Shared file-memory agents keep it under `calls/` in their canonical workspace, where their file tools can read it later; other shared agents keep it under `<storage>/calls/<agent>/`.
-Requester-private file-memory agents keep transcripts in their requester-scoped workspace, while other requester-private agents keep them in their requester-scoped state archive.
-When the call ends, file memory stores a relative transcript reference, Mem0 stores the transcript as recallable context, and disabled memory leaves only the transcript file.
+Synapse supports the full MatrixRTC stack, including automatic cleanup of stale call memberships.
+Tuwunel works with Element Call but does not yet support delayed events ([tuwunel#178](https://github.com/matrix-construct/tuwunel/issues/178)), so memberships of crashed clients linger until they expire.
 
 ## Limitations
 
-- Audio only: the agent neither publishes nor consumes video and screen shares.
-- Managed agent calls support one distinct human Matrix user at a time, although that user may join from multiple devices.
-- Cascaded speech services currently use OpenAI-compatible transcription and speech endpoints.
+- Audio only: the agent neither sends nor receives video or screen shares.
+- One human Matrix user per call, possibly on several devices.
+- Cascaded speech services must be OpenAI-compatible transcription and speech endpoints.
 - Legacy 1:1 `m.call.*` calls (non-MatrixRTC) are not supported.

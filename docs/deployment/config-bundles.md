@@ -4,138 +4,144 @@ icon: lucide/package
 
 # Config Bundles
 
+A config bundle is a complete configuration directory: `config.yaml`, its included YAML and text files, prompts, `.env`, and any other assets.
+The bundle commands deploy such a directory as a unit, validate it before activation, refuse to overwrite hand edits, keep the replaced tree for rollback, and confirm that the running MindRoom applied it.
+
+| Task | Command |
+| --- | --- |
+| Hot-apply a YAML/include change to a running MindRoom, wait for the result, and optionally roll back | [`config apply-bundle`](#config-apply-bundle) |
+| Install any change, including `.env`, plugins, or other assets, without waiting for the runtime | [`config install-bundle`](#config-install-bundle) |
+| Seed or update the config directory when MindRoom starts | [`mindroom run --bootstrap-config-bundle`](#install-at-startup) |
+| Check whether a change can be applied by config hot reload | [`config classify-change`](#config-classify-change) |
+| Confirm the runtime applied a config | [`config fingerprint` and `config check-applied`](#config-fingerprint-and-config-check-applied) |
+
+Keep runtime state and storage outside the bundle directory, and leave `.mindroom-bundle.json` inside it to the installer.
+
 ## config install-bundle
 
-Install a complete configuration directory, including nested YAML includes, prompts, and its `.env`:
+Validate and install a complete configuration directory:
 
 ```bash
 mindroom config install-bundle ./candidate --target ./active --json
 mindroom config install-bundle ./candidate --target ./active --initialize-only
 mindroom config install-bundle ./candidate --target ./active --revision deploy-2
 mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
-# Pin rollback to the digest of the tree the installation moved aside:
+# Roll back, pinned to the digest of the tree the installation moved aside:
 mindroom config install-bundle ./active.previous --target ./active --expected-digest <receipt-previous-digest> --json
 ```
 
-To install, confirm, and roll back in one step, use [`config apply-bundle`](#config-apply-bundle).
+`--target` is the directory to install into, `--config` selects the config file relative to the bundle root (default `config.yaml`), and `--json` prints the receipt as JSON.
 
-`--config` selects a relative file inside the bundle (default `config.yaml`).
-The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
-Native includes must remain inside the selected config file's directory.
-Run the installer with the runtime's environment and filesystem access; external resources referenced by config are outside the bundle's drift protection.
-Relative paths resolve within the staged candidate during validation.
-Automatic config migrations affect the staged copy only.
+The candidate is validated as MindRoom would load it, including includes and environment, before anything is activated.
+Includes must stay inside the config file's directory, as described in [Splitting the Configuration](../configuration/index.md#splitting-the-configuration-into-multiple-files).
+Run the installer with the runtime's environment and filesystem access; external resources the config references are validated but not part of the bundle.
+Automatic config migrations rewrite the installed copy, never the source bundle.
 
-`--initialize-only` without `--revision` preserves any existing target directory.
-It does not validate that existing tree and returns `initialized` with no fingerprint.
-With `--revision`, a matching revision stored in `.mindroom-bundle.json` preserves the active tree after recovery, including any later hot installs.
-A different or missing stored revision validates the candidate.
-When `--revision` is supplied and the stored revision is missing or differs, an existing active tree must be owned and unedited, even when the candidate has identical content.
-Use ordinary installation with explicit `--force` to adopt an unmanaged tree or reset authored drift.
-The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
-It changes only after successful validation and publication.
-If candidate content is identical, only metadata changes atomically; authored files and previous trees stay untouched.
-Ordinary installs without `--revision` carry the active revision forward and ignore revision metadata in the incoming bundle.
-Without this flag, unchanged trees return `unchanged`.
-Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
-This covers `.env` and files outside the YAML include graph too.
-An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
-`--force` cannot be combined with `--initialize-only`.
-`--source-only` refuses a changed candidate unless every difference from the existing active tree lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change).
-The comparison uses the staged candidate under the installer lock, so a refused candidate is never published.
-
-Successful replacement retains the complete former tree at `TARGET.previous`.
-Invalid candidates and failed copies leave active and previous trees untouched.
-Symlinks and special files are rejected.
-Mounts at or inside active and recovery trees are rejected before rotation or cleanup, including with `--force`.
-Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
-
-Rollback uses the same validated installation operation with `TARGET.previous` as its source.
-Pass the installation receipt's `previous_digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
-The rejected active revision then becomes the new previous tree.
-Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
-The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
-The guard can pin any mutable candidate source.
-If the active revision has since been authored, rollback also requires explicit `--force`.
-A failed or missing runtime receipt does not automatically roll back filesystem state.
-
-For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
-Add `--bootstrap-config-bundle-revision REVISION` to install a changed declared revision before startup; this option requires a bootstrap source.
-The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
-Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
-Startup then resolves paths and `.env` again from the installed tree.
-Without a declared revision, existing target directories are preserved on restart.
-With a matching declared revision, restarts preserve hot updates and guarded rollbacks; a new revision uses native validation and drift protection.
-Keep storage outside this dedicated config directory.
-
-**Filesystem limits:** directory replacement uses two renames on the target filesystem.
-Readers can briefly see a missing target between renames, but never a partly copied tree.
-This is not a transaction across concurrent reads or external writers, nor a power-loss durability guarantee.
-Installer calls serialize using a sibling lock.
-A failed publication rename restores the former active tree.
-Interrupted operations leave complete trees at `.TARGET.pending` and `.TARGET.retired`; `.TARGET.transaction` records whole-tree content digests and persists ownership of `TARGET.previous` between installations.
-Journal updates use atomic replacement; partial writes preserve the prior record.
-Recovery accepts copied or restored trees with identical file names, modes, and bytes, even on another mount; it rejects changed previous or recovery contents.
-Reserved regular `.mindroom-bundle.json` metadata is excluded from these digests, but links and special files are always rejected.
-This verifies preserved content, not filesystem object identity.
-Hashing previous and recovery trees adds filesystem reads during installation and bootstrap.
-Retry the command to recover before proceeding.
-Do not manually modify these reserved recovery paths.
-If retired cleanup deletes some files before failing, its content no longer matches the journal; retry fails closed and requires manual inspection.
-A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
+An invalid candidate leaves the active and previous trees untouched.
+Bundles containing symlinks or special files are rejected, and so are mounts at or inside the target and its recovery paths, even with `--force`.
 The target must be a directory below a writable mount, not the mount point itself.
 
-JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, `recovery_pending`, and `previous_digest`.
-The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
-`previous_digest` is the whole-tree digest of the tree this installation moved to `TARGET.previous`, or `null` when it replaced nothing.
-Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
-An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
-A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
-Pin mutable rollback sources as above.
-The fingerprint identifies native YAML/include sources, so use the existing `check-applied` command to confirm runtime application.
-The installer advances the root config mtime on changed activation for the existing watcher.
-Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
-Preserve `TARGET.previous` until runtime confirmation succeeds.
+### Protection against hand edits
+
+An identical candidate returns `unchanged` and changes nothing.
+A changed candidate replaces the active tree only if every file name, mode, and content still matches the last installation, including `.env` and files outside the YAML include graph.
+A target that was edited or never installed by this command fails with `Target contains authored edits or is unmanaged; use install-bundle --force to replace it explicitly.`
+`--force` adopts or resets such a target but never bypasses validation; it cannot be combined with `--initialize-only`.
+
+`--source-only` refuses a changed candidate unless every difference lies within the YAML/include sources of `--config`, as reported by [`config classify-change`](#config-classify-change); a refused candidate is never installed.
+`--source-only` also requires an existing target, so omit it for the initial installation.
+
+### Rolling back
+
+Every replacement keeps the complete former tree at `TARGET.previous`; keep it until the runtime confirms the new config.
+To roll back, install `TARGET.previous` with the receipt's `previous_digest` as `--expected-digest`.
+The digest covers the whole tree, including `.env` and other assets that the config fingerprint does not cover, and `--expected-digest` can pin any candidate source this way.
+After the rollback, the rejected tree becomes the new `TARGET.previous`, so repeating a pinned rollback fails instead of switching back to the rejected tree.
+If the active tree was edited since the installation, rollback also requires `--force`.
+`install-bundle` never rolls back on its own when the runtime rejects a config; use `apply-bundle --rollback-on-failure` for that.
+
+### Install at startup
+
+`mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` installs the bundle before MindRoom loads its environment.
+The target directory is the selected config file's directory, and the source must contain the same config filename at its root.
+Validation reads the bundle's `.env`, with exported process variables and an explicit `--storage-path` taking precedence, and startup then uses the installed tree.
+
+Without a revision, startup installs the bundle only when the target directory is absent and otherwise keeps it unchanged and unvalidated, returning `initialized` with no digest or fingerprint.
+Add `--bootstrap-config-bundle-revision REVISION` (which requires `--bootstrap-config-bundle`) to roll out a new bundle through restarts:
+
+- A target whose recorded revision matches is kept, including later hot installs and rollbacks.
+- A target with a different or no recorded revision gets the candidate after full validation, but only if the target is unedited and was installed by these commands, even when the content is identical; adopt or reset it once with `install-bundle --force`.
+- When only the revision differs, only the recorded revision changes and the files stay untouched.
+- A failed installation keeps the previous revision.
+
+These are the same rules as `install-bundle --initialize-only` with and without `--revision`.
+A revision is a nonblank string of at most 128 UTF-8 bytes without control characters.
+Installs without `--revision` keep the active revision and ignore any revision recorded in the incoming bundle.
+
+### Receipts and exit codes
+
+Exit `0` means the tree was installed or kept; exit `2` reports an installation error, printed as `{"status": "failed", "detail": ...}` with `--json`.
+The JSON receipt contains these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `installed`, `unchanged`, or `initialized` |
+| `config_path` | Installed config file |
+| `digest` | Whole-tree digest of file names, modes, and contents, excluding installer metadata; `null` for `initialized` |
+| `fingerprint` | [Config source fingerprint](#config-fingerprint-and-config-check-applied) to pass to `check-applied`; `null` for `initialized` |
+| `recovery_pending` | `true` when the new tree is active but moving the old tree to `TARGET.previous` needs a retry |
+| `previous_digest` | Whole-tree digest of the tree moved to `TARGET.previous`, or `null` when nothing was replaced |
+
+A changed installation triggers the running MindRoom's [config hot reload](../configuration/index.md#configuration-file); confirm the result with `config check-applied`.
+Hot reload does not reread `.env` or other assets, so environment changes can need a restart.
+
+### Interrupted installs
+
+Readers can briefly find the target missing during replacement but never see a partly copied tree.
+Installation is not durable against power loss and does not coordinate with other programs writing to the tree.
+After an interrupted install, rerun the command to finish recovery before doing anything else.
+Do not modify the reserved sibling paths `.TARGET.pending`, `.TARGET.retired`, `.TARGET.transaction`, and `.TARGET.lock`.
+If recovery reports changed previous or recovery trees, inspect them manually.
+A process killed while copying can leave an unused `.TARGET.stage-*` directory that you can delete.
 
 ## config classify-change
 
-Decide whether a candidate tree differs from the current tree only in the YAML/include sources that a runtime config reload rereads:
+Check whether a candidate tree differs from the current tree only in the YAML/include sources that config hot reload rereads:
 
 ```bash
 mindroom config classify-change ./active ./candidate --json
 mindroom config classify-change ./old-tree ./new-tree --config prod/config.yaml --config staging/config.yaml
 ```
 
-Sources are the files the native YAML loader reads from each `--config` entrypoint in either tree, including transitively included YAML and text files.
-Directories that only appear or disappear around those files also count as sources.
-Every other difference is reported as `other`, including `.env`, plugins, scripts, files no entrypoint reads, mode changes on directories, and include paths that switch between file and directory.
-Config reload does not reread `other` paths, so they may need a runtime restart or another reload mechanism such as [plugin hot reload](../plugins.md#live-development-hot-reload).
-A source-only result does not prove the runtime applies every changed setting; confirm with `config check-applied`.
-Each `--config` entrypoint (default `config.yaml`) must load in both trees.
-Installer metadata in `.mindroom-bundle.json` is ignored, and symlinks and special files are rejected as in installation.
-The command only reads both trees, and its results list paths, never file contents.
+Sources are the files the YAML loader reads from each `--config` entrypoint (default `config.yaml`, repeatable) in either tree, including transitively included YAML and text files, plus directories that only appear or disappear around them.
+Every entrypoint must load in both trees.
+Every other difference is reported as `other`, including `.env`, plugins, scripts, unreferenced files, directory mode changes, and include paths that switch between file and directory.
+Installer metadata in `.mindroom-bundle.json` is ignored.
+Hot reload does not reread `other` paths, so they may need a restart or another mechanism such as [plugin hot reload](../plugins.md#live-development-hot-reload).
+A source-only result does not prove that the runtime applies every changed setting; confirm with `config check-applied`.
+The command only reads both trees, rejects symlinks and special files, and lists paths but never file contents.
 
 JSON output contains `status` (`source_only` or `non_source`), `sources`, and `other`.
-Exit codes are `0` when every difference is a source (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
+Exit codes are `0` when every difference is a source change (including no difference), `1` for other changes, and `2` when either tree cannot be classified.
 
 ## config apply-bundle
 
-Hot-apply a source-only change to the directory a running MindRoom loads, wait for the runtime to apply it, and optionally restore the previous tree when the runtime rejects it:
+Hot-apply a source-only change to the directory a running MindRoom loads, wait for the runtime result, and optionally restore the previous tree when the runtime rejects it:
 
 ```bash
 mindroom config apply-bundle ./candidate --target ./active --rollback-on-failure --wait 300 --json
 ```
 
-The command first reads `GET /api/config/reload-status` and installs nothing unless the runtime reports a reload status, with the same `--url`, `--timeout`, `MINDROOM_API_KEY`, and HTTPS rules as `check-applied`.
-It then runs an ordinary installation without `--force`, honoring `--config` and `--expected-digest`, and waits up to `--wait` seconds (default 300) for the runtime result of the installed fingerprint.
-The installation always uses `--source-only`, because the runtime fingerprint covers only YAML/include sources; changes to `.env`, plugins, or other files that config reload does not reread are refused before anything is installed, so install those with `install-bundle` instead.
-With `--rollback-on-failure`, only a `failed` runtime result for the exact fingerprint of a changed installation restores `TARGET.previous`, pinned to the receipt's `previous_digest`, and then waits again for that tree's fingerprint.
-A reload already pending or failed before installation, for the same or a not-yet-known fingerprint, does not count, and pending, unreadable, or restart-required results never roll back.
+The command first checks that the runtime reports a reload status, using the same `--url`, `--timeout`, `MINDROOM_API_KEY`, and HTTPS rules as [`check-applied`](#config-fingerprint-and-config-check-applied), and installs nothing until it does.
+It then installs the candidate like `install-bundle --source-only` without `--force`, honoring `--config` and `--expected-digest`, and waits up to `--wait` seconds (default 300) for the runtime result.
+Changes to `.env`, plugins, or other files that hot reload does not reread are refused before anything is installed; install those with `install-bundle` instead.
+With `--rollback-on-failure`, a runtime rejection of a changed installation restores `TARGET.previous`, pinned to the receipt's `previous_digest`, and waits again for that tree.
+Pending, unreadable, or restart-required results never roll back, and neither does a failure when a reload of the same or an unknown config was already pending or failed before installation.
 
 | Status | Exit code | Meaning |
 | --- | --- | --- |
-| `applied` | `0` | The runtime applied the candidate fingerprint. |
-| `pending` | `1` | The candidate is installed, but the runtime had not settled its fingerprint within `--wait`; confirm later with `check-applied`. |
+| `applied` | `0` | The runtime applied the candidate. |
+| `pending` | `1` | The candidate is installed, but the runtime had not settled it within `--wait`; confirm later with `check-applied`. |
 | `failed` | `2` | Nothing was installed, or the runtime rejected the candidate and no rollback was requested or possible, so the candidate stays installed. |
 | `rolled_back` | `3` | The runtime rejected the candidate, and the restored previous tree was applied. |
 | `unconfirmed` | `4` | The runtime result could not be read or proven, or restoring or confirming the previous tree failed; inspect before retrying. |
@@ -146,7 +152,7 @@ The JSON receipt contains `status`, `detail`, the candidate `install` receipt an
 
 ## config fingerprint and config check-applied
 
-Confirm that the running runtime finished applying a particular config source:
+Confirm that the running MindRoom finished applying a particular config:
 
 ```bash
 mindroom config fingerprint --path ./config.yaml
@@ -154,27 +160,28 @@ mindroom config check-applied --path ./config.yaml --wait 300
 mindroom config check-applied --fingerprint <sha256> --url https://example.org --json
 ```
 
-`fingerprint` hashes the source bytes captured by the YAML loader, including all transitively included YAML and text files.
-A single file uses its plain SHA-256; multiple files combine their relative paths and content hashes.
-Moving the same tree to another directory preserves its fingerprint.
-Comments and formatting changes affect the fingerprint; unrelated files and environment variables do not.
+`fingerprint` prints a SHA-256 over the config file and all transitively included YAML and text files; for a config without includes it equals the file's SHA-256.
+Moving the tree to another directory keeps its fingerprint.
+Comment and formatting changes alter the fingerprint, while unrelated files and environment variables do not.
 
-Legacy access settings must be migrated with `mindroom config migrate --path <config-path>` before capturing a fingerprint.
-When reading a config file, both commands reject legacy access settings with exit `2`: automatic migration would rewrite their source bytes during reload.
-Explicit `--fingerprint` skips reading local config sources; the caller must supply a fingerprint of the migrated source.
+When reading a config file, both commands refuse legacy access settings, exiting `2`, because the runtime would rewrite those source files when migrating them.
+Run `mindroom config migrate --path <config-path>` first.
+`check-applied --fingerprint` does not read the local config, so it needs no local migration, but the fingerprint must be that of the migrated config.
 
-`check-applied` captures the expected fingerprint once before polling the authenticated `GET /api/config/reload-status` endpoint.
-It requires `MINDROOM_API_KEY` and HTTPS for remote endpoints.
-Without `--wait`, it checks once.
-`--timeout` bounds each HTTP request; `--wait` bounds the polling period.
+`check-applied` reads the authenticated `GET /api/config/reload-status` endpoint from `--url` (default `MINDROOM_URL`, then `http://127.0.0.1:8765`).
+It requires `MINDROOM_API_KEY`, and HTTPS for remote URLs.
+Without `--wait`, it checks once; `--wait` bounds the polling period and `--timeout` (default 10 seconds) bounds each request.
 Neither command changes config or triggers a reload.
 
-Exit codes are `0` for matching completed application, `1` for pending or a different fingerprint (including wait expiration), and `2` for matching failure, restart required, or unavailable status.
-JSON output identifies the expected and observed fingerprints.
-Only the latest reload result is retained in memory.
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The runtime applied the expected fingerprint. |
+| `1` | Pending, or the runtime reports a different fingerprint, including when `--wait` expires. |
+| `2` | The runtime failed to apply the expected fingerprint, needs a restart, or its status is unavailable. |
 
-The runtime acknowledges a fingerprint after its reload plan finishes, including changes that need no agent restart.
-A loaded API config cache does not count as completion.
-Known event-journal changes requiring a process restart return `restart_required`.
-Completion does not guarantee that every bot or external service is healthy.
-If parsing fails before the include tree is known, the failure has no fingerprint and cannot settle a wait for a particular fingerprint.
+JSON output shows the expected and observed fingerprints.
+The endpoint reports only the latest reload, with status `pending`, `applied`, `failed`, `restart_required`, or `unavailable` (HTTP 503, until MindRoom is ready).
+
+The runtime reports `applied` once the reload finished, including changes that need no agent restart, but this does not prove that every bot or external service is healthy.
+A change to the [event journal](storage.md#event-journal) database reports `restart_required`.
+If the YAML fails to parse, the failure has no fingerprint, so a wait for a specific fingerprint reports pending until it expires.

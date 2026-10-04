@@ -4,30 +4,20 @@ icon: lucide/wrench
 
 # Calendar & Scheduling
 
-Use these tools to read external calendars, manage to-do lists and bookings, and schedule future agent work inside MindRoom.
+Use these tools to give an agent access to Google Calendar, Google Tasks, or Cal.com bookings, or to let it schedule its own future work in MindRoom.
 
-## What This Page Covers
+- [`google_calendar`] - Read Google Calendar events and availability, and optionally create, update, or delete events.
+- [`google_tasks`] - List, create, update, complete, and delete Google Tasks.
+- [`cal_com`] - Query Cal.com availability and manage bookings.
+- [`scheduler`](../scheduling.md#scheduler) - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current conversation; documented on [Scheduling](../scheduling.md).
 
-This page documents the built-in tools in the `calendar-and-scheduling` group.
-Use these tools when you need Google Calendar or Google Tasks access, Cal.com booking APIs, or Matrix-native scheduled tasks that post back into MindRoom later.
+## Google Setup
 
-## Tools On This Page
-
-- [`google_calendar`] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
-- [`google_tasks`] - List, create, update, complete, and delete Google Tasks through Google OAuth.
-- [`cal_com`] - Query Cal.com availability and manage bookings through the Cal.com API.
-- [`scheduler`](../scheduling.md#scheduler) - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
-
-## Common Setup Notes
-
-`google_calendar` and `google_tasks` are per-service Google OAuth integrations.
-They use the `google_calendar` and `google_tasks` OAuth providers instead of an API key form.
-They support shared and requester-isolated worker scopes, with OAuth credentials resolved for the active execution identity.
-Use [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md) or [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md) to connect Google before enabling either tool.
-`cal_com` is a standard credential-backed tool with its own config fields and no shared-only restriction.
-`scheduler` is MindRoom's built-in scheduling system, so it does not need dashboard OAuth setup or API keys.
-Unlike the Google and Cal.com API tools, `scheduler` depends on the active Matrix `ToolRuntimeContext`, so it only works from a live room or thread.
-MindRoom also includes `scheduler` in `defaults.tools` by default on this branch.
+`google_calendar` and `google_tasks` use Google OAuth instead of API keys, with separate `google_calendar` and `google_tasks` connections.
+Connect Google with [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or, for custom clients and scopes, [Google Services OAuth](../deployment/google-services-oauth.md).
+An agent's `worker_scope` decides whose Google account it uses; see [Where Connections Are Stored](../oauth-framework.md#where-connections-are-stored).
+To use a Google Workspace service account instead, see [Service Account](../deployment/google-services-oauth.md#service-account).
+If an agent calls either tool before the account is connected, the tool returns a connect link instead of a result.
 
 ## [`google_calendar`]
 
@@ -36,25 +26,15 @@ MindRoom also includes `scheduler` in `defaults.tools` by default on this branch
   <source src="https://github.com/user-attachments/assets/ba40bcb7-19aa-4085-9c28-e99f1d171320#t=0.1" type="video/mp4">
 </video>
 
-`google_calendar` wraps Agno's Google Calendar toolkit with MindRoom-scoped Google OAuth credentials.
-
-### What It Does
-
-`google_calendar` exposes `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
-MindRoom loads the connected Google account from its unified credential store instead of relying on a per-process `token.json`.
-The OAuth provider requests narrowly targeted scopes for event access, calendar listing, availability, and working-hours settings, while MindRoom gates write methods with the `allow_update` setting.
-Write calls are enabled by default and can be removed from the tool surface with `allow_update: false`.
-When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnectionRequired` instead of falling back to Agno's local token flow.
-`find_available_slots()` derives openings from the user's current calendar events plus working-hours settings inferred from Google Calendar settings and locale.
-
-### Configuration
+`google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
+`find_available_slots()` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
+Dates without a time or offset, such as `2026-10-05`, are read as UTC, so the returned slots use UTC hours; convert them to the user's timezone before presenting them.
+`list_calendars()` returns the IDs of the other calendars the connected account can use.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `calendar_id` | `text` | `no` | `primary` | Google Calendar ID to query or update. |
-| `allow_update` | `boolean` | `no` | `true` | Expose create, update, delete, quick-add, move, and invitation-response operations. |
-
-### Example
+| `allow_update` | `boolean` | `no` | `true` | Expose `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`; set `false` for a read-only agent. |
 
 ```yaml
 agents:
@@ -71,43 +51,39 @@ find_available_slots(start_date="2026-04-01", end_date="2026-04-03", duration_mi
 create_event(
     start_date="2026-04-02T15:00:00",
     end_date="2026-04-02T15:30:00",
+    timezone="America/Los_Angeles",
     title="Deployment review",
     attendees=["ops@example.com"],
+    notify_attendees=True,
     add_google_meet_link=True,
 )
 ```
 
-### Notes
+`create_event()` reads times without an offset in its `timezone` argument, which defaults to UTC rather than MindRoom's configured `timezone`, so pass the user's IANA timezone or include an offset.
+`create_event()` emails invitations to attendees only when called with `notify_attendees=True`; by default guests are added without an email.
 
-- `calendar_id` defaults to `primary`, and `list_calendars()` can return the other calendar IDs available to the connected account.
-- If the Google Calendar connection is missing any required Calendar scope, `google_calendar` stays unavailable until the user reconnects and grants it.
-- Use the Google Services OAuth guides for consent-screen setup, redirect URIs, and environment variables.
+If the Google Calendar connection lacks any required Calendar permission, the tool stays unavailable until the user reconnects and grants it.
 
 ## [`google_tasks`]
 
-`google_tasks` is the native Google Tasks API toolkit for the connected user's task lists.
+`google_tasks` works with the connected user's Google Tasks lists.
 
-### What It Does
+| Function | Behavior |
+| --- | --- |
+| `google_tasks_list_task_lists()` | Returns up to 1,000 task lists with their IDs and titles. |
+| `google_tasks_list_tasks()` | Returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat. Completed tasks, including those completed in Google's own apps, appear only with `show_completed=True`. |
+| `google_tasks_create_task()` | Creates a task with optional notes, due date, and parent task. |
+| `google_tasks_update_task()` | Changes only the fields you pass: title, notes, due date, or completion state. Pass an empty string as `notes` or `due` to remove that field. |
+| `google_tasks_delete_task()` | Deletes one task. Deleting a task assigned from Google Docs or Chat also deletes the original assignment. |
 
-`google_tasks_list_task_lists()` returns up to 1,000 task lists per page with their IDs and titles, and a `nextPageToken` when more lists remain.
-`google_tasks_list_tasks()` returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat spaces, and returns a `nextPageToken` when more tasks remain.
-Completed tasks are omitted unless `show_completed=True`, which also includes tasks completed in Google's own apps.
-`google_tasks_create_task()` creates a task with optional notes, due date, and parent task.
-`google_tasks_update_task()` changes only the fields you pass: title, notes, due date, or completion state.
-`google_tasks_delete_task()` deletes one task.
-Deleting a task assigned from Google Docs or Chat also deletes the original assignment there.
-Every operation defaults to the user's default list, `@default`, when no `task_list_id` is given.
+Both list functions return a `nextPageToken` when more results remain.
+Every function uses the user's default list, `@default`, when no `task_list_id` is given.
 Due dates use `YYYY-MM-DD`, because Google Tasks stores a due day without a time.
-Pass an empty string as `notes` or `due` to `google_tasks_update_task()` to remove that field.
-
-### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_list_task_lists()` and `google_tasks_list_tasks()`. |
 | `manage_tasks` | `boolean` | `no` | `true` | Expose task creation, updates, completion, and deletion. |
-
-### Example
 
 ```yaml
 agents:
@@ -124,39 +100,28 @@ google_tasks_create_task("Renew passport", notes="Bring two photos", due="2026-1
 google_tasks_update_task("dGFzay0x", completed=True)
 ```
 
-### Notes
-
-- `google_tasks` uses its own `google_tasks` OAuth provider and `google_tasks_oauth` token service, which request only the Tasks scope plus Google identity scopes.
-- `google_tasks` always runs in the primary MindRoom runtime so Google OAuth tokens are never mirrored into worker containers.
-- Enable the Google Tasks API in the Google Cloud project that owns a custom OAuth client before connecting.
-
 ## [`cal_com`]
 
-`cal_com` talks to the Cal.com v2 booking API for availability lookup and booking management.
-
-### What It Does
-
-`cal_com` exposes `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`.
-The toolkit uses one configured `event_type_id` as the default booking type for slot lookup and booking creation.
-Responses are converted from UTC into `user_timezone` before they are returned.
-The per-method enable flags let you narrow the exposed call surface when an agent should only inspect availability or only manage existing bookings.
-
-### Configuration
+`cal_com` uses the Cal.com v2 API at `https://api.cal.com/v2` to look up availability and manage bookings.
+It provides `get_available_slots()`, `create_booking()`, `get_upcoming_bookings()`, `reschedule_booking()`, and `cancel_booking()`.
+Slot lookup and new bookings use the configured `event_type_id`.
+Returned times are converted from UTC into `user_timezone`.
+Use the per-function `enable_*` flags when an agent should, for example, only check availability or only manage existing bookings.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Cal.com API key. Configure this through the dashboard or credential store rather than inline YAML. |
-| `event_type_id` | `number` | `no` | `null` | Default Cal.com event type ID used for slot lookup and new bookings. |
-| `user_timezone` | `text` | `no` | `null` | IANA timezone used when formatting returned booking times. |
+| `api_key` | `password` | `no` | `null` | Cal.com API key; set it through the dashboard or credential store, not inline YAML. |
+| `event_type_id` | `number` | `no` | `null` | Cal.com event type ID used for slot lookup and new bookings. |
+| `user_timezone` | `text` | `no` | `null` | IANA timezone for returned booking times; `America/New_York` when unset. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 | `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
 | `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
 | `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
 | `enable_reschedule_booking` | `boolean` | `no` | `true` | Enable `reschedule_booking()`. |
 | `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
-| `all` | `boolean` | `no` | `false` | Enable every Cal.com operation at once. |
+| `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
-### Example
+Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables of the MindRoom process.
 
 ```yaml
 agents:
@@ -178,19 +143,8 @@ create_booking(
 get_upcoming_bookings(email="alex@example.com")
 ```
 
-### Notes
-
-- Although the metadata marks `api_key` and `event_type_id` as optional fields, the runtime only works properly when those values are supplied either through stored credentials or the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
-- If `user_timezone` is omitted, the upstream toolkit falls back to `America/New_York`.
-- `api_key` is a password field, so MindRoom blocks inline YAML overrides for it in normal authored config.
-- All current requests go to `https://api.cal.com/v2`.
-
-See [`scheduler`](../scheduling.md#scheduler).
-
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Scheduling](../scheduling.md)
 - [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
-- [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
-- [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)
+- [Scheduling](../scheduling.md)

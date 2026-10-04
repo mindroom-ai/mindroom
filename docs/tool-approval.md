@@ -9,7 +9,7 @@ icon: lucide/shield-check
   <source src="https://github.com/user-attachments/assets/d62d98e8-c066-4e1f-8a8f-d840da7b0bd1#t=0.1" type="video/mp4">
 </video>
 
-Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
+Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
 This example gates Slack message sending and file uploads, plus shell calls selected by a review script:
 
 ```yaml
@@ -29,29 +29,32 @@ tool_approval:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `default` | `auto_approve` or `require_approval` | `auto_approve` | Decision for calls that no rule matches |
-| `timeout_days` | number | `7` | How long an approval card stays open before it expires |
+| `timeout_days` | number, greater than 0 and at most 36500 | `7` | How long an approval card stays open before it expires |
 | `rules` | list | `[]` | Ordered rules; the first matching rule wins |
 | `rules[].match` | string | Required | Case-sensitive glob over exposed function names, not toolkit identifiers, so the same function name in another toolkit also matches |
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
-| `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`; approval is required only when it returns `True` |
-| `rules[].timeout_days` | number | `tool_approval.timeout_days` | Expiry window for this rule |
+| `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
+| `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 
 ## Approving and Denying
 
 - React to the approval card with `✅` to approve the tool call.
 - Reply to the card to deny the call; the start of the reply is recorded as the denial reason.
 - Only the original human requester can approve or deny their pending call.
-- Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
-  It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
-  It needs a thread and complete reviewable arguments, and is not offered for native tool-authored confirmations or background-script approvals.
-  The requester can stop auto-approval from the originating card, and changes to configured bindings or room membership end matching grants; calls already approved still run.
+  When an agent acts on a request relayed by another agent's reply, the original human is asked.
+- Tool calls requested by agents, the system, or configured bridge bots are denied instead of waiting for approval.
+- An unanswered card expires after its `timeout_days` and the call is denied.
 
 While approval is pending, the agent stops typing and the conversation can continue.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
 The approved call runs only with the exact arguments shown on the card.
-Tool calls authored by agents, the system, or configured bridge bots are denied instead of entering the approval flow.
-An agent acting on a request relayed by another agent's reply asks the original human for approval.
-See [When the Router Is Missing](#when-the-router-is-missing) when approval fails because the router is not in the room.
+
+### Auto-Approval for a Few Minutes
+
+Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
+It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
+It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves or for background-script approvals.
+The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
 ## Approval Card Contents
 
@@ -60,25 +63,19 @@ Fields whose names mark them as secret, such as `password`, `credentials`, or an
 Inside text, only credentials in known token formats, such as `sk-…`, `ghp_…`, `github_pat_…`, `xoxb-…`, `AIza…`, and JSON Web Tokens, are replaced by numbered placeholders like `⟦secret-1⟧`; equal tokens get the same number.
 Other inline secrets, such as `export DB_PASSWORD=hunter2` or an inline `Authorization: Basic …` header, stay visible, so keep secrets in credentials or secret-named fields.
 Deny the call when a hidden field or a placeholder where a command, host, path, or delimiter belongs could change what runs.
-A card cannot be approved when its complete redacted arguments exceed 2 MB, nest deeper than 32 levels, or fail to upload; approving it then denies the call.
+
+A card cannot be approved when its arguments exceed 2 MB, nest deeper than 32 levels, or fail to upload; approving it denies the call with `Cannot approve: the tool arguments cannot be shown in full`.
+Have the agent retry with a smaller payload, such as saving large content to a workspace file or sending it as an attachment, or auto-approve the tool with a script rule.
 
 ## Tools That Cannot Pause for Approval
 
-The OpenAI-compatible `/v1/chat/completions` API has no approval transport, so it hides every tool function that matches a required-approval rule, including script rules.
+The [OpenAI-compatible API](openai-api.md) has no approval cards, so it hides every tool function that matches a required-approval rule, including script rules.
 Skill, knowledge-search, and learning functions such as `get_skill_script`, `search_knowledge_base`, and `update_user_memory` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
 ## When the Router Is Missing
 
-Approval-gated tools are stricter than plain ad-hoc chat access.
-When approval needs a missing router, the agent can call `invite_router` to invite it into the current room and then retry.
-The tool waits briefly for joined membership and, if the invite remains pending, tells the agent to retry only after the router joins.
-The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
-For a team execution, that identity is the team's Matrix account rather than the member agent's account.
-
-Every concrete Matrix agent operating in a room also receives a built-in zero-argument `invite_router` recovery tool.
-The tool can invite only the persisted router identity and only into the agent's current room.
-The router accepts the invite and persists the room only when `router.accept_invites` allows the current Matrix transport account's user ID.
-A team member therefore authorizes recovery through the team's Matrix account, not the member agent's account.
-The recovery tool waits briefly for joined membership and reports a pending state when the router has not joined yet.
-This lets an agent recover router-backed approvals without adding persistent prompt instructions or exposing arbitrary invite targets.
+Approval cards need the router in the room, so a gated call in a room without the router fails with `Tool approval needs the router in this room.`
+Every agent in a room has a built-in `invite_router` tool that invites the router into the current room, waits briefly for it to join, and reports when the invite is still pending so the agent retries after the router joins.
+The router accepts that invite only when its [`router.accept_invites`](configuration/router.md) allows the inviting agent's Matrix account; for a team, that is the team's account rather than the member agent's.
+Otherwise enable that setting or add the router to the room manually, then retry.

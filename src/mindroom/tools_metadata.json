@@ -8345,7 +8345,7 @@
       ],
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

@@ -4,138 +4,110 @@ icon: lucide/layout-grid
 
 # Rooms & Spaces
 
-See also [Access Control](authorization.md).
+This page covers the Matrix rooms MindRoom creates and manages, their join, listing, encryption, invitation, and admin settings, and the root Matrix Space that groups them.
+Who may talk to an agent in a room is a separate setting covered in [Access Control](authorization.md).
 
 ## Configuration
 
-Matrix settings are derived from `config.yaml`:
+List room keys under an agent's or team's `rooms`, and optionally set per-room policy under `rooms.<key>`:
 
 ```yaml
+room_defaults:
+  join_policy: invite
+  listed: false
+  invite_users:
+    - "@owner:example.com"
+  admins:
+    - "@owner:example.com"
+
+rooms:
+  research:
+    display_name: Research Lab
+    description: Literature reviews and experiment notes
+    encrypted: true
+    invite_users:
+      - "@owner:example.com"
+      - "@scientist:example.com"
+
 agents:
   assistant:
-    rooms: [lobby, dev]  # Room aliases (auto-created if needed)
+    rooms: [lobby, dev]
 
 teams:
   research_team:
     rooms: [research]
 ```
 
-Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
-
-When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and it receives a managed avatar (see [Managed Avatars](matrix.md#managed-avatars)).
+Every room key listed by an agent or team, or under top-level `rooms`, is a managed room, created on startup or config reload if it does not exist yet.
+Entries starting with `!` are existing Matrix room IDs, which are joined as they are and are not created or managed.
 
 ## Room policy
 
-`room_defaults` supplies the default `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` values for every managed room.
+`room_defaults` sets the policy for every managed room, and `rooms.<key>` overrides it for one room.
 
-`rooms.<key>` also accepts `display_name` for the Matrix room name and `description` (string, default `""`) for the room's purpose shown in the dashboard.
-An authored field under `rooms.<key>` replaces the corresponding default.
-List overrides replace the whole default list instead of merging with it.
-An explicit empty list therefore disables the inherited invitations or admins for that room.
-MindRoom grants missing room admins but does not demote existing power-level 100 admins when they are removed from configuration, because the managing Matrix account cannot demote an equal-power user.
-Removing an admin from configuration therefore stops future grants; lowering an existing grant requires a Matrix authority with greater power.
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `join_policy` | `invite`, `knock`, or `public` | `invite` | How people may join the room |
+| `listed` | bool | `false` | Publish the room in the server's room directory |
+| `encrypted` | bool | `false` | Enable end-to-end encryption; once enabled it cannot be turned off |
+| `invite_users` | list of Matrix user IDs | `[]` | Users invited to the room |
+| `admins` | list of Matrix user IDs | `[]` | Users granted Matrix admin power (level 100) in the room |
+| `rooms.<key>.display_name` | string | the key with underscores as spaces, title-cased | Matrix room name |
+| `rooms.<key>.description` | string | `""` | Room purpose shown in the dashboard |
 
-`join_policy` accepts `invite`, `knock`, or `public`.
-Publishing managed rooms to the room directory with `listed: true` requires the managing service account (typically the router) to have moderator or admin power in each room.
-MindRoom reconciles join policy, directory visibility, invitations, and power levels for existing managed rooms.
-Encryption can be enabled but never disabled because enabling Matrix room encryption is irreversible.
+`invite_users` and `admins` accept only concrete Matrix user IDs, no wildcards, plus the pairing owner placeholder.
+A field set under `rooms.<key>` replaces the default, and a list replaces the whole default list instead of merging with it, so an empty list removes the inherited invitations or admins for that room.
+MindRoom logs `Administrators, room invitees, or room admins are on another homeserver; remove them unless you trust them` when any of these users is on a different homeserver.
 
-`invite_users` is declarative desired invitation state.
-A listed user who leaves or is kicked is invited again during reconciliation, so remove the user from configuration before intentionally removing access.
+MindRoom applies this policy to new and existing managed rooms on startup and on every config reload:
 
-The root Matrix Space receives the union of managed-room `invite_users` as invitations.
-Invitees do not automatically receive root Space admin power.
+- `invite_users` is the desired invitation list, so a listed user who leaves or is kicked is invited again; remove the user from configuration before intentionally removing access.
+- `admins` grants missing admin power but never demotes anyone, so removing a user from `admins` only stops future grants; lowering an existing admin requires a Matrix account with higher power.
+- `listed: true` requires the router to have moderator or admin power in the room.
+- `encrypted: true` turns on encryption in existing rooms, and setting it back to `false` never disables it.
 
 ## Room Management
 
-Agents can join existing rooms, create new rooms with AI-generated topics, respond to invites automatically, leave unconfigured rooms, and set room avatars.
+<a id="room-management_1"></a>The router creates and maintains managed rooms:
 
-Rooms are auto-created via `_ensure_room_exists()` (private) and `ensure_all_rooms_exist()` (public). DM rooms can be detected with `async is_dm_room(client, room_id) -> bool`.
+- Creates missing rooms with the alias `#<key>:<server>` (plus the `MINDROOM_NAMESPACE` suffix when set), an AI-generated topic, and a [managed avatar](matrix.md#managed-avatars).
+- Invites the configured agents and teams and the room's `invite_users`.
+- Sets the room name from `display_name`, and adds a topic only when the room has none.
+- Lets every room member write thread tags and call membership state, which requires the router to be joined and able to edit power levels.
+- Applies the [room policy](#room-policy) above.
 
-Any account on a shared homeserver can publish, repoint, or delete a managed alias such as `#lobby:<server>`, so a resolved alias alone never makes a room managed.
-A room already recorded in `matrix_state.yaml` for its key stays in use, and an alias that now resolves elsewhere only logs `managed_alias_points_elsewhere`.
-When the alias of a recorded room is deleted, the router points it back at that room, and replaces the room with a new aliased one only when the router can no longer read the room or is no longer joined to it.
-An unrecorded key adopts its alias target only when the router created that room, with no additional room version 12 creators, and the router itself set the alias as the room's canonical alias.
-Otherwise the router logs `managed_alias_target_refused`, never joins that room, and creates and records a fresh room without the alias, which later passes keep using.
-If the alias lookup or a state read fails transiently, a recorded room stays in use and an unrecorded key is retried on the next pass.
-A fresh room without the alias that is lost before its record is saved, for example by a crash, stays unrecorded, and the next pass creates another.
+Agents and teams leave rooms they are no longer configured for, except direct-message rooms and rooms they joined by accepting an invitation.
 
-A restart without current invite-cache evidence may require another invitation.
-
-### Room Management
-
-The router creates and manages rooms:
-
-- Creates configured rooms that don't exist yet
-- Invites configured agents, teams, and users to their rooms
-- Applies effective `room_defaults` and per-room policy for managed rooms
-- Reconciles managed room power levels so the custom thread-tags state event can be written at PL0
-- Generates AI-powered room topics based on configured agents and teams
-- Has admin privileges to manage room membership
-- Cleans up orphaned bots on startup
-
-See [When the Router Is Missing](tool-approval.md#when-the-router-is-missing).
-
-By default, `room_defaults.join_policy: invite` and `room_defaults.listed: false` keep managed rooms private.
-Set `room_defaults.join_policy` to `public` or `knock`, and use `room_defaults.listed` to control room-directory visibility.
-Per-room values replace these defaults when configured under `rooms.<key>`.
-That same reconciliation path also updates `m.room.power_levels` for managed rooms, so the router must be joined and able to edit room power levels when thread tags are enabled.
+On a shared homeserver, any account can create or repoint an alias such as `#lobby:<server>`, so MindRoom only uses an aliased room it recorded itself or one the router created and aliased.
+Otherwise it logs `managed_alias_target_refused`, never joins that room, and creates its own room without the alias.
+A recorded room stays in use even when its alias now points elsewhere, which logs `managed_alias_points_elsewhere`.
+If the alias of a recorded room is deleted, the router restores it, and creates a replacement room only when it can no longer read or is no longer joined to the recorded room.
 
 ## Room Cleanup
 
-On startup, MindRoom detects orphaned bot memberships left over from a previous configuration.
-When an agent is removed from `config.yaml`, its Matrix bot account may still be a member of rooms it previously joined.
-The global sweep removes only persisted bot identities that no longer belong to a configured router, agent, or team.
-Current entities reconcile their own configured and retained rooms after startup hooks and invitation handling, so the early global sweep cannot remove them before that reconciliation.
-An entity that cannot start keeps its memberships until its own lifecycle recovers.
-Unreadable or invalid retention files stop membership initialization instead of being treated as empty ownership records.
-This runs automatically — no manual intervention is needed.
+On startup, MindRoom removes Matrix accounts of agents and teams that were deleted from `config.yaml` from the rooms they had joined.
+Direct-message rooms are left untouched, and no manual cleanup is needed.
 
 ## Matrix Space
 
-MindRoom can create and maintain a root Matrix Space that groups all managed rooms together.
-This makes it easy for users to discover and navigate MindRoom rooms in their Matrix client.
+<a id="root-space"></a>MindRoom creates and maintains a root Matrix Space that contains every managed room, so users can find all MindRoom rooms in one place in their Matrix client.
 
-### Configuration
+<a id="configuration_1"></a>
 
 ```yaml
 matrix_space:
-  enabled: true    # Default: true
-  name: MindRoom   # Default: "MindRoom"
+  enabled: true
+  name: MindRoom
 ```
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `true` | Whether to create and maintain a root Matrix Space for managed MindRoom rooms |
-| `name` | string | `"MindRoom"` | Display name for the root Matrix Space when enabled |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Create and maintain the root Space |
+| `name` | string | `"MindRoom"` | Space display name; cannot be empty |
 
-### Behavior
-
-When `enabled` is `true`, MindRoom creates a Space on startup and adds all managed rooms as children.
-Rooms created later (by agents joining new rooms or config changes) are automatically added to the Space.
-MindRoom invites concrete users from effective managed-room `invite_users` policies to the root Space without granting those users root Space admin power.
-Startup and config updates maintain the child links without automatically granting human users Space admin power.
-Adding, removing, or reordering Space children in a Matrix client requires sufficient existing Matrix power in that Space.
-Existing Space admins are preserved; manage their permissions manually in a Matrix client.
-
-Set `enabled: false` to disable Space creation entirely.
-Disabling the setting does not delete an existing Space or remove its current child links.
-The `name` field controls the Space's display name and can be changed at any time.
-
-## Root Space
-
-MindRoom can create and maintain a root Matrix Space that groups all managed rooms.
-
-```yaml
-matrix_space:
-  enabled: true        # Default: true
-  name: MindRoom       # Display name for the Space
-```
-
-When enabled, `ensure_root_space()` creates the Space on first boot (or resolves an existing one by alias), links all managed rooms as children, and sets the Space avatar from workspace or bundled assets, falling back to the stock `mind-logo` image.
-The Space alias follows the same adoption rules as managed room aliases, so a Space held by another account is replaced by a fresh Space without the alias.
-The Space name is reconciled on each startup to match the configured value.
-Startup and config updates write child links without automatically granting human users root Space admin power.
-Concrete users from effective managed-room `invite_users` policies are invited to the root Space without receiving Space admin power.
-Platform `administrators`, room `admins`, responder users, and credential managers are not root Space invitation sources.
-MindRoom does not remove existing Space admins during reconciliation.
+Rooms added later are linked into the Space automatically, and the name follows the configured value on every startup.
+Every user in any managed room's `invite_users` is invited to the Space, without Space admin power.
+Room `admins`, `administrators`, and other access settings do not cause Space invitations.
+MindRoom never removes existing Space admins, and adding, removing, or reordering Space children in a Matrix client requires sufficient power in the Space; manage those permissions in a Matrix client.
+Setting `enabled: false` stops maintaining the Space but does not delete it or remove its child links.
+The Space avatar is described in [Managed Avatars](matrix.md#managed-avatars).

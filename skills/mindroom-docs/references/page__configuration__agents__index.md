@@ -1,7 +1,7 @@
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom.
-Each agent is a specialized AI actor with specific capabilities.
+This page covers the `agents:` section of `config.yaml`, where each agent is one AI actor with its own model, tools, rooms, and instructions.
+It also covers requester-private agents, files preloaded into an agent's prompt, naming rules, and the `defaults:` section that every agent inherits from.
 
 ## Basic Agent
 
@@ -14,205 +14,91 @@ agents:
     rooms: [lobby]
 ```
 
-## Full Configuration
+The key (`assistant`) is the agent's name, `model` names an entry under `models:`, and `rooms` lists the rooms the agent joins.
+
+A coding agent that runs its code tools in a worker, preloads workspace notes, and replies as plain room messages in a bridged room:
 
 ```yaml
 agents:
   developer:
-    # Display name shown in Matrix
     display_name: Developer
-
-    # Role description - guides the agent's behavior
     role: Generate code, manage files, execute shell commands
-
-    # Model to use (defined in models section)
     model: sonnet
-
-    # Tools the agent can use (plain names or inline config overrides)
     tools:
       - file
-      - shell
       - github
-      # Per-agent tool config override (single-key dict syntax):
-      # - shell:
-      #     extra_env_passthrough: "DAWARICH_*"
-      #     enable_run_shell_command: true
-
-    # Skills the agent can use (defined in skills section or plugins)
-    skills:
-      - my_custom_skill
-
-    # Custom instructions
+      - shell:
+          extra_env_passthrough: "DAWARICH_*"
+    worker_tools: [shell, file]
     instructions:
       - Always read files before modifying them
-      - Use clear variable names
-      - Add comments for complex logic
-
-    # Concise guidance included on every minimal-mode request (default: [])
-    minimal_instructions: []
-
-    # Rooms to join (will be created if they don't exist)
-    rooms:
-      - lobby
-      - dev
-
-    # Accept all, none, or matching inviter ID patterns
-    accept_invites: true
-
-    # Conversation access is separate from invitation acceptance
-    access:
-      current_room_members: false
-      members_of_rooms:
-        - lobby
-      users: []
-
-    # Enable markdown formatting
-    markdown: true
-
-    # Enable Agno Learning for this agent
-    learning: true
-
-    # Learning mode: always (automatic) or agentic (tool-driven)
-    learning_mode: always
-
-    # Memory backend override for this agent (optional: mem0, file, or none)
-    memory_backend: file
-
-    # Assign agent to one or more configured knowledge bases (optional)
-    knowledge_bases: [docs]
-
-    # Optional: additional files loaded into each freshly built agent instance
-    context_files:
-      - SOUL.md
-      - AGENTS.md
-      - USER.md
-      - IDENTITY.md
-      - TOOLS.md
-      - HEARTBEAT.md
-
-    # Whether to include defaults.tools for this agent (default: true)
-    include_default_tools: true
-
-    # Response mode: "thread" (replies in Matrix threads) or "room" (plain room messages)
-    thread_mode: thread
-
-    # Optional room-specific overrides for thread mode
-    # Keys may be managed room aliases/names or Matrix room IDs
+    context_files: [AGENTS.md, USER.md]
+    rooms: [lobby, dev, bridge_telegram]
     room_thread_modes:
-      lobby: thread
       bridge_telegram: room
-      "!abc123:example.com": room
+    access:
+      members_of_rooms: [dev]
+    delegate_to: [research]
+```
 
+To keep `defaults.tools` away from one agent:
 
-    # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)
-    worker_tools: [shell, file]
-
-    # How sandbox runtimes are shared (optional, inherits from defaults)
-    worker_scope: user_agent
-
-    # Allow this agent to read and modify its own config at runtime
-    allow_self_config: false
-
-    # Delegate tasks to other agents via tool calls
-    delegate_to:
-      - research
-      - finance
-
-    # History context controls (all optional, inherit from defaults)
-    num_history_runs: null
-    num_history_messages: null
-    compress_tool_results: false
-    max_tool_calls_from_history: null
-    max_tool_calls_per_turn: null
-
-    # Required compaction is enabled by default.
-    # Eligible models and history policies use native compaction at the threshold.
-    # Set enabled: false to disable automatic native and pre-reply text compaction.
-    compaction:
-      enabled: true
-      threshold_percent: 0.8
-      reserve_tokens: 16384
-      timeout_seconds: 600
-
-    # Keep <workspace>/thread_exports/ current with YAML exports of this agent's rooms
-    # (true enables the defaults; see Thread Exports below)
-    thread_exports: true
-
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Focus on deep research
+    include_default_tools: false
+    tools: [duckduckgo]
 ```
 
 ## Configuration Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `display_name` | string | *required* | Human-readable name shown in Matrix as the bot's display name |
-| `role` | string | `""` | System prompt describing the agent's purpose — guides its behavior and expertise |
-| `model` | string | `"default"` | Model name (must match a key in the `models` section) |
-| `tools` | list | `[]` | Agent-specific tool entries — plain strings or single-key dicts with config overrides (see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)); effective tools are `tools + defaults.tools` with duplicates removed |
-| `include_default_tools` | bool | `true` | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out |
-| `skills` | list | `[]` | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/)) |
-| `skill_learning` | object | disabled | [Automatic skill learning](https://docs.mindroom.chat/skills/#settings) settings; separate from Agno `learning_mode` |
+| `display_name` | string | *required* | Name shown in Matrix |
+| `role` | string | `""` | System prompt describing the agent's purpose and expertise |
+| `model` | string | `"default"` | Key of an entry under `models:` |
+| `tools` | list | `[]` | Tool names or single-key dicts with per-agent overrides; see [Tools](https://docs.mindroom.chat/tools/) and [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration). The agent gets these plus `defaults.tools`, without duplicates |
+| `include_default_tools` | bool | `true` | Set `false` to leave out `defaults.tools` and its overrides for this agent |
+| `skills` | list | `[]` | Skill names the agent can use; see [Skills](https://docs.mindroom.chat/skills/) |
+| `skill_learning` | object | disabled | [Automatic skill learning](https://docs.mindroom.chat/skills/#settings), separate from `learning` |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
-| `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
-| `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
-| `mid_turn` | object or null | `null` | Judge whether queued messages can wait until this agent finishes its active task; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
-| `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
-| `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
-| `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
-| `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
-| `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"`, `"file"`, or `"none"`). Inherits from global `memory.backend` when omitted |
-| `memory_search` | object | `null` | File-memory search override for this agent. Supports `mode`, `include`, and `include_entrypoint`; omitted fields inherit from global `memory.search` |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition |
-| `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
-| `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
-| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and shared OAuth connections. Does not grant conversation access. Eligible requesters manage their own isolated OAuth connections separately; see [OAuth authorization](https://docs.mindroom.chat/oauth-framework/) |
-| `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
-| `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
-| `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
-| `num_history_runs` | | | See [History & Compaction](https://docs.mindroom.chat/configuration/history/#history-settings) |
-| `num_history_messages` | | | See [History & Compaction](https://docs.mindroom.chat/configuration/history/#history-settings) |
-| `compress_tool_results` | | | See [History & Compaction](https://docs.mindroom.chat/configuration/history/#history-settings) |
-| `compaction` | | | See [History & Compaction](https://docs.mindroom.chat/configuration/history/#history-settings) |
-| `max_tool_calls_from_history` | | | See [History & Compaction](https://docs.mindroom.chat/configuration/history/#history-settings) |
-| `max_tool_calls_per_turn` | int | `null` | Tool calls one turn may execute. Further calls return a tool error, and a turn that has made this many plus two model requests ends with the text produced so far, including loops of calls to unknown tools or with unparseable arguments (`null` = `defaults.max_tool_calls_per_turn`, 1000) |
-| `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Routed tools may still show generic worker warmup text such as `Preparing isolated worker...`, but that copy never includes tool identifiers or tool-trace metadata. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
-| `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
-| `file_access` | string | `null` | Which files path-taking tools (`file`, `coding`, `attachments`, `matrix_message`, `gmail`, `google_drive`, `browser` uploads, `e2b` uploads) may use. `workspace`: the agent workspace and its attachments. `unrestricted`: any path the tool's process can reach. Code-execution tools such as `shell` and `python` are always unrestricted; isolate them with `worker_tools`. Inherits from `defaults.file_access` (default: `workspace`). See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/) |
-| `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
-| `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation)) |
-| `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports)) |
+| `minimal_instructions` | list | `[]` | Guidance included on every minimal-mode request; see [Prompt and `minimal_instructions`](https://docs.mindroom.chat/tools/agent-cli/#prompt-and-minimal_instructions) |
+| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs to join; missing managed rooms are created (see [Rooms](https://docs.mindroom.chat/rooms/)) |
+| `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID. Rooms joined this way are kept across restarts. Joining a room never grants its members access; see [Authorization](https://docs.mindroom.chat/authorization/) |
+| `access` | object | `null` | Who may converse with the agent: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the agent's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs (no wildcards) allowed to manage this agent's credentials and shared OAuth connections; grants no conversation access. See [OAuth](https://docs.mindroom.chat/oauth-framework/) |
+| `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) |
+| `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing) |
+| `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
+| `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
+| `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
+| `learning` | bool | `null` | Enable [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning), a persistent profile of user preferences |
+| `learning_mode` | string | `null` | `always` learns after every turn; `agentic` lets the agent decide through a tool call |
+| `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory but not `learning`. See [Memory](https://docs.mindroom.chat/memory/) |
+| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
+| `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
+| `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
+| `private` | object | `null` | Give each requester a separate copy of the agent's state; see [Private Instances](#private-instances) |
+| `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history` | | | See [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings) |
+| `compaction` | object | `defaults.compaction` | Per-agent compaction overrides; `enabled: false` turns automatic compaction off. See [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
+| `max_tool_calls_per_turn` | int, >= 1 | `null` | Tool calls one turn may execute. Further calls return a tool error, and after this many plus two model requests the turn ends with the text produced so far, which also stops loops of unknown or malformed tool calls |
+| `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
+| `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
+| `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments; `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access) |
+| `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) |
+| `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation) |
+| `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) |
 
-Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
-See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for `mode: semantic` and `mode: files`.
-
-Per-agent fields with a corresponding setting in `defaults` inherit that setting when `null`.
-`participation: null` disables adaptive participation; it does not inherit a global default.
-Per-agent values override them.
-`memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
-Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
-`agents.<name>.memory_search` can override `mode`, `include`, and `include_entrypoint` when the effective memory backend is `file`.
-Unset `memory_search` fields inherit from top-level `memory.search`.
-`show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent.
-The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
-Agents use `agents.<name>.accept_invites`, while teams and the router use their own `accept_invites` options with the same durable invite semantics.
-`true` accepts every valid invitation, `false` and `[]` reject every invitation, and a list accepts exact or wildcard Matrix user IDs after human-only alias resolution; non-human accounts retain their exact transport ID.
-Invite acceptance and responder access are independent, so joining a room does not authorize its inviter to interact with the agent.
-The agent continues to apply `access.users`, `access.current_room_members`, and `access.members_of_rooms` to every interaction after joining.
-
-See [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing), [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings), [Adaptive Participation](https://docs.mindroom.chat/configuration/threads/#adaptive-participation), [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/threads/#mid-turn-coalescing), [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration), and [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing).
+Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
+`memory_backend` and `memory_search` inherit from the top-level `memory:` section instead.
 
 ## Private Instances
 
-Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
-The YAML definition stays shared.
-The private root, copied files, file-memory workspace, and private knowledge path do not.
-Private agents cannot be configured as team members.
-Explicit Matrix messages that tag a private agent with other agents can form an ad hoc team for that requester.
-That exception is direct only: a shared team member that reaches a private agent through `delegate_to` is still rejected.
-
-`private.per` is not a second spelling of `worker_scope`.
-`private.per` chooses who gets a separate private instance of the agent's state.
-MindRoom then uses that same requester partition for worker execution, but that is an internal consequence of private execution, not the public meaning of `worker_scope`.
+Use `private` when one shared agent definition should give each requester their own workspace, file memory, and knowledge index.
+The YAML stays shared, while each requester's files live in their own private root.
 
 ```yaml
 knowledge_bases:
@@ -228,192 +114,115 @@ agents:
     tools: [file, shell]
     worker_tools: [file, shell]
     memory_backend: file
-    memory_search:
-      mode: semantic
-      include:
-        - memory/**/*.md
-      include_entrypoint: false
     private:
       per: user
       root: mind_data
       template_dir: ./mind_template
-      context_files:
-        - SOUL.md
-        - AGENTS.md
-        - USER.md
-        - IDENTITY.md
-        - TOOLS.md
-        - HEARTBEAT.md
-        - MEMORY.md
+      context_files: [SOUL.md, USER.md, MEMORY.md]
       knowledge:
         path: memory
         watch: false
     knowledge_bases: [company_docs]
 ```
 
-Example template directory:
+Here every user gets their own `mind_data/` root, seeded from `./mind_template/` (for example `SOUL.md`, `USER.md`, `MEMORY.md`, and a `memory/` folder), while `company_docs` stays shared by everyone.
+Private roots live at `<storage>/private_instances/<requester scope>/<agent>/<private.root>/`, not next to `config.yaml`, and dedicated workers mount only that root.
 
-```text
-mind_template/
-├── SOUL.md
-├── AGENTS.md
-├── USER.md
-├── IDENTITY.md
-├── TOOLS.md
-├── HEARTBEAT.md
-├── MEMORY.md
-└── memory/
-```
+How a private agent behaves:
 
-In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage.
-That private root is not created next to `config.yaml`.
-It is not stored under `workers/<worker>/`.
-Dedicated workers mount that `mind_data/` private root, not the state root around it, when they execute that requester scope.
-For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+- The template directory is copied into each new private root, and template files added later are copied in without overwriting requester edits.
+- The private root is created even without a template.
+- `private.context_files` load from the private root; agent-level `context_files` still load from the shared agent workspace.
+- With `memory_backend: file`, the private root is the requester's file-memory root; with any other backend, private files exist but are not file memory, and `none` turns memory off.
+- Nothing is enabled implicitly: set `memory_backend`, `private.context_files`, and `private.knowledge` explicitly for whatever the template provides; the file names are up to you.
+- Because `private.per` sets the agent's worker scope, configuring both `private` and `worker_scope` fails with `Private agents derive their execution scope from private.per; configure private or worker_scope, not both`.
+- Private agents cannot be configured as team members, and a shared team member cannot reach one through `delegate_to`.
+  Tagging a private agent together with other agents in a message still forms an ad hoc team for that requester.
+- A private agent runs only for a known requester; otherwise it fails with `Private agent '<name>' requires an active execution identity to resolve requester-local state`.
 
 ### Private Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `private.per` | `user` or `user_agent` | *required* | Which requester boundary gets its own private instance of the agent's state. MindRoom also uses that same boundary for the agent's internal execution scope |
-| `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root, and the workspace dedicated workers mount. Must be a relative path, cannot escape with `..`, and cannot start with a name the primary writes beside it: `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
-| `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root without overwriting existing files. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error when the directory does not exist |
-| `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
-| `private.knowledge` | object | `null` | Optional PrivateAgentKnowledge indexed from inside the private root. Sub-fields below. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge) |
-| `private.knowledge.enabled` | bool | `true` | Whether to index PrivateAgentKnowledge for this private agent instance. Set to `false` to disable indexing |
-| `private.knowledge.description` | string | `""` | Short description of what the private knowledge contains. Agents see this in the `search_knowledge_base` tool description so they know when the source is relevant |
-| `private.knowledge.path` | string | `null` | Path to a private knowledge directory relative to the private root |
-| `private.knowledge.watch` | bool | `true` | When true, PrivateAgentKnowledge schedules background refresh on access. When false, direct external edits require explicit refresh |
+| `private.per` | `user` or `user_agent` | *required* | Requester boundary that gets its own private instance; it also sets the agent's [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
+| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
+| `private.template_dir` | string | `null` | Directory copied into each private root; relative paths resolve from `config.yaml`, absolute paths are allowed, and a missing directory is a config error (`Agent '<name>' has invalid private.template_dir`) |
+| `private.context_files` | list | `null` | Private-root-relative files preloaded into the prompt; cannot escape the private root |
+| `private.knowledge` | object | `null` | Per-requester knowledge index built from the private root; see [Private Agent Knowledge](https://docs.mindroom.chat/knowledge/#private-agent-knowledge). Omit it or set `enabled: false` for no index |
+| `private.knowledge.enabled` | bool | `true` | Whether to index private knowledge |
+| `private.knowledge.description` | string | `""` | What the private knowledge contains, shown to the agent in the `search_knowledge_base` tool description |
+| `private.knowledge.path` | string | *required* when enabled | Knowledge directory relative to the private root (`.` allowed) |
+| `private.knowledge.watch` | bool | `true` | Refresh the index in the background on access; when `false`, external edits need an explicit refresh |
 | `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk (min: 128) |
-| `private.knowledge.chunk_overlap` | int | `0` | Overlapping characters between adjacent chunks (min: 0) |
-| `private.knowledge.git` | object | `null` | Optional Git sync configuration for PrivateAgentKnowledge (same schema as top-level `knowledge_bases.<id>.git`) |
-
-### Runtime Behavior
-
-1. MindRoom resolves the canonical private-instance state root from `private.per`.
-2. MindRoom creates the effective private root inside that canonical private-instance state root.
-3. If `private.template_dir` is set, MindRoom copies the template directory into the private root without overwriting files that already exist there.
-4. MindRoom loads any `private.context_files` from that private root when the agent is created or reloaded.
-5. If `memory_backend: file` is enabled, MindRoom uses that same private root as the file-memory root for that requester.
-6. If `private.knowledge.path` is configured, MindRoom indexes that private-root-relative path as PrivateAgentKnowledge for that requester only.
-
-### Important Rules
-
-- `private` is explicit opt-in.
-- `private` does not automatically enable file memory.
-- `private` does not automatically load any context files.
-- `private` does not automatically create a private knowledge base.
-- Private agents cannot be configured as team members.
-- Explicit Matrix ad hoc teams can include directly tagged private agents for requester-scoped execution.
-- Shared team members that reach a private agent through `delegate_to` are rejected.
-- If `private.template_dir` is omitted, MindRoom still creates the private root.
-- Private agents require an active requester-scoped runtime context.
-- MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
-- Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
-- Set `memory_backend: none` if the private agent should stay stateless while still using its private files and knowledge configuration.
-- Set `private.context_files` explicitly for any copied files you want loaded into role context.
-- Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as PrivateAgentKnowledge.
-- Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want PrivateAgentKnowledge indexing.
-- `private` cannot be combined with `worker_scope`.
-- Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both PrivateAgentKnowledge and shared knowledge in the same run.
-- Top-level `context_files` remain the shared workspace-relative mechanism used by single-user setups, including the default `mindroom config init` output.
-- Custom templates are fully supported.
-- The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
-
-See [Thread Exports](https://docs.mindroom.chat/thread-exports/#thread-exports) and [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution).
+| `private.knowledge.chunk_overlap` | int | `0` | Overlapping characters between adjacent chunks; must be smaller than `chunk_size` |
+| `private.knowledge.git` | object | `null` | Git sync, with the same schema as `knowledge_bases.<id>.git`; needs a dedicated `path` subtree, see [Private Agent Knowledge](https://docs.mindroom.chat/knowledge/#private-agent-knowledge) |
 
 ## File-Based Context Loading
 
-You can inject file content directly into an agent's role context without using a knowledge base.
+`context_files` inlines files into the agent's prompt under a `Personality Context` section, without a knowledge base.
 
-`context_files` behavior:
+- Paths are relative to the agent's workspace, `agents/<name>/workspace/` in the storage directory; absolute paths and `..` are rejected.
+  With `memory_backend: file`, the same workspace holds the agent's file memory.
+- Files load in list order, each headed by its resolved path so the agent knows where to edit it.
+- Missing files are skipped with a warning in the logs.
+- Edits take effect on the next reply without a restart.
 
-- Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
-- `private.context_files` paths are resolved relative to the effective private root
-- Existing files are loaded in list order and added under `Personality Context`
-- Missing files are skipped with a warning in logs
-
-MindRoom loads the files when it builds an agent instance.
-The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
-
-`context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`).
-When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory.
-Absolute paths and `..` traversal are rejected.
-
-Each part of the `Personality Context` section is headed by the resolved path of the file it was read from, and the section states that those files are already inlined so the agent does not spend a turn re-reading them.
-When the rendered section exceeds `defaults.max_preload_chars`, MindRoom drops earlier file bodies first, trims the final surviving body from its end, and leaves a per-file marker giving each affected path and omitted-character count, followed by a summary marker for the section.
-A dropped file therefore still appears with its path, so the agent can open it when it needs the omitted part.
-If the configured cap cannot contain the section heading plus all required per-file and summary markers, agent materialization fails explicitly instead of silently removing source paths.
-
-See [Agent Delegation](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
+`defaults.max_preload_chars` (default `50000`) caps the section.
+When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.
+Each affected file keeps its path and a marker with the omitted character count, so the agent can open the file for the rest.
+A cap too small to hold the headings and markers fails with `max_preload_chars=<n> cannot fit required context headings and omission markers`.
 
 ## Naming Rules
 
-Agent and team YAML keys must contain only alphanumeric characters and underscores (matching `^[a-zA-Z0-9_]+$`).
-Agent and team names must be distinct — the same key cannot appear in both `agents:` and `teams:`.
-The names `router`, `user`, and `_shared` are reserved for MindRoom's own accounts and storage.
+Agent and team keys may contain only letters, digits, and underscores (`^[a-zA-Z0-9_]+$`).
+The same key cannot appear under both `agents:` and `teams:`.
+`router`, `user`, and `_shared` are reserved.
 
 ## Defaults
 
-The `defaults` section sets fallback values for supported per-agent override fields and global-only agent behavior.
-Supported override fields inherit when omitted, `defaults.tools` is merged only when `include_default_tools` is true, and global-only defaults apply to every agent.
+The `defaults` section sets values every agent inherits unless it sets its own, plus global-only settings that cannot be overridden per agent.
 
 ```yaml
 defaults:
-  tools:                                # Tools added to every agent by default (set [] to disable)
-    - scheduler
-    # Per-agent tool config overrides also work in defaults:
-    # - shell:
-    #     enable_run_shell_command: true
-  markdown: true                        # Format responses as Markdown
-  learning: true                        # Enable Agno Learning
-  learning_mode: always                 # "always" or "agentic"
-  max_preload_chars: 50000              # Hard cap for preloaded context from context_files
-  tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
-  show_stop_button: true                # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
-  max_consecutive_agent_replies: 50    # Agent or team messages in a row before agents stop waking each other (global-only; see authorization.md)
-  num_history_runs: null                # Number of prior runs to include (null = all)
-  num_history_messages: null            # Max messages from history (null = use num_history_runs)
-  enable_streaming: true                # Stream agent responses via progressive message edits
-  streaming:
-    update_interval: 5.0                # Steady-state seconds between streamed edits
-    min_update_interval: 0.5            # Fast-start seconds between early edits
-    interval_ramp_seconds: 15.0         # Set 0 to disable interval ramping
-    max_idle: 2.0                       # Event-driven idle ceiling before the next edit
-  compress_tool_results: false          # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
-  compaction:
-    enabled: true
-    threshold_percent: 0.8
-    reserve_tokens: 16384
-    timeout_seconds: 600
-  max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
-  max_tool_calls_per_turn: 1000        # Tool calls one agent or team turn may execute
-  show_tool_calls: true                 # Show tool-call markers and trace metadata; hidden mode still allows generic worker warmup copy
-  worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
-  worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
-  allow_self_config: false               # Allow agents to read/modify their own config at runtime
-  file_access: workspace                 # workspace or unrestricted; see the file_access field above
-  worker_grantable_credentials: null     # Shared credential services leased to isolated workers (null denies all); Google OAuth client and token services and google_vertex_adc cannot be granted
-  large_message_strategy: sidecar        # Oversized replies: sidecar (preview plus full text as an attachment) or split (several complete messages); global-only
-  coalescing:
-    debounce_ms: 1000                    # Milliseconds to wait for more attachments or a trailing caption after media; text dispatches immediately
-  thread_summary_model: null             # Model alias for automatic thread summaries (null = default)
-  thread_summary_temperature: 0.2        # null uses provider defaults
-  thread_summary_first_threshold: 1      # Messages before the first automatic summary (integer >= 1)
-  thread_summary_subsequent_interval: 10 # Messages between later automatic summaries (integer >= 1)
+  tools: [scheduler]
+  learning_mode: agentic
+  max_tool_calls_per_turn: 200
+  worker_tools: [shell, file, python]
+  enable_streaming: true
+  max_preload_chars: 50000
 ```
 
-`defaults.streaming` is global-only and controls the timing of progressive message edits for streaming responses.
+These defaults apply to each agent that leaves the same field unset:
 
-To opt out a specific agent:
+| Field | Default |
+|-------|---------|
+| `markdown` | `true` |
+| `learning` | `true` |
+| `learning_mode` | `always` |
+| `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
+| `compress_tool_results` | `false` |
+| `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
+| `max_tool_calls_per_turn` | `1000` |
+| `show_tool_calls` | `true` |
+| `worker_tools` | `null` (the deployment's execution mode decides) |
+| `worker_scope` | `null` |
+| `file_access` | `workspace` |
+| `allow_self_config` | `false` |
 
-```yaml
-agents:
-  researcher:
-    display_name: Researcher
-    role: Focus on deep research
-    include_default_tools: false
-    tools: [duckduckgo]
-```
+`defaults.tools` (default `[scheduler]`) is added to every agent with `include_default_tools: true`; set it to `[]` to add nothing.
+It accepts the same per-tool overrides as `agents.<name>.tools`.
 
-See [Conversation mode](https://docs.mindroom.chat/tools/agent-cli/#conversation-mode) and [Automatic skill learning](https://docs.mindroom.chat/skills/#settings).
+These settings are global-only:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enable_streaming` | `true` | Show replies as progressive message edits; see [Streaming](https://docs.mindroom.chat/streaming/#configuration) |
+| `streaming` | see [Streaming](https://docs.mindroom.chat/streaming/#configuration) | Timing settings for progressive edits |
+| `large_message_strategy` | `sidecar` | Oversized replies as a preview with the full text attached (`sidecar`) or as several complete messages (`split`); see [Large Messages](https://docs.mindroom.chat/streaming/#large-messages) |
+| `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after media for more attachments or a trailing caption before replying; text replies immediately |
+| `show_stop_button` | `true` | Add a 🛑 reaction while an agent responds; see [Stop Button](https://docs.mindroom.chat/chat-commands/#stop-button) |
+| `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](https://docs.mindroom.chat/authorization/#agents-mentioning-other-agents) |
+| `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
+| `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
+| `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services and `google_vertex_adc` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
+| `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
