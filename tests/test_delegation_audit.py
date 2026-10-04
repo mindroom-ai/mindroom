@@ -337,6 +337,36 @@ async def test_settlement_finishes_a_full_record_with_its_reserved_terminal_even
 
 
 @pytest.mark.asyncio
+async def test_a_child_that_edits_its_exported_log_still_settles(tmp_path: Path) -> None:
+    """The workspace log is only an export, so a child editing it never fails its own delegation."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    record_dir = await _record_dir(child, config, runtime_paths)
+    with (record_dir / "events.jsonl").open("a", encoding="utf-8") as events:
+        events.write('{"sequence": 2, "kind": "output", "data": {"content": "edited by the child"}}\n')
+
+    await settle_child_response(
+        child,
+        RunOutput(run_id=child.run_id, session_id=child.session_id, status=RunStatus.completed, content="done"),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert child.status == "completed"
+    assert [event["kind"] for event in _events(record_dir)] == ["delegation_started", "output", "delegation_finished"]
+    assert "edited by the child" not in (record_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert json.loads((record_dir / "run.json").read_text(encoding="utf-8"))["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_live_observer_records_matching_child_events_once(tmp_path: Path) -> None:
     """Recording parent events, missing live tool data, or replaying an event must fail this test."""
     config = _config()

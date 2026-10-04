@@ -64,7 +64,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
 - [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, Chat UI actions, low-level Matrix API access, and attachment-aware workflows.
-- [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
+- [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an interactive canvas in MindRoom Chat.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.

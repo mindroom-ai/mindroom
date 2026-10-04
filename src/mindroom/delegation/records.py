@@ -1,4 +1,4 @@
-"""Durable workspace audit records for delegated agent runs."""
+"""Primary-owned delegation records and their write-only workspace audit exports."""
 
 from __future__ import annotations
 
@@ -6,26 +6,22 @@ import hashlib
 import json
 import os
 import re
-import sys
 import threading
-from collections import OrderedDict
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
+from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.path_confinement import (
-    open_directory_within_root,
-    open_regular_file_at,
-    read_regular_file_within_root,
-    write_file_within_root,
-)
+from mindroom.constants import primary_records_dir
+from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
 from mindroom.redaction import redact_sensitive_data
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import (
@@ -57,19 +53,14 @@ type _DelegationEventKind = Literal[
     "usage",
 ]
 type _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
-type _DelegationStatus = _DelegationActiveStatus | DelegationTerminalStatus
-# Device, inode, size, and modification time of the event log as the primary last left it.
-# Modification time rather than change time, so the child changing permissions or access times is not tampering.
-type _LogIdentity = tuple[int, int, int, int]
 
 _SCHEMA_VERSION = 1
 _DELEGATION_DIRECTORY = Path(".mindroom/delegations")
 _RECEIPT_DIRECTORY = Path(".mindroom/delegation_receipts")
+_EVENT_LOG = "events.jsonl"
+_STATE_FILE = "state.json"
 _MAX_INLINE_VALUE_BYTES = 64 * 1024
-# A record's first use in a process and its finish read the whole worker-writable record,
-# so these caps bound what one planted record costs.
-# Values above _MAX_INLINE_VALUE_BYTES already move to artifacts/, so real records stay far below them,
-# and a real event line carries at most five such values.
+# Caps on what one record may hold; values above _MAX_INLINE_VALUE_BYTES move to artifacts/.
 _MAX_RUN_BYTES = 4 << 20
 _MAX_EVENT_LINE_BYTES = 1 << 20
 _MAX_EVENT_LOG_BYTES = 64 << 20
@@ -80,26 +71,13 @@ _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 _FINISH_RUN_HEADROOM_BYTES = 3 * _MAX_INLINE_VALUE_BYTES + 256
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
-_STATUSES = frozenset({"running", "paused", *_TERMINAL_STATUSES})
-# Memory the kept record states may retain before finished records are dropped, least recently used first.
-# A running or paused record keeps its state until it finishes, a start or finish attempt fails, its directory
-# cannot be opened, or its log is refused as tampered, so only delegations whose owner can still settle them hold one.
-_MAX_RETAINED_STATE_BYTES = 64 << 20
-_STATE_RETAINED_BYTES = 1024
-_EVENT_ID_RETAINED_BYTES = 80
-# Logs whose first fold failed, so an unchanged broken log is refused again without being read.
-_MAX_REMEMBERED_REFUSALS = 4096
-# Worker code can lock any file in the record directory, so writers of one record exclude each other in this process.
+# Writers of one record exclude each other in this process, without a lock file worker code could hold.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _RECORD_LOCKS_GUARD = threading.Lock()
 
 
 class DelegationRecordLimitError(ValueError):
     """An event the record's size limits refuse before anything is written."""
-
-
-class _RecordAccessError(ValueError):
-    """A record file could not be opened or read; unlike a refusal of its content, this may pass and is not remembered."""
 
 
 @dataclass(frozen=True)
@@ -196,6 +174,8 @@ class DelegationRecordHandle:
     scoped_path: str
     child_workspace: Path
     caller_workspace: Path
+    # The primary-only directory holding the record's working state, of which the workspace files are exports.
+    state_dir: Path
 
     @property
     def _record_reference(self) -> str:
@@ -219,207 +199,18 @@ class DelegationEvent:
 
 
 @dataclass
-class _DelegationRun:
-    """The rebuildable run.json summary; a load keeps only these typed fields, so nothing else planted there survives."""
-
-    delegation_id: str
-    metadata: DelegationMetadata
-    status: _DelegationStatus
-    started_at: str
-    updated_at: str
-    finished_at: str | None
-    # Kept as the compact JSON they were read as, since run.json only writes them back.
-    output_json: str
-    error_json: str
-    usage_json: str
-    event_count: int
-    record_reference: str
-
-    @classmethod
-    def from_json(cls, payload: object) -> _DelegationRun:
-        """Parse one run summary, refusing any field the primary would not have written."""
-        if not isinstance(payload, dict):
-            msg = "Delegation run must be an object"
-            raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
-        run = cast("dict[str, object]", payload)
-        schema_version = run.get("schema_version")
-        if type(schema_version) is not int or schema_version != _SCHEMA_VERSION:
-            msg = "Delegation run has an unsupported schema version"
-            raise ValueError(msg)
-        status = _string_field(run, "status")
-        event_count = run.get("event_count")
-        if status not in _STATUSES or type(event_count) is not int:
-            msg = "Delegation run has an invalid status or event count"
-            raise ValueError(msg)
-        return cls(
-            delegation_id=_string_field(run, "delegation_id"),
-            metadata=DelegationMetadata(
-                caller_agent_name=_string_field(run, "caller_agent_name"),
-                child_agent_name=_string_field(run, "child_agent_name"),
-                requester_id=_optional_string_field(run, "requester_id"),
-                parent_run_id=_optional_string_field(run, "parent_run_id"),
-                parent_tool_call_id=_optional_string_field(run, "parent_tool_call_id"),
-                source_room_id=_optional_string_field(run, "source_room_id"),
-                source_thread_id=_optional_string_field(run, "source_thread_id"),
-                model_name=_optional_string_field(run, "model_name"),
-                task=_string_field(run, "task"),
-                parent_delegation_id=_optional_string_field(run, "parent_delegation_id"),
-                subagent_id=_optional_string_field(run, "subagent_id"),
-                previous_delegation_id=_optional_string_field(run, "previous_delegation_id"),
-            ),
-            status=cast("_DelegationStatus", status),
-            started_at=_string_field(run, "started_at"),
-            updated_at=_string_field(run, "updated_at"),
-            finished_at=_optional_string_field(run, "finished_at"),
-            output_json=_inline_field(run, "output"),
-            error_json=_inline_field(run, "error"),
-            usage_json=_inline_field(run, "usage"),
-            event_count=event_count,
-            record_reference=_string_field(run, "record_reference"),
-        )
-
-    def to_json_bytes(self) -> bytes:
-        """Return run.json as compact JSON, writing the inline values back exactly as kept."""
-        encoded = {
-            name: json.dumps(value, separators=(",", ":"))
-            for name, value in {
-                "schema_version": _SCHEMA_VERSION,
-                "delegation_id": self.delegation_id,
-                **asdict(self.metadata),
-                "status": self.status,
-                "started_at": self.started_at,
-                "updated_at": self.updated_at,
-                "finished_at": self.finished_at,
-                "event_count": self.event_count,
-                "record_reference": self.record_reference,
-            }.items()
-        }
-        encoded |= {"output": self.output_json, "error": self.error_json, "usage": self.usage_json}
-        body = ",".join(f"{json.dumps(name)}:{encoded[name]}" for name in sorted(encoded))
-        return f"{{{body}}}\n".encode()
-
-    def retained_bytes(self) -> int:
-        """Return roughly how much memory this view holds."""
-        strings = [
-            *(value for value in asdict(self.metadata).values() if isinstance(value, str)),
-            self.delegation_id,
-            self.started_at,
-            self.updated_at,
-            self.finished_at or "",
-            self.output_json,
-            self.error_json,
-            self.usage_json,
-            self.record_reference,
-        ]
-        return sum(map(sys.getsizeof, strings))
-
-
-@dataclass
 class _RecordState:
-    """The primary's view of one record as of its last write to the event log."""
+    """One record's committed state, kept beside its event log in primary-only storage."""
 
-    key: Path
-    run: _DelegationRun
-    log_identity: _LogIdentity | None = None
-    event_count: int = 0
-    last_sequence: int | None = None
-    event_ids: set[bytes] = field(default_factory=set)
-    # The log identity transcript.md was last rendered from in this process.
-    transcript_identity: _LogIdentity | None = None
-
-    def retained_bytes(self) -> int:
-        """Return roughly how much memory this state holds."""
-        return _STATE_RETAINED_BYTES + self.run.retained_bytes() + _EVENT_ID_RETAINED_BYTES * len(self.event_ids)
-
-    def has_event(self, event_id: str) -> bool:
-        """Return whether a committed event carries this stable ID."""
-        return _event_id_digest(event_id) in self.event_ids
-
-    def observe(self, event: Mapping[str, object]) -> None:
-        """Account for one committed event in the view."""
-        _apply_event(self.run, event)
-        sequence = event.get("sequence")
-        event_id = event.get("event_id")
-        self.event_count += 1
-        self.last_sequence = sequence if type(sequence) is int else None
-        if isinstance(event_id, str):
-            self.event_ids.add(_event_id_digest(event_id))
-
-    def next_sequence(self, delegation_id: str) -> int:
-        """Return the sequence the next committed event takes."""
-        if self.event_count == 0:
-            return 1
-        if self.last_sequence is None:
-            msg = f"Delegation event sequence is malformed: {delegation_id}"
-            raise ValueError(msg)
-        return self.last_sequence + 1
-
-
-@dataclass
-class _RecordStates:
-    """Each record's state as the primary last wrote it, so a write never parses what worker code can plant in the log."""
-
-    states: OrderedDict[Path, _RecordState] = field(default_factory=OrderedDict)
-    sizes: dict[Path, int] = field(default_factory=dict)
-    retained_bytes: int = 0
-    refusals: OrderedDict[Path, tuple[_LogIdentity | None, str]] = field(default_factory=OrderedDict)
-    guard: threading.Lock = field(default_factory=threading.Lock)
-
-    def get(self, key: Path) -> _RecordState | None:
-        """Return one record's kept state."""
-        with self.guard:
-            state = self.states.get(key)
-            if state is not None:
-                self.states.move_to_end(key)
-            return state
-
-    def put(self, state: _RecordState) -> None:
-        """Keep or re-account one state, dropping finished records beyond the memory budget."""
-        size = state.retained_bytes()
-        with self.guard:
-            self.refusals.pop(state.key, None)
-            self.retained_bytes += size - self.sizes.get(state.key, 0)
-            self.states[state.key] = state
-            self.sizes[state.key] = size
-            self.states.move_to_end(state.key)
-            if self.retained_bytes <= _MAX_RETAINED_STATE_BYTES:
-                return
-            # Drop a quarter below the budget, so one scan serves many later writes.
-            target = _MAX_RETAINED_STATE_BYTES * 3 // 4
-            finished = [key for key, kept in self.states.items() if kept.run.status in _TERMINAL_STATUSES]
-            for key in finished:
-                if self.retained_bytes <= target:
-                    break
-                del self.states[key]
-                self.retained_bytes -= self.sizes.pop(key)
-
-    def refusal(self, key: Path, identity: _LogIdentity | None) -> str | None:
-        """Return why an unchanged log was refused before, if it was."""
-        with self.guard:
-            refused = self.refusals.get(key)
-            return refused[1] if refused is not None and refused[0] == identity else None
-
-    def refuse(self, key: Path, identity: _LogIdentity | None, reason: str) -> None:
-        """Remember why one log could not be folded."""
-        with self.guard:
-            self.refusals[key] = (identity, reason)
-            self.refusals.move_to_end(key)
-            while len(self.refusals) > _MAX_REMEMBERED_REFUSALS:
-                self.refusals.popitem(last=False)
-
-    def discard(self, key: Path) -> None:
-        """Forget one record's kept state."""
-        with self.guard:
-            if self.states.pop(key, None) is not None:
-                self.retained_bytes -= self.sizes.pop(key)
-
-
-_RECORD_STATES = _RecordStates()
+    # The run.json document the workspace receives.
+    run: dict[str, Any]
+    log_bytes: int = 0
+    event_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class DelegationRecordOwner:
-    """Resolve scoped workspaces and durably maintain delegation audit exports."""
+    """Resolve scoped workspaces, own each record's state, and export it to the workspaces."""
 
     config: Config
     runtime_paths: RuntimePaths
@@ -452,7 +243,7 @@ class DelegationRecordOwner:
         handle: DelegationRecordHandle,
         event: DelegationEvent,
     ) -> None:
-        """Append one full, redacted event and refresh readable record views."""
+        """Append one full, redacted event and refresh the record's exports."""
         await run_blocking_until_complete(self._append_event, handle, event)
 
     async def finish(
@@ -487,95 +278,82 @@ class DelegationRecordOwner:
         _validate_metadata(metadata)
         resolved_id = _validated_id(delegation_id or uuid4().hex)
         timestamp = _utc_timestamp()
-        started_date = timestamp[:10]
         locator = DelegationRecordLocator(
             delegation_id=resolved_id,
-            started_date=started_date,
+            started_date=timestamp[:10],
             caller_agent_name=metadata.caller_agent_name,
             child_agent_name=metadata.child_agent_name,
             caller_execution_identity=caller_execution_identity,
             child_execution_identity=child_execution_identity,
         )
         handle = self._resolve_handle(locator)
+        run = redact_sensitive_data(
+            {
+                "schema_version": _SCHEMA_VERSION,
+                "delegation_id": resolved_id,
+                **asdict(metadata),
+                "status": "running",
+                "started_at": timestamp,
+                "updated_at": timestamp,
+                "finished_at": None,
+                "output": None,
+                "error": None,
+                "usage": None,
+                "event_count": 0,
+                "record_reference": handle._record_reference,
+            },
+        )
+        state = _RecordState(cast("dict[str, Any]", run))
+        if len(_json_bytes(state.run)) + _FINISH_RUN_HEADROOM_BYTES > _MAX_RUN_BYTES:
+            msg = "Delegation record exceeds its size limit"
+            raise DelegationRecordLimitError(msg)
         with _record_lock(handle), _record_directory(handle, create=True) as record_fd:
-            if _record_entry_exists(record_fd, "run.json"):
+            if (handle.state_dir / _STATE_FILE).exists():
                 msg = f"Delegation record already exists: {resolved_id}"
                 raise FileExistsError(msg)
-            run = _DelegationRun.from_json(
-                redact_sensitive_data(
-                    {
-                        "schema_version": _SCHEMA_VERSION,
-                        "delegation_id": resolved_id,
-                        **asdict(metadata),
-                        "status": "running",
-                        "started_at": timestamp,
-                        "updated_at": timestamp,
-                        "finished_at": None,
-                        "output": None,
-                        "error": None,
-                        "usage": None,
-                        "event_count": 0,
-                        "record_reference": handle._record_reference,
-                    },
+            create_directory_durable(handle.state_dir, mode=0o700)
+            line = _commit_event(
+                handle,
+                state,
+                _event_payload(
+                    sequence=1,
+                    timestamp=timestamp,
+                    kind="delegation_started",
+                    data={},
+                    status="running",
+                    event_id="delegation_started",
                 ),
             )
-            if len(run.to_json_bytes()) + _FINISH_RUN_HEADROOM_BYTES > _MAX_RUN_BYTES:
-                msg = "Delegation record exceeds its size limit"
-                raise DelegationRecordLimitError(msg)
-            _write_run(record_fd, run)
-            state = _RecordState(_record_key(handle), run)
-            try:
-                _append_jsonl(
-                    handle,
-                    record_fd,
-                    state,
-                    _event_payload(
-                        sequence=1,
-                        timestamp=timestamp,
-                        kind="delegation_started",
-                        data={},
-                        status="running",
-                        event_id="delegation_started",
-                    ),
-                )
-                _write_record_views(handle, record_fd, run)
-            except BaseException:
-                # No caller holds a record whose start failed, so nothing would ever finish its state.
-                _RECORD_STATES.discard(state.key)
-                raise
+            _write_exports(handle, record_fd, state, line)
         return handle
 
     def _reopen(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         handle = self._resolve_handle(locator)
-        with _record_lock(handle), _record_directory(handle) as record_fd:
-            _record_state(handle, record_fd)
+        with _record_lock(handle):
+            _load_state(handle)
         return handle
 
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
-        with _record_lock(handle), _record_directory(handle) as record_fd:
-            state = _record_state(handle, record_fd)
-            if event.event_id is not None and state.has_event(event.event_id):
-                _write_record_views(handle, record_fd, state.run)
+        with _record_lock(handle):
+            state = _load_state(handle)
+            if state is None:
                 return
-            _ensure_active(state.run)
-            sequence = state.next_sequence(handle.locator.delegation_id)
-            timestamp = event.timestamp or _utc_timestamp()
-            redacted_data = _redacted_event_data(
-                record_fd,
-                sequence=sequence,
-                data=event.data,
-            )
-            payload = _event_payload(
-                sequence=sequence,
-                timestamp=timestamp,
-                kind=event.kind,
-                data=redacted_data,
-                status=event.status,
-                event_id=event.event_id,
-            )
-            _append_jsonl(handle, record_fd, state, payload)
-            _write_record_views(handle, record_fd, state.run)
+            with _record_directory(handle, create=True) as record_fd:
+                if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
+                    _write_exports(handle, record_fd, state)
+                    return
+                _ensure_active(state.run)
+                sequence = state.run["event_count"] + 1
+                payload = _event_payload(
+                    sequence=sequence,
+                    timestamp=event.timestamp or _utc_timestamp(),
+                    kind=event.kind,
+                    data=_redacted_event_data(record_fd, sequence=sequence, data=event.data),
+                    status=event.status,
+                    event_id=event.event_id,
+                )
+                _write_exports(handle, record_fd, state, _commit_event(handle, state, payload))
 
     def _finish(
         self,
@@ -590,31 +368,42 @@ class DelegationRecordOwner:
             msg = f"Invalid delegation terminal status: {status}"
             raise ValueError(msg)
         handle = self._validated_handle(handle)
-        with _record_lock(handle), _record_directory(handle) as record_fd:
-            state = _record_state(handle, record_fd)
-            if state.run.status != status:
-                try:
-                    _commit_finish(handle, record_fd, state, status=status, output=output, error=error, usage=usage)
-                except BaseException:
-                    # A finish that never lands would keep an active state for good; a retry folds the log again.
-                    _RECORD_STATES.discard(state.key)
-                    raise
-            _write_record_views(handle, record_fd, state.run)
-            # Rendering reads the whole log again, so only a finish renders it, and a replayed finish only
-            # when this process has not rendered it from the same log, such as after a restart.
-            if state.transcript_identity != state.log_identity:
-                _write_transcript(handle, record_fd, state)
+        with _record_lock(handle):
+            state = _load_state(handle)
+            if state is None:
+                return
+            with _record_directory(handle, create=True) as record_fd:
+                line = b""
+                if state.run["status"] != status:
+                    _ensure_active(state.run)
+                    sequence = state.run["event_count"] + 1
+                    terminal_data = _redacted_event_data(
+                        record_fd,
+                        sequence=sequence,
+                        data={"status": status, "output": output, "error": error, "usage": usage},
+                    )
+                    payload = _event_payload(
+                        sequence=sequence,
+                        timestamp=_utc_timestamp(),
+                        kind="delegation_finished",
+                        data=terminal_data,
+                        status=None,
+                        event_id="delegation_finished",
+                    )
+                    line = _commit_event(handle, state, payload, terminal=True)
+                # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
+                _write_exports(handle, record_fd, state, line, final=True)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
         started_date = _validated_date(locator.started_date)
-        child_workspace = _resolve_workspace(
+        child_workspace, child_state_root = _resolve_workspace(
             locator.child_agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
             execution_identity=locator.child_execution_identity,
         )
-        caller_workspace = _resolve_workspace(
+        caller_workspace, _caller_state_root = _resolve_workspace(
             locator.caller_agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
@@ -625,6 +414,10 @@ class DelegationRecordOwner:
             scoped_path=(_DELEGATION_DIRECTORY / started_date / delegation_id).as_posix(),
             child_workspace=child_workspace,
             caller_workspace=caller_workspace,
+            state_dir=primary_records_dir(child_state_root, self.runtime_paths)
+            / "delegations"
+            / started_date
+            / delegation_id,
         )
 
     def _validated_handle(self, handle: DelegationRecordHandle) -> DelegationRecordHandle:
@@ -689,7 +482,8 @@ def _resolve_workspace(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> Path:
+) -> tuple[Path, Path]:
+    """Return the agent's workspace root and the state root it belongs to."""
     resolved = resolve_agent_storage(
         agent_name,
         config,
@@ -706,8 +500,8 @@ def _resolve_workspace(
         use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
     )
     if workspace is None:
-        return agent_workspace_root_path(runtime_paths.storage_root, agent_name)
-    return workspace.root
+        return agent_workspace_root_path(runtime_paths.storage_root, agent_name), resolved.state_root
+    return workspace.root, resolved.state_root
 
 
 def _utc_timestamp() -> str:
@@ -718,327 +512,98 @@ def _receipt_relative_path(locator: DelegationRecordLocator) -> Path:
     return _RECEIPT_DIRECTORY / _validated_date(locator.started_date) / f"{_validated_id(locator.delegation_id)}.json"
 
 
-def _commit_finish(
-    handle: DelegationRecordHandle,
-    record_fd: int,
-    state: _RecordState,
-    *,
-    status: DelegationTerminalStatus,
-    output: object | None,
-    error: object | None,
-    usage: object | None,
-) -> None:
-    _ensure_active(state.run)
-    sequence = state.next_sequence(handle.locator.delegation_id)
-    terminal_data = _redacted_event_data(
-        record_fd,
-        sequence=sequence,
-        data={
-            "status": status,
-            "output": output,
-            "error": error,
-            "usage": usage,
-        },
-    )
-    event = _event_payload(
-        sequence=sequence,
-        timestamp=_utc_timestamp(),
-        kind="delegation_finished",
-        data=terminal_data,
-        status=None,
-        event_id="delegation_finished",
-    )
-    _append_jsonl(handle, record_fd, state, event, terminal=True)
-
-
-def _record_key(handle: DelegationRecordHandle) -> Path:
-    return handle.child_workspace / handle.scoped_path
-
-
 @contextmanager
 def _record_lock(handle: DelegationRecordHandle) -> Iterator[None]:
     """Serialize the writers of one record without taking a lock worker code could hold."""
-    record_path = _record_key(handle)
     with _RECORD_LOCKS_GUARD:
-        lock = _RECORD_LOCKS.get(record_path)
+        lock = _RECORD_LOCKS.get(handle.state_dir)
         if lock is None:
             lock = threading.Lock()
-            _RECORD_LOCKS[record_path] = lock
+            _RECORD_LOCKS[handle.state_dir] = lock
     with lock:
         yield
 
 
-def _record_state(handle: DelegationRecordHandle, record_fd: int) -> _RecordState:
-    """Return the record's state under its lock, reading the log only when this process keeps no state for it.
-
-    Only the primary writes the log, so a log whose identity differs from the one the
-    primary last left was changed by worker code and is refused without being read.
-    """
-    key = _record_key(handle)
-    state = _RECORD_STATES.get(key)
-    identity = _named_log_identity(record_fd)
-    if state is not None:
-        if identity != state.log_identity:
-            _refuse_tampered_log(handle, key, identity)
-        _validate_run_identity(state.run, handle.locator)
-        return state
-    refused = _RECORD_STATES.refusal(key, identity)
-    if refused is not None:
-        raise ValueError(refused)
-    with _remembered_refusal(key, identity):
-        run = _load_run(handle, record_fd)
-    _validate_run_identity(run, handle.locator)
-    with _remembered_refusal(key, identity):
-        state = _fold_record(handle, record_fd, _RecordState(key, run))
-    _RECORD_STATES.put(state)
-    return state
-
-
-@contextmanager
-def _remembered_refusal(key: Path, identity: _LogIdentity | None) -> Iterator[None]:
-    """Remember why a record's content was refused; a failure to open or read it may pass and is not remembered."""
+def _load_state(handle: DelegationRecordHandle) -> _RecordState | None:
+    """Return the record's committed state, or None for a record that predates primary-owned state."""
     try:
-        yield
-    except _RecordAccessError:
-        raise
-    except ValueError as exc:
-        _RECORD_STATES.refuse(key, identity, str(exc))
-        raise
+        payload = (handle.state_dir / _STATE_FILE).read_bytes()
+    except FileNotFoundError:
+        # LEGACY_COMPAT: Delegation records whose working state lived only in their workspace files.
+        # Legacy format: A record directory below the child workspace's .mindroom/delegations/ with no state.json below
+        # tracking/; selected when the state file is missing while that workspace directory exists.
+        # Last legacy release: v2026.10.101; replacement: the next release keeps each record's state below tracking/
+        # and writes run.json, events.jsonl, and transcript.md as exports of it.
+        # Handling: Such a record's operations return without reading or writing its workspace files, so a delegation
+        # still in flight at the upgrade settles and its record stays as it was; a record found in neither place is missing.
+        # Coverage: tests/test_delegation_records.py::test_a_record_started_before_primary_state_is_left_as_it_was.
+        with _record_directory(handle):
+            return None
+    return _RecordState(**json.loads(payload))
 
 
-def _named_log_identity(record_fd: int) -> _LogIdentity | None:
-    try:
-        return _log_identity(os.stat("events.jsonl", dir_fd=record_fd, follow_symlinks=False))
-    except OSError:
-        return None
-
-
-def _refuse_tampered_log(handle: DelegationRecordHandle, key: Path, identity: _LogIdentity | None) -> NoReturn:
-    """Drop a record whose log changed outside the primary, and refuse it unread while the log stays as found."""
-    msg = f"Delegation event log was changed outside the primary: {handle.locator.delegation_id}"
-    _RECORD_STATES.discard(key)
-    _RECORD_STATES.refuse(key, identity, msg)
-    raise ValueError(msg)
-
-
-def _require_own_log(handle: DelegationRecordHandle, state: _RecordState, status: os.stat_result) -> None:
-    """Refuse an opened log other than the one the primary last left, or a non-empty one for a new record."""
-    own = status.st_size == 0 if state.log_identity is None else _log_identity(status) == state.log_identity
-    if not own:
-        _refuse_tampered_log(handle, state.key, _log_identity(status))
-
-
-def _log_identity(status: os.stat_result) -> _LogIdentity:
-    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
-
-
-def _event_id_digest(event_id: str) -> bytes:
-    # Fixed-size digests keep a planted log's long IDs from growing the cached view.
-    return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+def _event_id_digest(event_id: str) -> str:
+    # Fixed-size digests keep long event IDs from growing the state file.
+    return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
 
 
 @contextmanager
 def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -> Iterator[int]:
-    """Pin the record directory by a no-follow walk from the child workspace."""
+    """Pin the workspace record directory by a no-follow walk from the child workspace."""
     if create:
         handle.child_workspace.mkdir(parents=True, exist_ok=True)
-    with ExitStack() as stack:
-        try:
-            record_fd = stack.enter_context(
-                open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700),
-            )
-        except OSError:
-            # Keep no state for a record that may never open again; a later open folds its log again.
-            _RECORD_STATES.discard(_record_key(handle))
-            raise
+    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700) as record_fd:
         yield record_fd
 
 
-def _record_entry_exists(record_fd: int, filename: str) -> bool:
-    try:
-        os.stat(filename, dir_fd=record_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
-
-
 def _json_bytes(payload: object) -> bytes:
-    # Compact, because indenting deeply nested data a worker planted would multiply its size by its depth.
     return (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
 
 
-def _string_field(run: Mapping[str, object], name: str) -> str:
-    value = run.get(name)
-    if not isinstance(value, str):
-        msg = f"Delegation run field {name} must be a string"
-        raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
-    return value
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        remaining = remaining[os.write(descriptor, remaining) :]
 
 
-def _optional_string_field(run: Mapping[str, object], name: str) -> str | None:
-    if name not in run:
-        msg = f"Delegation run field {name} is missing"
-        raise ValueError(msg)
-    value = run[name]
-    if value is not None and not isinstance(value, str):
-        msg = f"Delegation run field {name} must be a string or null"
-        raise ValueError(msg)
-    return value
-
-
-def _inline_field(run: Mapping[str, object], name: str) -> str:
-    if name not in run:
-        msg = f"Delegation run field {name} is missing"
-        raise ValueError(msg)
-    return _inline_json(run[name])
-
-
-def _inline_json(value: object) -> str:
-    """Return a value's compact JSON, refusing one larger than the primary keeps inline; it moves larger ones to artifacts."""
-    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
-    if len(encoded) > _MAX_INLINE_VALUE_BYTES:
-        msg = "Delegation record value exceeds its size limit"
-        raise ValueError(msg)
-    return encoded
-
-
-def _write_run(record_fd: int, run: _DelegationRun) -> None:
-    payload = run.to_json_bytes()
-    if len(payload) > _MAX_RUN_BYTES:
-        # Refused before writing, so run.json never holds what its reader refuses.
-        msg = "Delegation record exceeds its size limit"
-        raise ValueError(msg)
-    atomic_write_bytes_at(record_fd, "run.json", payload)
-
-
-def _append_jsonl(
+def _commit_event(
     handle: DelegationRecordHandle,
-    record_fd: int,
     state: _RecordState,
-    payload: Mapping[str, object],
+    payload: Mapping[str, Any],
     *,
     terminal: bool = False,
-) -> None:
-    """Commit one event and advance the record's view to the log this append left."""
+) -> bytes:
+    """Append one event to the primary log, then commit the state that counts it, and return the event's line."""
     line = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     log_limit = _MAX_EVENT_LOG_BYTES if terminal else _MAX_EVENT_LOG_BYTES - _FINISH_EVENT_HEADROOM_BYTES
     event_limit = _MAX_EVENTS if terminal else _MAX_EVENTS - 1
-    descriptor = open_regular_file_at(record_fd, "events.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    if (
+        len(line) > _MAX_EVENT_LINE_BYTES
+        or state.log_bytes + len(line) > log_limit
+        or state.run["event_count"] >= event_limit
+    ):
+        msg = "Delegation event exceeds its size limit"
+        raise DelegationRecordLimitError(msg)
+    descriptor = os.open(handle.state_dir / _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        # The name was checked before, but worker code can rename another log into place since.
-        opened = os.fstat(descriptor)
-        _require_own_log(handle, state, opened)
-        committed = opened.st_size
-        if len(line) > _MAX_EVENT_LINE_BYTES or committed + len(line) > log_limit or state.event_count >= event_limit:
-            # Refused before writing, so the log never holds what its readers refuse.
-            msg = "Delegation event exceeds its size limit"
-            raise DelegationRecordLimitError(msg)
-        try:
-            remaining = memoryview(line)
-            while remaining:
-                remaining = remaining[os.write(descriptor, remaining) :]
-            os.fsync(descriptor)
-        except BaseException:
-            # Like the rewrite this append replaces, a failed append leaves only committed events.
-            os.ftruncate(descriptor, committed)
-            raise
-        finally:
-            # Either way the view must match the log this descriptor left behind.
-            state.log_identity = _log_identity(os.fstat(descriptor))
+        # The state file is the commit point, so an append whose state never committed is dropped first.
+        os.ftruncate(descriptor, state.log_bytes)
+        _write_all(descriptor, line)
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    state.observe(payload)
-    _RECORD_STATES.put(state)
+    _apply_event(state.run, payload)
+    state.log_bytes += len(line)
+    if payload["event_id"] is not None:
+        state.event_ids.append(_event_id_digest(payload["event_id"]))
+    write_json_file_durable(handle.state_dir / _STATE_FILE, asdict(state), strict_atomic_replace=True)
+    return line
 
 
-def _load_run(handle: DelegationRecordHandle, record_fd: int) -> _DelegationRun:
-    msg = f"Delegation record is unreadable: {handle.locator.delegation_id}"
-    try:
-        payload = read_regular_file_within_root(record_fd, "run.json", max_bytes=_MAX_RUN_BYTES)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise _RecordAccessError(msg) from exc
-    except ValueError as exc:
-        raise ValueError(msg) from exc
-    try:
-        return _DelegationRun.from_json(json.loads(payload))
-    except (RecursionError, ValueError) as exc:
-        raise ValueError(msg) from exc
-
-
-def _validate_run_identity(run: _DelegationRun, locator: DelegationRecordLocator) -> None:
-    expected = (locator.delegation_id, locator.caller_agent_name, locator.child_agent_name, locator.started_date)
-    actual = (run.delegation_id, run.metadata.caller_agent_name, run.metadata.child_agent_name, run.started_at[:10])
-    if actual != expected:
-        msg = f"Delegation record identity mismatch: {locator.delegation_id}"
+def _ensure_active(run: Mapping[str, Any]) -> None:
+    if run["status"] in _TERMINAL_STATUSES:
+        msg = f"Delegation record is already terminal: {run['delegation_id']}"
         raise ValueError(msg)
-
-
-def _ensure_active(run: _DelegationRun) -> None:
-    if run.status in _TERMINAL_STATUSES:
-        msg = f"Delegation record is already terminal: {run.delegation_id}"
-        raise ValueError(msg)
-
-
-def _fold_record(handle: DelegationRecordHandle, record_fd: int, state: _RecordState) -> _RecordState:
-    """Fold the committed log into the record's state, one event at a time."""
-    descriptor = _open_event_log(handle, record_fd)
-    try:
-        state.log_identity = _log_identity(os.fstat(descriptor))
-        for event in _iter_events(handle, descriptor):
-            state.observe(event)
-        if _log_identity(os.fstat(descriptor)) != state.log_identity:
-            msg = f"Delegation event log changed while it was read: {handle.locator.delegation_id}"
-            raise ValueError(msg)
-    finally:
-        os.close(descriptor)
-    return state
-
-
-def _read_event_values(descriptor: int) -> Iterator[object]:
-    """Parse the log one bounded line at a time, so no reader ever holds the whole worker-writable log."""
-    if os.fstat(descriptor).st_size > _MAX_EVENT_LOG_BYTES:
-        msg = "Delegation event log exceeds its size limit"
-        raise ValueError(msg)
-    count = consumed = 0
-    with os.fdopen(os.dup(descriptor), "rb") as stream:
-        while line := stream.readline(_MAX_EVENT_LINE_BYTES + 1):
-            # Worker code can keep appending while this reads, so the caps also hold for what was read.
-            count += 1
-            consumed += len(line)
-            if len(line) > _MAX_EVENT_LINE_BYTES or consumed > _MAX_EVENT_LOG_BYTES or count > _MAX_EVENTS:
-                msg = "Delegation event log exceeds its size limit"
-                raise ValueError(msg)
-            yield json.loads(line)
-
-
-def _open_event_log(handle: DelegationRecordHandle, record_fd: int) -> int:
-    msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
-    try:
-        return open_regular_file_at(record_fd, "events.jsonl")
-    except OSError as exc:
-        raise _RecordAccessError(msg) from exc
-    except ValueError as exc:
-        raise ValueError(msg) from exc
-
-
-def _iter_event_values(handle: DelegationRecordHandle, descriptor: int) -> Iterator[object]:
-    msg = f"Delegation event stream is unreadable: {handle.locator.delegation_id}"
-    try:
-        yield from _read_event_values(descriptor)
-    except OSError as exc:
-        raise _RecordAccessError(msg) from exc
-    except (RecursionError, ValueError) as exc:
-        raise ValueError(msg) from exc
-
-
-def _iter_events(handle: DelegationRecordHandle, descriptor: int) -> Iterator[dict[str, object]]:
-    for event in _iter_event_values(handle, descriptor):
-        if not isinstance(event, dict):
-            msg = f"Delegation event stream is malformed: {handle.locator.delegation_id}"
-            raise ValueError(msg)  # noqa: TRY004 - callers handle one error type for every unusable record
-        yield cast("dict[str, object]", event)
 
 
 def _event_payload(
@@ -1061,41 +626,59 @@ def _event_payload(
     }
 
 
-def _apply_event(run: _DelegationRun, event: Mapping[str, object]) -> None:
+def _apply_event(run: dict[str, Any], event: Mapping[str, Any]) -> None:
     """Fold one committed event into the run view."""
-    sequence = event.get("sequence")
-    timestamp = event.get("timestamp")
-    if type(sequence) is int:
-        run.event_count = sequence
-    if isinstance(timestamp, str):
-        run.updated_at = timestamp
-    event_status = event.get("status")
-    if event_status in {"running", "paused"}:
-        run.status = cast("_DelegationActiveStatus", event_status)
-    if event.get("kind") != "delegation_finished":
-        return
-    data = event.get("data")
-    if not isinstance(data, dict):
-        return
-    terminal_data = cast("dict[str, object]", data)
-    terminal_status = terminal_data.get("status")
-    if terminal_status not in _TERMINAL_STATUSES:
-        return
-    run.status = cast("DelegationTerminalStatus", terminal_status)
-    run.finished_at = timestamp if isinstance(timestamp, str) else None
-    run.output_json = _inline_json(terminal_data.get("output"))
-    run.error_json = _inline_json(terminal_data.get("error"))
-    run.usage_json = _inline_json(terminal_data.get("usage"))
+    run["event_count"] = event["sequence"]
+    run["updated_at"] = event["timestamp"]
+    if event["status"] is not None:
+        run["status"] = event["status"]
+    if event["kind"] == "delegation_finished":
+        terminal_data = event["data"]
+        run["status"] = terminal_data["status"]
+        run["finished_at"] = event["timestamp"]
+        run["output"] = terminal_data["output"]
+        run["error"] = terminal_data["error"]
+        run["usage"] = terminal_data["usage"]
 
 
-def _write_record_views(
+def _write_exports(
     handle: DelegationRecordHandle,
     record_fd: int,
-    run: _DelegationRun,
+    state: _RecordState,
+    line: bytes = b"",
+    *,
+    final: bool = False,
 ) -> None:
-    """Rewrite the run summary and the caller's receipt."""
-    _write_run(record_fd, run)
-    _write_receipt(handle, run)
+    """Rewrite the workspace exports and the caller's receipt from the committed state, never reading them back."""
+    atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
+    if final or not _append_export(record_fd, line, size_before=state.log_bytes - len(line)):
+        with atomic_write_file_at(record_fd, _EVENT_LOG) as export:
+            export.writelines(_committed_lines(handle, state))
+    if final:
+        _write_transcript(handle, record_fd, state)
+    _write_receipt(handle, state.run)
+
+
+def _append_export(record_fd: int, line: bytes, *, size_before: int) -> bool:
+    """Append the newest event to the workspace log while its size still matches the events committed before it."""
+    try:
+        descriptor = open_regular_file_at(record_fd, _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    except (OSError, ValueError):
+        # A link, FIFO, hard link, or unwritable file at the name is replaced by a rewrite instead.
+        return False
+    try:
+        if os.fstat(descriptor).st_size != size_before:
+            return False
+        _write_all(descriptor, line)
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _committed_lines(handle: DelegationRecordHandle, state: _RecordState) -> Iterator[bytes]:
+    """Yield the primary log's committed events in order, one line each."""
+    with (handle.state_dir / _EVENT_LOG).open("rb") as log:
+        yield from islice(log, state.run["event_count"])
 
 
 def _redacted_event_data(
@@ -1134,18 +717,18 @@ def _safe_artifact_label(value: str) -> str:
 
 def _write_receipt(
     handle: DelegationRecordHandle,
-    run: _DelegationRun,
+    run: Mapping[str, Any],
 ) -> None:
     receipt = {
         "schema_version": _SCHEMA_VERSION,
         "delegation_id": handle.locator.delegation_id,
         "caller_agent_name": handle.locator.caller_agent_name,
         "child_agent_name": handle.locator.child_agent_name,
-        "status": run.status,
+        "status": run["status"],
         "record_reference": handle._record_reference,
-        "started_at": run.started_at,
-        "updated_at": run.updated_at,
-        "finished_at": run.finished_at,
+        "started_at": run["started_at"],
+        "updated_at": run["updated_at"],
+        "finished_at": run["finished_at"],
     }
     write_file_within_root(
         handle.caller_workspace,
@@ -1162,44 +745,37 @@ def _write_transcript(
 ) -> None:
     run = state.run
     header = [
-        f"# Delegation {run.delegation_id}",
+        f"# Delegation {run['delegation_id']}",
         "",
-        f"- Caller: {run.metadata.caller_agent_name}",
-        f"- Child: {run.metadata.child_agent_name}",
-        f"- Model: {run.metadata.model_name}",
-        f"- Status: {run.status}",
-        f"- Started: {run.started_at}",
-        f"- Updated: {run.updated_at}",
-        f"- Record: {run.record_reference}",
+        f"- Caller: {run['caller_agent_name']}",
+        f"- Child: {run['child_agent_name']}",
+        f"- Model: {run['model_name']}",
+        f"- Status: {run['status']}",
+        f"- Started: {run['started_at']}",
+        f"- Updated: {run['updated_at']}",
+        f"- Record: {run['record_reference']}",
         "",
         "## Task",
         "",
-        run.metadata.task,
+        run["task"],
         "",
         "## Events",
         "",
         "",
     ]
-    descriptor = _open_event_log(handle, record_fd)
-    try:
-        # Render only the log the primary left, never one worker code renamed into place.
-        _require_own_log(handle, state, os.fstat(descriptor))
-        with atomic_write_file_at(record_fd, "transcript.md") as transcript:
-            transcript.write("\n".join(header).encode("utf-8"))
-            for index, event in enumerate(_iter_events(handle, descriptor)):
-                section = [
-                    f"### {event.get('sequence')}. {event.get('kind')}",
-                    "",
-                    f"Timestamp: {event.get('timestamp')}",
-                    "",
-                    "```json",
-                    # Compact for the same reason as run.json.
-                    json.dumps(event.get("data"), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-                    "```",
-                    "",
-                ]
-                separator = "\n" if index else ""
-                transcript.write((separator + "\n".join(section)).encode("utf-8"))
-    finally:
-        os.close(descriptor)
-    state.transcript_identity = state.log_identity
+    with atomic_write_file_at(record_fd, "transcript.md") as transcript:
+        transcript.write("\n".join(header).encode("utf-8"))
+        for index, line in enumerate(_committed_lines(handle, state)):
+            event = json.loads(line)
+            section = [
+                f"### {event['sequence']}. {event['kind']}",
+                "",
+                f"Timestamp: {event['timestamp']}",
+                "",
+                "```json",
+                json.dumps(event["data"], ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                "```",
+                "",
+            ]
+            separator = "\n" if index else ""
+            transcript.write((separator + "\n".join(section)).encode("utf-8"))

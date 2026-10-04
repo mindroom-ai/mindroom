@@ -20,7 +20,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     RuntimePaths,
 )
@@ -2612,7 +2612,7 @@ class TestAgentBot(AgentBotTestBase):
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
                 response_text="[calculator] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
 
@@ -2796,7 +2796,7 @@ class TestAgentBot(AgentBotTestBase):
             SendTextRequest(
                 target=MessageTarget.resolve("!test:localhost", "$thread_root", "$event"),
                 response_text="[team_bot] ⚠️ Error: boom",
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_ERROR},
             ),
         )
 

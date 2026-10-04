@@ -5062,7 +5062,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
     edit_request = harness.gateway.edited[0]
     assert edit_request.event_id == "$sent-1:localhost"
     assert edit_request.new_text == "[general] ⚠️ Error: attachment lookup failed"
-    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_COMPLETED}
+    assert edit_request.extra_content == {constants.STREAM_STATUS_KEY: constants.STREAM_STATUS_ERROR}
     handled_turn = harness.turn_store.get_turn_record(selection.question_event_id)
     assert handled_turn is not None
     assert handled_turn.response_event_id == "$sent-1:localhost"

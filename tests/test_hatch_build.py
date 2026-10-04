@@ -258,7 +258,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires the release that treats undecodable decrypted payloads as decryption failures."""
+    """The wheel requires the release that copies deeply nested event trees without recursion."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -282,5 +282,6 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert Version("1.1.0") not in requirement.specifier
     assert Version("1.1.1") not in requirement.specifier
     assert Version("1.1.2") not in requirement.specifier
-    assert Version("1.1.3") in requirement.specifier
+    assert Version("1.1.3") not in requirement.specifier
+    assert Version("1.1.4") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier
