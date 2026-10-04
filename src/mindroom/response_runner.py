@@ -4350,20 +4350,23 @@ class ResponseRunner:
             cancel_source=cancel_source,
             source_handled=source_handled,
         )
-        # Last, so a failure to hold or release leaves the turn's own settlement complete.
-        await self.held_messages.settle(
-            request,
-            final_outcome,
-            report.boundary,
-            continued=held,
-            stop_button_event_id=stop_button_event_id,
-        )
-        if deferred_error is not None:
-            if source_handled and request.on_deferred_outcome_handled is not None:
-                response_event_id = final_outcome.final_visible_event_id
-                assert response_event_id is not None
-                await request.on_deferred_outcome_handled(response_event_id)
-            raise deferred_error
+        if deferred_error is not None and source_handled and request.on_deferred_outcome_handled is not None:
+            response_event_id = final_outcome.final_visible_event_id
+            assert response_event_id is not None
+            await request.on_deferred_outcome_handled(response_event_id)
+        try:
+            # Last, so a failure to hold or release leaves the turn's own settlement complete.
+            await self.held_messages.settle(
+                request,
+                final_outcome,
+                report.boundary,
+                continued=held,
+                stop_button_event_id=stop_button_event_id,
+            )
+        finally:
+            if deferred_error is not None:
+                # The turn's own cancellation or failure outranks a failure to hold or release its message.
+                raise deferred_error
         return final_outcome.final_visible_event_id if source_handled else None
 
     def _build_lifecycle(

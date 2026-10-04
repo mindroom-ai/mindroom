@@ -97,6 +97,7 @@ from mindroom.event_journal import (
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
+from mindroom.held_reply_lifecycle import HeldReplyLifecycle
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
@@ -10128,3 +10129,46 @@ async def test_only_a_completed_response_counts_toward_its_skill_review(succeede
         PostResponseEffectsDeps(logger=MagicMock(), queue_skill_review=count),
     )
     assert calls == (["run-1"] if succeeded else [])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_held_message_settlement_keeps_the_turns_own_outcome(tmp_path: Path) -> None:
+    """Settling the held message comes last, so its failure neither replaces the turn's cancellation nor skips it."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    order: list[str] = []
+    request = replace(
+        _plain_request(_target()),
+        on_deferred_outcome_handled=_async_callback(lambda event_id: order.append(f"handled:{event_id}")),
+    )
+    progress = response_runner._DeliveryProgress()
+    progress.note_delivery_started("$response")
+    progress.settle(_completed_outcome())
+    lifecycle = coordinator._build_lifecycle(
+        identity=coordinator._response_identity(request, response_kind="ai"),
+        request=request,
+    )
+
+    with (
+        patch.object(
+            coordinator,
+            "_run_cancellable_response",
+            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
+        ),
+        patch.object(HeldReplyLifecycle, "settle", new=AsyncMock(side_effect=RuntimeError("journal unavailable"))),
+        patch_response_runner_module(apply_post_response_effects=AsyncMock()),
+        pytest.raises(asyncio.CancelledError, match="sync_restart"),
+    ):
+        await coordinator._run_and_settle_locked_response(
+            request,
+            target=request.response_envelope.target,
+            lifecycle=lifecycle,
+            progress=progress,
+            response_function=AsyncMock(),
+            user_id=request.user_id,
+            run_id="run-1",
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert order == ["handled:$response"]
