@@ -196,8 +196,9 @@ get_upcoming_bookings(email="alex@example.com")
 
 ### What It Does
 
-`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
+`scheduler` exposes `schedule()`, `schedule_tool_call()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
+`schedule_tool_call()` schedules one exact approval-gated tool call that the requester approves while scheduling it, as described in [Pre-Approved Tool Calls](../scheduling.md#pre-approved-tool-calls).
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 Pass `model="cheap"` to run a task with a model alias configured under `models:`, including all team members.
 The choice applies only to scheduled runs and takes precedence over room and thread model settings.

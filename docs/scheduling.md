@@ -159,6 +159,31 @@ Pass an empty string on an edit to remove the override and restore normal model 
 Schedule confirmations and listings show the selected alias.
 The option controls task execution; parsing the scheduling request still uses the default model.
 
+## Pre-Approved Tool Calls
+
+Agents can schedule one exact tool call that the requester approves while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
+`arguments_json` holds the call's exact arguments as a JSON object, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
+The current `tool_approval` policy must gate the call; otherwise the scheduler refuses it, and the agent uses `schedule()` instead.
+
+```python
+schedule_tool_call(
+    tool_name="post_slack_message",
+    arguments_json='{"channel": "U0123ABCD", "text": "Good morning! The report is ready."}',
+    execute_at="2026-10-04T09:00:00-04:00",
+    description="Morning report DM",
+)
+```
+
+MindRoom saves a one-time task in the current thread and posts an approval card for the call itself, showing the tool, its exact arguments, and the send time.
+Only the original human requester can approve or deny the card, and it expires at the send time.
+When the task fires, the agent receives a trigger asking it to make that call exactly once with exactly those arguments.
+If the requester approved the card, the task is unchanged, and it fires within 15 minutes of its scheduled time, the first call with exactly those arguments from the same agent, requester, room, and thread is approved once.
+That call publishes an approved receipt card whose `approval_provenance` has `kind: scheduled_approval` with the task, approver, approval time, scheduled time, and arguments digest, and MindRoom logs `scheduled_tool_call_approval_consumed` with the same fields.
+Every other call keeps per-call approval, including a call with different arguments, a second identical call, a call after the router left and rejoined the room, a late fire, a fire of an edited task, and a fire whose card was never answered.
+Denying the card skips the send, and cancelling the task denies a card that is still pending.
+Recurring schedules cannot pre-approve calls.
+
 ## Timezone
 
 The timezone in `config.yaml` controls natural-language time interpretation and displayed timestamps (defaults to UTC):

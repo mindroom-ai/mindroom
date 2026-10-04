@@ -371,6 +371,7 @@ A timed approval accepts the original call, matching pending calls, and subseque
 Subsequent matching calls do not publish another approval card.
 For generic MCP dispatch, the server and remote tool name are part of the operation, so approving one remote operation does not approve every tool on that server.
 Timed approval requires a canonical thread and complete reviewable arguments; native tool-authored confirmations and background-script approvals remain per-call.
+A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 The backend fixes the grant deadline when it accepts the originating call and preserves it across restarts; replaying an approval never extends or recreates the grant.
 This deadline is separate from the pending card's approval timeout.
 Only the original requester with current responder access can stop auto-approval using the originating card.

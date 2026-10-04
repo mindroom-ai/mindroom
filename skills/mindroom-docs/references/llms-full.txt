@@ -1739,6 +1739,7 @@ A timed approval accepts the original call, matching pending calls, and subseque
 Subsequent matching calls do not publish another approval card.
 For generic MCP dispatch, the server and remote tool name are part of the operation, so approving one remote operation does not approve every tool on that server.
 Timed approval requires a canonical thread and complete reviewable arguments; native tool-authored confirmations and background-script approvals remain per-call.
+A gated call can also be approved once, ahead of time, when an agent schedules it; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 The backend fixes the grant deadline when it accepts the originating call and preserves it across restarts; replaying an approval never extends or recreates the grant.
 This deadline is separate from the pending card's approval timeout.
 Only the original requester with current responder access can stop auto-approval using the originating card.
@@ -12651,8 +12652,9 @@ get_upcoming_bookings(email="alex@example.com")
 
 ### What It Does
 
-`scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
+`scheduler` exposes `schedule()`, `schedule_tool_call()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
+`schedule_tool_call()` schedules one exact approval-gated tool call that the requester approves while scheduling it, as described in [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls).
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
 Pass `model="cheap"` to run a task with a model alias configured under `models:`, including all team members.
 The choice applies only to scheduled runs and takes precedence over room and thread model settings.
@@ -20042,6 +20044,31 @@ Omitting `model` on creation uses normal model selection; omitting it on an edit
 Pass an empty string on an edit to remove the override and restore normal model selection.
 Schedule confirmations and listings show the selected alias.
 The option controls task execution; parsing the scheduling request still uses the default model.
+
+## Pre-Approved Tool Calls
+
+Agents can schedule one exact tool call that the requester approves while scheduling it, so a gated action such as an external message runs at its time without a second approval.
+The agent calls `schedule_tool_call(tool_name, arguments_json, execute_at, description)` from a thread.
+`arguments_json` holds the call's exact arguments as a JSON object, and `execute_at` is an ISO 8601 time with a UTC offset, such as `2026-10-04T09:00:00-04:00`.
+The current `tool_approval` policy must gate the call; otherwise the scheduler refuses it, and the agent uses `schedule()` instead.
+
+```python
+schedule_tool_call(
+    tool_name="post_slack_message",
+    arguments_json='{"channel": "U0123ABCD", "text": "Good morning! The report is ready."}',
+    execute_at="2026-10-04T09:00:00-04:00",
+    description="Morning report DM",
+)
+```
+
+MindRoom saves a one-time task in the current thread and posts an approval card for the call itself, showing the tool, its exact arguments, and the send time.
+Only the original human requester can approve or deny the card, and it expires at the send time.
+When the task fires, the agent receives a trigger asking it to make that call exactly once with exactly those arguments.
+If the requester approved the card, the task is unchanged, and it fires within 15 minutes of its scheduled time, the first call with exactly those arguments from the same agent, requester, room, and thread is approved once.
+That call publishes an approved receipt card whose `approval_provenance` has `kind: scheduled_approval` with the task, approver, approval time, scheduled time, and arguments digest, and MindRoom logs `scheduled_tool_call_approval_consumed` with the same fields.
+Every other call keeps per-call approval, including a call with different arguments, a second identical call, a call after the router left and rejoined the room, a late fire, a fire of an edited task, and a fire whose card was never answered.
+Denying the card skips the send, and cancelling the task denies a card that is still pending.
+Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
