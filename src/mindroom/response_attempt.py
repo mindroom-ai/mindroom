@@ -166,7 +166,15 @@ class ResponseAttemptRunner:
 
     async def _stop_if_stopped_before_start(self, request: ResponseAttemptRequest, task: asyncio.Task[None]) -> None:
         """Stop an attempt whose held message a Stop reached before the attempt could be stopped."""
-        if request.stopped_before_start is not None and await request.stopped_before_start():
+        if request.stopped_before_start is None:
+            return
+        try:
+            stopped = await request.stopped_before_start()
+        except Exception as error:
+            # The attempt is running already, so a check that cannot tell leaves it running under its owner.
+            self.deps.logger.warning("held_reply_stop_check_failed", error=str(error))
+            return
+        if stopped:
             # That Stop found no turn to stop, so it stops this one now that it can be.
             self.deps.stop_manager.request_task_stop(task)
 

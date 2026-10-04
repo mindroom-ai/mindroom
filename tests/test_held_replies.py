@@ -1052,6 +1052,41 @@ async def test_attempt_stops_when_a_stop_reached_its_message_before_it_could_be_
 
 
 @pytest.mark.asyncio
+async def test_attempt_runs_on_when_its_stop_check_fails() -> None:
+    """A Stop check that cannot read the hold leaves the attempt running under its owner, not orphaned."""
+    manager = StopManager()
+    manager.add_stop_button = AsyncMock()  # type: ignore[method-assign]
+    ran: list[str | None] = []
+
+    async def response(message_id: str | None) -> None:
+        ran.append(message_id)
+
+    runner = ResponseAttemptRunner(
+        ResponseAttemptDeps(
+            client=MagicMock(),
+            stop_manager=manager,
+            logger=MagicMock(),
+            show_stop_button=lambda: False,
+            config=MagicMock(),
+        ),
+    )
+    await asyncio.wait_for(
+        runner.run(
+            ResponseAttemptRequest(
+                target=_target(thread_id=_THREAD),
+                response_function=response,
+                existing_event_id="$reply",
+                stopped_before_start=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+            ),
+        ),
+        JOB_TEST_TIMEOUT,
+    )
+    for task in manager.cleanup_tasks:
+        task.cancel()
+    assert ran == ["$reply"]
+
+
+@pytest.mark.asyncio
 async def test_a_turn_sees_a_stop_that_reached_its_hold(held: _Held) -> None:
     """A turn or wake that read a hold before a Stop learns of it from the saved hold."""
     await held.start("running", asyncio.Event())
