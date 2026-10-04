@@ -199,6 +199,21 @@ def test_read_journal_matches_a_turn_record_by_its_anchor_alone(tmp_path: Path) 
     assert [item["index_event_id"] for item in results["turn_records"].items] == ["$index"]
 
 
+def test_read_journal_returns_the_turn_records_of_every_event_in_the_thread(tmp_path: Path) -> None:
+    """Naming only the room and thread still returns the turn record of a later event the thread admitted."""
+    path = tmp_path / "event_journal.db"
+    _seed_journal(path)
+    with closing(sqlite3.connect(path)) as db:
+        db.execute(_TURN_INSERT, ("general", "$late", "$late", "{}"))
+        db.commit()
+    ids = collect_ids(None, room_id=ROOM, thread_id="$root")
+    assert ids.event_ids == frozenset({"$root"})
+    with _sqlite_query(path) as query:
+        results = _read_journal(query, ids, str(path))
+    assert [item["event_id"] for item in results["journal_events"].items] == ["$user", "$late"]
+    assert sorted(item["index_event_id"] for item in results["turn_records"].items) == ["$late", "$user"]
+
+
 def test_read_journal_without_thread_matches_event_ids_only(tmp_path: Path) -> None:
     """Without a thread, only the named events are read and the outbox is not queried."""
     path = tmp_path / "event_journal.db"

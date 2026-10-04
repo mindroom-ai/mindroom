@@ -187,9 +187,28 @@ def _journal_results(status: str, location: str, error: str | None = None) -> di
 def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
     """Read turn records, admitted events, and outbound deliveries for the identifiers."""
     results = _journal_results("ok", location)
-    marks, event_ids = _in_list(ids.event_ids)
     thread_known = bool(ids.room_id and ids.thread_id)
 
+    conditions: list[str] = []
+    params: list[object] = []
+    if ids.event_ids:
+        marks, event_ids = _in_list(ids.event_ids)
+        conditions.append(f"event_id IN ({marks})")
+        params.extend(event_ids)
+    if thread_known:
+        conditions.append("(room_id = ? AND thread_id = ?)")
+        params.extend([ids.room_id, ids.thread_id])
+    admitted_event_ids: set[str] = set()
+    if conditions:
+        rows = query(
+            f"SELECT * FROM journal_events WHERE {' OR '.join(conditions)} ORDER BY receipt_order",  # noqa: S608 - placeholders only
+            params,
+        )
+        results["journal_events"].items = [_decode_json_columns(row) for row in rows]
+        admitted_event_ids = {row["event_id"] for row in rows}
+
+    # A thread names events the report did not list, so their turn records follow the admitted events.
+    marks, event_ids = _in_list(ids.event_ids | admitted_event_ids)
     if event_ids:
         rows = query(
             f"SELECT * FROM turn_records WHERE index_event_id IN ({marks}) OR anchor_event_id IN ({marks}) "  # noqa: S608 - placeholders only
@@ -197,21 +216,6 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
             [*event_ids, *event_ids],
         )
         results["turn_records"].items = [_decode_json_columns(row) for row in rows]
-
-    conditions: list[str] = []
-    params: list[object] = []
-    if event_ids:
-        conditions.append(f"event_id IN ({marks})")
-        params.extend(event_ids)
-    if thread_known:
-        conditions.append("(room_id = ? AND thread_id = ?)")
-        params.extend([ids.room_id, ids.thread_id])
-    if conditions:
-        rows = query(
-            f"SELECT * FROM journal_events WHERE {' OR '.join(conditions)} ORDER BY receipt_order",  # noqa: S608 - placeholders only
-            params,
-        )
-        results["journal_events"].items = [_decode_json_columns(row) for row in rows]
 
     if thread_known:
         rows = query(
