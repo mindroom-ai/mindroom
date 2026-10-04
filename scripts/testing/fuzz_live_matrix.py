@@ -4860,6 +4860,8 @@ class ExactReplyOracle:
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
         # Sources whose pending edits MindRoom settled without anything to regenerate.
         self.declined_edit_sources: frozenset[str] = frozenset()
+        # Admission state of every event MindRoom's agent principal journaled.
+        self.journal_event_states: Mapping[str, str] = {}
         self.supersession_proofs: dict[str, SupersessionProof] = {}
         self.canonical_events: dict[str, Mapping[str, Any]] = {}
         self.next_batch: str | None = None
@@ -4933,6 +4935,7 @@ class ExactReplyOracle:
         self._ledger_read_at = now
         self.supersession_proofs = {}
         self.declined_edit_sources = frozenset()
+        self.journal_event_states = {}
         if self.log_path is None:
             self._ledger_observations = read_ledger_records(self.ledger_path, include_incomplete=True)
         else:
@@ -4955,6 +4958,7 @@ class ExactReplyOracle:
                 # A concurrent write may invalidate this poll, never final qualification.
                 self.supersession_proofs = {}
                 self.declined_edit_sources = frozenset()
+                self.journal_event_states = {}
                 self._ledger_observations = {}
         self._ledger_records = {
             event_id: record
@@ -5784,6 +5788,7 @@ class FinalStateAuditor:
         assert self.ledger_path is not None
         snapshot = _read_supersession_snapshot(self.ledger_path, f"{AGENT_NAME}@{self.agent_id}")
         decisions = _supersession_decisions(self.oracle.log_path)
+        self.oracle.journal_event_states = {event_id: row.state for event_id, row in snapshot.sources.items()}
         # A message MindRoom never answered, such as one it superseded, has no reply to
         # regenerate, so MindRoom settles each edit of it without any visible effect.
         self.oracle.declined_edit_sources = frozenset(
@@ -8338,12 +8343,25 @@ class LiveFuzzRunner:
             self._pending_source_tombstones.difference_update(
                 source_event_id
                 for source_event_id in tuple(self._pending_source_tombstones)
-                if _redaction_target_state(
-                    source_event_id,
-                    self.oracle._ledger_observations,
-                    self.source_revision_markers,
-                )[0]
+                if self._source_tombstone_settled(source_event_id)
             )
+
+    def _source_tombstone_settled(self, target_event_id: str) -> bool:
+        """Return whether MindRoom durably settled one redaction target.
+
+        MindRoom reads each room in order, so a settled redaction of a source it never
+        admitted means it only saw that source already deleted and owes it no turn.
+        """
+        records = self.oracle._ledger_observations
+        if _redaction_target_state(target_event_id, records, self.source_revision_markers)[0]:
+            return True
+        states = self.oracle.journal_event_states
+        redaction_event_id = self.redacted_targets.get(target_event_id)
+        return (
+            target_event_id not in states
+            and redaction_event_id is not None
+            and states.get(redaction_event_id) == "settled"
+        )
 
     def _current_pending_edit_marker(self, source_id: str) -> str | None:
         """Choose the newest observed live debt by canonical Matrix replacement order."""
@@ -8828,11 +8846,7 @@ class LiveFuzzRunner:
         targets = tuple(self.event_ids[source] for source in operation.cleanup_sources)
         while True:
             self.oracle.refresh_ledger_attributions(min_interval=0.0)
-            observed = {
-                target
-                for target in targets
-                if _redaction_target_state(target, self.oracle._ledger_observations, self.source_revision_markers)[0]
-            }
+            observed = {target for target in targets if self._source_tombstone_settled(target)}
             self._pending_source_tombstones.difference_update(observed)
             if len(observed) == len(targets):
                 break

@@ -9608,6 +9608,35 @@ async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_appl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("journal_event_states", "released"),
+    [
+        ({"$redaction": "settled"}, True),
+        ({"$redaction": "pending"}, False),
+        ({"$redaction": "settled", "$root": "settled"}, False),
+    ],
+    ids=["seen_only_deleted", "redaction_unsettled", "source_admitted"],
+)
+async def test_chaos_checkpoint_releases_tombstone_for_source_mindroom_only_saw_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+    journal_event_states: dict[str, str],
+    released: bool,
+) -> None:
+    """A source redacted before MindRoom read it never starts a turn, so its settled redaction is the whole effect."""
+    runner = _temporal_revision_runner()
+    runner._pending_source_tombstones = {"$root"}
+    runner.redacted_targets = {"$root": "$redaction"}
+    runner.oracle.journal_event_states = journal_event_states
+    monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
+    if released:
+        await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)
+        assert runner._pending_source_tombstones == set()
+    else:
+        with pytest.raises(AssertionError, match="timed out waiting for mutation effects"):
+            await runner._wait_for_pending_mutation_effects(deadline_seconds=0.05, batch_index=4)
+
+
+@pytest.mark.asyncio
 async def test_chaos_checkpoint_tombstone_releases_same_source_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     """A source tombstone supersedes a concurrently landed edit obligation."""
     runner = _temporal_revision_runner()
