@@ -430,6 +430,9 @@ matchLabels:
 {{- $selectorPeer := dict -}}
 {{- if kindIs "map" $dns.namespaceSelector -}}
 {{- $_ := set $selectorPeer "namespaceSelector" $dns.namespaceSelector -}}
+{{- else if kindIs "map" $dns.podSelector -}}
+{{- /* A pod-only peer means the policy's own namespace; pin it to the worker namespace so both policies select the same pods. */ -}}
+{{- $_ := set $selectorPeer "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" (include "mindroom-runtime.workerNamespace" .))) -}}
 {{- end -}}
 {{- if kindIs "map" $dns.podSelector -}}
 {{- $_ := set $selectorPeer "podSelector" $dns.podSelector -}}

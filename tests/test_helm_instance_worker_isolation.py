@@ -2617,8 +2617,22 @@ _NODE_LOCAL_DNS_BLOCK = {"cidr": "169.254.20.10/32"}
             {"namespaceSelector": None, "podSelector": None, "ipBlocks": [_NODE_LOCAL_DNS_BLOCK]},
             [{"ipBlock": _NODE_LOCAL_DNS_BLOCK}],
         ),
+        # A pod-only DNS destination is pinned to the worker namespace, not the vault's release namespace.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            {"namespaceSelector": None, "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}}},
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+                },
+            ],
+        ),
     ],
-    ids=["vault-first", "squid-first", "external-proxy"],
+    ids=["vault-first", "squid-first", "external-proxy", "pod-only-dns"],
 )
 def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clients(
     tmp_path: Path,
