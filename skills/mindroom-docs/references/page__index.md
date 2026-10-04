@@ -4,7 +4,8 @@
 
 MindRoom gives you a personal AI agent for everything from family trips to your homelab, and gives teams shared agents connected to their email, chat, calendar, documents, tickets, and code.
 They find what you need, write what you ask for, run recurring jobs on their own, and learn from every conversation, so they get better the more they are used.
-It is open source, works with any model, and you can run all of it yourself: the chat app, the server, and the AI backend.
+It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
+You can run all of it yourself: the chat app, the server, and the AI backend.
 
 <video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -19,11 +20,12 @@ It is open source, works with any model, and you can run all of it yourself: the
 
     - Plan a family trip: flights, places to stay, a day-by-day itinerary, and a packing list.
     - Keep your calendar, reminders, and to-do lists in order, by voice from your phone.
-    - Look after your home network and homelab: check services, read logs, and change configs from the chat, with approval rules for anything risky.
-    - Build quick tools and scripts in the agent's own workspace.
-    - Keep notes and memories you can still find months later.
+    - Sort your personal email and draft replies, approving each one before it goes out.
+    - Keep notes, a journal, and memories you can still find months later.
+    - Track your budget, workouts, or anything else in files the agent keeps up to date.
     - Follow the topics you care about, with a digest that only arrives when there is something new.
-    - Control your smart home through Home Assistant.
+    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval rules for anything risky.
+    - Build quick tools and scripts in the agent's own workspace.
 
 === "Work"
 
@@ -41,6 +43,13 @@ It is open source, works with any model, and you can run all of it yourself: the
 
 Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](https://docs.mindroom.chat/tools/), [MCP Servers](https://docs.mindroom.chat/mcp/)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
 Each person can get a private room with their own agent ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/)), each team can share agents that answer only its members ([Access Control](https://docs.mindroom.chat/authorization/)), and agents can work as a team or hand tasks to each other ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
+
+### Private where it matters
+
+You choose the model for each agent.
+A private agent can run on a local model through Ollama or llama.cpp, so you can share your most personal data with it, while an agent that writes code uses a frontier model from Anthropic, OpenAI, or Google ([Models](https://docs.mindroom.chat/configuration/models/)).
+Pair a local model with local memory and your own server, and nothing that agent sees leaves your home ([Memory](https://docs.mindroom.chat/memory/), [Deployment](https://docs.mindroom.chat/deployment/)).
+Each agent keeps its own memory, tools, and access, so what you tell a private agent stays out of shared ones, and rooms can be end-to-end encrypted ([End-to-End Encryption](https://docs.mindroom.chat/matrix/#end-to-end-encryption)).
 
 ### They remember, and keep improving
 
@@ -78,7 +87,7 @@ So agents are not limited to what Slack or WhatsApp can display:
 ### Yours to own
 
 - **Open source:** MindRoom is Apache 2.0 licensed, so you can run the whole stack on your own hardware, or use the [hosted Matrix server](https://docs.mindroom.chat/deployment/hosted-matrix/) and run only the backend yourself.
-- **Any model:** use cloud models from Anthropic, OpenAI, Google, and others, or local models through Ollama and llama.cpp, chosen per agent, room, or thread, and switch the day a better model comes out ([Models](https://docs.mindroom.chat/configuration/models/)).
+- **Any model:** pick a model per agent, room, or thread, and switch the day a better one comes out ([Models](https://docs.mindroom.chat/configuration/models/)).
 - **Federated like email:** separate MindRoom deployments, such as groups with different data rules, can still share rooms where that is allowed.
 - **Extensible:** add your own tools, skills, and event hooks as plugins, which reload while MindRoom keeps running ([Plugins](https://docs.mindroom.chat/plugins/), [Hooks](https://docs.mindroom.chat/hooks/)).
 
