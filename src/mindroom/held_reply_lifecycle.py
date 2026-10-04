@@ -85,13 +85,18 @@ class HeldReplyLifecycle:
 
     async def save(self, hold: HeldReply) -> None:
         """Make a message the holder of its work, releasing the message that held it before."""
-        replaced, _saved = await self.store.save(
+        replaced, saved = await self.store.save(
             hold_id=hold.key.hold_id,
             recipient=hold.key.recipient,
             message_event_id=hold.message_event_id,
             hold_json=encode_held_reply(hold),
         )
         previous = self.read(replaced) if replaced is not None else None
+        if previous is not None and previous.stopped and previous.message_event_id == hold.message_event_id:
+            # A Stop reached the message after its turn checked, so the message ends stopped instead of holding again.
+            await self.store.delete(hold.key.hold_id, generation=saved.generation)
+            await self.release(hold, stopped=True)
+            return
         if previous is not None and previous.message_event_id != hold.message_event_id:
             await self.release(previous, stopped=previous.stopped)
         await self._show_held(hold)

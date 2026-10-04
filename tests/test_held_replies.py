@@ -1087,6 +1087,27 @@ async def test_attempt_runs_on_when_its_stop_check_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_holding_again_keeps_a_stop_that_reached_the_message_after_it_checked(
+    held: _Held,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop between a turn's check and its new hold still ends the message stopped instead of waiting again."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    hold = await held.hold()
+    assert hold is not None
+    assert await held.runner.held_messages.stop("$reply", 7)
+
+    async def checked_before_the_stop(_self: object, _hold: HeldReply) -> bool:
+        return False
+
+    monkeypatch.setattr(type(held.runner.held_messages), "stopped", checked_before_the_stop)
+    await held.settle("$reply", "Started.\n\nPart one is done.", _WAITING_NOTICE, held=hold)
+    assert await held.hold() is None
+    assert held.edits[-1].new_text == "Started.\n\nPart one is done.\n\n**[Response cancelled by user]**"
+
+
+@pytest.mark.asyncio
 async def test_a_turn_sees_a_stop_that_reached_its_hold(held: _Held) -> None:
     """A turn or wake that read a hold before a Stop learns of it from the saved hold."""
     await held.start("running", asyncio.Event())
