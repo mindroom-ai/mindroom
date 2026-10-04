@@ -1,31 +1,190 @@
-# mindroom
+<div align="center">
+
+<picture>
+  <source media="(prefers-reduced-motion: no-preference)" srcset="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark-animated.svg" />
+  <img src="https://raw.githubusercontent.com/mindroom-ai/mindroom/main/assets/logo/logo-mark.svg" alt="MindRoom logo" width="128" />
+</picture>
+
+# MindRoom
+
+**AI agents that know you and your work, in a chat app anyone can use.**
+
+Open source under Apache 2.0 · Any model, local or cloud · Self-host the whole stack
+
+[Website](https://mindroom.chat) · [Docs](https://docs.mindroom.chat) · [Showcase](https://docs.mindroom.chat/showcase/) · [MindRoom Chat](https://chat.mindroom.chat) · [Quick start](#quick-start)
 
 [![PyPI](https://img.shields.io/pypi/v/mindroom)](https://pypi.org/project/mindroom/)
-[![Python](https://img.shields.io/pypi/pyversions/mindroom)](https://pypi.org/project/mindroom/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/pytest.yml?label=tests)](https://github.com/mindroom-ai/mindroom/actions/workflows/pytest.yml)
-[![Build](https://img.shields.io/github/actions/workflow/status/mindroom-ai/mindroom/build-mindroom.yml?label=build)](https://github.com/mindroom-ai/mindroom/actions/workflows/build-mindroom.yml)
 [![Docs](https://img.shields.io/badge/docs-mindroom.chat-blue)](https://docs.mindroom.chat)
 [![License](https://img.shields.io/github/license/mindroom-ai/mindroom)](https://github.com/mindroom-ai/mindroom/blob/main/LICENSE)
 [![Downloads](https://img.shields.io/pypi/dm/mindroom)](https://pypi.org/project/mindroom/)
-[![GitHub](https://img.shields.io/badge/github-mindroom--ai%2Fmindroom-blue?logo=github)](https://github.com/mindroom-ai/mindroom)
 
-<picture>
-  <source media="(prefers-reduced-motion: no-preference)" srcset="assets/logo/logo-mark-animated.svg" />
-  <img src="assets/logo/logo-mark.svg" alt="MindRoom Logo" align="right" width="150" />
-</picture>
-
-**AI agents that live in your chat rooms.**
-
-MindRoom is an open-source multi-agent runtime built on [Matrix](https://matrix.org/) that works with nearly any [cloud or local AI model](docs/configuration/models.md).
-You define agents in a YAML file or in the web dashboard; MindRoom gives each one a Matrix account, and you talk to them in threads in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) — or any other Matrix client you already use.
-Because Matrix bridges to other platforms, the same agents also work in Slack, Telegram, Discord, WhatsApp, IRC, and email — with the same persistent memory everywhere.
-Self-host the whole stack, or run only the MindRoom backend locally and pair it with hosted Matrix at [mindroom.chat](https://mindroom.chat).
+</div>
 
 https://github.com/user-attachments/assets/665d730b-83b3-42b6-aa98-7dde35f16244
 
-See the [showcase](https://docs.mindroom.chat/showcase/) for more recordings.
+MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
+Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
+Pick a [local model](docs/configuration/models.md) for your private life or a frontier model for hard problems, and self-host the whole stack or run only the agents on your own computer.
 
-## Features
+<table>
+<tr>
+<th width="50%">Any computer</th>
+<th width="50%">macOS app</th>
+</tr>
+<tr>
+<td valign="top">
+
+```bash
+uvx mindroom run
+```
+
+Installs and starts MindRoom with a starter agent, then pairs it with your [MindRoom Chat](https://chat.mindroom.chat) account.
+
+</td>
+<td valign="top">
+
+```bash
+brew install --cask mindroom-ai/tap/mindroom
+```
+
+A native app that runs your agents on your Mac in the background.
+Needs an Apple silicon Mac with macOS 14 or later.
+
+</td>
+</tr>
+</table>
+
+Chat with your agents on the [web](https://chat.mindroom.chat), on the [Mac](docs/installation/macos-app.md), on [iPhone and iPad](https://apps.apple.com/us/app/mindroom-ai/id6760272172), and on Android (in beta).
+See [Quick Start](#quick-start) for every way to run it.
+
+## See it in action
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5e389c59-c81a-4f70-9c5d-de7406ff95f4" /><img src="https://github.com/user-attachments/assets/bc6194b1-9398-47f5-b649-2ea17dbb6b9f" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
+<p><b>Approve before it acts</b><br />Risky actions wait for your OK, with the exact arguments in view.</p>
+</td>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/39a572a8-74d7-4349-ad68-2ee1b0c16a21" /><img src="https://github.com/user-attachments/assets/1efa0323-6502-4d7c-82c9-6c39f906ce89" alt="Three colleagues see the same agent thread side by side" /></picture></a>
+<p><b>The whole team, one thread</b><br />Colleagues share an agent in a thread and see every answer stream in live.</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/7fc2bc01-1ec5-40d1-971f-5e6f33ba0f18" /><img src="https://github.com/user-attachments/assets/8eb3e6d8-8e9f-4ebb-a51b-bbb5913536e3" alt="Two agent canvases: a week grid of free meeting slots and a weekend trip planner with a budget" /></picture></a>
+<p><b>Canvases you can click</b><br />An agent lays out free slots or a trip budget beside the chat and acts on what you pick.</p>
+</td>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/1392c1f2-146f-4131-a966-360f7d83f14a" /><img src="https://github.com/user-attachments/assets/bd3107c6-907d-4df3-922e-73f0da14055c" alt="A thread next to a data canvas with a fitted curve and its parameters" /></picture></a>
+<p><b>Data you can explore</b><br />Leave a point out of a fit, then send the new result back to the agent.</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ca52372b-8fc5-442a-8f2b-90d7a3d16d8e" /><img src="https://github.com/user-attachments/assets/1884d9d2-1c4b-4279-ba55-d6cbdc4d43ba" alt="An agent's browser waits on an order page while the user can take control" /></picture></a>
+<p><b>It drives, you take the wheel</b><br />Watch an agent work in its own browser and take over when it needs your passkey.</p>
+</td>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#connect-once-then-just-ask"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/69f219b2-6fef-419c-9d3b-513aaa340b01" /><img src="https://github.com/user-attachments/assets/4f18f100-5ce8-46c4-a4bf-18be84fccb4f" alt="A thread answered from a wiki next to the connections page where the wiki account is connected" /></picture></a>
+<p><b>Connect once, then just ask</b><br />Connect an account once, and the agent answers from it from then on.</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#lock-up-on-the-way-out"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/b35e6de5-09f6-4ae1-b8df-e9ad3e81987e" /><img src="https://github.com/user-attachments/assets/38b5676b-dedf-4bde-a6ba-fad3378d3c12" alt="Two phone screens: a voice note locks up the house, and another sets a reminder" /></picture></a>
+<p><b>From your phone</b><br />One voice note locks up the house; another becomes a reminder.</p>
+</td>
+<td width="50%" valign="top">
+<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/d37616c8-3dd4-4e35-a065-988249227c81" /><img src="https://github.com/user-attachments/assets/03a931bc-6654-44b4-a15e-696921305fd3" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
+<p><b>Your morning, already handled</b><br />A scheduled brief with today's meetings and what needs you.</p>
+</td>
+</tr>
+</table>
+
+These are stills from the [showcase](https://docs.mindroom.chat/showcase/) recordings: MindRoom Chat and a real MindRoom backend, with a fictional company and scripted model responses.
+
+## What people use it for
+
+<table>
+<tr>
+<th width="50%">Personal</th>
+<th width="50%">Work</th>
+</tr>
+<tr>
+<td valign="top">
+
+- Plan a family trip, from flights to a packing list.
+- Keep your calendar, reminders, and to-do lists in order, by voice.
+- Keep notes, a journal, and memories you can find months later.
+- Follow the topics you care about, with a digest only when something is new.
+- Look after your homelab and smart home, with approval for anything risky.
+- Build quick tools and scripts in the agent's own workspace.
+
+</td>
+<td valign="top">
+
+- Find anything across email, chat, documents, tickets, and code, with sources.
+- Get a morning briefing, or a summary of your week before a one-on-one.
+- Write status updates from what actually happened in chat and the tracker.
+- Turn a question into a report or a presentation built from your own documents.
+- Triage the inbox and draft emails, approving each one before it is sent.
+- Join a new team and ask its agent how the work fits together.
+
+</td>
+</tr>
+</table>
+
+## Why MindRoom
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**🔌 [Connected to your tools and documents](https://docs.mindroom.chat/#agents-that-know-you-and-your-work)**<br />
+Personal agents and shared team agents connect to 100+ tools, including email, calendar, Slack, Jira, GitHub, and any MCP server, and search your own documents.
+
+</td>
+<td width="50%" valign="top">
+
+**🔒 [Private where it matters](https://docs.mindroom.chat/#private-where-it-matters)**<br />
+Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🧠 [Memory that keeps improving](https://docs.mindroom.chat/#they-remember-and-keep-improving)**<br />
+Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.
+
+</td>
+<td valign="top">
+
+**🛡️ [Safe to give real access](https://docs.mindroom.chat/#safe-to-give-real-access)**<br />
+One-tap approval for anything risky, sandboxed code execution, and end-to-end encryption on Matrix, the open standard governments use for secure messaging.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**💬 [A chat app built for agents](https://docs.mindroom.chat/#a-chat-app-built-for-agents)**<br />
+MindRoom builds its own client for the web, Mac, iPhone, iPad, and Android (in beta), so agents can show live tool traces, ask for approval, join voice calls, and work in a browser you can take over.
+
+</td>
+<td valign="top">
+
+**🌉 [Works where you already are](https://docs.mindroom.chat/#works-where-you-already-are)**<br />
+Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an MCP gateway brings them to Claude Code and Codex.
+
+</td>
+</tr>
+</table>
+
+<details>
+<summary><b>Full feature list</b></summary>
 
 - **Multi-agent orchestration** — define specialist agents and teams in `config.yaml`; a built-in router picks the responder when you don't @-mention one, and mentioning several agents makes them collaborate in a thread.
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
@@ -40,14 +199,7 @@ See the [showcase](https://docs.mindroom.chat/showcase/) for more recordings.
 - **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
 - **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts, isolated execution workers, and egress approval for locked-down environments.
 
-What it looks like:
-
-```text
-You: @research @analyst @writer Create a competitive analysis report
-Research: I'll gather data on our top 5 competitors...
-Analyst: I'll identify strategic patterns and opportunities...
-Writer: I'll compile everything into an executive summary...
-```
+</details>
 
 <details>
 <summary><b>Why we built this</b></summary>
