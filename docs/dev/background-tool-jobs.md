@@ -26,7 +26,7 @@ User-facing configuration and examples are in [Agent Orchestration](../tools/age
   Work that a foreground wait claims, or whose access is only unresolved, such as while room membership resolves after a restart, stays held without being offered; a proven denial ends it.
   A continuation or edit of a held message that ends before its response boundary, because it failed or was stopped or interrupted, releases the hold, and a message the turn did not replace shows how it ended.
   A continuation a crash cut short continues below what it already showed, like any reply a restart cut short, and retrieves the outcomes the cut-short run already read instead of losing them.
-  Stop on a held message cancels the work it holds through the message's latest turn at once, leaving a newer running reply's work alone, and shows the message as stopped once no turn runs in the conversation; Stop while a turn continues the message stops that turn and the work like any reply.
+  Stop on a held message cancels the work it holds through the message's latest turn at once, leaving a newer running reply's work alone, and shows the message as stopped; Stop while a turn continues the message stops that turn and the work like any reply, including a turn that began before it could be stopped.
   A newer reply that reaches its boundary but ends without a finished message leaves an older message holding the work.
 - Stop cancels the reply and this agent's outstanding managed jobs for the same requester and conversation, including earlier turns.
   It suppresses automatic continuation from that stopped work, while explicit result retrieval remains possible.

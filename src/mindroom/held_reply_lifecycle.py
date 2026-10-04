@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.background_tasks import create_background_task
 from mindroom.streaming import StreamingPresentation, UnfinishedStreamedReply
 from mindroom.tool_jobs.completion import HeldContinuation, completion_prompt
 from mindroom.tool_jobs.held_replies import (
@@ -32,7 +30,6 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import HeldReplyStore, PrincipalStore, SavedHeldReply
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
     from mindroom.response_runner import ResponseRequest
     from mindroom.stop import StopManager
     from mindroom.tool_jobs.completion import ReplyBoundary
@@ -47,13 +44,10 @@ class HeldReplyLifecycle:
     journal: PrincipalStore
     delivery_gateway: DeliveryGateway
     stop_manager: StopManager
-    lifecycle: ResponseLifecycleCoordinator
     client: Callable[[], nio.AsyncClient]
     runtime_paths: RuntimePaths
     agent_name: str
     logger: structlog.stdlib.BoundLogger
-    # Owns the detached settlement of a Stop on a held message.
-    background_owner: object
 
     def read(self, saved: SavedHeldReply) -> HeldReply | None:
         """Read one saved hold; an unreadable one holds nothing this runtime can continue."""
@@ -219,17 +213,9 @@ class HeldReplyLifecycle:
         if self.stop_manager.can_handle_stop_reaction(message_id, hold.key.room_id):
             return False
         if released is not None:
-            # The message settles once the conversation is free; a turn running meanwhile, perhaps for long, must not
-            # hold up the room's other events, such as a Stop of that turn.
-            create_background_task(
-                self.lifecycle.run_locked_target_operation(
-                    target=hold.target,
-                    while_waiting=None,
-                    locked_operation=partial(self.release, hold, stopped=True),
-                ),
-                name=f"held_reply_stop:{message_id}",
-                owner=self.background_owner,
-            )
+            # No turn edits the message after this: a takeover or wake finds the hold gone, and a continuation that
+            # began before it could be stopped stops itself.
+            await self.release(hold, stopped=True)
         return True
 
     async def release_unstarted(self, hold: HeldReply) -> None:

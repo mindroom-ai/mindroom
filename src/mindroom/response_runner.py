@@ -990,12 +990,10 @@ class ResponseRunner:
             journal=self.deps.approval_store,
             delivery_gateway=self.deps.delivery_gateway,
             stop_manager=self.deps.stop_manager,
-            lifecycle=self._lifecycle_coordinator,
             client=self._client,
             runtime_paths=self.deps.runtime_paths,
             agent_name=self.deps.agent_name,
             logger=self.deps.logger,
-            background_owner=self.deps.runtime,
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,

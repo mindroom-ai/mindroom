@@ -8034,7 +8034,6 @@ visibility = [
 [[modules]]
 path = "mindroom.held_reply_lifecycle"
 depends_on = [
-    "mindroom.background_tasks",
     "mindroom.streaming",
     "mindroom.tool_jobs.completion",
     "mindroom.tool_jobs.held_replies",

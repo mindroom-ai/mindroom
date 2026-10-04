@@ -489,9 +489,9 @@ async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _
 @pytest.mark.asyncio
 @pytest.mark.parametrize("busy", [False, True])
 async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) -> None:
-    """Stop on a message no turn runs on cancels its work at once and shows the message stopped once the room is free.
+    """Stop on a message no turn runs on cancels its work and shows the message stopped at once.
 
-    A turn running in the conversation meanwhile does not hold the Stop, or the room's other events, up.
+    A turn running in the conversation meanwhile does not hold the Stop up.
     """
     gate = asyncio.Event()
     await held.start("running", gate)
@@ -520,13 +520,11 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
     stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
     assert stopped.user_stop_receipt_order == 7
     await wait_for_status(held.runtime, "running", "cancelled")
-    if turn is not None:
-        assert held.edits[-1].new_text == f"Started.\n\n{_WAITING_NOTICE}"
-        release.set()
-        await turn
-    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
     assert await held.hold() is None
     assert held.edits[-1].new_text == "Started.\n\n**[Response cancelled by user]**"
+    if turn is not None:
+        release.set()
+        await turn
     assert held.edits[-1].extra_content["io.mindroom.stream_status"] == "cancelled"
     held.bot.client.room_redact.assert_awaited_once_with("!room:localhost", "$button", reason="Response completed")
     assert not await held.runner.held_messages.stop("$reply", 8)
@@ -556,7 +554,6 @@ async def test_a_wake_queued_before_a_stop_leaves_the_message_stopped(held: _Hel
     finally:
         release.set()
         await turn
-    await wait_for_background_tasks(JOB_TEST_TIMEOUT, owner=held.runner.deps.runtime)
     assert held.edits[-1].new_text == "Started.\n\n**[Response cancelled by user]**"
 
 
