@@ -53,7 +53,7 @@ matrix_message(action="react", event_id="$message", message="✅")
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.
-Only the chosen recipient responds, even if the text mentions other agents, and without `recipient` no agent is started.
+Only the chosen recipient responds, even if the text or a sent file's name mentions other agents, and without `recipient` no agent is started.
 An unknown or unavailable name returns `Recipient '<name>' is not available in this room. Available recipients: ...`.
 Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.

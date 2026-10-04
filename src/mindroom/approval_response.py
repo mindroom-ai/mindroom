@@ -13,7 +13,8 @@ from mindroom import approval_manager
 from mindroom.approval_failure import prepare_approval_failure
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_CANCELLED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
@@ -448,7 +449,6 @@ class ApprovalResponseCoordinator:
         reason: str,
         *,
         visible_text: str | None = None,
-        stream_status: str = STREAM_STATUS_COMPLETED,
     ) -> bool:
         """Settle cards and the failure outcome from the owning source worker."""
         current = await self.store.approval_continuation(continuation.approval_id)
@@ -473,16 +473,15 @@ class ApprovalResponseCoordinator:
         )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
-        visible_reason = visible_text or (
-            _USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else redact_sensitive_text(reason)
-        )
+        user_stop = reason == _USER_STOP_FAILURE_REASON
+        visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if user_stop else redact_sensitive_text(reason))
         target = continuation_target(current)
         delivered = await self.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=current.response_event_id,
                 new_text=visible_reason,
-                extra_content={STREAM_STATUS_KEY: stream_status},
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_CANCELLED if user_stop else STREAM_STATUS_ERROR},
                 delivery_turn_id=current.source_event_ids[0],
                 response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,

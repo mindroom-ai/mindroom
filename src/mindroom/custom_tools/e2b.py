@@ -4,34 +4,72 @@ from __future__ import annotations
 
 import base64
 import json
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
 
+import httpx
 from agno.agent import Agent  # noqa: TC002  # resolved by Agno function schema introspection
 from agno.team.team import Team  # noqa: TC002  # resolved by Agno function schema introspection
 from agno.tools.e2b import E2BTools
 from agno.tools.function import ToolResult
+from e2b.envd.api import ENVD_API_FILES_ROUTE, handle_envd_api_exception
 
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.file_access import resolve_agent_file
 from mindroom.path_confinement import (
+    MAX_READ_BYTES,
     open_directory_within_root,
     read_regular_file_within_root,
     resolve_path_within_root,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
+    from e2b_code_interpreter import Sandbox
+
     from mindroom.config.models import FileAccess
 
 
-def _write_within_root(root: Path, relative: Path, payload: bytes | bytearray) -> None:
-    """Atomically publish bytes at a canonical path below a pinned root."""
+def _write_within_root(root: Path, relative: Path, chunks: Iterable[bytes]) -> None:
+    """Atomically publish chunks at a canonical path below a pinned root."""
     with (
         open_directory_within_root(root, relative.parent, create=True) as directory,
         atomic_write_file_at(directory, relative.name) as output,
     ):
-        output.write(payload)
+        output.writelines(chunks)
+
+
+@contextmanager
+def _sandbox_file_chunks(sandbox: Sandbox, path: str) -> Iterator[Iterator[bytes]]:
+    """Stream one sandbox file in chunks, refusing it once it passes the shared read limit.
+
+    The SDK's ``files.read`` buffers the whole body even with ``format="stream"``,
+    so this sends the same request without reading the body up front.
+    """
+    config = sandbox.connection_config
+    with httpx.stream(
+        "GET",
+        f"{sandbox.envd_api_url}{ENVD_API_FILES_ROUTE}",
+        params={"path": path, "username": "user"},
+        headers=config.sandbox_headers,
+        proxy=config.proxy,
+        timeout=config.get_request_timeout(),
+    ) as response:
+        if error := handle_envd_api_exception(response):
+            raise error
+        yield _within_read_limit(response.iter_bytes())
+
+
+def _within_read_limit(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    total = 0
+    for chunk in chunks:
+        total += len(chunk)
+        if total > MAX_READ_BYTES:
+            message = f"Sandbox file exceeds the {MAX_READ_BYTES >> 20} MiB transfer limit"
+            raise ValueError(message)
+        yield chunk
 
 
 class MindRoomE2BTools(E2BTools):
@@ -42,7 +80,8 @@ class MindRoomE2BTools(E2BTools):
     Downloads always land inside the workspace at workspace-relative paths without
     ``..``; links that leave the workspace are rejected. Reads and writes use
     descriptors pinned below their root, so a link swapped in after resolution
-    cannot redirect them.
+    cannot redirect them. Uploads, downloads, and file reads refuse files above
+    the shared read limit, and downloads stream so no partial file is published.
     """
 
     def __init__(
@@ -114,11 +153,30 @@ class MindRoomE2BTools(E2BTools):
         local_path = local_path or Path(sandbox_path).name
         try:
             root, relative = self._workspace_location(local_path)
-            content = self.sandbox.files.read(sandbox_path, format="bytes")
-            _write_within_root(root, relative, content)
+            with _sandbox_file_chunks(self.sandbox, sandbox_path) as chunks:
+                _write_within_root(root, relative, chunks)
         except Exception as e:
             return json.dumps({"status": "error", "message": f"Error downloading file: {e}"})
         return local_path
+
+    @override
+    def read_file_content(self, file_path: str, encoding: str = "utf-8") -> str:
+        """Read the content of a file from the sandbox.
+
+        Args:
+            file_path (str): Path to the file in the sandbox
+            encoding (str): Encoding to use for text files (default: utf-8)
+
+        Returns:
+            str: File content or error message
+
+        """
+        try:
+            with _sandbox_file_chunks(self.sandbox, file_path) as chunks:
+                content = b"".join(chunks)
+            return content.decode(encoding, errors="replace")
+        except Exception as e:
+            return json.dumps({"status": "error", "message": f"Error reading file: {e}"})
 
     @override
     def download_png_result(
@@ -144,7 +202,7 @@ class MindRoomE2BTools(E2BTools):
             return result
         try:
             root, relative = self._workspace_location(output_path)
-            _write_within_root(root, relative, base64.b64decode(png))
+            _write_within_root(root, relative, [base64.b64decode(png)])
         except Exception as e:
             return ToolResult(content=f"{result.content}, but saving it failed: {e}", images=result.images)
         self.downloaded_files[result_index] = output_path
@@ -184,7 +242,7 @@ class MindRoomE2BTools(E2BTools):
                 return ToolResult(content=f"Result at index {result_index} does not contain interactive chart data")
             chart = result.chart.to_dict()
             root, relative = self._workspace_location(output_path)
-            _write_within_root(root, relative, json.dumps(chart, indent=2).encode())
+            _write_within_root(root, relative, [json.dumps(chart, indent=2).encode()])
         except Exception as e:
             return ToolResult(content=f"Error extracting chart data: {e}")
         labels = (("title", "Title"), ("x_label", "X-axis"), ("y_label", "Y-axis"))

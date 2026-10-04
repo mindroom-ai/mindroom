@@ -28,6 +28,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `synthetic` - Built-in Lorem Ipsum model for local conversations and load generation
 
 To generate a starter config for one provider, use `mindroom config init --provider <preset>` (see [Getting Started](../getting-started.md)).
+The [macOS app's local model setup](../installation/macos-app.md#local-ai-models) downloads and runs models with one click, with hardware recommendations including Qwen3.8 27B when memory permits.
 
 ## Model Config Fields
 

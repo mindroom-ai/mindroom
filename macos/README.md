@@ -18,6 +18,11 @@ The menu app launches it as a foreground child and communicates only through inh
 Quitting the app closes that channel, clears every control lease and shell auto-approval, and kills running shell commands.
 Closing only the main window keeps the helper and menu bar available.
 
+## Local inference
+
+Choose **Set Up Local Model** in **Configure** to download and run AI on this Mac.
+See [Local AI Models](../docs/installation/macos-app.md#local-ai-models) for setup, hardware recommendations, and limits.
+
 ## Local agents
 
 Local agents uses **Install**, **Configure**, **Check**, and **Start** steps with independent progress markers.

@@ -6,11 +6,14 @@ import base64
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from agno.agent import Agent
+from e2b import ConnectionConfig
 from e2b_code_interpreter.models import Execution, Result
 
 import mindroom.custom_tools.e2b as e2b_module
@@ -21,7 +24,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\nfake"
@@ -40,6 +43,11 @@ _CHART = {
 }
 
 
+_ENVD_URL = "https://49983-sandbox.e2b.test"
+_ENVD_TOKEN = "envd-token"  # noqa: S105
+_CHUNK = 1 << 20
+
+
 @dataclass
 class _WriteInfo:
     path: str
@@ -48,25 +56,62 @@ class _WriteInfo:
 @dataclass
 class _FakeFiles:
     stored: dict[str, bytes] = field(default_factory=dict)
+    sparse: dict[str, int] = field(default_factory=dict)
     reads: list[str] = field(default_factory=list)
+    served: int = 0
 
     def write(self, path: str, data: bytes) -> _WriteInfo:
         self.stored[path] = data
         return _WriteInfo(path=f"/home/user/{path}")
 
-    def read(self, path: str, format: str = "text") -> bytearray:  # noqa: A002
-        assert format == "bytes"
-        self.reads.append(path)
-        return bytearray(self.stored[path])
+    def chunks(self, path: str) -> Iterator[bytes]:
+        """Serve a stored file whole, or a sparse file lazily in zero-filled chunks."""
+        if path in self.stored:
+            self.served += len(self.stored[path])
+            yield self.stored[path]
+            return
+        for offset in range(0, self.sparse[path], _CHUNK):
+            chunk = bytes(min(_CHUNK, self.sparse[path] - offset))
+            self.served += len(chunk)
+            yield chunk
 
 
 @dataclass
 class _FakeSandbox:
     files: _FakeFiles = field(default_factory=_FakeFiles)
+    envd_api_url: str = _ENVD_URL
+    connection_config: ConnectionConfig = field(
+        default_factory=lambda: ConnectionConfig(api_key="test", extra_sandbox_headers={"X-Access-Token": _ENVD_TOKEN}),
+    )
 
     @classmethod
     def create(cls, **_kwargs: object) -> _FakeSandbox:
         return cls()
+
+
+def _serve_files(files: _FakeFiles) -> Callable[..., object]:
+    """Answer the envd file route the way the sandbox does, streaming bodies without buffering them."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.copy_with(query=None) == f"{_ENVD_URL}/files"
+        assert request.headers["X-Access-Token"] == _ENVD_TOKEN
+        assert request.url.params["username"] == "user"
+        path = request.url.params["path"]
+        files.reads.append(path)
+        if path not in files.stored and path not in files.sparse:
+            return httpx.Response(404, json={"message": f"path '{path}' does not exist"})
+        return httpx.Response(200, content=files.chunks(path))
+
+    @contextmanager
+    def stream(method: str, url: str, *, proxy: object, **kwargs: object) -> Iterator[httpx.Response]:
+        assert proxy is None
+        with (
+            httpx.Client(transport=httpx.MockTransport(handle)) as client,
+            client.stream(method, url, **kwargs) as response,
+        ):
+            yield response
+
+    return stream
 
 
 @pytest.fixture
@@ -95,7 +140,9 @@ def make_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[Path
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
 
     def build(workspace_root: Path | None) -> MindRoomE2BTools:
-        return MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
+        tool = MindRoomE2BTools(api_key="test", tool_output_workspace_root=workspace_root)
+        monkeypatch.setattr(httpx, "stream", _serve_files(_files(tool)))
+        return tool
 
     return build
 
@@ -271,6 +318,70 @@ def test_download_writes_inside_workspace(
     assert (workspace / "result.csv").read_bytes() == b"x,y\n"
     assert (workspace / "exports" / "final.csv").read_bytes() == b"x,y\n"
     assert not (tmp_path / "result.csv").exists()
+
+
+def test_download_streams_file_in_chunks(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A sandbox file below the limit arrives whole even when it spans many chunks."""
+    tool = make_tool(workspace)
+    _files(tool).sparse["/tmp/data.bin"] = 3 * _CHUNK + 5  # noqa: S108
+
+    assert tool.download_file_from_sandbox("/tmp/data.bin") == "data.bin"  # noqa: S108
+    assert (workspace / "data.bin").stat().st_size == 3 * _CHUNK + 5
+
+
+def test_download_refuses_oversized_file_while_streaming(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A huge sandbox file is refused once it passes the limit, without buffering it or publishing a partial file."""
+    (workspace / "result.bin").write_bytes(b"previous")
+    tool = make_tool(workspace)
+    _files(tool).sparse["/tmp/huge.bin"] = 8 << 30  # noqa: S108
+
+    message = _error(tool.download_file_from_sandbox("/tmp/huge.bin", "result.bin"))  # noqa: S108
+
+    assert "64 MiB transfer limit" in message
+    assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
+    assert (workspace / "result.bin").read_bytes() == b"previous"
+    assert [entry.name for entry in workspace.iterdir()] == ["result.bin"]
+
+
+def test_download_reports_missing_sandbox_file(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A missing sandbox file is a tool error carrying the sandbox's message, and nothing is written."""
+    tool = make_tool(workspace)
+
+    assert "path '/tmp/missing.csv' does not exist" in _error(tool.download_file_from_sandbox("/tmp/missing.csv"))  # noqa: S108
+    assert list(workspace.iterdir()) == []
+
+
+def test_read_file_content_returns_text(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """File reads return the decoded sandbox file."""
+    tool = make_tool(workspace)
+    _files(tool).stored["/tmp/notes.txt"] = "caf\u00e9\n".encode()  # noqa: S108
+
+    assert tool.read_file_content("/tmp/notes.txt") == "caf\u00e9\n"  # noqa: S108
+    assert tool.read_file_content("/tmp/notes.txt", encoding="latin-1") == "caf\u00c3\u00a9\n"  # noqa: S108
+
+
+def test_read_file_content_refuses_oversized_file_while_streaming(
+    make_tool: Callable[[Path | None], MindRoomE2BTools],
+    workspace: Path,
+) -> None:
+    """A huge sandbox file read is refused once it passes the limit instead of being buffered whole."""
+    tool = make_tool(workspace)
+    _files(tool).sparse["/tmp/huge.log"] = 8 << 30  # noqa: S108
+
+    assert "64 MiB transfer limit" in _error(tool.read_file_content("/tmp/huge.log"))  # noqa: S108
+    assert _files(tool).served <= MAX_READ_BYTES + _CHUNK
 
 
 @pytest.mark.parametrize(

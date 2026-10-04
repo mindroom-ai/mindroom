@@ -268,7 +268,11 @@ def _render_coalesced_prompt(
 
 
 def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPayloadMetadata:
-    """Aggregate canonical per-event payload metadata for one prepared turn."""
+    """Aggregate canonical per-event payload metadata for one prepared turn.
+
+    Mentions come only from events that do not ask receivers to ignore them, so a
+    file sent with that flag cannot erase the mention in text batched with it.
+    """
     event_metadata = [
         payload_metadata_from_source(
             pending_event.event.source,
@@ -276,6 +280,7 @@ def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPaylo
         )
         for pending_event in pending_events
     ]
+    mention_metadata = [metadata for metadata in event_metadata if metadata.skip_mentions is not True]
     inspected_content = any(metadata.mentioned_user_ids is not None for metadata in event_metadata)
     return DispatchPayloadMetadata(
         attachment_ids=tuple(
@@ -289,19 +294,19 @@ def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPaylo
         voice_transcript=any(metadata.voice_transcript is True for metadata in event_metadata),
         mentioned_user_ids=(
             tuple(
-                dict.fromkeys(user_id for metadata in event_metadata for user_id in metadata.mentioned_user_ids or ()),
+                dict.fromkeys(
+                    user_id for metadata in mention_metadata for user_id in metadata.mentioned_user_ids or ()
+                ),
             )
             if inspected_content
             else None
         ),
         formatted_bodies=(
-            tuple(body for metadata in event_metadata for body in metadata.formatted_bodies or ())
+            tuple(body for metadata in mention_metadata for body in metadata.formatted_bodies or ())
             if inspected_content
             else None
         ),
-        skip_mentions=(
-            any(metadata.skip_mentions is True for metadata in event_metadata) if inspected_content else None
-        ),
+        skip_mentions=not mention_metadata if inspected_content else None,
     )
 
 

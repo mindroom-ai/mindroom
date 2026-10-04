@@ -79,12 +79,8 @@ class _ThreadRoomScanBoundError(RuntimeError):
     """
 
 
-class OpaqueEncryptedThreadHistoryError(RuntimeError):
-    """Raised when a thread reconstruction depends on still-undecryptable encrypted events."""
-
-
-class UnresolvedOpaqueRoomHistoryError(OpaqueEncryptedThreadHistoryError):
-    """Raised when opaque room history cannot be assigned to a specific thread."""
+class UnresolvedOpaqueRoomHistoryError(RuntimeError):
+    """Raised when undecryptable events from a delivery's sender could hide the exact delivery a scan must prove."""
 
 
 def _finish_exact_delivery_scan_at_bound(
@@ -177,8 +173,8 @@ def _record_scanned_room_message_source(
     """Record one scanned room-message source and return the recorded event ID."""
     event_source = event.source if isinstance(event.source, dict) else {}
     if _is_opaque_thread_affecting_event_source(event_source):
-        # Undecryptable relation-bearing ciphertext is recorded as fail-closed evidence: it resolves
-        # thread membership through its exposed relation and poisons only that reconstruction.
+        # Undecryptable ciphertext still exposes its relation, so it is placed in a thread exactly
+        # like the readable message it would decrypt to.
         scanned_message_sources[event.event_id] = _event_source_for_cache(event)
         return event.event_id
     if not is_room_message_event(event):
@@ -215,16 +211,6 @@ async def fetch_thread_event_sources_via_room_messages(
             scanned_event_count=scan_result.scanned_event_count,
         )
         raise ThreadRoomScanRootNotFoundError(msg)
-    if scan_result.unresolved_opaque_event_ids:
-        logger.warning(
-            "Thread room scan contains opaque encrypted relations with unresolved impact",
-            room_id=room_id,
-            thread_id=thread_id,
-            user_id=client.user_id,
-            unresolved_opaque_event_ids=sorted(scan_result.unresolved_opaque_event_ids),
-        )
-        msg = f"thread history scan for {thread_id} contains undecryptable events with unresolved thread impact"
-        raise UnresolvedOpaqueRoomHistoryError(msg)
     return _ThreadEventSourceScanResult(
         event_sources=scan_result.thread_event_sources[thread_id],
         page_count=scan_result.page_count,
@@ -470,7 +456,6 @@ class _BulkThreadScanResult:
 
     thread_event_sources: dict[str, list[dict[str, Any]]]
     missing_root_ids: frozenset[str]
-    unresolved_opaque_event_ids: frozenset[str]
     page_count: int
     scanned_event_count: int
     homeserver_scan_parse_cpu_ms: float = 0.0
@@ -490,25 +475,23 @@ async def _group_scanned_sources_by_thread(
     thread_root_ids: Collection[str],
     scanned_message_sources: dict[str, dict[str, Any]],
     edit_candidates: ThreadEditCandidates,
-) -> tuple[dict[str, list[dict[str, Any]]], frozenset[str]]:
-    """Bucket room-scan sources per requested thread and report unresolved opaque relations."""
+) -> dict[str, list[dict[str, Any]]]:
+    """Bucket room-scan sources per requested thread."""
     grouped: dict[str, dict[str, dict[str, Any]]] = {
         root_id: {root_id: scanned_message_sources[root_id]}
         for root_id in thread_root_ids
         if root_id in scanned_message_sources
     }
     if not grouped:
-        return {}, frozenset()
+        return {}
     event_infos = {
         event_id: EventInfo.from_event(event_source) for event_id, event_source in scanned_message_sources.items()
     }
     ordered_event_ids = ordered_event_ids_from_scanned_event_sources(scanned_message_sources.values())
-    indeterminate_event_ids: set[str] = set()
     resolved_thread_ids = await resolve_thread_ids_for_event_infos(
         room_id,
         event_infos=event_infos,
         ordered_event_ids=ordered_event_ids,
-        indeterminate_event_ids=indeterminate_event_ids,
     )
     for event_id in ordered_event_ids:
         root_id = resolved_thread_ids.get(event_id)
@@ -518,12 +501,6 @@ async def _group_scanned_sources_by_thread(
         if bucket is None or event_id in bucket:
             continue
         bucket[event_id] = scanned_message_sources[event_id]
-
-    unresolved_opaque_event_ids = frozenset(
-        event_id
-        for event_id in indeterminate_event_ids
-        if is_opaque_encrypted_event_source(scanned_message_sources[event_id])
-    )
 
     edits_by_root: dict[str, list[dict[str, Any]]] = {}
     for original_event_id in edit_candidates.original_event_ids():
@@ -543,14 +520,13 @@ async def _group_scanned_sources_by_thread(
         for root_id in target_roots:
             edits_by_root.setdefault(root_id, []).append(_event_source_for_cache(edit_event))
 
-    grouped_sources = {
+    return {
         root_id: sort_thread_event_sources_root_first(
             [*bucket.values(), *edits_by_root.get(root_id, [])],
             thread_id=root_id,
         )
         for root_id, bucket in grouped.items()
     }
-    return grouped_sources, unresolved_opaque_event_ids
 
 
 async def bulk_scan_thread_event_sources(
@@ -621,7 +597,7 @@ async def bulk_scan_thread_event_sources(
             break
         from_token = response.end
 
-    thread_event_sources, unresolved_opaque_event_ids = await _group_scanned_sources_by_thread(
+    thread_event_sources = await _group_scanned_sources_by_thread(
         room_id=room_id,
         thread_root_ids=thread_root_ids,
         scanned_message_sources=scanned_message_sources,
@@ -630,7 +606,6 @@ async def bulk_scan_thread_event_sources(
     return _BulkThreadScanResult(
         thread_event_sources=thread_event_sources,
         missing_root_ids=frozenset(remaining_root_ids),
-        unresolved_opaque_event_ids=unresolved_opaque_event_ids,
         page_count=page_count,
         scanned_event_count=scanned_event_count,
         homeserver_scan_parse_cpu_ms=homeserver_scan_parse_cpu_ms,
