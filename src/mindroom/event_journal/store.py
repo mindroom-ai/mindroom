@@ -2198,6 +2198,19 @@ class HeldReplyStore:
             ),
         )
 
+    async def resave(self, hold_id: str, *, generation: str, hold_json: str) -> SavedHeldReply | None:
+        """Save a hold again, only while ``generation`` still holds the work, returning the new save."""
+        new_generation = uuid4().hex
+        return await self._backend.write(
+            lambda transaction: held_replies.resave(
+                transaction,
+                hold_id,
+                generation=generation,
+                hold_json=hold_json,
+                new_generation=new_generation,
+            ),
+        )
+
     async def delete(self, hold_id: str, *, generation: str | None = None) -> SavedHeldReply | None:
         """Release a hold, only that ``generation`` of it when one is given, returning the released hold."""
         return await self._backend.write(

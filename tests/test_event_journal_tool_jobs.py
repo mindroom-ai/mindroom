@@ -108,3 +108,20 @@ async def test_held_reply_saves_are_unique_generations_and_wakes_name_one(journa
     assert await holds.delete("hold", generation=second.generation) is None
     assert await holds.delete("hold") == third
     assert await holds.load("hold") is None
+
+
+@pytest.mark.asyncio
+async def test_held_reply_resave_replaces_only_the_generation_it_names(journal_store: EventJournalStore) -> None:
+    """A resave writes a new generation over the one it names, and nothing once that generation is gone."""
+    holds = journal_store.held_replies()
+    _replaced, first = await holds.save(hold_id="hold", recipient="general", message_event_id="$one", hold_json="{}")
+    await holds.mark_woken("hold", first.generation)
+    second = await holds.resave("hold", generation=first.generation, hold_json='{"n": 2}')
+    assert second is not None
+    assert second.generation != first.generation
+    assert (second.hold_json, second.woken_generation) == ('{"n": 2}', None)
+    assert await holds.load_for_message("general", "$one") == second
+    assert await holds.resave("hold", generation=first.generation, hold_json="{}") is None
+    assert await holds.delete("hold") == second
+    assert await holds.resave("hold", generation=second.generation, hold_json="{}") is None
+    assert await holds.load("hold") is None

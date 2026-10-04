@@ -433,6 +433,48 @@ async def test_resuming_shows_what_the_work_waits_for_now(held: _Held) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_stop_while_resuming_is_not_undone_by_the_new_notice(
+    held: _Held,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that releases the hold while a wake reads the work leaves it released, whatever that wake read."""
+    decided = asyncio.Event()
+
+    async def approval() -> BackgroundOutcome:
+        await held.runtime.set_awaiting_approval("approval", awaiting=True)
+        await decided.wait()
+        return BackgroundOutcome("completed", "approved")
+
+    try:
+        await start_job(
+            held.runtime,
+            "approval",
+            tool_name="delegate",
+            depth=0,
+            adapter={},
+            owner=held.owner,
+            operation=approval,
+        )
+        await wait_for_status(held.runtime, "approval", "awaiting_approval")
+        await held.settle("$reply", "Started.", _WAITING_NOTICE)
+        hold = await held.hold()
+        assert hold is not None
+        source_jobs = held.runtime.source_jobs
+
+        async def stopped_meanwhile(*args: object, **kwargs: object) -> object:
+            await held.runner.deps.held_replies.delete(hold.key.hold_id, generation=hold.generation)
+            return await source_jobs(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(held.runtime, "source_jobs", stopped_meanwhile)
+        edits = len(held.edits)
+        assert await held.runner.held_messages.resume(replace(held.request, held_reply=hold)) is None
+        assert await held.hold() is None
+        assert len(held.edits) == edits
+    finally:
+        decided.set()
+
+
+@pytest.mark.asyncio
 async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _Held) -> None:
     """With no work left, the wake releases the message."""
     await held.settle("$reply", "Started.", _WAITING_NOTICE)

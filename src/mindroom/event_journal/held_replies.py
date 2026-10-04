@@ -82,6 +82,26 @@ def save(
     return previous, _saved(row)
 
 
+def resave(
+    transaction: Transaction,
+    hold_id: str,
+    *,
+    generation: str,
+    hold_json: str,
+    new_generation: str,
+) -> SavedHeldReply | None:
+    """Save a hold again as a new generation, only while ``generation`` still holds the work."""
+    row = transaction.fetchone(
+        f"""
+        UPDATE held_replies SET hold_json = ?, generation = ?, woken_generation = NULL
+        WHERE hold_id = ? AND generation = ?
+        RETURNING {_COLUMNS}
+        """,  # noqa: S608
+        (hold_json, new_generation, hold_id, generation),
+    )
+    return None if row is None else _saved(row)
+
+
 def delete(transaction: Transaction, hold_id: str, *, generation: str | None = None) -> SavedHeldReply | None:
     """Release a hold, only that ``generation`` of it when one is given, returning the hold that was released."""
     if generation is None:

@@ -92,6 +92,10 @@ class HeldReplyLifecycle:
         previous = self.read(replaced) if replaced is not None else None
         if previous is not None and previous.message_event_id != hold.message_event_id:
             await self.release(previous)
+        await self._show_held(hold)
+
+    async def _show_held(self, hold: HeldReply) -> None:
+        """Show a message holding its work with its notice, and wake the work if it is ready already."""
         if hold.message_event_id is not None:
             await self.delivery_gateway.edit_text(held_edit(hold))
         runtime = get_background_runtime(self.runtime_paths)
@@ -285,8 +289,18 @@ class HeldReplyLifecycle:
                 ),
             )
         if work.jobs:
-            # The work changed without becoming ready, so the message shows what it waits for now.
-            await self.save(replace(hold, notice=waiting_notice(work.jobs)))
+            # The work changed without becoming ready, so the message shows what it waits for now, unless a Stop
+            # released the hold meanwhile.
+            waiting = replace(hold, notice=waiting_notice(work.jobs))
+            if (
+                await self.store.resave(
+                    hold.key.hold_id,
+                    generation=hold.generation,
+                    hold_json=encode_held_reply(waiting),
+                )
+                is not None
+            ):
+                await self._show_held(waiting)
         elif await self.store.delete(hold.key.hold_id, generation=hold.generation) is not None:
             await self.release(hold)
         return None
