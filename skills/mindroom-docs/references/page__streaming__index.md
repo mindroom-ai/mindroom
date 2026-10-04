@@ -124,7 +124,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
 
 A restart covers a crash, an orderly shutdown, and an agent replaced by a configuration or MCP change.
-The continuing run is told what the stopped attempt showed and which finished tool calls not to repeat.
+The continuing run is told what the stopped attempt showed, including which tool calls had finished, so it builds on them instead of repeating calls with side effects.
 
 ## Large Streamed Messages
 

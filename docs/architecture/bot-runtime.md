@@ -87,7 +87,8 @@ A crash leaves the same pending state as orderly shutdown and entity replacement
 An approved run cut short by any of them ends its cards and releases its approval continuation without settling its sources, unless a FINAL is already owed, so replay adopts its reply too.
 When the adopted reply already shows streamed text or a tool trace, `ResponseRunner` reads them back from Matrix, and the new attempt streams below them after `**[Response interrupted by service restart]**`, numbering its tool calls after the stopped ones.
 A resumed reply always streams, because a blocking answer would replace what it showed.
-The new attempt's prompt carries an account of what the stopped attempt showed, ending with the finished calls not to repeat, and is saved with the turn, so later turns keep it in history.
+The new attempt's prompt carries an account of what the stopped attempt showed, separating finished tool calls from those still running, and is saved with the turn, so later turns keep it in history.
+The account names no calls as forbidden: with it in the current message, models left side-effecting calls alone while still re-running a read-only call whose shortened result was not enough.
 Only visible work can be passed on: tool calls hidden by `show_tool_calls: false` leave no trace, a call started just before the stop may not have reached Matrix, a non-streaming reply shows nothing until it finishes, and in a team only the leader reads the account.
 A recovered reply that cannot be read back, or that shows no work and has not reached a terminal status, instead gets an account warning that side effects may already have happened.
 A replayed turn whose earlier attempt left no reply to adopt, such as a silent scheduled run or a turn whose placeholder was never sent, gets no account.

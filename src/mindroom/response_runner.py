@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections import Counter
 from contextlib import asynccontextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -245,18 +244,6 @@ _UNKNOWN_ATTEMPT_INSTRUCTION = (
     "A previous attempt at replying to the current message was interrupted, and what that attempt did "
     "is unknown. Before repeating any tool call with side effects, check whether it already took effect."
 )
-
-
-def _already_called_line(tools: Sequence[ToolTraceEntry]) -> str | None:
-    """Name finished calls in one closing line, which models follow even when the message asks for them again.
-
-    Calls still running at the stop stay out: listing them kept models from re-running ones whose result was lost.
-    """
-    counts = Counter(tool.tool_name for tool in tools)
-    if not counts:
-        return None
-    listed = ", ".join(f"`{name}` ({count} call{'' if count == 1 else 's'})" for name, count in counts.items())
-    return f"Already called for the current message, so do not repeat: {listed}."
 
 
 async def _cancel_pending_responses(
@@ -3625,10 +3612,7 @@ class ResponseRunner:
                 completed_tools=completed_tools,
                 interrupted_tools=interrupted_tools,
             )
-            already_called = _already_called_line(completed_tools)
-            instruction = "\n\n".join(
-                part for part in (_INTERRUPTED_ATTEMPT_INSTRUCTION, attempt, already_called) if part is not None
-            )
+            instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
         elif message is None or message.stream_status in {
             None,
             STREAM_STATUS_PENDING,

@@ -304,40 +304,6 @@ async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("trace", "closing_line"),
-    [
-        (
-            (
-                *TRACE,
-                ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="2"),
-            ),
-            "Already called for the current message, so do not repeat: `counter` (2 calls).",
-        ),
-        (TRACE[1:], None),
-        ((), None),
-    ],
-    ids=["finished_calls_listed", "still_running_only", "text_only"],
-)
-async def test_the_new_attempt_is_told_which_calls_not_to_repeat(
-    tmp_path: Path,
-    trace: tuple[ToolTraceEntry, ...],
-    closing_line: str | None,
-) -> None:
-    """A closing line counts every finished call; a call still running may need to run again for its lost result."""
-    bot = _bot(tmp_path)
-
-    (call,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed("Half of the report", trace=trace))
-
-    account = call.account
-    assert account is not None
-    if closing_line is None:
-        assert "Already called" not in account
-    else:
-        assert account.endswith(closing_line)
-
-
-@pytest.mark.asyncio
 async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
     """A reply that already reached a terminal state hides no stopped work."""
     bot = _bot(tmp_path)
