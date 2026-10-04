@@ -882,6 +882,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
+    redacted_event_ids: Callable[[str, tuple[str, ...]], Awaitable[frozenset[str]]]
 
 
 @dataclass(frozen=True)
@@ -3469,6 +3470,7 @@ class ResponseRunner:
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
+            redacted_event_ids=partial(self.deps.redacted_event_ids, request.room_id),
         )
 
     async def _record_user_stop_handled(
@@ -4439,6 +4441,7 @@ class ResponseRunner:
             system_enrichment_items=request.system_enrichment_items,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
+            redacted_event_ids=partial(self.deps.redacted_event_ids, request.room_id),
         )
         team_turn_recorder = self._build_turn_recorder(
             user_message=prepared_prompt,

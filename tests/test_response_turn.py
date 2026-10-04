@@ -13,12 +13,21 @@ from unittest.mock import Mock
 import pytest
 from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 
 from mindroom import response_turn as response_turn_module
+from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+)
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -43,10 +52,12 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.conftest import seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
+    from pathlib import Path
 
 
 @dataclass
@@ -688,6 +699,124 @@ async def test_cancel_during_scope_open_closes_entered_context() -> None:
         await turn_task
 
     assert exited.is_set()
+
+
+def _history_run(run_id: str, *, team: bool, event_id: str, seen: list[str]) -> RunOutput | TeamRunOutput:
+    metadata: dict[str, Any] = {
+        MATRIX_EVENT_ID_METADATA_KEY: event_id,
+        MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen,
+        MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: f"{event_id}-reply",
+    }
+    if team:
+        return TeamRunOutput(
+            run_id=run_id,
+            team_id="crew",
+            session_id="session-1",
+            status=RunStatus.completed,
+            metadata=metadata,
+        )
+    return RunOutput(
+        run_id=run_id,
+        agent_id="crew",
+        session_id="session-1",
+        status=RunStatus.completed,
+        metadata=metadata,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("redacted_event_id", ["$older", "$newer-reply"])
+@pytest.mark.parametrize("team", [False, True])
+async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
+    tmp_path: Path,
+    streaming: bool,
+    redacted_event_id: str,
+    team: bool,
+) -> None:
+    """A message a newer one superseded never gets a turn, yet the newer turn's run read it as context.
+
+    Redacting it, or the reply that read it, must remove that run and everything after it
+    before the history is used again, while the history before it stays.
+    """
+    storage = create_state_storage("crew", tmp_path, subdir="sessions", session_table="crew_sessions")
+    runs = [
+        _history_run("earlier", team=team, event_id="$earlier", seen=["$earlier"]),
+        _history_run("newer", team=team, event_id="$newer", seen=["$older", "$newer"]),
+        _history_run("later", team=team, event_id="$later", seen=["$later"]),
+    ]
+    seed_session(
+        storage,
+        TeamSession(session_id="session-1", team_id="crew", runs=runs)
+        if team
+        else AgentSession(session_id="session-1", agent_id="crew", runs=runs),
+    )
+
+    def _stored_session() -> AgentSession | TeamSession | None:
+        return get_team_session(storage, "session-1") if team else get_agent_session(storage, "session-1")
+
+    lookups: list[tuple[str, ...]] = []
+
+    async def _redacted_event_ids(event_ids: tuple[str, ...]) -> frozenset[str]:
+        lookups.append(event_ids)
+        return frozenset(event_ids) & {redacted_event_id}
+
+    def _open_scope() -> AbstractContextManager[ScopeSessionContext]:
+        return contextlib.nullcontext(
+            ScopeSessionContext(
+                scope=HistoryScope(kind="team" if team else "agent", scope_id="crew"),
+                storage=storage,
+                session=_stored_session(),
+            ),
+        )
+
+    attempt_history: list[list[str | None]] = []
+
+    def _record_history(run: TurnRunState) -> CompletedAttempt:
+        assert run.scope_context is not None
+        assert run.scope_context.session is not None
+        attempt_history.append([history_run.run_id for history_run in run.scope_context.session.runs or []])
+        return CompletedAttempt(response_text="done", replayable_text="done", has_visible_content=True)
+
+    async def _blocking_attempt(
+        run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        return _record_history(run)
+
+    async def _streaming_attempt(
+        run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(_record_history(run))
+
+    log = _AdapterLog()
+    ctx = _ctx(redacted_event_ids=_redacted_event_ids)
+    for _turn in range(2):
+        if streaming:
+            await _collect(
+                stream_response_turn(
+                    ctx,
+                    _streaming_adapter(log, _streaming_attempt, open_scope=_open_scope),
+                    TurnSinks(),
+                    continuation=_continuation(),
+                ),
+            )
+        else:
+            await run_blocking_response_turn(
+                ctx,
+                _blocking_adapter(log, _blocking_attempt, open_scope=_open_scope),
+                TurnSinks(),
+                continuation=_continuation(),
+            )
+
+    assert redacted_event_id in lookups[0]
+    # Nothing that derived from the redacted event is left for the next turn to find.
+    assert redacted_event_id not in lookups[1]
+    assert attempt_history == [["earlier"], ["earlier"]]
+    stored = _stored_session()
+    assert stored is not None
+    assert [history_run.run_id for history_run in stored.runs or []] == ["earlier"]
 
 
 def test_blocking_completion_records_and_updates_collector() -> None:

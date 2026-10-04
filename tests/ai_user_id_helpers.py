@@ -532,6 +532,7 @@ def _build_response_runner(
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
+            redacted_event_ids=AsyncMock(return_value=frozenset()),
         ),
     )
 

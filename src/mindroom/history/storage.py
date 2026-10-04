@@ -43,12 +43,15 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.db.base import SessionType
+from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.summary import SessionSummary
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import (
+    get_agent_session,
+    get_team_session,
     replace_runs,
     runs_without,
     save_compaction_usage,
@@ -77,7 +80,6 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.response import ModelResponse
-    from agno.run.agent import RunOutput
 
 
 _COMPACTION_METADATA_VERSION = 2
@@ -294,20 +296,43 @@ def read_scope_seen_event_ids(
     return seen_event_ids
 
 
+def read_scope_history_event_ids(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+) -> set[str]:
+    """Return every Matrix event id one scope's replayed history derives from.
+
+    These are the ids redaction cleanup matches: what live runs consumed or
+    answered, and what compacted history represents.
+    """
+    event_ids = archive.compacted_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
+    for run in session.runs or []:
+        if is_model_history_visible_run(run) and _scope_for_run(run) == scope:
+            event_ids |= _run_event_ids(run)
+    return event_ids
+
+
 def _run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
     """Return every Matrix event id one run consumed or answered, as redaction matches them."""
     if not is_model_history_visible_run(run):
         return set()
-    event_ids = _run_seen_event_ids(run)
+    return _run_seen_event_ids(run) | _run_source_event_ids(run)
+
+
+def _run_source_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
+    """Return the Matrix event ids one run answered."""
     metadata = run.metadata
-    if isinstance(metadata, dict):
-        event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
-        if isinstance(event_id, str) and event_id:
-            event_ids.add(event_id)
-        for key in (MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY):
-            raw_ids = metadata.get(key)
-            if isinstance(raw_ids, list):
-                event_ids.update(candidate for candidate in raw_ids if isinstance(candidate, str) and candidate)
+    if not isinstance(metadata, dict):
+        return set()
+    event_ids: set[str] = set()
+    event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
+    if isinstance(event_id, str) and event_id:
+        event_ids.add(event_id)
+    for key in (MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY):
+        raw_ids = metadata.get(key)
+        if isinstance(raw_ids, list):
+            event_ids.update(candidate for candidate in raw_ids if isinstance(candidate, str) and candidate)
     return event_ids
 
 
@@ -347,7 +372,82 @@ def update_scope_seen_event_ids(
     return True
 
 
-def remove_redacted_event_from_compaction(
+def remove_run_by_event_id(
+    storage: BaseDb,
+    session_id: str,
+    event_id: str,
+    *,
+    session_type: SessionType = SessionType.AGENT,
+    include_seen_event_ids: bool = False,
+    remove_following_runs: bool = False,
+) -> bool:
+    """Remove a run whose Matrix source identity, or with ``include_seen_event_ids`` its whole history, matches.
+
+    Its whole history is what it read, what revisions it consumed, and the reply it wrote.
+    Redaction cleanup can also remove the causal suffix after the first match,
+    because later model output may depend on content from the matching run.
+    Returns True if any run was removed.
+    """
+    session = (
+        get_team_session(storage, session_id)
+        if session_type is SessionType.TEAM
+        else get_agent_session(storage, session_id)
+    )
+    if session is None or not session.runs:
+        return False
+    removed_runs: list[RunOutput | TeamRunOutput] = []
+    for run in session.runs:
+        if not isinstance(run, (RunOutput, TeamRunOutput)):
+            continue
+        matched_event_ids = _run_source_event_ids(run)
+        if include_seen_event_ids:
+            matched_event_ids |= _run_seen_event_ids(run)
+        if (removed_runs and remove_following_runs) or event_id in matched_event_ids:
+            removed_runs.append(run)
+    if not removed_runs:
+        return False
+    # Team member runs hang off the team run through parent_run_id and go with it.
+    kept = runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
+    replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
+    return True
+
+
+def remove_redacted_event_from_history(
+    storage: BaseDb,
+    session: AgentSession | TeamSession,
+    scope: HistoryScope,
+    *,
+    event_id: str,
+    legacy_source_event_id: str | None = None,
+) -> bool:
+    """Remove the part of one scope's history that derives from a redacted Matrix event.
+
+    The first run that answered, read, or wrote the event goes with every run after it,
+    and compacted history is rolled back the same way. ``session`` is synced to
+    the stored result. Returns whether the scope's history changed.
+    """
+    removed_run = remove_run_by_event_id(
+        storage,
+        session.session_id,
+        event_id,
+        session_type=SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT,
+        include_seen_event_ids=True,
+        remove_following_runs=True,
+    )
+    latest_session = _latest_persisted_session(storage, session)
+    removed_compacted = _remove_redacted_event_from_compaction(
+        storage,
+        latest_session,
+        scope,
+        event_id=event_id,
+        removed_live_run=removed_run,
+        legacy_source_event_id=legacy_source_event_id,
+    )
+    _adopt_session_fields(session, latest_session)
+    return removed_run or removed_compacted
+
+
+def _remove_redacted_event_from_compaction(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     scope: HistoryScope,

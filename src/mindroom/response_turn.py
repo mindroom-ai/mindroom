@@ -46,6 +46,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.helper_usage import helper_usage_context
+from mindroom.history.storage import read_scope_history_event_ids, remove_redacted_event_from_history
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -314,6 +315,8 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for responses that count toward skill learning, so the review can fork their final request.
     skill_review_capture: SkillReviewCapture | None = None
+    # Which of the given events this turn's room has redacted; set for Matrix replies so their history drops them first.
+    redacted_event_ids: Callable[[tuple[str, ...]], Awaitable[frozenset[str]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -869,6 +872,48 @@ def _advance_turn_continuation(
     return advanced
 
 
+async def _remove_history_of_redacted_events(
+    ctx: ResponseTurnContext,
+    scope_context: ScopeSessionContext | None,
+) -> None:
+    """Remove persisted history derived from events the room has since redacted.
+
+    A message no turn answered, such as one a newer message superseded, leaves
+    no turn to clean up after its redaction, yet a later turn may have read it as
+    thread context. Checking what this scope's history derives from catches it
+    before the history is used again.
+    """
+    if ctx.redacted_event_ids is None or scope_context is None or scope_context.session is None:
+        return
+    session = scope_context.session
+    event_ids = await run_blocking_until_complete(
+        read_scope_history_event_ids,
+        scope_context.storage,
+        session,
+        scope_context.scope,
+    )
+    if not event_ids:
+        return
+    removed_event_ids: list[str] = []
+    for event_id in sorted(await ctx.redacted_event_ids(tuple(sorted(event_ids)))):
+        removal = partial(
+            remove_redacted_event_from_history,
+            scope_context.storage,
+            session,
+            scope_context.scope,
+            event_id=event_id,
+        )
+        if await run_blocking_until_complete(removal):
+            removed_event_ids.append(event_id)
+    if removed_event_ids:
+        logger.info(
+            "Removed history derived from redacted events",
+            session_id=session.session_id,
+            history_scope=scope_context.scope.key,
+            redacted_event_ids=removed_event_ids,
+        )
+
+
 def _enter_scope_context(
     open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
 ) -> tuple[AbstractContextManager[ScopeSessionContext | None], ScopeSessionContext | None]:
@@ -926,6 +971,7 @@ async def run_blocking_response_turn(
             response_cli_lifetime() as cli_lifetime,
             _open_scope_off_event_loop(adapter.open_scope) as scope_context,
         ):
+            await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
@@ -1267,6 +1313,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     run = TurnRunState()
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
+            await _remove_history_of_redacted_events(ctx, scope_context)
             run.scope_context = scope_context
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)

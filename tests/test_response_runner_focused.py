@@ -6704,6 +6704,58 @@ async def test_non_streaming_response_reuses_prepared_room_model_after_override_
 
 
 @pytest.mark.asyncio
+async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Path) -> None:
+    """The turn driver's redaction lookup reads the tombstones the bot's journal recorded for the room."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    store = coordinator.deps.approval_store
+    await _admit_approval_source(store, event_id="$older")
+    await store.admit(
+        InboundEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.REDACTION,
+            event_class=EventClass.CONTEXT_ONLY,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={"event_id": "$redaction", "redacts": "$older", "content": {}},
+        ),
+        ProjectedEvent(
+            event_id="$redaction",
+            room_id="!room:localhost",
+            thread_id=None,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            content={},
+            replaces_event_id=None,
+            redacts_event_id="$older",
+        ),
+    )
+    found: list[frozenset[str]] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        assert ctx.redacted_event_ids is not None
+        found.append(await ctx.redacted_event_ids(("$older", "$kept")))
+        return "final text"
+
+    with (
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator._process_and_respond(_plain_request(_target()))
+
+    assert found == [frozenset({"$older"})]
+
+
+@pytest.mark.asyncio
 async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: Path) -> None:
     """A room-default change during locked preparation must wait for the next turn."""
     bot = _bot(tmp_path)

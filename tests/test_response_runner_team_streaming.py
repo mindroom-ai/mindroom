@@ -320,6 +320,49 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path) -> None:
+    """Team turns ask the response's room which events their history derives from were redacted."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    lookups: list[tuple[str, tuple[str, ...]]] = []
+
+    async def redacted_event_ids(room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        lookups.append((room_id, event_ids))
+        return frozenset()
+
+    async def fake_team_response(*_args: object, **kwargs: object) -> str:
+        turn_context = kwargs["ctx"]
+        assert turn_context.redacted_event_ids is not None
+        await turn_context.redacted_event_ids(("$event",))
+        return "Team answer"
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.team_response", new=AsyncMock(side_effect=fake_team_response)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=_team_orchestrator(config, runtime_paths),
+        )
+        coordinator.deps = replace(coordinator.deps, redacted_event_ids=redacted_event_ids)
+        _install_inert_post_response_effects(coordinator)
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert lookups == [("!test:localhost", ("$event",))]
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_path: Path) -> None:
     """ResponseRunner preflight should not reject direct private members before team_response."""
     runtime_paths = _runtime_paths(tmp_path)
