@@ -120,11 +120,45 @@ def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> N
             """,
             "tuwunel.settings.identity_providers[0] must be a string, number, boolean, or list",
         ),
+        (
+            """
+            tuwunel:
+              serverName: example.com
+              settings: [login_with_password]
+            """,
+            "tuwunel.settings must be a map",
+        ),
+        (
+            """
+            config:
+              existingConfigMap: tuwunel-config
+            tuwunel:
+              settings:
+                login_with_password: false
+            """,
+            "tuwunel.settings.login_with_password requires the chart-managed tuwunel.toml",
+        ),
+        (
+            """
+            config:
+              existingConfigMap: tuwunel-config
+            tuwunel:
+              extraConfig: allow_legacy_media = true
+            """,
+            "tuwunel.extraConfig requires the chart-managed tuwunel.toml",
+        ),
     ],
-    ids=["always-managed-option", "registration-token-option", "array-of-tables"],
+    ids=[
+        "always-managed-option",
+        "registration-token-option",
+        "array-of-tables",
+        "settings-not-a-map",
+        "settings-with-existing-config",
+        "extra-config-with-existing-config",
+    ],
 )
 def test_settings_reject_options_that_cannot_render_cleanly(tmp_path: Path, values: str, error: str) -> None:
-    """Duplicate chart options and arrays of tables fail at render time instead of at homeserver startup."""
+    """Duplicate chart options, arrays of tables, and options a custom config would ignore fail at render time."""
     completed = _run_helm_template(TUWUNEL_CHART, release_name="matrix", values_files=_values_files(tmp_path, values))
 
     assert completed.returncode != 0

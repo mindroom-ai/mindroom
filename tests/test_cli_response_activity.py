@@ -199,17 +199,25 @@ def test_cli_rejects_credentials_over_remote_http(
 
 
 @pytest.mark.parametrize(
-    "url",
-    ["http://localhost:bad", "file:///activity", "http://secret@localhost"],
+    "option",
+    [
+        ["--url", "http://localhost:bad"],
+        ["--url", "file:///activity"],
+        ["--url", "http://secret@localhost"],
+        ["--wait", "inf"],
+        ["--wait", "nan"],
+    ],
 )
-def test_cli_invalid_url_fails_closed(tmp_path: Path, url: str) -> None:
-    """Bad URLs must produce a controlled unavailable result without exposing input."""
+def test_cli_invalid_option_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: list[str]) -> None:
+    """Bad URLs and unbounded waits must produce a controlled unavailable result without polling or exposing input."""
+    served = _serve(monkeypatch, [httpx.Response(200, json=_snapshot())])
     result = runner.invoke(
         app,
-        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), "--url", url, "--json"],
+        ["check-active-responses", "--config", str(tmp_path / "config.yaml"), *option, "--json"],
     )
     assert result.exit_code == 2
     assert json.loads(result.stdout)["status"] == "unavailable"
+    assert not served
     assert "secret@" not in result.output
 
 

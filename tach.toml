@@ -4348,6 +4348,7 @@ depends_on = [
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
+    "mindroom.cli.debug_report",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
@@ -6772,6 +6773,21 @@ path = "mindroom.cli.response_activity"
 depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
 
 [[modules]]
+path = "mindroom.debug_report"
+depends_on = []
+visibility = ["mindroom.cli.debug_report"]
+
+[[modules]]
+path = "mindroom.cli.debug_report"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.config.yaml_includes",
+    "mindroom.constants",
+    "mindroom.debug_report",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.config_reload"
 depends_on = []
 
@@ -7773,7 +7789,7 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.redaction"]
+depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.logging_config", "mindroom.redaction"]
 visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.response_lifecycle", "mindroom.response_runner"]
 
 [[modules]]

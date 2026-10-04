@@ -3,432 +3,31 @@
 The `desktop` tool lets a cloud-hosted MindRoom agent use a local computer without opening an inbound port.
 It can inspect and operate explicitly allowlisted applications, read explicitly selected folders, and run shell commands that a person at the computer approves.
 Applications, [read-only folders](#read-only-folders), and [shell commands](#shell-commands) are separate local choices, and each starts disabled.
-The local computer runs an outbound Matrix sync client, while commands and responses use Olm-encrypted to-device events addressed to exact pinned Matrix devices.
-App screenshots are encrypted before upload to Matrix media, and their decryption keys travel only inside the encrypted response.
-By default, the screenshot is model-visible and MindRoom does not create a separate plaintext attachment file on the cloud host.
-Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database, so protect and expire that storage according to the sensitivity of the controlled applications.
-When a user asks to receive the image, `desktop(action="screenshot", return_attachment=true)` returns a turn-scoped `att_*` handle that can be sent with `matrix_message`.
-That handle reuses the existing encrypted Matrix media instead of saving or uploading the screenshot again, and it expires when the turn ends.
-
-The bridge is accessibility-first on macOS.
-It returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot cropped to the selected app window.
-The agent normally selects an opaque `element_ref` from that state instead of guessing a screen coordinate.
-The bridge retains up to 128 observations for 120 seconds, bound to the requester, agent, command session, and exact app.
-An `element_index` remains supported within its matching `state_id`.
-A new observation does not invalidate an older unchanged target; expiration, process/window changes, and changed target identity still reject it.
-The local bridge pins the exact local process, window, element, and ancestor identity and rechecks them before acting.
-Passive labels such as clocks may change without invalidating an unchanged actionable target.
-Full actionable text and identity stay checked even when returned text is truncated.
-On macOS, complete trees undergo bounded stabilization sampling; a changing tree can still return a `state_id` with `stability: unstable`.
-A capped partial tree returns immediately with `truncated: true` and `stability: truncated`.
-
-Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
-Fallback coordinates run from `0` to `1000` inside the selected app window rather than using raw desktop pixels.
-Every completed action normally returns a new accessibility state and a new app-window screenshot for the next step.
-If follow-up state or capture fails after an action completes, the tool tells the agent not to repeat the action automatically.
-On macOS, taking the scoped screenshot foregrounds the selected application, so observation can change which local window is active.
-
-## Observations and recovery
-
-Pass `observation="tree"` to native app actions when semantic state is sufficient.
-Tree mode skips screenshot capture, encrypted media upload, and image input entirely.
-`observation="screenshot"` omits the element list while retaining app/state/coordinate metadata; `both` remains the default.
-The explicit `screenshot` action requires pixels.
-Results include elapsed execution time and structured/image byte counts.
-
-A timeout returns the original `request_id` and an unknown outcome.
-Call `desktop(action="request_status", request_id="...")` with a new query request to read `queued`, `running`, `completed`, `unknown`, or `not_found`.
-The query can recover the same requester's and agent's receipt across command sessions, including after local restart.
-It does not wait behind the action executor or evict the receipt it reads.
-Request IDs must be unique across actions and queries.
-A missing receipt is not evidence that the action never ran.
-Do not repeat an uncertain action automatically; inspect current state first.
-
-The local SQLite journal commits command admission before Matrix acknowledgement and records an execution start before input.
-After a crash, queued work is rechecked against current trust, deadline, policy, and lease.
-Started work with no outcome becomes unknown; it is never executed again automatically.
-Responses retry independently without repeating the original action.
-The private journal contains command arguments and structured outcomes, including shell commands, file text, inline shell output, and encrypted media descriptors; it does not store plaintext screenshot files.
-An existing legacy replay journal is imported without resending historical outcomes.
-
-On macOS, captures return logical bounds, display identity and scale, source pixel dimensions, and output image dimensions.
-Secondary displays and negative logical origins are supported when the window fits one unambiguous display.
-Move a window fully onto one display if it spans displays or its mapping cannot be verified.
-
-## Security Model
-
-For applications, the local bridge starts in observe-only mode unless a person at the computer grants a short control lease in Desktop Control or on the command line.
-The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
-Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
-Cloud configuration and model output cannot add an application to that allowlist.
-MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because MindRoom's windows grant shell auto-approval, control leases, and app access; the macOS app does not offer them, and saving either or naming it with `--allow-app` is refused.
-A setup saved by an earlier release that allowed either loads without it.
-The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
-The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
-
-!!! warning "Some allowlisted apps give an agent your own authority"
-    Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
-    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
-    Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
-    Allowlist these only when you would also approve everything the agent could run or send as you.
-
-The local bridge executes actions serially and revalidates each target immediately before input.
-Matrix polling, durable admission, and response delivery continue independently during slow actions.
-Cloud configuration cannot enable control, extend a running lease, change any local allowlist or selected folder, enable shell commands, or approve one.
-Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
-Moving the pointer to the upper-left corner of the primary display triggers the emergency stop and latches control off.
-Desktop Control can reset the latch while idle and away from that corner; resetting does not grant control.
-The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters, values, or typed text.
-
-The observation actions are:
-
-- `status` reports coarse screen, cursor, accessibility-backend, and local lease state.
-- `request_status` reads a retained request outcome for the original requester and agent without executing it again.
-- `list_apps` lists only locally allowlisted app IDs and whether each is running.
-- `get_app_state` returns a fresh accessibility state and app-window screenshot.
-- `screenshot` returns a fresh state and requires its app-window screenshot to succeed.
-
-Only `screenshot` accepts `return_attachment=true`.
-The option does not write plaintext pixels to attachment storage.
-It exposes the existing encrypted MXC object only inside the active tool context and does not upload the image again.
-The media key is protected by the room event in an E2EE room and has the same visibility as other event content in an unencrypted room.
-
-The control actions are:
-
-- `launch_app` launches or foregrounds one exact locally allowlisted application.
-- `click_element` invokes the selected element's semantic press action.
-- `set_value` changes an accessibility value only when the selected element reports that it is writable.
-- `scroll_element` scrolls at the selected element's current bounds.
-- `perform_action` invokes an exact action advertised by the selected element.
-- `click` and `double_click` click a normalized fallback coordinate inside the app window.
-- `hover` moves the pointer within the validated app window.
-- `drag` moves with the left button held between two normalized points in the same window, over 100–2,000 milliseconds.
-- `type_text` types up to 2,000 characters into the validated and focused app; an optional `element_ref` or `element_index` requires that exact element to have focus.
-  Without an element, the text must not contain line breaks, tabs, or other control characters, so send Enter or Tab with `keypress`.
-  Without an element, macOS typing also checks before each 20-character chunk that the app is still frontmost; it fails without typing anything if the app lost focus first, and stops with an unknown outcome if it lost focus partway.
-- `scroll` scrolls a bounded number of pages up, down, left, or right at the app or an optional normalized app coordinate.
-- `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
-  Global switching, quit, launch, and address-bar shortcuts are rejected, and the chord is not sent once the app is no longer frontmost.
-
-From the moment a shell command needs local approval until it is answered, every control action above except `launch_app` is refused, and the request is shown for approval only one second after a control action already in progress finishes, so events it posted have time to reach their target.
-Input from this bridge's agents therefore never reaches its waiting approval card or terminal prompt.
-The pause covers only the approvals of the bridge that sends the input, so run at most one bridge in each logged-in graphical session; another bridge's agents could otherwise click or type into this bridge's approval.
-
-Folder reads and shell commands are separate opt-in capabilities with their own limits, described in [Read-Only Folders](#read-only-folders) and [Shell Commands](#shell-commands).
-The bridge does not expose a clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
-App control operates only the currently logged-in graphical session, and no bridge capability can bypass operating-system permission prompts.
-
-The optional Playwright MCP extension path is a separate browser capability on the same pinned Matrix transport and local control lease.
-It returns semantic page snapshots and stable element references from the browser, which are usually more precise for forms and interactive websites than desktop coordinates.
-Its observation actions are `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`.
-Its supported control actions are `start`, `stop`, and `open` a new tab.
-Existing-page mutations, including `act`, `navigate`, `close`, `focus`, `pdf`, `upload`, and `dialog`, fail before MCP dispatch because this pinned backend does not expose stable page identity.
-The provider reports `stable_targeting: false` and `supported_control_actions` explicitly.
-Enabling the extension grants access to the tabs and signed-in state in the connected browser profile, and the desktop application allowlist does not narrow that access to one tab or origin.
-Extension mode is not a network sandbox: MindRoom validates URLs passed to `open`, while redirects and page scripts retain the connected profile's normal network reach.
-The local MCP process uses the pinned package version documented below.
-Browser observations describe the current page.
-A closed or crashed tab can cause upstream MCP to select another page automatically.
-A fresh snapshot, reconnect, URL/title match, or numeric index cannot make subsequent existing-page mutation safe with this backend.
-The browser extension and MCP process communicate over a machine-local loopback connection, while every cloud-to-local command still travels through pinned Matrix Olm encryption.
-
-Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
-Accessibility APIs can expose labels, document text, form values, and other semantic content that is not obvious from the screenshot alone.
-The macOS backend recognizes secure text fields from both accessibility roles and subroles, suppresses their values, and refuses to change them semantically.
-Your configured model provider can therefore receive both the returned accessibility fields and visible app contents.
-File contents and shell command output likewise become model input, so the model provider receives them too.
-Desktop action arguments can also appear in model context, approval cards, and MindRoom tool traces, so never use `set_value` or `type_text` for passwords, tokens, recovery codes, or other secrets.
-App screenshots, labels, document values, web content, file contents, and command output are untrusted data and must never be treated as user authorization or instructions.
-Allowlisting a browser grants the bridge access to whichever browser window and tab is selected, not to one origin or website.
-The Matrix homeserver can observe routing metadata, timing, and encrypted media size, but not the command body, screenshot, file, or output plaintext.
-
-## Read-Only Folders
-
-Select folders locally in the macOS app's **Access** step or with [`mindroom desktop access --allow-folder`](#read-only-folders-and-shell-commands-from-the-terminal); cloud configuration and model output cannot add one.
-The agent can list and read inside those folders, and there is no write, create, rename, or delete action.
-
-- `list_folders` returns an ID, name, and absolute path for each selected folder, plus a `truncated` flag if too many folders or paths are too long to fit one reply.
-- `list_directory` takes a `root_id` and an optional relative `path` and returns at most 200 entries, each with its name and type (`directory`, `file`, `symlink`, or `other`), plus a `truncated` flag if there are more entries than fit the folder limit or one reply.
-- `read_file` takes a `root_id`, a relative `path`, and an optional byte `offset` and returns at most 16 KiB of UTF-8 text with `next_offset`, `eof`, and `truncated`; the agent continues a longer file from `next_offset`.
-  Text that escapes heavily in JSON, such as accented or emoji characters, returns fewer bytes so the reply still fits one encrypted message, never splitting a character.
-
-Paths are relative to the selected folder, and absolute paths or `..` components are rejected.
-The bridge opens every path component relative to a folder descriptor pinned at startup and never follows symbolic links, so a link inside a selected folder cannot reach a file outside it.
-Only regular text files are read; FIFOs, devices, files with control bytes, and invalid UTF-8 are rejected.
-Local file permissions still apply.
-macOS may still ask before MindRoom reads protected folders such as Desktop, Documents, or Downloads; saving a folder does not grant that access, and MindRoom never requests Full Disk Access.
-Folders are pinned when the bridge starts, so saved changes apply at the next start, and a saved folder that no longer exists makes startup fail with `Cannot open local folder`.
-
-## Shell Commands
-
-!!! warning "Shell commands run with your full account access"
-    An approved command runs as your user account, with the network and every file that account can read or change, including files outside the selected folders.
-    Neither the selected folders nor the working directory confine it, and it is not a sandbox.
-    Approve only commands you would run yourself, and run the bridge in a dedicated operating-system account when you need stronger isolation.
-
-Shell requests are off by default.
-Enable them locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`; cloud configuration and model output cannot enable them.
-
-- `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the local home directory.
-  A `command` or `cwd` with more than 64 whitespace or invisible characters in a row, more than two blank lines in a row, or more than 8 combining marks on one character is refused before approval, because such padding could push part of the request out of the approver's view.
-  Before approval only the form of `cwd` is checked; whether it exists is checked after approval, so an unapproved request reveals nothing about local directories.
-  Its `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
-- `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it has finished.
-  With an optional byte `offset`, it returns output from that offset instead: as much of a running command's output as fits one reply, or all of a finished command's remaining output.
-  An offset past the captured output, a negative offset, or one inside a UTF-8 character is rejected, and a finished handle stays available for a corrected check.
-- `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
-  A later `check_shell` then reports `state: "killed"` with whatever exit code the process returned, which is the negative signal number only when the signal ended it, while `completed` means the command exited on its own.
-
-### Local Approval
-
-Every `run_shell` request waits for a decision from the person at the computer, either on the approval card in the macOS app or at the prompt in the terminal running `mindroom desktop run`, unless an earlier choice already auto-approved it.
-The approver sees the exact command, working directory, requester, agent, and expiry, with control, text-direction, invisible, and non-ASCII space characters shown escaped, and the command's length in characters and lines.
-When any of them contains a non-ASCII character, both surfaces warn that it can look like ASCII and repeat each such field, labeled, with every non-ASCII character escaped, so a look-alike host such as one spelled with Cyrillic letters stands out.
-The macOS card lays out every line of the command and working folder left to right, so right-to-left text cannot reverse how a line reads, and copying the text yields exactly what is shown.
-The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
-There is no remote approval operation, so a chat message, the agent, or cloud configuration cannot approve a command, extend auto-approval, or grant it.
-The cloud call waits up to 120 seconds, the command's lifetime, and a request that nobody approves in time expires without running.
-Rejection, expiry, revocation, and bridge stop before approval never start the command.
-Approving once applies only to that exact request, so the next request waits again.
-
-!!! warning "Auto-approval covers every allowed caller"
-    Timed and until-stopped auto-approval approves every shell command from all locally allowed requesters and agents, not only the command that prompted it.
-    Auto-approval is never saved: it ends when its time runs out, when you revoke shell access, or when the bridge stops, and a restarted bridge asks for each command again.
-
-Auto-approval uses a monotonic local deadline, so changing the wall clock does not extend it.
-In the macOS app, **Allow Without Asking…** grants auto-approval before any request arrives, and **Revoke Shell Access** ends it at any time.
-In the terminal, `--shell-auto-approve-minutes` grants auto-approval for up to 60 minutes from startup, and `Ctrl+C` stops the bridge and revokes it.
-Revoking clears auto-approval, rejects a waiting request, and stops every running command and handle.
-
-### Handles
-
-A command still running after its inline wait keeps running as a handle instead of being killed.
-The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops the command with `kill_shell`.
-Every shell result reports `output_start` and `next_offset`, the byte range the returned output covers, while `output_bytes` stays the total captured size.
-An `output_start` above the requested offset, 0 without one, means earlier output was skipped, as in a running command's newest-output reply, and a `check_shell` from that earlier offset reads it.
-Passing the last `next_offset` as the `check_shell` offset returns only newer output in whole UTF-8 characters, and more output is available while `next_offset` is below `output_bytes`.
-Handles belong to the requester and agent that started them, and another caller cannot see, check, or kill them.
-Checking or killing your own handle needs no approval, and a handle keeps running after the auto-approval that started it ends.
-The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill each running one.
-A handle killed there stays listed as killed, so the agent's next `check_shell` reports `state: "killed"` with the exit code the process returned, instead of an unknown handle.
-A `check_shell` that returns a finished handle's remaining output in full, inline or as an attachment, hands it over and forgets the handle.
-If the attachment cannot be uploaded, the reply shows the part that fits from the requested offset with a `warning`, and the handle stays for a `check_shell` from `next_offset`.
-A `run_shell` that finished within its inline wait but whose output cannot be attached returns such a handle too, and a `request_status` for that `run_shell` returns the same reply with the handle.
-If that reply is lost or its outcome is uncertain, recover it with `request_status` for that check's request ID instead of checking again.
-The bridge retains at most 16 handles.
-When all 16 are retained, a new command drops the handle that finished longest ago, together with its output, even if the agent is still paging through it, and is refused before approval if all 16 are still running.
-A retained handle keeps its output, up to 10 MiB, in the bridge's private temporary files, so 16 retained handles can hold up to 160 MiB on local disk until each is checked in full, dropped for a new command, dropped when a command starts more than 10 minutes after it finished, or forgotten by revoke, stop, or shutdown.
-
-Revoking shell access, stopping the bridge, and helper shutdown kill and forget every handle, so a later `check_shell` reports an unknown handle.
-Handles never survive a helper restart.
-If the helper is force-killed, for example with `SIGKILL`, running handle processes are not cleaned up.
-After a command finishes, the remaining processes in its process group, such as children started with `&`, are terminated, so long-running work should stay in the foreground and continue as a handle.
-Deliberately detached processes, such as those started in a new session with `setsid`, may escape this cleanup, but running, stopping, and revoking still return promptly.
-
-### Environment and Output
-
-Commands run with the environment of your login shell, captured once when the bridge starts.
-MindRoom starts your account's login shell as an interactive login shell from a minimal environment of `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, and a `PATH` that includes the Homebrew and `~/.local/bin` directories.
-Only `TMPDIR` and `LANG` come from the helper's own environment, so helper credentials are never copied.
-
-!!! warning "Your shell profile's exports are visible to commands"
-    Anything your shell profile exports, including tokens and other secrets, is visible to every approved command.
-    Commands could already read the profile files that set those values, but a command that prints one sends it to the model provider like any other output.
-
-If capture fails or takes longer than 5 seconds, commands use that minimal environment instead.
-Profile changes apply the next time the bridge starts.
-Each call runs in a fresh non-interactive `/bin/sh`, so a directory change, variable, or other shell state never carries over to the next call.
-`$SHELL` is still your login shell, not the shell running the command.
-Commands read standard input from `/dev/null`, so it is at end of file, and have no terminal, so they cannot answer password prompts, but they keep any authority the account already has without one.
-Standard error is merged into standard output in the order it is written; redirect it with `2>file` to keep it separate.
-
-The bridge captures up to 10 MiB of combined output per command in private temporary files, which it removes after transfer and when it stops.
-Output beyond that limit is dropped, and the result reports `output_truncated: true`.
-Output that fits in one encrypted reply returns inline.
-Larger output travels as an encrypted Matrix media attachment whose key is only inside the encrypted reply, and the cloud tool downloads and verifies it within the tool's configured `timeout_seconds` before returning the full text.
-If the upload fails or takes longer than 30 seconds, the reply keeps the exit code, shows the output that fits from the requested offset, sets `output_truncated` and `next_offset`, and adds a `warning`.
-The reply then carries a handle, also for a command that finished within its inline wait, and `check_shell` continues from `next_offset` until a reply delivers the rest.
-For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#common-setup-notes) apply.
-A result larger than the automatic-save threshold, 50 KiB by default, is saved as a plaintext file under `mindroom_tool_outputs/` in the agent workspace and returned as a preview, and the agent can pass `mindroom_output_path` to choose the file.
-
-### Uncertain Outcomes and Confidentiality
-
-Uncertain shell outcomes are never retried automatically.
-If `run_shell` times out, the command may still be waiting for approval, may have run, or may still be running.
-The tool tells the agent to query `request_status` with the original `request_id` instead of submitting the command again.
-The local journal keeps each reply as a durable receipt, and a command interrupted by a helper crash is reported with an unknown outcome and never run again.
-
-`status` reports which of applications, folders, and shell commands are enabled, whether a shell command is waiting for approval, the remaining auto-approval time, and only the caller's own handles.
-Its `bridge.gui_mode`, `observe_only` or `control`, describes only application control, so an observe-only bridge can still read selected folders and run approved shell commands.
-Remote status never includes a waiting command's text; only the person at the computer sees it.
-A remote status reply also fits one encrypted message, so with many selected folders it can trim the folder list and set `file_roots_truncated: true`; the local status a person at the computer sees always lists every folder.
-File contents and command output become model input after MindRoom decrypts them in the cloud process, so your model provider receives them.
-They can also remain in agent session storage, tool traces, automatically saved workspace files, and the local command journal.
-Commands and paths appear in tool-call arguments, Matrix tool traces, and approval cards, so never put secrets in them.
+The local computer runs an outbound Matrix client, and commands and responses travel end-to-end encrypted between exact paired Matrix devices.
+Set up and run the bridge from the [macOS app](https://docs.mindroom.chat/installation/macos-app/#computer-access) or from the terminal; both use the same saved setup.
 
 ## Requirements
 
-You can use the same Matrix account as your agent chat or a dedicated Matrix account for the local bridge.
-The `mindroom desktop setup` command returned by `!desktop setup` uses your chat account and adds a dedicated Matrix device to it when no saved local Desktop session exists.
-For manual password login, a dedicated account reduces the impact of exposing that password on the local computer.
-The desktop account and the cloud MindRoom entity must use the same Matrix federation environment and must be able to exchange to-device events and media.
-If the optional local desktop dependencies are missing, `mindroom desktop run` auto-installs the `desktop` extra at startup unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-To install them in advance on the computer being controlled:
+- **Matrix account**: Use your chat account or a dedicated Matrix account for the local bridge.
+  The `mindroom desktop setup` command returned by `!desktop setup` adds a new device to your chat account when no local Desktop session is saved.
+  For password login, a dedicated account limits the impact of exposing that password on the local computer.
+  The desktop account and the cloud MindRoom agent must be able to exchange to-device events and media through the same Matrix federation.
+- **Local package**: `mindroom desktop run` installs the `desktop` extra at startup when it is missing, unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+  To install it in advance, run `uv tool install 'mindroom[desktop]'` on the computer being controlled.
+- **macOS applications**: Accessibility permission is required for state and control, and screenshots require macOS 14 or newer and Screen Recording permission.
+  When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
+- **Linux applications**: Only screenshot observation of the `primary-screen` app ID is available, plus coordinate input during a control lease, on an active X11 desktop; Wayland is not supported.
+- **Windows applications**: The terminal commands offer the same `primary-screen` screenshot observation and coordinate input, which have not been verified on a real Windows computer.
+  On Linux and Windows, coordinate input is not bound to an app window, so whatever window covers the point receives it.
+- **Read-only folders and shell commands**: These need no application selection and no Accessibility or Screen Recording permission, and they require macOS or Linux.
+  On Windows, `mindroom desktop access` refuses to save them, and `mindroom desktop run` refuses to start while either is saved; run `mindroom desktop access --clear-folders --no-shell` to turn them off.
+- **Signed-in browser profile** (optional): Node.js 18 or newer, Chrome or Brave, and the official Playwright MCP Bridge extension in the browser profile MindRoom will use.
 
-```bash
-uv tool install 'mindroom[desktop]'
-```
-
-macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
-macOS screenshots require macOS 14 or newer and Screen Recording permission.
-When `mindroom desktop run` starts from a terminal, macOS attributes both permissions to that terminal app and applies a new grant only after the app is quit and reopened, even if it already appears enabled; inside tmux, also restart the tmux server with `tmux kill-server`.
-ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
-On macOS, right before each pointer event from `click`, `double_click`, `drag`, `hover`, `scroll`, or `scroll_element`, including every drag step and the release, the topmost visible window at that point must belong to the allowed app; if another app's window covers it, such as a notification banner, floating panel, or Picture in Picture, the action fails without sending anything when that happens before its first event, and otherwise input stops, any held button is released, and the outcome is reported as unknown.
-Linux currently exposes screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
-On Windows, the terminal commands `mindroom desktop login`, `pair`, `setup`, `access`, and `run` target screenshot-only observation through the explicit `primary-screen` app ID, which has not yet been verified on a real Windows computer.
-Coordinate input during a control lease uses the same PyAutoGUI path and is also unverified on Windows.
-Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
-On Linux and Windows, coordinate input is best-effort: it is not bound to the app's window, so a window covering the point receives it.
 A headless or locked graphical session is not a supported target.
-Read-only folders and shell commands need no application selection and no Accessibility or Screen Recording permission.
-They require macOS or Linux.
-On Windows, `mindroom desktop access` refuses to save them, and `mindroom desktop run` refuses to start while either is saved; both name `mindroom desktop access --clear-folders --no-shell` to turn them off.
-Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
-Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
 
-## Native macOS setup
+## 1. Configure the Agent
 
-Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
-In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into **Connect**.
-Review the displayed controller fingerprint, requester, and agent, then reuse the saved Matrix login or sign in.
-Confirm those identities and select **Save and Connect**. Return the displayed confirmation command to the same chat, wait for the agent's confirmation, and select **I’ve Confirmed in Chat**.
-In **Access**, choose allowed applications and select **Save App Access**, or add read-only folders and allow shell command requests and select **Save Folder and Shell Access**.
-Then complete **Permissions**, which only applications need, and **Start**.
-The top summary distinguishes a missing connection, saved setup with access off, and an active connection; it names the next action.
-Incomplete app setup remains disabled across restarts and can be retried with fresh setup data without replacing the login.
-Cloudflare Access authentication is supported in the app when `cloudflared` is installed.
-
-The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
-Start in observe-only mode, then grant a bounded local lease when control is needed.
-Stop and Revoke remain available while another setup operation is waiting.
-The menu displays the current mode, remaining lease, and active action without exposing its arguments.
-Each shell command opens a separate approval window without taking keyboard focus from your current app.
-It shows the exact command, working folder, agent, requester, and expiry, with **Reject**, **Approve Once**, and **Approve & Allow…** choices.
-The whole command appears above the choices, never clipped, and **Approve Once** and **Approve & Allow…** stay disabled for one second after a request appears or replaces another one.
-Timed or until-stopped approval still requires a second confirmation describing its scope.
-Closing the window or choosing **Later** leaves the command waiting until it expires.
-The approval card also stays above the **Computer access** steps; **Review Command** in the app or menu bar reopens the separate window.
-The window closes when the request is answered, expires, or access stops, and remains usable while a folder picker is open.
-Changing configuration or restarting the app/helper does not renew control or shell auto-approval.
-Once a command journal exists, saving a different controller identity is rejected before settings change.
-Pending work remains bound to its original controller.
-Saving settings can repair malformed local configuration or restore private file permissions; revision checks still apply.
-
-Release builds package the existing Python provider inside a separately signed helper app with a fixed bundle identity.
-The menu app owns that foreground helper through inherited private standard-I/O pipes.
-There is no listening management socket or separate background daemon.
-The terminal workflow remains available below.
-
-## 1. Create the Local Desktop Device
-
-For password login, create a dedicated Matrix user such as `@my-laptop:example.org` using your normal Matrix administration or registration flow.
-By default, the login command checks the homeserver's advertised methods.
-It opens Matrix SSO when available and otherwise uses password login.
-
-For password login, pass the dedicated user ID and enter its password at the hidden prompt:
-
-```bash
-mindroom desktop login \
-  --user-id @my-laptop:example.org \
-  --homeserver https://matrix.example.org
-```
-
-For an SSO-only homeserver, omit `--user-id` and complete authentication in the browser:
-
-```bash
-mindroom desktop login \
-  --homeserver https://matrix.example.org
-```
-
-You may still pass `--user-id` during SSO as an identity check; MindRoom attempts to revoke and always rejects a newly issued session if SSO returns a different Matrix user.
-Use `--login-method sso` to force SSO when the homeserver also advertises password login.
-If the homeserver exposes multiple SSO providers, pass its provider ID with `--sso-idp ID` to select one directly.
-Use `--no-open-browser` to print a URL that you can open in the browser of your choice.
-The browser returns a short-lived, single-use Matrix login token to an unguessable callback path on `127.0.0.1`.
-MindRoom exchanges that token immediately and never writes it to disk or terminal logs.
-It does not create or replace account-level cross-signing keys for an SSO account; the bridge authenticates this transport by pinning the exact device ID and Ed25519 key shown after login.
-
-The session JSON saves only the reusable Matrix access token and device identifiers.
-By default, all `mindroom desktop` commands use the user-level `~/.mindroom` runtime, regardless of the current working directory.
-An explicit `--config`, `--storage-path`, `MINDROOM_CONFIG_PATH`, or `MINDROOM_STORAGE_PATH` still selects another runtime and must be reused across login, pairing, and bridge startup.
-The device's private Olm identity is persisted separately under `<storage>/encryption_keys/`; on Unix, MindRoom forces its per-user directory to mode `0700`.
-The printed Ed25519 value is the device's public fingerprint.
-Self-service pairing sends that fingerprint to the exact cloud agent through an authenticated Olm-encrypted claim, so never copy user-specific Desktop identity fields into agent YAML.
-On Unix, the session file is forced to mode `0600`, and the bridge refuses to load it if group or other users can read it.
-The command prints values similar to these:
-
-```text
-User: @my-laptop:example.org
-Device: ABCDEFGHIJ
-Ed25519: desktop-device-fingerprint
-```
-
-Normal and private agents register these public identity values through the requester-scoped chat flow below.
-
-### Homeservers Behind an Identity-Aware Proxy
-
-A command-line Matrix client cannot reuse an interactive browser proxy cookie.
-For a homeserver protected by Cloudflare Access, install the [`cloudflared` CLI](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and enable interactive Access authentication during desktop login:
-
-```bash
-mindroom desktop login \
-  --homeserver https://matrix.example.org \
-  --cloudflare-access
-```
-
-`cloudflared` opens the browser when the local Access session needs authentication.
-MindRoom passes the resulting user-scoped JWT as `cf-access-token` on Matrix requests without saving that token in the desktop session.
-The session remembers that Cloudflare Access is enabled, so later `mindroom desktop run` commands do not need the flag again.
-MindRoom reads the JWT's documented `exp` claim and reuses it only while current.
-After expiry, the first Matrix request obtains a current token from `cloudflared`, prompting for browser reauthentication when needed.
-For an older saved session, `mindroom desktop run --cloudflare-access` enables Access for that invocation without rewriting the session.
-
-When the MindRoom runtime reaches Matrix through an internal address, set `MINDROOM_DESKTOP_MATRIX_HOMESERVER` to the public Matrix URL that local Desktop clients can reach.
-This changes only the login command printed by `!desktop setup`; server-side Matrix traffic continues to use `MATRIX_HOMESERVER`.
-Set `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS=true` when that public URL requires Cloudflare Access so the printed login and pairing commands include `--cloudflare-access`.
-
-For unattended proxies that issue machine credentials instead, put their required request headers in a separate JSON file:
-
-```json
-{
-  "X-Access-Client-Id": "client-id",
-  "X-Access-Client-Secret": "client-secret"
-}
-```
-
-Use the exact header names issued by the proxy, restrict the file to its owner, and pass it during both login and bridge startup:
-
-```bash
-chmod 600 ~/.config/mindroom/matrix-http-headers.json
-
-mindroom desktop login \
-  --user-id @my-laptop:example.org \
-  --homeserver https://matrix.example.org \
-  --matrix-http-headers-file ~/.config/mindroom/matrix-http-headers.json
-```
-
-The file must contain one JSON object whose keys and values are strings.
-MindRoom refuses group-readable or world-readable header files on Unix.
-The headers apply to every Matrix request made by the desktop client, including login, sync, encryption-key, and media requests.
-They are not copied into the saved Matrix session.
-Set `MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE` to the file path instead of repeating the option on both commands.
-During Matrix SSO, the browser handles any interactive proxy authentication while the header file authenticates the CLI's login-method discovery, token exchange, and later Matrix requests.
-Configure the proxy to accept these machine credentials only for the Matrix endpoints the desktop device needs, while keeping normal Matrix authentication enabled.
-Do not combine `--cloudflare-access` with a static `cf-access-token` header.
-
-## 2. Configure the Agent
-
-Configure the Desktop tool on a normal or private agent without authored device identity fields:
+Add the `desktop` tool to a normal or private agent:
 
 ```yaml
 agents:
@@ -441,74 +40,128 @@ agents:
           timeout_seconds: 30
 ```
 
-The tool's `timeout_seconds`, from 1 to 120, bounds each call and each shell-output download, while `run_shell` always waits up to 120 seconds so the person at the computer has time to decide.
-Add `private: {per: user_agent}` only when the agent's entire runtime and state should also be requester-private.
-Desktop device identities are requester-agent scoped either way.
-Each user then runs `!desktop setup` in a private Matrix room containing only that user and one Desktop-enabled agent, plus the router when it is serving the command.
-The short-lived pairing code is a bearer secret, so MindRoom rejects `!desktop` when any other room member is present.
-It also rejects `!desktop` when it cannot confirm the room's complete membership, including invites the server counts but the bot has not seen.
-When the router serves the command but could not look up the room's membership, it asks you to try again in a moment instead.
-The serving bot returns one full `mindroom desktop setup` command containing the configured homeserver, a short-lived code, the agent name, and the exact pinned cloud controller identity.
-Run it once; it reuses an existing local Desktop Matrix session or completes login before claiming the pairing.
-For commands from older servers without `--allow-agent`, the terminal asks for the agent name shown in the setup message; it never guesses from the controller ID.
-After a successful claim it saves the controller, requester, and allowed agents in the same private configuration used by the macOS app.
-When setup uses `--cloudflare-access`, it also saves that authentication choice for subsequent app and terminal starts, including when reusing an older login.
-The pairing code is never saved there.
-An open app refreshes externally saved settings while stopped and preserves unsaved form edits.
-Add `--allow-app com.apple.TextEdit` to save an app choice during terminal setup, or choose apps in **Computer access** afterward.
-Repeating setup for the same controller preserves existing browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
+
+Never put device identity fields in agent YAML for the `desktop` tool; each user pairs their own computer through chat.
+Pairings are scoped to one requester and one agent, so add `private: {per: user_agent}` only when the agent's whole runtime and state should also be requester-private.
+The tool needs a live Matrix room and runs in the primary agent process, so it is unavailable in [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) runs.
+To drive the user's signed-in browser, configure the separate [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool with the bridge's device identity, then follow [Use the Signed-In Browser Profile](#use-the-signed-in-browser-profile).
+
+## 2. Pair the Computer
+
+1. In a private Matrix room containing only you and one Desktop-enabled agent, plus the router when it serves the command, send `!desktop setup`.
+   The reply contains setup data for the macOS app and an equivalent `mindroom desktop setup` command, which name the homeserver you sign in to, your Matrix account, the agent, the cloud agent's exact device identity, and a short-lived pairing code.
+   The pairing code is a bearer secret, so MindRoom refuses `!desktop` when any other member is present or when it cannot confirm the room's complete membership, including pending invites.
+   If the router could not look up the membership, it asks you to try again in a moment.
+2. In the macOS app, paste the reply's JSON setup data into **Computer access** and follow the [Computer Access steps](https://docs.mindroom.chat/installation/macos-app/#computer-access).
+   In a terminal, run the full `mindroom desktop setup` command from the reply once; it reuses a saved Desktop Matrix session or logs in first, then claims the pairing.
+   Add `--allow-app com.apple.TextEdit` to save an app choice at the same time.
+3. Copy the printed `!desktop confirm <code> <verification>` command back into the same chat.
+   The verification value ties confirmation to the device that claimed the code, so another device cannot take over a visible pairing code.
+
+Only the same requester with the same agent can confirm or use the pairing, and shared credentials are never used as a fallback.
+Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
+Use `!desktop status`, `!desktop rotate`, and `!desktop disconnect` as described in [`!desktop`](#desktop).
+
+Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 Setup for a different controller starts without saved folders or shell access.
-Setup also replaces a malformed local configuration, or one readable by group or other users, with fresh private settings; choose apps, folders, shell, and browser access again afterward.
-If the saved session belongs to a different homeserver or Matrix user than the command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace` to replace the saved session.
-Then copy the exact `!desktop confirm <code> <verification>` command it prints back to the same Matrix chat.
+If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
-The claim travels as an authenticated Olm-encrypted to-device event, and confirmation stores the local device identity only in that requester's agent-scoped credential store.
-The verification value binds confirmation to the claimed Ed25519 key, so a different device cannot pre-claim a visible pairing code and be confirmed accidentally.
-Another requester or agent cannot confirm or use that record, and shared credentials are never used as a fallback.
-Until pairing is confirmed, Desktop calls return a setup-required result while the agent's unrelated tools continue to work.
-The Desktop tool can explain the trusted chat command, but the model cannot register or replace a device itself.
-Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
-The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
-Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
-Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
-It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
+### Log In Manually
 
-The separate `browser` tool can still target its Playwright extension transport through its own configuration:
+`mindroom desktop login` creates the local Desktop Matrix device.
+By default it checks the homeserver's advertised methods, opens Matrix SSO in the browser when available, and otherwise uses password login; `--login-method password` or `--login-method sso` selects one explicitly.
 
-```yaml
-agents:
-  computer:
-    tools:
-      - browser:
-          default_target: desktop
-          device_user_id: "@my-laptop:example.org"
-          device_id: "ABCDEFGHIJ"
-          device_ed25519: "desktop-device-fingerprint"
-          timeout_seconds: 90
+```bash
+# SSO
+mindroom desktop login --homeserver https://matrix.example.org
+
+# Password login for a dedicated account such as @my-laptop:example.org
+mindroom desktop login \
+  --user-id @my-laptop:example.org \
+  --homeserver https://matrix.example.org \
+  --login-method password
 ```
 
-You can keep `default_target: host` and pass `target="desktop"` only for calls that should use the user's existing local profile.
+Password login requires `--user-id` and prompts for the password with hidden input.
+During SSO, `--user-id` is an optional identity check, and MindRoom rejects the new session if SSO returns a different Matrix user.
+Use `--sso-idp ID` to pick one of several SSO providers, and `--no-open-browser` to print the URL instead of opening it.
+MindRoom does not create cross-signing keys for the device; the bridge trusts the exact device ID and Ed25519 key shown after login instead.
+The command prints values similar to these:
+
+```text
+User: @my-laptop:example.org
+Device: ABCDEFGHIJ
+Ed25519: desktop-device-fingerprint
+```
+
+All `mindroom desktop` commands use the `~/.mindroom` runtime regardless of the current directory.
+An explicit `--config`, `--storage-path`, `MINDROOM_CONFIG_PATH`, or `MINDROOM_STORAGE_PATH` selects another runtime and must be reused for login, setup, pairing, and `mindroom desktop run`.
+On Unix, the saved session file must be owner-only (`0600`), and the bridge refuses to load it if group or other users can read it.
+Run `mindroom desktop login --replace` to replace a saved session with a fresh device.
+
+### Homeservers Behind an Identity-Aware Proxy
+
+For a homeserver protected by Cloudflare Access, install the [`cloudflared` CLI](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and add `--cloudflare-access` to `mindroom desktop login` or `mindroom desktop setup`:
+
+```bash
+mindroom desktop login \
+  --homeserver https://matrix.example.org \
+  --cloudflare-access
+```
+
+`cloudflared` opens the browser whenever Access needs authentication, and MindRoom never saves the Access token.
+The session remembers the choice, so later `mindroom desktop run` commands and the macOS app need no flag.
+For a session saved without it, `mindroom desktop run --cloudflare-access` enables Access for that run only.
+
+Two environment variables on the MindRoom server change the commands that `!desktop setup` prints:
+
+- `MINDROOM_DESKTOP_MATRIX_HOMESERVER`: the public Matrix URL local Desktop clients should use when the server reaches Matrix through an internal address; server traffic keeps using `MATRIX_HOMESERVER`.
+- `MINDROOM_DESKTOP_CLOUDFLARE_ACCESS=true`: add `--cloudflare-access` to the printed login and pairing commands.
+
+For unattended proxies that issue machine credentials instead, put the exact request headers the proxy requires in a JSON object of string keys and values:
+
+```json
+{
+  "X-Access-Client-Id": "client-id",
+  "X-Access-Client-Secret": "client-secret"
+}
+```
+
+Restrict the file to its owner and pass it to both login and the bridge, or set `MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE` to its path:
+
+```bash
+chmod 600 ~/.config/mindroom/matrix-http-headers.json
+
+mindroom desktop login \
+  --user-id @my-laptop:example.org \
+  --homeserver https://matrix.example.org \
+  --matrix-http-headers-file ~/.config/mindroom/matrix-http-headers.json
+```
+
+MindRoom refuses group-readable or world-readable header files on Unix, adds the headers to every Matrix request the desktop client makes, and does not copy them into the saved session.
+During SSO, the browser handles interactive proxy authentication while the header file authenticates the command-line requests.
+Accept these machine credentials only for the Matrix endpoints the desktop device needs, keep normal Matrix authentication enabled, and do not combine `--cloudflare-access` with a static `cf-access-token` header.
 
 ## 3. Choose Local Access
 
 Applications, read-only folders, and shell commands are saved separately, and the bridge exposes only what is saved.
 
-### Applications
+### Choose Applications
 
-On macOS, use exact application bundle identifiers such as `com.apple.TextEdit` or `com.brave.Browser`.
-You can inspect an installed app bundle without granting MindRoom access to it:
+Save applications in the macOS app's **Access** step or with repeated `--allow-app` on `mindroom desktop setup`; `--allow-app` on `mindroom desktop run` applies to that run only.
+On macOS, use exact bundle identifiers such as `com.apple.TextEdit` or `com.brave.Browser`; you can look one up without granting access:
 
 ```bash
 mdls -name kMDItemCFBundleIdentifier /System/Applications/TextEdit.app
 ```
 
 Add only the applications needed for the current task.
-Use the special app ID `primary-screen` only when full-primary-screen observation and coordinate fallback are intentionally required.
+The special app ID `primary-screen` exposes the whole primary display without semantic elements; on Linux and Windows it is the only usable target.
 Controlling `primary-screen`, a terminal emulator, a scripting or automation app, or a browser or Matrix client signed in as you hands the agent your own authority, as the [Security Model](#security-model) warning explains.
-`primary-screen` has no semantic elements.
-On Linux and Windows, `primary-screen` is currently the only usable state target.
 
 ### Read-Only Folders and Shell Commands from the Terminal
 
@@ -520,142 +173,245 @@ mindroom desktop access --allow-folder ~/Documents/project-notes --shell
 
 Repeat `--allow-folder` to add more existing folders, use `--clear-folders` to remove every saved folder, and use `--no-shell` to turn shell requests off.
 Omitted options keep the saved values, and the command prints the saved applications, folders, and shell setting.
-It requires completed setup, uses the same revision check as the app, and never starts the bridge or grants auto-approval.
-Changes apply the next time the bridge starts.
+It requires completed setup and never starts the bridge or grants auto-approval.
 
 ## 4. Run the Local Bridge
 
-After saving setup and local access through either interface, start the bridge with:
+Start the bridge from the macOS app or with:
 
 ```bash
 mindroom desktop run
 ```
 
-The command reads the same saved controller, allowlists, read-only folders, shell setting, browser settings, and capture settings as the macOS app.
-Control leases and shell auto-approval are temporary and are never restored from saved setup.
+The command uses the same saved controller, allowlists, folders, shell setting, browser settings, and capture settings as the macOS app.
 Stop the bridge in the interface that started it before switching interfaces.
-Saved changes take effect on the next start; they do not change a running bridge's authority.
+Saved changes take effect on the next start and never change a running bridge's authority.
+The bridge opens only outbound HTTPS connections to Matrix and does not listen on a network port.
+Wait for `Desktop bridge online` before sending work when you need confirmation that startup completed.
 
-Explicit flags override settings for one terminal run without changing the saved setup.
-Changing the controller requires its complete identity and explicit requester, agent, and app allowlists, and such a run starts without saved folders or shell access.
-For example, start with observation only and an exact app allowlist:
+Flags override saved settings for one run without changing them; [`mindroom desktop run`](https://docs.mindroom.chat/cli/#desktop-run) lists every option.
+`--allow-requester`, `--allow-agent`, and `--allow-app` take exact Matrix user IDs, agent names, and app IDs, each option can be repeated, and wildcards are not accepted.
+Changing the controller requires `--controller-user-id`, `--controller-device-id`, `--controller-ed25519`, and all three allowlist options, and such a run starts without saved folders or shell access.
+The `!desktop confirm` reply prints a `mindroom desktop run` command with these values filled in except the app ID.
 
-```bash
-mindroom desktop run \
-  --controller-user-id @computer:example.org \
-  --controller-device-id CLOUDDEVICE \
-  --controller-ed25519 cloud-device-fingerprint \
-  --allow-requester @alice:example.org \
-  --allow-agent computer \
-  --allow-app com.apple.TextEdit
-```
+### Grant Application Control
 
-Every requester, agent, and application value is an exact local allowlist entry, and each option can be repeated when more than one exact identity is needed.
-Wildcards are not accepted as authority.
-The process opens outbound HTTPS connections to Matrix and does not listen on a network port.
-Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
-Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
-The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
-Completed journal records retain bounded desktop, folder, shell, or browser response content and screenshot or output-attachment decryption metadata in `<storage>/desktop_bridge/commands.sqlite3`, which MindRoom requires to be owner-only (`0600`) before reading.
-Existing `command_journal.json` files are imported as legacy receipts; current admission and delivery state lives in SQLite.
-
-To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
+Applications start observe-only.
+To allow semantic and coordinate input, a person at the computer grants a control lease with **Grant Control…** in the macOS app or by restarting the terminal bridge with `--allow-control`:
 
 ```bash
-mindroom desktop run \
-  --controller-user-id @computer:example.org \
-  --controller-device-id CLOUDDEVICE \
-  --controller-ed25519 cloud-device-fingerprint \
-  --allow-requester @alice:example.org \
-  --allow-agent computer \
-  --allow-app com.apple.TextEdit \
-  --allow-control \
-  --lease-minutes 15
+mindroom desktop run --allow-control --lease-minutes 15
 ```
 
-The maximum lease accepted by the CLI is sixty minutes.
-The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
-The bridge continues observing after the lease expires, but every control action is rejected until a person grants another local lease.
-Desktop Control can grant or revoke without restarting; the CLI requires a new invocation.
+`--lease-minutes` defaults to 15 and accepts at most 60, and changing the wall clock does not extend a lease.
+After the lease expires, the bridge keeps observing but rejects every control action until a person grants another lease.
+The macOS app can grant or revoke without restarting; the terminal requires a new invocation.
+Leases are never saved or renewed automatically, so a restarted bridge is observe-only again.
 
 ### Approve Shell Commands in the Terminal
 
-With shell requests saved, the startup message says that each command needs your approval in this terminal.
-Each request then appears with its ID, expiry, requester, agent, working directory, and command, and waits for one answer:
+With shell requests saved, each command appears in the terminal running `mindroom desktop run` with its ID, expiry, requester, agent, working directory, and command, and waits for one answer:
 
 ```text
 [a]pprove once, [r]eject, [5]/[15]/[60] minutes, [u]ntil stopped:
 ```
 
-The timed and until-stopped answers also approve later commands from every allowed requester and agent, as the prompt says.
-Only an answer typed after the prompt counts, because earlier input is discarded, and control, formatting, invisible, non-ASCII space, and backslash characters in the request are shown escaped.
-The command's length in characters and lines appears right above the answer prompt, so scroll up when the request is longer than the terminal.
-If standard input is not an interactive terminal, input reaches its end, or the bridge runs as a background job of its terminal, requests are rejected with guidance instead of waiting.
-To approve commands without asking for part of a run, start it with `--shell-auto-approve-minutes`, from 1 to 60; this requires saved shell access and is never saved itself.
-`Ctrl+C` stops the bridge, revokes auto-approval, and stops waiting and running shell commands.
-The terminal has no separate revoke command, so stop the bridge to revoke a grant early.
+Only an answer typed after the prompt counts, and the command's length appears right above the prompt, so scroll up when the request is longer than the terminal.
+If standard input is not an interactive terminal, input reaches its end, or the bridge runs as a background job, requests are rejected with guidance instead of waiting.
+Start with `--shell-auto-approve-minutes`, from 1 to 60, to approve commands without asking for part of the run; this requires saved shell access and is never saved.
+The terminal has no separate revoke command; press `Ctrl+C` to stop the bridge instead.
+See [Local Approval](#local-approval) for what each choice covers.
 
 ### Use the Signed-In Browser Profile
 
-Install the official [Playwright MCP Bridge extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm) in the local browser profile.
-The browser will show its normal extension installation confirmation, and MindRoom cannot bypass it.
-For Brave on macOS, add these options to the local bridge command:
+The `browser` tool's desktop target drives the user's real browser profile through the official [Playwright MCP Bridge extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm).
+Install the extension in the local browser profile, then start the bridge with `--browser-extension`.
+For Brave on macOS, also pass its executable and user-data root:
 
 ```bash
 mindroom desktop run \
-  --controller-user-id @computer:example.org \
-  --controller-device-id CLOUDDEVICE \
-  --controller-ed25519 cloud-device-fingerprint \
-  --allow-requester @alice:example.org \
-  --allow-agent computer \
-  --allow-app com.brave.Browser \
   --allow-control \
-  --lease-minutes 15 \
   --browser-extension \
   --browser-executable "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
   --browser-user-data-dir "$HOME/Library/Application Support/BraveSoftware/Brave-Browser"
 ```
 
-For Chrome, omit the two explicit path options to use Playwright MCP's normal Chrome discovery, or provide the matching Chrome executable and user-data root.
-An explicit `browser(action="start", target="desktop")` call starts `@playwright/mcp@0.0.78` locally through `npx` and opens the extension connection page in that profile.
-Starting that connection requires the local control lease; observation calls cannot launch or foreground the browser on an observe-only bridge.
-The connection page lets the user choose an initial tab and displays a reconnect token.
-To reconnect after local bridge restarts without another browser prompt, store that value as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
-Treat the reconnect token like a local browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
-MindRoom passes only the safe MCP subprocess environment, this explicit reconnect token, and the selected browser profile root to the Node child, so unrelated provider API keys are not inherited.
-Only Desktop Control and the local bridge terminal can grant or renew the control lease.
+For Chrome, omit the two path options to use normal Chrome discovery, or provide the matching Chrome paths.
+A `browser_control(action="start", target="desktop")` call requires the local control lease, starts `@playwright/mcp@0.0.78` locally through `npx`, and opens the extension's connection page, where the user chooses an initial tab.
+To reconnect after bridge restarts without another browser prompt, store the reconnect token that page shows as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
+Treat that token as a browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
+The local browser process does not receive unrelated provider API keys.
 
-## 5. Agent Flow
+The desktop target can observe tabs, page snapshots, screenshots, and the console, and can start, stop, and open a new tab; it cannot act on, navigate, or close an existing page.
+See [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) for its configuration and actions.
+For app-level control of the browser window, or for Safari and other browsers, allowlist the browser as an application instead.
 
-The agent calls `list_apps` and selects an exact returned app ID.
-If the selected app is not running, the agent calls `launch_app`, which requires the local control lease and returns fresh state when the app becomes accessible.
-It then calls `get_app_state` and inspects the returned roles, names, actions, hierarchy, and screenshot.
-It prefers a semantic action using an `element_ref` and the matching `state_id`.
-The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
-The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
-Coordinate input, unscoped typing, general scrolling, and keypress fallbacks require a fresh, complete, stable observation.
-If state is unstable or truncated, let the UI settle and call `get_app_state` again before a fallback.
-Semantic actions and element-targeted typing use separate exact-element validation.
-If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
-If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
-Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
-If the user asks to receive the screenshot, the agent calls `desktop(action="screenshot", app="...", return_attachment=true)` and then sends the returned `attachment_id` in the same turn with `matrix_message`.
+## Security Model
 
-For folders, the agent calls `list_folders`, then `list_directory` and `read_file` with a returned `root_id` and relative paths, continuing a long file from `next_offset`.
-For shell work, the agent sends one exact command with `run_shell`, waits for the local decision and the inline result, and polls a returned handle with `check_shell` from the last `next_offset`.
-The tool instructs it never to resubmit or rephrase a rejected or expired command, and to query `request_status` after a timeout or unknown outcome instead of running the command again.
+- **Control is local**: Applications are observe-only until a person at the computer grants a control lease, and only the macOS app's **Computer access** section or the local terminal can grant or renew it.
+- **Exact identities**: The bridge accepts commands only from the paired cloud agent device, for locally allowed requesters, agents, and apps, and rejects expired or replayed commands.
+- **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled.
+  An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
+  Allowlisting a browser exposes whichever window and tab is selected, not one website.
+- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted, because their windows grant shell auto-approval, control leases, and app access.
+- **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
+- **Emergency stop**: Moving the pointer to the upper-left corner of the primary display stops control and keeps it off until the bridge restarts or a person selects **Reset Emergency Stop** in the macOS app while no action is running; the reset does not grant control.
+- **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
+- **One bridge per session**: While a shell command waits for local approval, this bridge refuses every control action except `launch_app`, so its own agents cannot click or type into the approval.
+  Another bridge's agents could, so run at most one bridge in each logged-in graphical session.
+- **Not exposed**: The bridge offers no clipboard, microphone, webcam, unlock, privilege elevation, or arbitrary local RPC, and it cannot bypass operating-system permission prompts.
 
-For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
-The snapshot returns semantic roles, names, current values, and element references from the current page.
-Existing-page control is unavailable through this pinned extension backend until stable page targeting is supported.
-For app-level control, an explicitly allowlisted browser can still use the native desktop state and input path.
-After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
-The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
-For a browser screenshot that the user should receive, the agent passes `returnAttachment=true` with `target="desktop"` and sends the returned `attachment_id` through `matrix_message` in the same turn.
+!!! warning "Some allowlisted apps give an agent your own authority"
+    Controlling a terminal emulator, a scripting or automation app such as Script Editor, Shortcuts, or Automator, or the `primary-screen` target lets an agent run anything your account can, without any shell approval.
+    The agent can type commands into a terminal or script, and `primary-screen` input reaches whatever app is under the pointer or has focus, including MindRoom's own windows while no shell request is pending.
+    Controlling a web browser or Matrix client signed in as you, such as MindRoom Chat in a browser or Element, or a browser with a local MindRoom dashboard session, lets an agent act as you: it can answer its own Matrix tool approvals, send `!` commands, and instruct other agents.
+    Allowlist these only when you would also approve everything the agent could run or send as you.
 
-## 6. Add Matrix Approval for Desktop-App Control Actions
+Enabling the browser extension grants access to every tab and the signed-in state of the connected profile, not one tab or origin.
+It is not a network sandbox: MindRoom validates URLs passed to `open`, but redirects and page scripts keep the profile's normal network reach.
 
-The local lease is the hard authority boundary, while MindRoom's existing approval cards can add per-action human confirmation in the Matrix conversation.
+### What Leaves the Computer
+
+The Matrix homeserver sees routing metadata, timing, and encrypted media size, but not commands, screenshots, file contents, or output.
+After MindRoom decrypts them in the cloud, accessibility state, screenshots, file contents, and command output become model input, so your model provider receives them.
+Accessibility data can include labels, document text, and form values not obvious from the screenshot; macOS secure text fields are suppressed and cannot be changed semantically.
+Model-visible screenshots and other results can remain in agent session storage, tool traces, and automatically saved workspace files, so protect and expire that storage according to the sensitivity of the controlled applications.
+Action arguments, shell commands, and paths appear in model context, approval cards, and Matrix tool traces, so never use `set_value`, `type_text`, or `run_shell` with passwords, tokens, recovery codes, or other secrets.
+Screenshots, labels, web content, file contents, and command output are untrusted data and are never user authorization or instructions.
+The bridge keeps command arguments and outcomes, including shell commands, file text, and inline shell output, in `<storage>/desktop_bridge/commands.sqlite3`, which must be owner-only (`0600`); it stores no plaintext screenshots.
+
+## Applications
+
+Applications are accessibility-first on macOS.
+`get_app_state` returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot of the selected app window.
+The agent normally acts on an `element_ref` from that state instead of guessing a coordinate, and every completed action returns fresh state and a fresh screenshot for the next step.
+Taking a screenshot on macOS brings the selected app to the front.
+
+Observation actions:
+
+- `status` reports screen, cursor, accessibility backend, lease state, which capabilities are enabled, whether a shell command is waiting, remaining auto-approval time, and the caller's own shell handles.
+  Its `bridge.gui_mode` (`observe_only` or `control`) describes only application control.
+- `request_status` reads a retained outcome without executing it again; see [Uncertain Outcomes](#uncertain-outcomes).
+- `list_apps` lists locally allowlisted app IDs and whether each is running.
+- `get_app_state` returns fresh state and screenshot.
+- `screenshot` returns fresh state and requires the screenshot to succeed.
+  With `return_attachment=true`, it also returns a turn-scoped `att_*` handle that `matrix_message` can send in the same turn without saving or uploading the image again.
+
+Control actions, which require a control lease:
+
+- `launch_app` launches or foregrounds one allowlisted app.
+- `click_element`, `perform_action`, and `scroll_element` press, invoke an advertised action on, or scroll the selected element.
+- `set_value` changes an accessibility value only when the element reports it is writable.
+- `click`, `double_click`, and `hover` use a coordinate from `0` to `1000` inside the app window, not raw screen pixels.
+- `drag` holds the left button between two such points over 100 to 2,000 milliseconds.
+- `type_text` types up to 2,000 characters into the focused app, or into an exact `element_ref` or `element_index` that must have focus.
+  Without an element, text cannot contain line breaks, tabs, or other control characters, so send Enter or Tab with `keypress`.
+- `scroll` scrolls a bounded number of pages in one direction at the app or an optional app coordinate.
+- `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
+  App-switching, quit, launch, and address-bar shortcuts are rejected because they could reach apps outside the allowlist.
+
+Pass `observation="tree"` to skip screenshot capture, upload, and image input when semantic state is enough, or `observation="screenshot"` to omit only the element list; the default is `both`, and the `screenshot` action rejects `tree`.
+
+Element references expire after 120 seconds or when the app's process, window, or target element changes, and a newer observation does not invalidate an unchanged older target.
+When the bridge reports stale state, call `get_app_state` again instead of reusing the old reference or coordinate.
+A large tree is capped and returns `truncated: true`, and a tree still changing returns `stability: unstable`.
+Coordinate input, unscoped typing, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
+On macOS, keyboard input fails without being sent if the app has lost focus, and pointer input fails if another app's window, such as a notification banner, floating panel, or Picture in Picture, covers the target point; if either happens after input started, input stops and the outcome is unknown.
+Windows on secondary displays are supported when the window lies on one display; move a window that spans displays fully onto one.
+
+## Read-Only Folders
+
+The agent can list and read inside locally selected folders, and there is no write, create, rename, or delete action.
+
+- `list_folders` returns an ID, name, and absolute path for each selected folder.
+- `list_directory` takes a `root_id` and optional relative `path` and returns at most 200 entries with their type (`directory`, `file`, `symlink`, or `other`) and a `truncated` flag.
+- `read_file` takes a `root_id`, a relative `path`, and an optional byte `offset`, and returns at most 16 KiB of UTF-8 text with `next_offset`, `eof`, and `truncated`; continue a longer file from `next_offset`.
+
+Paths are relative to the selected folder, absolute paths and `..` components are rejected, and symbolic links are never followed, so a link cannot reach a file outside the folder.
+Only regular text files are read; FIFOs, devices, files with control bytes, and invalid UTF-8 are rejected.
+Local file permissions still apply, and macOS may still ask before MindRoom reads protected folders such as Desktop, Documents, or Downloads; MindRoom never requests Full Disk Access.
+A saved folder that no longer exists makes startup fail with `Cannot open local folder`.
+
+## Shell Commands
+
+!!! warning "Shell commands run with your full account access"
+    An approved command runs as your user account, with the network and every file that account can read or change, including files outside the selected folders.
+    Neither the selected folders nor the working directory confine it, and it is not a sandbox.
+    Approve only commands you would run yourself, and run the bridge in a dedicated operating-system account when you need stronger isolation.
+
+Enable shell requests locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`.
+
+- `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the home directory.
+  `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
+- `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it finishes; pass `offset` to read from a byte position.
+- `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
+  A later `check_shell` reports `state: "killed"`, while `completed` means the command exited on its own.
+
+A `command` or `cwd` with more than 64 whitespace or invisible characters in a row, more than two blank lines in a row, or more than 8 combining marks on one character is refused before approval, because such padding could hide part of the request from the approver.
+
+### Local Approval
+
+Every `run_shell` request waits for a decision from the person at the computer, on the macOS app's approval card or at the `mindroom desktop run` terminal prompt, unless auto-approval is active.
+The approver sees the exact command, working directory, requester, agent, expiry, and command length, with invisible and control characters escaped and a warning when a field contains look-alike non-ASCII characters.
+The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
+There is no remote approval, so a chat message, the agent, or cloud configuration cannot approve a command or grant auto-approval.
+A request nobody answers within 120 seconds expires, and rejected, expired, or revoked requests never run.
+
+!!! warning "Auto-approval covers every allowed caller"
+    Timed and until-stopped auto-approval approves every shell command from all locally allowed requesters and agents, not only the command that prompted it.
+    Auto-approval is never saved: it ends when its time runs out, when you revoke shell access, or when the bridge stops, and a restarted bridge asks for each command again.
+
+In the macOS app, **Allow Without Asking…** grants auto-approval before any request arrives; in the terminal, use `--shell-auto-approve-minutes`.
+Besides ending auto-approval, revoking shell access or stopping the bridge rejects a waiting request and kills every running command.
+
+### Handles
+
+A command still running after its inline wait keeps running as a handle instead of being killed.
+The reply has `state: "running"`, the handle, and the newest output so far; the agent polls with `check_shell` and stops it with `kill_shell`.
+Results report `output_start` and `next_offset` for the returned byte range and `output_bytes` for the total captured; pass the last `next_offset` to `check_shell` to read only newer output, and an `output_start` above the requested offset means earlier output was skipped.
+Handles belong to the requester and agent that started them, and checking or killing your own handle needs no approval.
+The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill running ones.
+A `check_shell` that returns a finished handle's remaining output in full forgets the handle.
+
+The bridge keeps at most 16 handles.
+When all 16 are retained, a new command drops the handle that finished longest ago, with its output, and a new command is refused if all 16 are still running.
+Each handle keeps up to 10 MiB of output in private temporary files until it is read in full, dropped for a new command, or dropped when a new command starts more than 10 minutes after it finished.
+Handles do not survive revoking shell access or a bridge restart, so a later `check_shell` reports an unknown handle.
+When a command finishes, other processes in its process group, such as children started with `&`, are terminated, so keep long-running work in the foreground and let it continue as a handle.
+
+### Environment and Output
+
+Commands run with your login shell's environment, captured once when the bridge starts, so profile changes apply at the next start.
+If capture fails or takes more than 5 seconds, commands get a minimal environment of `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, and a `PATH` that includes the Homebrew and `~/.local/bin` directories.
+The bridge's own credentials are never passed to commands.
+
+!!! warning "Your shell profile's exports are visible to commands"
+    Anything your shell profile exports, including tokens and other secrets, is visible to every approved command.
+    Commands could already read the profile files that set those values, but a command that prints one sends it to the model provider like any other output.
+
+Each call runs in a fresh non-interactive `/bin/sh`, so directory changes and variables never carry over, and `$SHELL` is still your login shell.
+Commands have no terminal and read standard input from `/dev/null`, so they cannot answer password prompts.
+Standard error is merged into standard output; redirect it with `2>file` to keep it separate.
+
+The bridge captures up to 10 MiB of output per command and reports `output_truncated: true` when more was dropped.
+Larger output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
+If that delivery fails, the reply shows the output that fits with a `warning`, and `check_shell` from `next_offset` reads the rest.
+For agents with a workspace, MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#common-setup-notes) apply: a result larger than the automatic-save threshold, 50 KiB by default, is saved under `mindroom_tool_outputs/` in the agent workspace and returned as a preview, and `mindroom_output_path` chooses the file.
+
+## Uncertain Outcomes
+
+A timeout returns the original `request_id` and an unknown outcome; the action may still be queued, may have run, or, for `run_shell`, may still be waiting for approval or running.
+Call `desktop(action="request_status", request_id="...")` with a new request to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
+Only the requester and agent that sent the action can read its outcome, from any conversation; other callers get `not_found`.
+Request IDs must be unique across actions and queries, and `not_found` is not evidence that the action never ran.
+Do not repeat an uncertain action automatically; observe current state first.
+Some apps change their UI and then report an accessibility error, so a fresh observation is the only reliable way to resolve an unknown app action.
+Interrupted work is never run again and reports an unknown outcome.
+Never resubmit or rephrase a rejected or expired shell command.
+
+## Require Matrix Approval for App Control
+
+The local lease is the hard authority boundary, but MindRoom's [tool approval](https://docs.mindroom.chat/tool-approval/#tool-approval) cards can add per-action confirmation in the Matrix conversation.
 Create `approval_scripts/desktop_control.py` beside the cloud config:
 
 ```python
@@ -690,41 +446,42 @@ tool_approval:
       script: ./approval_scripts/desktop_control.py
 ```
 
-With this policy, observation remains immediately available while each `desktop` app-control action waits for the original Matrix requester to approve it.
-This example does not cover the separate `browser` tool; add a browser-specific rule if browser calls also need Matrix approval.
-Approval does not override an absent or expired local control lease.
-Adding `run_shell` to such a rule adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
+Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
+Adding `run_shell` to the set adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 
-Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the direct agent chat.
-The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
-Cloud-controller rotation is a separate case: `!desktop rotate` starts pairing but does not migrate the local command journal.
-An existing journal pins the cloud user, device ID, and Ed25519 fingerprint, so pairing alone cannot resume that journal under a replacement controller.
-Keep the original journal and unresolved outcomes intact; do not delete or rewrite its ownership binding.
-The native app has no journal-migration action.
-Terminal commands accept `--storage-path` for a separate local setup; use the same new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`.
-A separate setup does not transfer pending commands or their outcomes from the old journal.
-A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
-Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
-Shutdown also revokes shell auto-approval, rejects a waiting shell request, and kills running shell commands and handles.
-Before disconnecting, shutdown allows up to two seconds to deliver saved replies, including the cancellation.
-If the network or delivery fails, undelivered replies remain saved for recovery after restart; commands are not executed again.
-Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.
-For stronger isolation, run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
+- **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
+  `--replace` does not revoke the old device by itself.
+- **Change the cloud controller**: Once the bridge has a command history, saving a different controller identity is rejected, because pending work stays bound to its original controller.
+  Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
+- **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
+- **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge; see [Local Approval](#local-approval) for what that does to shell commands.
+  An app or browser action already in progress can still finish, so observe local state before retrying it.
+- **Stronger isolation**: Run the bridge in a dedicated operating-system account and expose only a non-sensitive desktop session.
+
+### `!desktop`
+
+Manage the current requester's Desktop target for one Desktop-enabled agent.
+
+Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
+
+```text
+!desktop setup
+!desktop status
+!desktop confirm <code> <verification>
+!desktop rotate
+!desktop disconnect
+!desktop disconnect confirm
+```
+
+`!desktop setup` starts pairing, and `!desktop confirm` completes it with the exact command that local setup prints.
+`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
+`!desktop status`, or `!desktop` alone, reports whether a Desktop target is configured for you and this agent.
+`!desktop disconnect` asks for confirmation, and `!desktop disconnect confirm` removes your Desktop target for this agent, so its `desktop` calls need setup again.
+The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
 
 ## Current Limits
 
-Native semantic accessibility is implemented only for macOS in this version.
-Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
-On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
-ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
-Linux and Windows pixel operations currently target the primary display.
-Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
-The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
-Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
-There is no MatrixRTC live screen stream, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
-Folder access is read-only and text-only, with at most 16 KiB per read and 200 entries per listing.
-Shell commands have no terminal, standard input, or persistent session, and their handles do not survive a helper restart.
-Shell commands cannot be approved remotely, and uncertain shell outcomes are never retried automatically.
-Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.
+There is no live screen stream, multi-monitor selector, or unattended service installer.

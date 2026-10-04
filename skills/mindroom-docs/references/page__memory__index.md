@@ -335,6 +335,62 @@ This exposes `add_memory`, `search_memories`, `list_memories`, `get_memory`, `up
 Persisted IDs and file-backed `file:<path>:<line>` IDs support read, update, and delete operations.
 Semantic file-memory results use read-only `semantic:<source_file>:<rank>` locators.
 
+## [`memory`]
+
+`memory` gives an agent explicit control over the MindRoom memories available in its current scope.
+
+### What It Does
+
+`memory` exposes `add_memory()`, `search_memories()`, `list_memories()`, `get_memory()`, `update_memory()`, and `delete_memory()`.
+It complements MindRoom's automatic post-response memory extraction by letting the agent deliberately remember or inspect something on demand.
+The tool always uses the current agent's configured MindRoom memory backend, so the same calls work whether that agent uses built-in `mem0` storage or file-backed memory.
+Agents with `memory_backend: none` do not receive this tool.
+Search and list results include identifiers or locators.
+Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `get_memory()`, `update_memory()`, and `delete_memory()`.
+Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
+The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
+For file-backed memory, `search_memories()` follows `memory.search.mode`.
+Keyword mode searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+Ordinary `MEMORY.md` prose is preloaded into the prompt instead of searched as keyword snippets.
+For prose omitted by the preload limit, read the file directly or use semantic search with `include_entrypoint: true` and a ready index.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to those keyword entries and snippets when embeddings are unavailable.
+Result metadata includes `search_mode` so callers can tell which path produced the result.
+File memory is already searchable on demand through `search_memories()`.
+When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
+That knowledge surface is semantic-only and does not provide keyword fallback, team-visible memory, or memory IDs.
+
+### Configuration
+
+This tool has no tool-specific inline configuration fields.
+Use `memory.search` or `agents.<name>.memory_search` to configure file-backed search behavior.
+
+### Example
+
+```yaml
+memory:
+  backend: file
+
+agents:
+  assistant:
+    tools:
+      - memory
+```
+
+```python
+add_memory("The user prefers terse release notes.")
+search_memories("release notes", limit=3)
+list_memories(limit=20)
+get_memory("abc123")
+update_memory("abc123", "The user prefers terse release notes with dates.")
+delete_memory("abc123")
+```
+
+### Notes
+
+- The tool uses whichever MindRoom backend is active for the agent, so enable and tune that backend through the backend settings on this page, not through tool-local options.
+- This is the right tool when you want explicit control over MindRoom's built-in durable memory rather than a separate provider account.
+- The tool returns user-facing error strings on failures instead of raising raw exceptions into the conversation.
+
 ## Agno Learning
 
 MindRoom integrates Agno's built-in Learning system, which lets agents learn and adapt from conversations.
@@ -366,3 +422,5 @@ agents:
 Agents inherit `learning` and `learning_mode` from `defaults` unless explicitly overridden.
 Disabled agents do not create or update learning state.
 Learning data persists in `agents/<name>/learning/<agent>.db` within the agent's state root.
+
+Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.

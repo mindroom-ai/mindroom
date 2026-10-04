@@ -184,7 +184,7 @@ Editable workspace receipts never grant continuation authority.
 A retained Agno run identifies the exact attempt; the lifecycle owner derives its outcome before publishing storage and audit projections.
 Tach dependency rules and isolated import tests enforce these directions.
 
-See [Agent Delegation](../configuration/agents.md#agent-delegation) for configuration, tool arguments, audit paths, and user-visible behavior.
+See [Agent Delegation](../tools/agent-orchestration.md#agent-delegation) for configuration, tool arguments, audit paths, and user-visible behavior.
 
 ## Message Handling
 
@@ -199,9 +199,8 @@ Correctness-critical timeline callbacks cross durable journal admission before o
 5. `response_runner.py` and `response_turn.py` execute the selected agent or team.
 6. `delivery_gateway.py` sends or edits the Matrix response and `TurnStore` records durable terminal truth.
 
-**Message edits**: When a user edits a message that already received an agent response, the agent regenerates its response for the updated content.
-The agent edits its own previous reply in place rather than sending a new message.
-Edits from other agents never trigger regeneration; another agent's completed reply that mentions this entity is dispatched to it as a reply instead.
+See [Message Edits](../configuration/threads.md#message-edits).
+
 The feature requires that the turn's `anchor_event_id` is recorded in the `TurnStore`.
 
 **`_on_media_message`**: Handles media events (images, videos, files, and audio).
@@ -212,7 +211,7 @@ When no agent or team is mentioned, routing selects the appropriate agent or tea
 
 **Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_responder_for_message()` only when multiple candidates remain.
 In threads where multiple humans have posted, the router stays silent and explicit targeting is the default.
-Authorized, materializable individual agents that already replied may opt into [Adaptive Participation](../configuration/agents.md#adaptive-participation) for untagged turns; an approved decision can produce an individual reply, without automatic team formation.
+Authorized, materializable individual agents that already replied may opt into [Adaptive Participation](../configuration/threads.md#adaptive-participation) for untagged turns; an approved decision can produce an individual reply, without automatic team formation.
 Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency

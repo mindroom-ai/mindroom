@@ -7,6 +7,8 @@ MindRoom keeps room invitations, conversation access, Matrix power, platform adm
   <source src="https://github.com/user-attachments/assets/6ac07018-9961-465a-b38d-a3a34eba75b6#t=0.1" type="video/mp4">
 </video>
 
+See also [Rooms & Spaces](https://docs.mindroom.chat/rooms/), [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), and [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/).
+
 ## Authority at a glance
 
 MindRoom answers six authority questions independently.
@@ -93,25 +95,7 @@ Room administrators are not platform administrators or credential managers.
 Responder users and room membership do not grant credential authority.
 Credential managers do not gain responder access.
 
-## Room policy
-
-`room_defaults` supplies the default `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` values for every managed room.
-
-An authored field under `rooms.<key>` replaces the corresponding default.
-List overrides replace the whole default list instead of merging with it.
-An explicit empty list therefore disables the inherited invitations or admins for that room.
-MindRoom grants missing room admins but does not demote existing power-level 100 admins when they are removed from configuration, because the managing Matrix account cannot demote an equal-power user.
-Removing an admin from configuration therefore stops future grants; lowering an existing grant requires a Matrix authority with greater power.
-
-`join_policy` accepts `invite`, `knock`, or `public`.
-MindRoom reconciles join policy, directory visibility, invitations, and power levels for existing managed rooms.
-Encryption can be enabled but never disabled because enabling Matrix room encryption is irreversible.
-
-`invite_users` is declarative desired invitation state.
-A listed user who leaves or is kicked is invited again during reconciliation, so remove the user from configuration before intentionally removing access.
-
-The root Matrix Space receives the union of managed-room `invite_users` as invitations.
-Invitees do not automatically receive root Space admin power.
+See [Room policy](https://docs.mindroom.chat/rooms/#room-policy).
 
 ## Responder access
 
@@ -139,7 +123,8 @@ A scheduled task's text never runs as a chat command when it fires, so an agent 
 The replying entity stays the message's author in conversation history and prompts, and its unaddressed replies remain agent chatter that other entities ignore.
 A mention counts once the reply is finished, including a streamed reply whose final text replaces its placeholder, and never in a reply that was stopped or failed.
 A mention in an agent's or team's message wakes the mentioned entity only while the person it acts for is a joined member of the room; an invited or departed requester, or membership MindRoom cannot confirm, wakes nobody.
-Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, 50 by default, and continue after the next message from a person.
+Agents also stop waking each other once a conversation has `defaults.max_consecutive_agent_replies` consecutive agent or team messages since a person last wrote there, and continue after the next message from a person.
+The setting is global, defaults to `50`, and accepts any positive integer; `1` stops agents from waking each other, and a room-level conversation counts the room's messages outside threads.
 A team's `access` authorizes requests to the team as a whole: a requester the team admits reaches every member agent through that team, even members whose own `access` would not admit them directly.
 The authoritative membership index fails closed while a referenced room is missing, stale, unresolved, or unavailable.
 Invitations do not count as joined membership, and leave, kick, or ban events revoke membership grants.
@@ -227,19 +212,7 @@ authorization:
       - "@signal_456:example.com"
 ```
 
-## Automatic migration
-
-Loading a monolithic configuration with retired access fields automatically converts it to this schema.
-MindRoom validates the converted configuration before replacing `config.yaml` atomically and saves the exact original bytes once as `config.yaml.pre-membership-access`.
-When `config.yaml` is a single-file Docker bind mount that cannot be replaced atomically, migration stops and directs the operator to run `mindroom config migrate --path <host-config.yaml>` on the host.
-The migration preserves explicit new-schema values and removes the retired fields.
-The normalized YAML does not preserve comments or hand formatting; the exact backup preserves both for recovery.
-Before retrying a rejected migration, replace non-concrete identity grants with concrete Matrix user IDs and unresolved room IDs or aliases with managed room keys.
-Also remove `authorization.agent_reply_permissions` entries whose agent or team is no longer configured.
-
-Access migration does not support configurations that use `!include`.
-If retired access fields and any `!include` are present together, loading fails without changing the root file, changing included files, or creating a backup.
-Remove the includes or migrate the combined configuration manually before retrying.
+See [Automatic migration](https://docs.mindroom.chat/deployment/upgrades/#membership-access-migration).
 
 ## Bot accounts
 

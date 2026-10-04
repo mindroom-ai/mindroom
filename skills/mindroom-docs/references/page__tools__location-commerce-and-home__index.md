@@ -229,5 +229,5 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)
 - [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/)

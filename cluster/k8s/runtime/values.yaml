@@ -656,6 +656,7 @@ egressProxy:
     # Labels selecting the existing proxy pods. NetworkPolicy cannot target a Service directly.
     proxyPodSelector: {}
     proxyNamespaceSelector: {}
+    # DNS destinations for workers, also used by the Agent Vault server NetworkPolicy while this worker egress policy is enabled.
     dns:
       namespaceSelector:
         matchLabels:

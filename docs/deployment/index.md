@@ -6,7 +6,7 @@ icon: lucide/cloud
 
 MindRoom can be deployed in various ways depending on your needs.
 
-Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](nio-upgrade.md).
+Existing deployments moving from the previous Nio integration must follow the [Nio 1.0 cutover guide](upgrades.md#upgrading-to-nio-10).
 
 ## Deployment Options
 
@@ -41,88 +41,7 @@ For hosted multi-user private agents, also configure [Trusted Upstream Browser A
 
 ## Quick Start
 
-### Hosted Matrix + local MindRoom (recommended)
-
-```bash
-# Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
-uvx mindroom config init
-$EDITOR ~/.mindroom/.env
-uvx mindroom run
-# Open the printed link or scan the QR code to approve pairing,
-# or enter the code in MindRoom Chat → Settings → Local MindRoom
-```
-
-Pairing happens automatically on first run.
-
-See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
-If you want worker-routed execution tools like `coding`, `docker`, `file`, `python`, and `shell` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](sandbox-proxy.md).
-
-### NixOS LXC container (preferred alternative, agent-controlled machine)
-
-Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with MindRoom, Tuwunel, MindRoom Chat, and Caddy plus Docker and `ragenix`-based secrets wiring, so the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
-It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
-It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/); see the repo README for the full setup.
-
-```bash
-git clone https://github.com/mindroom-ai/lxc-nixos.git
-cd lxc-nixos
-incus launch images:nixos/unstable mindroom -c security.nesting=true
-incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
-```
-
-### Full Stack Docker Compose (all-local alternative)
-
-```bash
-git clone https://github.com/mindroom-ai/mindroom-stack
-cd mindroom-stack
-cp .env.example .env
-$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
-
-./scripts/quickstart.py
-```
-
-The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
-To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
-
-Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
-
-The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
-The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
-If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-### Direct (Development)
-
-```bash
-mindroom run --storage-path ./mindroom_data
-```
-
-The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
-
-For local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
-
-```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
-mindroom run --storage-path ./mindroom_data
-```
-
-### Docker (single container)
-
-Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](docker.md#quick-start) for your Docker user mapping.
-
-```bash
-docker run -d \
-  --name mindroom \
-  -p 8765:8765 \
-  -v ./config.yaml:/app/config.yaml:ro \
-  -v ./mindroom_data:/app/mindroom_data \
-  --env-file .env \
-  ghcr.io/mindroom-ai/mindroom:latest
-```
-
-Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
-
-See the [Docker deployment guide](docker.md) for the full single-container setup.
+See [Install & First Run](../getting-started.md#hosted-matrix-local-mindroom-recommended) and [Docker (single container)](docker.md#docker-single-container).
 
 ### Kubernetes
 

@@ -39,6 +39,22 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
+### Docker (single container)
+
+Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](https://docs.mindroom.chat/deployment/docker/#quick-start) for your Docker user mapping.
+
+```bash
+docker run -d \
+  --name mindroom \
+  -p 8765:8765 \
+  -v ./config.yaml:/app/config.yaml:ro \
+  -v ./mindroom_data:/app/mindroom_data \
+  --env-file .env \
+  ghcr.io/mindroom-ai/mindroom:latest
+```
+
+Before using this read-only single-file mount with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host.
+
 ## Docker Compose
 
 Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
@@ -157,51 +173,4 @@ During that wait, `/api/ready` returns `503` with `"detail": "Waiting for local 
 After approval, the port is briefly closed while the full API server takes it over, as at any startup, and `/api/ready` then reports normal startup progress until MindRoom is ready.
 Find the approval link in the container logs.
 
-## Data Persistence
-
-MindRoom stores data in the `mindroom_data` directory by default:
-
-- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
-- `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
-- `knowledge_db/` - Knowledge base vector stores
-- `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
-- `credentials/` - Synchronized secrets from `.env`
-- `logs/` - Application logs
-- `matrix_state.yaml` - Matrix connection state
-- `encryption_keys/` - Matrix E2EE keys (if enabled)
-
-These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
-`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
-
-Keep `tracking/` on persistent storage and include it in backups.
-Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
-When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
-
-Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
-If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
-These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
-Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
-This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
-Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
-
-Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
-The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
-Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
-Checkpoint invalidation can force a no-`since` limited sync that backfills older events, and opaque Matrix tokens provide no safe ordering frontier for pruning those exact keys.
-Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runtime/#durable-dispatch-boundary).
-
-## Sandbox Proxy Isolation
-
-When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
-The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
-This provides real process-level isolation for code-execution tools.
-In a simple local static-runner install with no proxy URL and no YAML or environment settings requesting worker routing, execution tools run in the MindRoom process.
-Explicit YAML worker lists take precedence over environment execution modes.
-Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
-Dedicated Docker and Kubernetes workers do not allow that fallback.
-
-See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
-
-> [!TIP]
-> For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+See [Data Persistence](https://docs.mindroom.chat/deployment/storage/#data-persistence) and [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/#sandbox-proxy-isolation_1).

@@ -44,7 +44,7 @@ Each video comes in a light and a dark recording to match your color scheme.
 ### Ask, approve, done
 
 An agent finds two requests in the inbox, picks a free slot, and pauses for approval before it books the meeting.
-See [Tool Approval](https://docs.mindroom.chat/configuration/#tool-approval).
+See [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval).
 
 <video controls playsinline preload="metadata" aria-label="Ask, approve, done" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/6a2033ea-3354-4afd-9d58-fc617b18cd24#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -174,7 +174,7 @@ See [Scheduling](https://docs.mindroom.chat/scheduling/).
 ### Nothing falls through the cracks
 
 A check asked for in conversation becomes a weekly scheduled report.
-See [Scheduler tool](https://docs.mindroom.chat/tools/calendar-and-scheduling/#scheduler).
+See [Scheduler tool](https://docs.mindroom.chat/scheduling/#scheduler).
 
 <video controls playsinline preload="metadata" aria-label="Nothing falls through the cracks" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">

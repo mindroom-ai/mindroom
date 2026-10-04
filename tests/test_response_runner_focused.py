@@ -9651,7 +9651,7 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     if failure == "secret":
         history[0].body = "My API key is sk-" + "a" * 48
     if failure == "oversized":
-        history[0].body = "x" * 16001
+        history[0].body = "Sleep thirty times for two seconds each. " + "x" * 16001 + " Log every sleep."
     refreshed = ThreadHistoryResult(
         history,
         is_full_history=failure != "partial",
@@ -9685,17 +9685,20 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
         finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
-    if failure:
+    if failure not in {None, "oversized"}:
         assert not finish
         assert payloads == []
     else:
         assert finish
         conversation = payloads[0]["state"]["conversation"]
         evidence = json.loads(conversation[-1]["text"])
-        assert conversation[:-1] == [
-            {"role": "user", "text": "Sleep thirty times for two seconds each"},
-            {"role": "user", "text": "Actually, make each sleep three seconds"},
-        ]
+        assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
+        root = conversation[0]["text"]
+        assert root.startswith("Sleep thirty times for two seconds each")
+        if failure == "oversized":
+            # A long message reaches the judge as its start and end rather than disabling judgment.
+            assert root.endswith("Log every sleep.")
+            assert "characters omitted" in root
         assert evidence["active_request"] == "Continue"
         assert "Stale input" not in str(payloads)
         assert "Future queued text" not in str(payloads)

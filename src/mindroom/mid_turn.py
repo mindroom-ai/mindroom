@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -16,6 +17,15 @@ if TYPE_CHECKING:
 
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
+
+logger = get_logger(__name__)
+
+# A long earlier message or reply snapshot reaches the judge as its start and end, so one big reply cannot disable judgment.
+_CLIPPED_TEXT_CHARS = 2_000
+# The redactor refuses input over 64 KiB, so longer text is scanned in overlapping chunks below that bound.
+_REDACTION_CHUNK_CHARS = 60_000
+_REDACTION_OVERLAP_CHARS = 4_000
+_MAX_CONTEXT_MESSAGES = 63
 
 MID_TURN_QUESTION = JudgmentQuestion(
     id="interrupt_current_turn",
@@ -32,6 +42,37 @@ MID_TURN_QUESTION = JudgmentQuestion(
         "Mere relevance to the task does not make praise or thanks an interruption."
     ),
 )
+
+
+def _clip(text: str) -> str:
+    if len(text) <= _CLIPPED_TEXT_CHARS:
+        return text
+    half = _CLIPPED_TEXT_CHARS // 2
+    return f"{text[:half]}\n[... {len(text) - 2 * half} characters omitted ...]\n{text[-half:]}"
+
+
+def _is_unredacted(text: str) -> bool:
+    """Scan the whole text, so a credential that clipping cuts in half still blocks the request."""
+    return all(
+        redact_sensitive_text(chunk) == chunk
+        for chunk in (
+            text[start : start + _REDACTION_CHUNK_CHARS + _REDACTION_OVERLAP_CHARS]
+            for start in range(0, len(text) or 1, _REDACTION_CHUNK_CHARS)
+        )
+    )
+
+
+def _is_plain_text(text: str | None) -> TypeGuard[str]:
+    return (
+        text is not None
+        and bool(text.strip())
+        and "[attachments:" not in text
+        and "Attachments sent with the current message" not in text
+    )
+
+
+def _is_whole_text(text: str | None) -> TypeGuard[str]:
+    return _is_plain_text(text) and len(text) <= MAX_REQUEST_BYTES and _is_unredacted(text)
 
 
 def message_text_for_judgment(envelope: MessageEnvelope) -> str | None:
@@ -72,8 +113,8 @@ class MidTurnGate:
         self._finish = False
 
     def record_visible_response(self, text: str) -> None:
-        """Keep only bounded Matrix-acknowledged text for subsequent queue snapshots."""
-        self.visible_response_text = text if len(text) <= MAX_REQUEST_BYTES else None
+        """Keep the latest Matrix-acknowledged text for subsequent queue snapshots."""
+        self.visible_response_text = text
 
     async def acknowledge_deferred(self, message: QueuedMessage) -> None:
         """Attempt one acknowledgement per message after the caller accepts the decision."""
@@ -87,56 +128,52 @@ class MidTurnGate:
         async with self._lock:
             if self._checked == pending:
                 return self._finish
-            texts = (
-                self.active_text,
-                *(message.text for message in pending),
-                *(message.text for message in self.conversation_context or ()),
-            )
-            if (
-                self.conversation_context is None
-                or not pending
-                or len(pending) > 8
-                or any(
-                    text is None
-                    or not text.strip()
-                    or len(text) > MAX_REQUEST_BYTES
-                    or "[attachments:" in text
-                    or "Attachments sent with the current message" in text
-                    or redact_sensitive_text(text) != text
-                    for text in texts
-                )
-            ):
-                self._checked, self._finish = pending, False
-                return False
-            if any(
-                message.visible_response is None
-                or len(message.visible_response) > MAX_REQUEST_BYTES
-                or redact_sensitive_text(message.visible_response) != message.visible_response
-                for message in pending
-            ):
-                self._checked, self._finish = pending, False
-                return False
-            evidence = json.dumps(
-                {
-                    "active_request": self.active_text,
-                    "queued_messages": [
-                        {"text": message.text, "visible_response": message.visible_response} for message in pending
-                    ],
-                },
-                ensure_ascii=False,
-            )
-            request = build_judgment_request(
-                MID_TURN_QUESTION,
-                (*(self.conversation_context or ()), JudgmentMessage("user", evidence)),
-                max_context_messages=64,
-                instructions=self.instructions,
-            )
             finish = False
-            if request.complete:
-                try:
-                    finish = await self.evaluate(request) is True
-                except Exception:
-                    # Keep the existing behavior; SDK exceptions can contain private inputs.
-                    finish = False
+            request = self._request(pending)
+            if isinstance(request, str):
+                reason = request
+            else:
+                reason = request.incomplete_reason
+                if request.complete:
+                    try:
+                        finish = await self.evaluate(request) is True
+                    except Exception:
+                        # Keep the existing behavior; SDK exceptions can contain private inputs.
+                        reason = "judge_error"
+            if reason is not None:
+                logger.info("Mid-turn judgment skipped", reason=reason, queued_messages=len(pending))
             self._checked, self._finish = pending, finish
             return finish
+
+    def _request(self, pending: tuple[QueuedMessage, ...]) -> JudgmentRequest | str:  # noqa: PLR0911
+        """Build the judge's request, or name why the queue cannot be judged."""
+        if self.conversation_context is None:
+            return "history_unavailable"
+        if not pending or len(pending) > 8:
+            return "queued_message_count"
+        # The judge compares the active request with each queued message, so both are sent whole.
+        if not _is_whole_text(self.active_text):
+            return "active_request_unjudgeable"
+        queued = []
+        for message in pending:
+            if not _is_whole_text(message.text):
+                return "queued_message_unjudgeable"
+            if message.visible_response is None or not _is_unredacted(message.visible_response):
+                return "visible_response_unavailable"
+            queued.append({"text": message.text, "visible_response": _clip(message.visible_response)})
+        history = self.conversation_context[-_MAX_CONTEXT_MESSAGES:]
+        if not all(_is_plain_text(message.text) and _is_unredacted(message.text) for message in history):
+            return "history_unjudgeable"
+        evidence = json.dumps({"active_request": self.active_text, "queued_messages": queued}, ensure_ascii=False)
+        context = [JudgmentMessage(message.sender, _clip(message.text)) for message in history]
+        while True:
+            request = build_judgment_request(
+                MID_TURN_QUESTION,
+                (*context, JudgmentMessage("user", evidence)),
+                max_context_messages=_MAX_CONTEXT_MESSAGES + 1,
+                instructions=self.instructions,
+            )
+            if request.incomplete_reason != "essential_input_too_large" or not context:
+                return request
+            # The oldest conversation gives way first.
+            del context[0]

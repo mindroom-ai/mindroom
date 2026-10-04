@@ -314,5 +314,5 @@ get_currently_playing()
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
 - [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)

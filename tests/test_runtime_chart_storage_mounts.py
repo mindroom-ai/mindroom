@@ -218,6 +218,16 @@ def test_storage_options_reject_invalid_values(tmp_path: Path, values: dict[str,
 @pytest.mark.parametrize(
     ("config_path", "values"),
     [
+        ("/app/agent_data/encryption_keys/config.yaml", {"stateStorage": _STATE}),
+        ("/app/agent_data/sync_continuity/config.yaml", {"stateStorage": _STATE}),
+        (
+            "/app/agent_data/active/config.yaml",
+            {"stateStorage": {**_STATE, "encryptionKeys": {"mountPath": "/app/agent_data/active/keys"}}},
+        ),
+        (
+            "/app/agent_data/active/config.yaml",
+            {"extraVolumeMounts": [{"name": "custom", "mountPath": "/app/agent_data/active/keys"}]},
+        ),
         (
             "/app/agent_data/runtime-config/config.yaml",
             {
@@ -234,12 +244,12 @@ def test_storage_options_reject_invalid_values(tmp_path: Path, values: dict[str,
         ("/app/agent_data/knowledge_db/config.yaml", {"knowledgeStorage": {"enabled": True}}),
     ],
 )
-def test_bootstrap_config_directory_cannot_be_a_new_storage_mount(
+def test_bootstrap_config_directory_cannot_overlap_a_mount(
     tmp_path: Path,
     config_path: str,
     values: dict[str, Any],
 ) -> None:
-    """Native bootstrap must not write its config directory onto one of the new mounts."""
+    """Native bootstrap must not write its config directory onto a mount or above a nested one."""
     bootstrap = {
         "config": {"source": "file", "path": config_path, "bootstrapBundlePath": "/bundle"},
         "workers": {"backend": "kubernetes"},

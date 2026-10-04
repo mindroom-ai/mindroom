@@ -179,7 +179,24 @@ agents:
 Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Self-hosted configurations from `mindroom config init` leave it off.
 
-All fields, defaults, and bounds are listed in the [agent configuration reference](configuration/agents.md#automatic-skill-learning).
+All fields, defaults, and bounds are listed in [Settings](#settings).
+
+### Settings
+
+`agents.<name>.skill_learning` controls the optional background review that maintains learned skills in the agent's workspace, modeled on Hermes Agent's self-improvement loop.
+All fields are optional, and unknown fields are rejected.
+
+| Field | Type | Default | Bounds and behavior |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Count completed standalone responses, review conversations that reach the interval, and offer the `skill_manage` tool. |
+| `model` | string or null | `null` | Review model alias from `models`; null reviews on the model the response used and reuses its prompt cache, while another model replays a digest of the conversation. |
+| `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
+| `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
+| `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
+| `archive_after_days` | integer | `30` | 0–3650 days with no use, creation, or `skill_manage` edit before a learned skill is archived; `0` keeps learned skills indefinitely. |
+
+Reviews incur additional model usage.
+See [Automatic skill learning](#automatic-skill-learning) for triggering, ownership, history, archival, and notices.
 
 ### When reviews run
 

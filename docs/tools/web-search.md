@@ -493,4 +493,4 @@ web_search_with_linkup(
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)

@@ -3,7 +3,8 @@ name: docs-review
 description: Review documentation for accuracy, completeness, and consistency against the actual codebase.
 ---
 
-Review documentation for accuracy, completeness, and consistency. Focus on things that require judgment—automated checks handle the rest.
+Review documentation for accuracy, completeness, relevance, and consistency. Focus on things that require judgment—automated checks handle the rest.
+The Documentation Policy in `AGENTS.md` defines who reads `docs/` and what belongs there.
 
 ## What's Already Automated
 
@@ -17,10 +18,11 @@ Don't waste time on these—CI and pre-commit hooks handle them:
 Focus on things that require judgment:
 
 1. **Accuracy**: Does the documentation match what the code actually does?
-2. **Completeness**: Are there undocumented features, options, or behaviors?
-3. **Clarity**: Would a new user understand this? Are examples realistic?
-4. **Consistency**: Do different docs contradict each other?
-5. **Freshness**: Has the code changed in ways the docs don't reflect?
+2. **Completeness**: Are there undocumented features, config options, user-visible behaviors, or operator procedures?
+3. **Relevance**: Does every sentence pass the Documentation Policy, or does it describe implementation mechanics or change history?
+4. **Clarity**: Would a MindRoom agent answering a user question find and apply this? Are examples realistic?
+5. **Consistency**: Do different docs contradict each other or repeat the same fact?
+6. **Freshness**: Has the code changed in ways the docs don't reflect?
 
 ## Review Process
 
@@ -52,8 +54,8 @@ ls docs/configuration/
 Trace inheritance for every discovered class instead of assuming each Pydantic model directly subclasses `BaseModel`.
 
 Check:
-- All config keys documented, types and defaults match code
-- No models exist without corresponding docs (or vice versa)
+- Every public config field has one owning reference with accurate type, default, constraints, inheritance, and prerequisites
+- Internal models need no docs just because they exist
 - Example YAML would actually work
 
 ### 3. Verify Architecture Docs Against Source
@@ -65,7 +67,7 @@ git ls-files "src/mindroom/**/*.py"
 
 Check `docs/architecture/` and the Architecture section of `AGENTS.md`:
 - Listed modules exist and descriptions match what the code does
-- No source modules are missing from the listings
+- No source modules are missing from the `AGENTS.md` listing; `docs/architecture/` covers components and data flow, not every module
 - Both locations can drift independently — check both
 
 ### 4. Verify Feature Docs Against Implementation
@@ -114,9 +116,10 @@ Categorize findings:
 1. **Critical**: Wrong info that would break user workflows
 2. **Inaccuracy**: Technical errors (wrong defaults, paths, types)
 3. **Missing**: Undocumented features or options
-4. **Outdated**: Was true, no longer is
-5. **Inconsistency**: Docs contradict each other
-6. **Minor**: Typos, unclear wording
+4. **Irrelevant**: Implementation mechanics, change history, or repeated facts to remove
+5. **Outdated**: Was true, no longer is
+6. **Inconsistency**: Docs contradict each other
+7. **Minor**: Typos, unclear wording
 
 For each issue, provide a ready-to-apply fix:
 

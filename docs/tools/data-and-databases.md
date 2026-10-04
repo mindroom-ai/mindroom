@@ -760,6 +760,6 @@ get_news("TSLA", limit=10)
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
 - [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
 - [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)

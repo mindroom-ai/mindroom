@@ -16,7 +16,7 @@ Use these tools when you need Google Calendar or Google Tasks access, Cal.com bo
 - [`google_calendar`] - Read Google Calendar data and, when enabled, create, update, or delete events through Google OAuth.
 - [`google_tasks`] - List, create, update, complete, and delete Google Tasks through Google OAuth.
 - [`cal_com`] - Query Cal.com availability and manage bookings through the Cal.com API.
-- [`scheduler`] - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
+- [`scheduler`](../scheduling.md#scheduler) - Schedule, edit, list, and cancel MindRoom tasks and reminders in the current Matrix conversation.
 
 ## Common Setup Notes
 
@@ -185,71 +185,12 @@ get_upcoming_bookings(email="alex@example.com")
 - `api_key` is a password field, so MindRoom blocks inline YAML overrides for it in normal authored config.
 - All current requests go to `https://api.cal.com/v2`.
 
-## [`scheduler`]
-
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%">
-  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
-</video>
-
-`scheduler` is MindRoom's built-in task scheduler for future messages, reminders, and recurring agent or team work.
-
-### What It Does
-
-`scheduler` exposes `schedule()`, `schedule_tool_call()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
-It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
-`schedule_tool_call()` schedules one exact approval-gated tool call that the requester approves while scheduling it, as described in [Pre-Approved Tool Calls](../scheduling.md#pre-approved-tool-calls).
-Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
-Pass `model="cheap"` to run a task with a model alias configured under `models:`, including all team members.
-The choice applies only to scheduled runs and takes precedence over room and thread model settings.
-The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
-Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
-Pass `silent=True` to hide the scheduled trigger and omit successful final responses that are empty or contain only `NO_REPLY`.
-Findings, failures, and messages explicitly sent by tools remain visible for silent schedules.
-Scheduled tasks are stored in Matrix room state and persist across restarts.
-The scheduler validates mentioned agents and teams against the current room or thread before it saves a task.
-If no Matrix room context is available, the tool returns an unavailable error instead of creating a task.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - scheduler
-```
-
-```python
-schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
-schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
-schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
-list_schedules()
-edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
-cancel_schedule("a1b2c3d4")
-```
-
-### Notes
-
-- `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
-- Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
-- Editing preserves the chosen model when `model` is omitted; pass `model=""` to restore normal model selection.
-- Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
-- Editing preserves the current silent-delivery mode unless the natural-language request or `silent` argument changes it.
-- Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
-- A silent schedule with `new_thread=True` posts any finding or failure as a room-level root because its hidden trigger cannot serve as a visible thread root.
-- Silent delivery controls room presentation only; the task body still travels through Matrix and remains subject to homeserver retention and MindRoom's durable recovery journal.
-- Conditional phrases such as `if` and `when` are converted into recurring polling schedules rather than real event subscriptions.
-- Use [Scheduling](../scheduling.md) for the full command syntax, timezone behavior, persistence details, and command-line aliases.
+See [`scheduler`](../scheduling.md#scheduler).
 
 ## Related Docs
 
 - [Tools Overview](index.md)
 - [Scheduling](../scheduling.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
 - [Google Services OAuth (Admin Setup)](../deployment/google-services-oauth.md)
 - [Google Services OAuth (Individual Setup)](../deployment/google-services-user-oauth.md)

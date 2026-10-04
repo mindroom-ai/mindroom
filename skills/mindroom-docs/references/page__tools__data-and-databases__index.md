@@ -756,6 +756,6 @@ get_news("TSLA", limit=10)
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)
 - [Google Services OAuth (Admin Setup)](https://docs.mindroom.chat/deployment/google-services-oauth/)
 - [Google Services OAuth (Individual Setup)](https://docs.mindroom.chat/deployment/google-services-user-oauth/)

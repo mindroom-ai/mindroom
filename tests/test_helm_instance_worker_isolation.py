@@ -2384,7 +2384,10 @@ def test_chart_progress_deadline_is_optional(
 
 
 @_PROGRESS_DEADLINE_CHARTS
-@pytest.mark.parametrize("deadline", [0, -1, 1.5, "abc", True, "", 2147483648, 999999999999999999999999])
+@pytest.mark.parametrize(
+    "deadline",
+    [0, -1, 1.5, "abc", True, "", 2147483648, 99999999999999999999, 999999999999999999999999],
+)
 @pytest.mark.parametrize("from_values_file", [False, True])
 def test_chart_rejects_invalid_progress_deadline(
     tmp_path: Path,
@@ -2583,17 +2586,56 @@ def _agent_vault_network_policies(tmp_path: Path, values: dict[str, Any]) -> lis
     ]
 
 
+_NODE_LOCAL_DNS_BLOCK = {"cidr": "169.254.20.10/32"}
+
+
 @pytest.mark.parametrize(
-    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy"),
+    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy", "dns", "dns_peers"),
     [
         # Vault-first: workers send tool egress to agentVault.proxyUrl directly.
-        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False),
+        # Without a worker egress policy the DNS setting is unused, so vault DNS stays port-only.
+        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False, {"ipBlocks": [_NODE_LOCAL_DNS_BLOCK]}, None),
         # Squid-first: only approved egress forwards token-bearing traffic to the proxy port.
-        (True, True, [_VAULT_API_PORT], True),
+        # Vault DNS uses the worker egress policy's default cluster DNS destination.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            None,
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                },
+            ],
+        ),
         # Approved egress with an external proxyUrl: nothing in the chart uses the proxy port.
-        (True, False, [_VAULT_API_PORT], False),
+        # Vault DNS follows a configured destination that replaces the default selectors.
+        (
+            True,
+            False,
+            [_VAULT_API_PORT],
+            False,
+            {"namespaceSelector": None, "podSelector": None, "ipBlocks": [_NODE_LOCAL_DNS_BLOCK]},
+            [{"ipBlock": _NODE_LOCAL_DNS_BLOCK}],
+        ),
+        # A pod-only DNS destination is pinned to the worker namespace, not the vault's release namespace.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            {"namespaceSelector": None, "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}}},
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+                },
+            ],
+        ),
     ],
-    ids=["vault-first", "squid-first", "external-proxy"],
+    ids=["vault-first", "squid-first", "external-proxy", "pod-only-dns"],
 )
 def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clients(
     tmp_path: Path,
@@ -2601,8 +2643,10 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
     parent_proxy: bool,
     worker_ports: list[dict[str, Any]],
     squid_reaches_proxy: bool,
+    dns: dict[str, Any] | None,
+    dns_peers: list[dict[str, Any]] | None,
 ) -> None:
-    """Workers, the control plane, and the vault Jobs reach the API; the proxy port follows the egress chain."""
+    """Workers, the control plane, and the vault Jobs reach the API; the proxy port and DNS follow the egress chain."""
     agent_vault: dict[str, Any] = {
         "enabled": True,
         "cliImage": "example.test/vault:test",
@@ -2639,6 +2683,8 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
             "image": {"tag": "v0.1.0"},
             "parentProxy": {"enabled": parent_proxy},
         }
+    if dns is not None:
+        values["egressProxy"] = {"networkPolicy": {"dns": dns}}
 
     [policy] = _agent_vault_network_policies(tmp_path, values)
 
@@ -2678,9 +2724,12 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
                 "ports": [_VAULT_PROXY_PORT],
             },
         )
+    dns_egress, web_egress = _VAULT_BASE_EGRESS
+    if dns_peers is not None:
+        dns_egress = {"to": dns_peers, **dns_egress}
     assert policy["metadata"]["name"] == "agent-vault"
     assert policy["spec"]["ingress"] == expected_ingress
-    assert policy["spec"]["egress"] == _VAULT_BASE_EGRESS
+    assert policy["spec"]["egress"] == [dns_egress, web_egress]
 
 
 @pytest.mark.parametrize("smtp_enabled", [False, True])
@@ -4114,39 +4163,6 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
         "storageClassName": "fast-rwo",
         "resources": {"requests": {"storage": "20Gi"}},
     }
-
-
-@pytest.mark.parametrize(
-    ("config_path", "extra_args"),
-    [
-        ("/app/agent_data/encryption_keys/config.yaml", ()),
-        ("/app/agent_data/sync_continuity/config.yaml", ("stateStorage.syncContinuity.enabled=true",)),
-        ("/app/agent_data/active/config.yaml", ("stateStorage.encryptionKeys.mountPath=/app/agent_data/active/keys",)),
-        (
-            "/app/agent_data/active/config.yaml",
-            ("extraVolumeMounts[0].name=custom", "extraVolumeMounts[0].mountPath=/app/agent_data/active/keys"),
-        ),
-    ],
-)
-def test_runtime_chart_rejects_bootstrap_target_overlapping_mount(
-    config_path: str,
-    extra_args: tuple[str, ...],
-) -> None:
-    """Chart-known mounts must not become bootstrap target or its nested children."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        "config.source=file",
-        f"config.path={config_path}",
-        "config.bootstrapBundlePath=/bundle",
-        "workers.backend=kubernetes",
-        "stateStorage.enabled=true",
-        "stateStorage.existingClaim=mindroom-state",
-        *extra_args,
-        release_name="mindroom-runtime",
-    )
-    assert completed.returncode != 0
-    assert "config.path directory overlaps a mounted volume" in completed.stderr
 
 
 @pytest.mark.parametrize(

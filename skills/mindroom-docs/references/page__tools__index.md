@@ -32,23 +32,149 @@ defaults:
 `defaults.tools` are merged into each agent's own `tools` list with duplicates removed.
 Set `defaults.tools: []` to disable global default tools, or set `agents.<name>.include_default_tools: false` to opt out a specific agent.
 When the same tool appears in both `defaults.tools` and an agent's `tools` with inline overrides, the per-agent overrides take priority, with non-overlapping keys merged from both.
-See [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration) for the full override syntax and merge order.
+See [Per-Agent Tool Configuration](#per-agent-tool-configuration) for the full override syntax and merge order.
 Configured MCP servers also appear here as dynamic tools named `mcp_<server_id>`.
 See [MCP](https://docs.mindroom.chat/mcp/) for the `mcp_servers` config and naming rules.
 
-## MindRoom-Managed OAuth Onboarding In Conversation
+## Per-Agent Tool Configuration
 
-This flow applies to tools whose MindRoom catalog metadata names an `auth_provider`, including the Google provider tools and OAuth MCP servers.
-It does not apply to every tool labeled `SetupType.OAUTH`; tools without `auth_provider` metadata use their own setup contract.
-When `config_manager` creates or updates an agent with one of these tools, it returns a connect URL scoped to the updated agent and current authorized requester when that binding is available.
-Present that URL directly instead of asking the configuring agent to call the new tool, because newly configured tools are not guaranteed to enter the current run's tool schema.
-When the current agent already has a MindRoom-managed provider tool, call an appropriate safe status, read, or list operation to check its connection.
-For an OAuth MCP server, use its generated `*_connection_status` or `*_list_tools` operation.
-If the operation is disconnected, its structured `OAuthConnectionRequired` result includes `oauth_connection_required: true`, a scoped `connect_url` when available, and `requires_host_browser: true` when the URL uses a supported loopback host.
-When `connect_url` is provided, present it directly instead of sending the user to the dashboard.
-When `requires_host_browser` is true, explain that the loopback URL (`localhost`, `127.0.0.1`, or `::1`) must be opened in a browser on the computer where MindRoom is running, not on a phone or another computer.
-After the user connects, have the target agent retry the safe operation or original request.
-The dashboard remains a manual alternative only when no `connect_url` is available.
+Tools can be plain strings or single-key dicts with inline config overrides.
+This lets you customize tool behavior per agent without affecting other agents that use the same tool.
+
+```yaml
+agents:
+  code:
+    tools:
+      - file                              # no override, uses defaults
+      - shell:                            # per-agent override
+          extra_env_passthrough: "DAWARICH_*"
+          enable_run_shell_command: true
+  research:
+    tools:
+      - shell                             # uses global defaults (no overrides)
+      - duckduckgo
+```
+
+### Merge Order
+
+MindRoom resolves tool configuration in layers:
+
+1. Tool constructor defaults (hardcoded in tool code)
+2. Credentials (dashboard or credential store)
+3. `defaults.tools` overrides (global inline config)
+4. `agents.<name>.tools` overrides (per-agent inline config)
+5. Runtime overrides (sandbox proxy, init overrides)
+
+Within the authored layers (`defaults.tools` and `agents.<name>.tools`), each field has three possible states:
+
+- Key omitted: keep the value from the next lower layer unchanged.
+- Concrete value: override the next lower layer with that value.
+- `__MINDROOM_INHERIT__`: clear an inherited authored override and fall back to the next lower layer.
+
+When the same tool appears in both `defaults.tools` and `agents.<name>.tools`, MindRoom merges them field-by-field.
+Per-agent values win for overlapping keys, non-overlapping keys are kept from both, and `__MINDROOM_INHERIT__` removes the inherited authored value instead of passing the literal string to the tool.
+
+### Defaults with Overrides
+
+`defaults.tools` also accepts the single-key dict syntax for global overrides that apply to all agents:
+
+```yaml
+defaults:
+  tools:
+    - scheduler
+    - shell:
+        enable_run_shell_command: true     # global default for all agents
+```
+
+### Filtering Toolkit Functions
+
+Registered Agno Toolkit integrations accept `include_tools` and `exclude_tools` inline overrides even when those fields are not declared by the concrete toolkit constructor.
+`include_tools` is an allowlist, while `exclude_tools` is a denylist applied after the toolkit registers its functions.
+Use the function names exposed by the tool catalog.
+Unsupported non-Toolkit integrations reject these fields during config validation.
+
+```yaml
+agents:
+  research:
+    tools:
+      - searxng:
+          include_tools:
+            - search_web
+            - news_search
+            - image_search
+```
+
+### Clearing An Inherited Override
+
+Use `__MINDROOM_INHERIT__` when an agent should keep the tool but stop inheriting one authored field from `defaults.tools`.
+
+Optional-field example:
+
+```yaml
+defaults:
+  tools:
+    - shell:
+        extra_env_passthrough: "DAWARICH_*"
+        enable_run_shell_command: true
+
+agents:
+  research:
+    tools:
+      - shell:
+          extra_env_passthrough: __MINDROOM_INHERIT__
+```
+
+`research` still inherits `enable_run_shell_command: true`, but `extra_env_passthrough` falls back to the lower layer (persisted tool config if set, otherwise the tool's normal default).
+For sandboxed `shell`, provider API keys and other committed runtime credentials are denied by default in both worker startup env and command env.
+Use `extra_env_passthrough` when a specific exported process env value must be visible to shell commands.
+
+Required non-secret field example:
+
+```yaml
+defaults:
+  tools:
+    - clickup:
+        master_space_id: "space-default"
+
+agents:
+  ops:
+    tools:
+      - clickup:
+          master_space_id: __MINDROOM_INHERIT__
+```
+
+`ops` still uses the `clickup` tool, but `master_space_id` no longer inherits `"space-default"`.
+MindRoom falls back to the next lower layer, which is usually the stored tool config from the dashboard or credential store.
+
+### `include_default_tools` vs `__MINDROOM_INHERIT__`
+
+- `include_default_tools: false` is coarse-grained: it removes every tool and every override inherited from `defaults.tools` for that agent.
+- `__MINDROOM_INHERIT__` is fine-grained: it keeps the tool and the rest of the inherited fields, but clears one specific authored override.
+
+### Security Restrictions
+
+Not all config fields can be overridden inline:
+
+- `type="password"` fields are blocked (credentials must go through the dashboard or credential store)
+- `base_dir` is blocked (runtime-only, set by the workspace system)
+- Fields with `authored_override: false` in the tool metadata are blocked
+
+MindRoom validates overrides at config load time and rejects unknown field names, wrong value types, and blocked fields with a clear error message.
+
+### Backward Compatibility
+
+Existing configs with plain string tool lists work unchanged:
+
+```yaml
+tools: [shell, file, duckduckgo]   # still valid
+```
+
+### Config Manager
+
+The `!config` chat command and the `config_manager` tool preserve inline overrides when updating tool lists.
+Adding or removing tools via chat does not discard existing per-agent overrides on other tools.
+
+See [MindRoom-Managed OAuth Onboarding In Conversation](https://docs.mindroom.chat/oauth-framework/#mindroom-managed-oauth-onboarding-in-conversation).
 
 ## Browse By Topic
 
@@ -78,28 +204,7 @@ Some entries are config-only presets rather than runtime toolkits.
 Some tools also imply companion tools through `Config.IMPLIED_TOOLS`.
 Today `matrix_message` implies both `attachments` and `matrix_room`, so the effective tool set includes all three even when only `matrix_message` is configured explicitly.
 
-## Tool Runtime Context
-
-When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
-This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
-`thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
-Tools like `matrix_message`, `matrix_room`, `chat_ui`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
-`thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
-`thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
-`thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
-`thread_tags.list_thread_tags(tag=...)` narrows both thread-specific and room-wide responses to the requested tag only.
-`thread_tags.list_thread_tags(include_tag=..., exclude_tag=...)` filters which threads are returned: `include_tag` keeps only threads with that tag, `exclude_tag` removes threads with that tag.
-Both can be combined.
-Unlike `tag` (which narrows the output payload), these filter which threads appear at all.
-`thread_tags.list_thread_tags(exclude_tag="resolved", include_untagged=True)` lists unresolved room threads, including threads that have no tag state yet.
-`include_untagged=True` forces a room-wide query and cannot be combined with `thread_id`.
-It enumerates Matrix `/threads` and may stop at the 2000-root safety cap.
-The response includes `include_untagged: bool` and `truncated: bool`.
-Callers must check `truncated` before claiming the unresolved list is complete.
-`thread_tags` also validates and normalizes predefined payload schemas for `blocked.data.blocked_by`, `waiting.data.waiting_on`, `priority.data.level`, and `due.data.deadline`.
-`thread_resolution` is an explicit opt-in capability backed by the `resolved` thread tag and does not read the removed experimental `com.mindroom.thread.resolution` event type.
-It is absent from starter configs and default tool sets, while `thread_tags` can list but cannot mutate `resolved` state.
-`matrix_api` defaults `room_id` to the active room, supports cross-room targeting for rooms the requester is joined to, never infers event IDs or state keys from thread context, and now also supports room-scoped full-text search through `action="search"`.
+See [Tool Runtime Context](https://docs.mindroom.chat/tools/matrix-and-attachments/#tool-runtime-context).
 
 ## MindRoom Update Awareness
 
@@ -114,18 +219,7 @@ defaults:
     - update_awareness
 ```
 
-## Worker-Routed Execution
-
-Some tools default to running in a sandboxed worker container instead of the primary agent process.
-The current worker-routed defaults are `file`, `shell`, `python`, `coding`, and `docker`.
-Use [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for deployment details and worker-scope behavior.
-
-## Shared-Only Integrations
-
-Some dashboard integrations are restricted to shared or unscoped execution and cannot be used by agents with isolating worker scopes.
-The current shared-only integrations are `spotify` and `homeassistant`.
-MCP `mcp_<server_id>` tools work on every worker scope: OAuth credentials and sessions follow the selected agent's effective execution scope, while non-OAuth servers always call through the shared server session without requester credentials.
-For OAuth-backed MCP, `shared` belongs to the agent, `user` belongs to the requester across agents, `user_agent` belongs to one requester-agent pair, and unscoped belongs to the installation.
+See [Worker-Routed Execution](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routed-execution) and [Shared-Only Integrations](https://docs.mindroom.chat/deployment/sandbox-proxy/#shared-only-integrations).
 
 ## Automatic Dependency Installation
 

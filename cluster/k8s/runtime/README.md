@@ -334,7 +334,7 @@ Bundle transport can refresh the separate source directory normally.
 To activate a changed revision without a restart, run `mindroom config apply-bundle SOURCE --target TARGET --config FILENAME --rollback-on-failure --json` in the runtime container, where TARGET and FILENAME are the directory and filename of `config.path`.
 It installs the tree, waits for the runtime to apply its fingerprint, restores the digest-pinned `TARGET.previous` only when the runtime rejects the change, and exits `0` only for `applied`.
 It refuses changes outside the YAML/include sources that a config reload rereads, such as `.env` or plugin files; [Updating a Bootstrapped Config](#updating-a-bootstrapped-config) shows the full hot path.
-See [`config apply-bundle`](../../../docs/cli.md#config-apply-bundle) for receipt statuses and exit codes, and [`config install-bundle`](../../../docs/cli.md#config-install-bundle) for drift protection, manual rollback, and filesystem limits.
+See [`config apply-bundle`](../../../docs/deployment/config-bundles.md#config-apply-bundle) for receipt statuses and exit codes, and [`config install-bundle`](../../../docs/deployment/config-bundles.md#config-install-bundle) for drift protection, manual rollback, and filesystem limits.
 Content images need no MindRoom binary.
 
 Bootstrap cannot be combined with `workers.backend: static_runner`: its sidecar starts concurrently and could capture the environment before installation.

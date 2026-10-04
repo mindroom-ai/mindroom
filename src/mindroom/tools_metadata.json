@@ -7880,7 +7880,7 @@
       ],
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
-      "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/#agent-callbacks",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

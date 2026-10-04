@@ -25,6 +25,32 @@ Reset removes the saved override and restores the standard default.
 Selecting minimal mode does not grant shell access or add tools.
 If the deployment or agent cannot support minimal mode, the command keeps the previous selection and lists every missing requirement with its fix, the `.env` file for deployment settings, and a link to the [deployment requirements](#deployment-requirements).
 
+### `!mode`
+
+Switch one agent's tool interface for its next Matrix response in the current conversation.
+Minimal mode exposes only Bash to the model; the agent's configured tools remain available through the MindRoom CLI.
+Standard mode restores the usual tool interface.
+
+```
+!mode helper minimal
+!mode helper show
+!mode helper standard
+!mode helper reset
+```
+
+The choice survives restarts without changing `config.yaml`.
+For agents using threads, run the command inside an existing thread and continue talking to the agent in that same thread.
+For agents using `thread_mode: room`, the choice applies to the whole room, including commands sent from a thread.
+Private agents store the choice separately for each requester.
+Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
+
+You must be authorized to use the named agent.
+Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and MindRoom's API server, reachable from wherever the agent's shell runs.
+When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
+See [deployment requirements](#deployment-requirements).
+If shell permissions or deployment settings later change, minimal responses fail closed.
+Run `!mode helper standard` or `!mode helper reset` in the same conversation to remove the saved choice and restore standard mode.
+
 ## Minimal subagents
 
 A caller with the [`delegate`](https://docs.mindroom.chat/tools/agent-orchestration/#delegate) tool can pass `minimal=True` to `run_subagent` to run that child in minimal mode.
@@ -73,6 +99,14 @@ Moving guidance out of the initial prompt changes when the model sees it.
 Use `minimal_instructions` for concise guidance that should be present on every minimal request.
 Use the agent's existing memory system for durable notes and `minimal_instructions` for custom minimal-mode guidance.
 Switching modes does not create a second workspace or memory store.
+
+### Conversation mode
+
+Standard mode is the default.
+An existing shell-enabled agent can select minimal mode per conversation with `!mode <agent> minimal`.
+Minimal mode presents one Bash tool and discovers other tools through `mindroom-agent`.
+It keeps the same identity, workspace, memory, history, and permissions.
+The optional `minimal_instructions` list defaults to `[]` and supplies concise guidance on every minimal request; ordinary instructions remain available through CLI context discovery.
 
 ## Discover and call tools
 
