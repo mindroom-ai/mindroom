@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import html
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -272,11 +273,16 @@ async def _final_answer(bot: AgentBot) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(tmp_path: Path) -> None:
+@pytest.mark.parametrize("adopted_placeholder", [True, False], ids=["replayed_turn", "edit_regeneration"])
+async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(
+    tmp_path: Path,
+    adopted_placeholder: bool,
+) -> None:
     """The stopped text and calls stay above the continuation, which streams even to an offline requester."""
     bot = _bot(tmp_path)
+    request = replace(await _crashed_turn(bot), existing_event_is_placeholder=adopted_placeholder)
 
-    (call,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
+    (call,), _fetch = await _replay(bot, request, _streamed())
 
     assert call.streamed
     assert call.model_prompt.startswith("CRASHTEST write the report\n\n<mindroom_message_context>")
@@ -301,6 +307,31 @@ async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(
     assert all(content["body"].startswith(PARTIAL) for content in in_progress)
     assert all(tool_trace_from_content(content) == list(TRACE) for content in in_progress)
     assert not await bot.journal_principal().is_pending("$source")
+
+
+@pytest.mark.asyncio
+async def test_a_failure_before_the_continuation_streams_keeps_the_stopped_reply(tmp_path: Path) -> None:
+    """A run that fails before it streams leaves the stopped attempt's text in place rather than redacting it."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    def failing_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        message = "model unavailable"
+        raise RuntimeError(message)
+
+    with (
+        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.stream_agent_response", new=failing_stream),
+        _hooks_prepare(runner),
+        contextlib.suppress(RuntimeError),
+    ):
+        await runner.generate_response(request)
+
+    bot.client.room_redact.assert_not_awaited()
+    final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert final is None
 
 
 @pytest.mark.asyncio
@@ -350,7 +381,7 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
     existing_event_id: str | None,
 ) -> None:
-    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery (as an edit regeneration does), is not read."""
+    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery, is not read."""
     bot = _bot(tmp_path)
     request = replace(
         await _crashed_turn(bot),

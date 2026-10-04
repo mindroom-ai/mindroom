@@ -332,6 +332,14 @@ def _interruption_note_landed(final_outcome: FinalDeliveryOutcome) -> bool:
     return body is not None and body.rstrip().endswith(note)
 
 
+def _replaceable_placeholder(request: ResponseRequest) -> bool:
+    """Return whether the adopted event holds only a placeholder that terminal handling may replace or redact.
+
+    A resumed reply shows its stopped attempt's work, which no failure may remove.
+    """
+    return request.existing_event_is_placeholder and request.resumed_reply is None
+
+
 def _split_delivery_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -2487,7 +2495,7 @@ class ResponseRunner:
                     tool_trace=tool_trace,
                     extra_content=extra_content,
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                 ),
             )
         self._note_final_delivery_timing(request, delivery)
@@ -3831,7 +3839,7 @@ class ResponseRunner:
             tracked_event_id=progress.tracked_event_id,
             run_message_id=placeholder_run_message_id,
             existing_event_id=request.existing_event_id,
-            existing_event_is_placeholder=request.existing_event_is_placeholder,
+            existing_event_is_placeholder=_replaceable_placeholder(request),
         )
         if pending.terminal_event_id is None:
             return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
@@ -3852,7 +3860,7 @@ class ResponseRunner:
                 tool_trace=None,
                 extra_content=None,
                 existing_event_id=request.existing_event_id,
-                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                existing_event_is_placeholder=_replaceable_placeholder(request),
             ),
         )
 
@@ -4292,7 +4300,7 @@ class ResponseRunner:
                         FinalDeliveryRequest(
                             target=resolved_target,
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(request),
                             response_text=reason,
                             identity=response_identity,
                             tool_trace=None,
@@ -4660,7 +4668,7 @@ class ResponseRunner:
                             exc,
                             message_id=message_id,
                             delivery_target=delivery_target,
-                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_identity=response_identity,
                             restart_message="Team non-streaming response interrupted by sync restart",
                             user_stop_message="Team non-streaming response cancelled by user",
@@ -4678,7 +4686,7 @@ class ResponseRunner:
                             if team_turn_recorder.outcome == "completed"
                             else None,
                             existing_event_id=message_id,
-                            existing_event_is_placeholder=delivery_request.existing_event_is_placeholder,
+                            existing_event_is_placeholder=_replaceable_placeholder(delivery_request),
                             response_text=response_text,
                             identity=response_identity,
                             tool_trace=None,
@@ -4745,7 +4753,7 @@ class ResponseRunner:
                         request.attachment_ids,
                     ),
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                 ),
             )
 
@@ -5211,7 +5219,7 @@ class ResponseRunner:
                     exc,
                     message_id=request.existing_event_id,
                     delivery_target=runtime.resolved_target,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_identity=response_identity,
                     restart_message="Non-streaming response interrupted by sync restart",
                     user_stop_message="Non-streaming response cancelled by user",
@@ -5239,7 +5247,7 @@ class ResponseRunner:
                     target=runtime.resolved_target,
                     prepared_edit_record=request.prepared_edit_record if turn_recorder.outcome == "completed" else None,
                     existing_event_id=request.existing_event_id,
-                    existing_event_is_placeholder=request.existing_event_is_placeholder,
+                    existing_event_is_placeholder=_replaceable_placeholder(request),
                     response_text=generation.response_text,
                     identity=response_identity,
                     tool_trace=generation.tool_trace if runtime.show_tool_calls else None,
@@ -5389,7 +5397,7 @@ class ResponseRunner:
                         tool_trace=error.tool_trace if runtime.show_tool_calls else None,
                         extra_content=response_extra_content,
                         existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        existing_event_is_placeholder=_replaceable_placeholder(request),
                     ),
                 ),
             )
@@ -5420,7 +5428,7 @@ class ResponseRunner:
                                 tracked_event_id=request.existing_event_id,
                                 run_message_id=None,
                                 existing_event_id=request.existing_event_id,
-                                existing_event_is_placeholder=request.existing_event_is_placeholder,
+                                existing_event_is_placeholder=_replaceable_placeholder(request),
                             ),
                             terminal_status="error",
                             failure_reason=str(error),
@@ -5434,7 +5442,7 @@ class ResponseRunner:
                             request.attachment_ids,
                         ),
                         existing_event_id=request.existing_event_id,
-                        existing_event_is_placeholder=request.existing_event_is_placeholder,
+                        existing_event_is_placeholder=_replaceable_placeholder(request),
                     ),
                 ),
             )

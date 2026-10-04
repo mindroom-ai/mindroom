@@ -664,10 +664,13 @@ class StreamingResponse:
         self.reply_to_event_id = self.target.reply_to_event_id
         self.room_mode = self.target.is_room_mode
         if self.resumed_text or self.resumed_tool_trace:
-            # The stopped attempt's part is already in Matrix, so a failed edit rolls back to it, not past it.
+            # The stopped attempt's part is already visible in Matrix, so a failed
+            # edit rolls back to it, and no terminal path treats it as a placeholder.
             self.accumulated_text = self._last_delivered_text = self.resumed_text
             self.tool_trace = list(self.resumed_tool_trace)
             self._last_delivered_tool_trace = list(self.resumed_tool_trace)
+            self._last_committed_rendered_body = self.resumed_text.rstrip()
+            self._last_committed_visible_body_state = "visible_body"
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -840,6 +843,21 @@ class StreamingResponse:
             return stream_status
         return STREAM_STATUS_COMPLETED
 
+    def _place_final_only_continuation(
+        self,
+        canonical_final_body_candidate: str | None,
+        *,
+        final_stream_status: str,
+    ) -> None:
+        """Put a completed continuation that arrived only as its final event below the stopped attempt it resumes."""
+        if (
+            final_stream_status == STREAM_STATUS_COMPLETED
+            and canonical_final_body_candidate is not None
+            and self.resumed_text
+            and not self.accumulated_text.removeprefix(self.resumed_text).strip()
+        ):
+            self.accumulated_text = self.resumed_text + canonical_final_body_candidate
+
     async def finalize(  # noqa: C901, PLR0911, PLR0912
         self,
         client: nio.AsyncClient,
@@ -907,6 +925,7 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
+        self._place_final_only_continuation(canonical_final_body_candidate, final_stream_status=final_stream_status)
         text_to_send = self.accumulated_text
         if (
             final_stream_status == STREAM_STATUS_COMPLETED

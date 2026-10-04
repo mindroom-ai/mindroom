@@ -423,6 +423,9 @@ class EditRegenerator:
                     edit_receipt_order=active_receipt_order,
                 ),
                 existing_event_id=record.response_event_id,
+                # A restart can stop a regeneration mid-stream; reading the reply back
+                # tells that stopped stream, which the replay continues, from a finished answer.
+                existing_event_is_recovered=True,
                 user_id=requester_id,
                 correlation_id=driving_edit.revision[1],
                 matrix_run_metadata=metadata,

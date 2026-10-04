@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import streaming as streaming_mod
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
@@ -1221,3 +1221,21 @@ async def test_a_resumed_team_pause_hands_off_the_teams_own_presentation(config:
     assert presentation.rendered_response_text is None
     assert [entry.tool_name for entry in presentation.tool_trace] == ["lookup"]
     assert presentation.state == state
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(config: Config) -> None:
+    """A continuation that arrives only as its final event still goes below the stopped attempt."""
+    gateway = _FakeGateway()
+
+    async def final_only() -> AsyncIterator[object]:
+        yield RunCompletedEvent(content="The second half.")
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        outcome = await _run_resumed_stream(config, final_only())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text == f"{_RESUMED_PREFIX}The second half."
+    assert outcome.visible_body_state == "visible_body"

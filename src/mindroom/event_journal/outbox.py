@@ -574,7 +574,7 @@ def claim_active_delivery_ownership(
 
 
 def owns_response(transaction: Transaction, principal_id: str, *, room_id: str, event_id: str) -> bool:
-    """Require a current attempted delivery before history can trigger auto-resume."""
+    """Require a current attempted delivery before startup cleanup may repair a response."""
     return response_delivery_id(transaction, principal_id, room_id=room_id, event_id=event_id) is not None
 
 

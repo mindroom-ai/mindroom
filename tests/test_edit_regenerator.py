@@ -360,6 +360,8 @@ async def test_simple_edit_regenerates_and_records_new_response(tmp_path: Path) 
     assert request.member_display_names == {USER_ID: "Banana Man"}
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert request.existing_event_is_placeholder is False
+    # A restart may have stopped an earlier regeneration of this reply, which the runner reads back.
+    assert request.existing_event_is_recovered is True
     assert request.user_id == USER_ID
     assert request.correlation_id == EDIT_EVENT_ID
     assert request.matrix_run_metadata == RUN_METADATA
