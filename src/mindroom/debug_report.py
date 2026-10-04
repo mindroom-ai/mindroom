@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 AI_RUN_KEY = "io.mindroom.ai_run"
 JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
+_AGNO_JSON_COLUMNS = frozenset({"run_data"})
 
 Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
 
@@ -135,7 +136,7 @@ def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozens
 @contextmanager
 def sqlite_query(path: Path) -> Iterator[Query]:
     """Open one SQLite database read-only and yield a query function returning dict rows."""
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    connection = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=1.0)
     connection.row_factory = sqlite3.Row
     try:
 
@@ -209,3 +210,42 @@ def read_journal(query: Query, ids: DebugReportIds, location: str) -> dict[str, 
         )
         results["delivery_outbox"].items = [_decode_json_columns(row) for row in rows]
     return results
+
+
+def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
+    """Read Agno runs by run ID or session ID from every session database under the session root.
+
+    Databases are found by path rather than from the config so deleted agents' history is included.
+    """
+    databases = sorted(session_root.glob("**/sessions/*.db"))
+    if not databases:
+        return SourceResult("missing", [str(session_root)])
+    result = SourceResult("ok", [str(database) for database in databases])
+    run_marks, run_ids = _in_list(ids.run_ids)
+    session_marks, session_ids = _in_list(ids.session_ids)
+    conditions = [
+        condition
+        for condition, values in (
+            (f"run_id IN ({run_marks})", run_ids),
+            (f"session_id IN ({session_marks})", session_ids),
+        )
+        if values
+    ]
+    if not conditions:
+        return result
+    for database in databases:
+        with sqlite_query(database) as query:
+            tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
+            for table in sorted(name for name in tables if name.endswith("_runs")):
+                columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
+                if not {"run_id", "session_id", "run_data"} <= columns:
+                    continue
+                rows = query(
+                    f'SELECT * FROM "{table}" WHERE {" OR ".join(conditions)} ORDER BY rowid',  # noqa: S608 - table names come from sqlite_master
+                    [*run_ids, *session_ids],
+                )
+                result.items.extend(
+                    {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
+                    for row in rows
+                )
+    return result
