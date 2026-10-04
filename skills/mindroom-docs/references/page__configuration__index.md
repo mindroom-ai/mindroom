@@ -51,7 +51,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `models` | Model providers and IDs | [Models](https://docs.mindroom.chat/configuration/models/) |
 | `teams` | Multi-agent collaboration | [Teams](https://docs.mindroom.chat/configuration/teams/) |
 | `router` | Message routing | [Router](https://docs.mindroom.chat/configuration/router/) |
-| `defaults` | Fallback values for agent settings | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults), [Streaming](https://docs.mindroom.chat/streaming/) for `enable_streaming`, `streaming`, and `large_message_strategy`, [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) for `worker_grantable_credentials`, [thread summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#related-matrix-runtime-features) for `thread_summary_*`, and [Automatic Restart Resumption](#automatic-restart-resumption) |
+| `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |

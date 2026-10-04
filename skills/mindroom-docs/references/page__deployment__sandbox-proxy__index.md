@@ -478,7 +478,7 @@ Run matching MindRoom revisions in the primary and workers so both use the same 
 
 ## Security considerations
 
-- Workers never get the primary runtime's API keys, Matrix client state, credentials-encryption key, or orchestrator authority.
+- Workers never get the primary runtime's API key files, Matrix client state, credentials-encryption key, or orchestrator authority; they receive only the credentials leased under [Credential leases](#credential-leases).
 - Use a strong random `MINDROOM_SANDBOX_PROXY_TOKEN`; runners accept requests and config snapshots only when authenticated with it or a token derived from it.
 - Dedicated Docker and Kubernetes workers have a read-only root filesystem with a private writable `/tmp` of 1 GiB, so tool code cannot replace the runner's code; tool extras install into the worker's own virtualenv instead.
   On Docker, `/tmp` refuses writes past the limit; on Kubernetes, exceeding it evicts that worker pod.

@@ -55,7 +55,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `models` | Model providers and IDs | [Models](models.md) |
 | `teams` | Multi-agent collaboration | [Teams](teams.md) |
 | `router` | Message routing | [Router](router.md) |
-| `defaults` | Fallback values for agent settings | [Agents — Defaults](agents.md#defaults), [Streaming](../streaming.md) for `enable_streaming`, `streaming`, and `large_message_strategy`, [Sandbox Proxy](../deployment/sandbox-proxy.md#credential-leases) for `worker_grantable_credentials`, [thread summaries](../tools/matrix-and-attachments.md#related-matrix-runtime-features) for `thread_summary_*`, and [Automatic Restart Resumption](#automatic-restart-resumption) |
+| `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](agents.md#defaults) |
 | `memory` | Memory backends and embedder | [Memory](../memory.md) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](../knowledge.md) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](../mcp.md) |

@@ -97,6 +97,7 @@ Credential managers do not gain responder access.
 
 `room_defaults` supplies the default `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` values for every managed room.
 
+`rooms.<key>` also accepts `display_name` for the Matrix room name and `description` (string, default `""`) for the room's purpose shown in the dashboard.
 An authored field under `rooms.<key>` replaces the corresponding default.
 List overrides replace the whole default list instead of merging with it.
 An explicit empty list therefore disables the inherited invitations or admins for that room.

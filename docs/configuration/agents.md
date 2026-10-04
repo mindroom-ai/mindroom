@@ -947,6 +947,16 @@ defaults:
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
+  file_access: workspace                 # workspace or unrestricted; see the file_access field above
+  worker_grantable_credentials: null     # Shared credential services leased to isolated workers (null denies all); Google OAuth client and token services and google_vertex_adc cannot be granted
+  large_message_strategy: sidecar        # Oversized replies: sidecar (preview plus full text as an attachment) or split (several complete messages); global-only
+  coalescing:
+    debounce_ms: 1000                    # Milliseconds to wait for more attachments or a trailing caption after media; text dispatches immediately
+  auto_resume_after_restart: true        # Resume interrupted threads after a restart; see configuration/index.md
+  thread_summary_model: null             # Model alias for automatic thread summaries (null = default)
+  thread_summary_temperature: 0.2        # null uses provider defaults
+  thread_summary_first_threshold: 1      # Messages before the first automatic summary (integer >= 1)
+  thread_summary_subsequent_interval: 10 # Messages between later automatic summaries (integer >= 1)
 ```
 
 `defaults.streaming` is global-only and controls the timing of progressive message edits for streaming responses.

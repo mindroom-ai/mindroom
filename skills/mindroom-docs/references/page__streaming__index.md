@@ -41,7 +41,7 @@ Raise `update_interval` to reduce load on the homeserver, or lower it for smooth
 
 ## Presence-Based Streaming
 
-Even when streaming is enabled, MindRoom only streams to the user who sent the message while they are online.
+Even when streaming is enabled, MindRoom streams a response only when the user who sent the message is online; everyone in the room sees the same edits.
 
 | Requester presence | Streaming used? |
 |--------------------|-----------------|
