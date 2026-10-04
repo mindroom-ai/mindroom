@@ -1108,6 +1108,22 @@ async def test_a_turn_holding_again_keeps_a_stop_that_reached_the_message_after_
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_began_on_a_stopped_message_holds_its_new_work(held: _Held) -> None:
+    """An edit regenerating a stopped message answers anew, and the message holds the work that answer leaves."""
+    await held.start("running", asyncio.Event())
+    await held.settle("$reply", "Started.", _WAITING_NOTICE)
+    assert await held.runner.held_messages.stop("$reply", 7)
+    stopped = await held.hold()
+    assert stopped is not None
+    assert stopped.stopped
+    await held.settle("$reply", "Started again.", _WAITING_NOTICE, held=stopped)
+    again = await held.hold()
+    assert again is not None
+    assert not again.stopped
+    assert held.edits[-1].new_text == f"Started again.\n\n{_WAITING_NOTICE}"
+
+
+@pytest.mark.asyncio
 async def test_a_turn_sees_a_stop_that_reached_its_hold(held: _Held) -> None:
     """A turn or wake that read a hold before a Stop learns of it from the saved hold."""
     await held.start("running", asyncio.Event())

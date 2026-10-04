@@ -83,8 +83,11 @@ class HeldReplyLifecycle:
             )
         await self._redact_stop_button(hold)
 
-    async def save(self, hold: HeldReply) -> None:
-        """Make a message the holder of its work, releasing the message that held it before."""
+    async def save(self, hold: HeldReply, *, continued: HeldReply | None = None) -> None:
+        """Make a message the holder of its work, releasing the message that held it before.
+
+        ``continued`` is the hold the saving turn ran on, if any.
+        """
         replaced, saved = await self.store.save(
             hold_id=hold.key.hold_id,
             recipient=hold.key.recipient,
@@ -92,8 +95,14 @@ class HeldReplyLifecycle:
             hold_json=encode_held_reply(hold),
         )
         previous = self.read(replaced) if replaced is not None else None
-        if previous is not None and previous.stopped and previous.message_event_id == hold.message_event_id:
-            # A Stop reached the message after its turn checked, so the message ends stopped instead of holding again.
+        if (
+            previous is not None
+            and previous.stopped
+            and previous.message_event_id == hold.message_event_id
+            and (continued is None or previous.generation != continued.generation)
+        ):
+            # A Stop reached the message after its turn checked, so the message ends stopped instead of holding again;
+            # a turn that began on the stopped hold, such as an edit regenerating the message, answers anew.
             await self.store.delete(hold.key.hold_id, generation=saved.generation)
             await self.release(hold, stopped=True)
             return
@@ -171,6 +180,7 @@ class HeldReplyLifecycle:
                     joins=boundary.joins,
                     offered=boundary.offered,
                 ),
+                continued=continued,
             )
             return
         # The turn could not show the work it leaves outstanding: it failed, was stopped or interrupted, or paused for
