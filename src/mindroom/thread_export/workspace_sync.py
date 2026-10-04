@@ -447,12 +447,13 @@ def _private_targets(
             continue
         if instance.requester_id is None:
             # Instances from before owner records moved below tracking/ wait here for their requester's next turn.
-            logger.info(
-                "Clearing exports of private instance until the primary records its owner",
-                agent_name=agent_name,
-                instance_root=str(instance.state_root),
-            )
-            _clear_export_tree(runtime_paths, output_dir)
+            # Every pass clears them again, so only a pass that removed something logs.
+            if _clear_export_tree(runtime_paths, output_dir):
+                logger.info(
+                    "Clearing exports of private instance until the primary records its owner",
+                    agent_name=agent_name,
+                    instance_root=str(instance.state_root),
+                )
             continue
         required_member_user_ids = (instance.requester_id,)
         if options.private_room_scope == "owner_and_agent":
@@ -490,12 +491,13 @@ def _private_export_dir(
     return workspace.lexical_root / _WORKSPACE_EXPORT_DIRNAME
 
 
-def _clear_export_tree(runtime_paths: RuntimePaths, output_dir: Path) -> None:
-    """Remove one exporter-owned tree; a root without the ownership marker is left alone."""
+def _clear_export_tree(runtime_paths: RuntimePaths, output_dir: Path) -> bool:
+    """Remove one exporter-owned tree and return whether anything was removed; markerless roots are left alone."""
     try:
-        clear_thread_export_root(output_dir, trusted_root=runtime_paths.storage_root)
+        return clear_thread_export_root(output_dir, trusted_root=runtime_paths.storage_root)
     except (OSError, RuntimeError):
         logger.warning("Skipping unsafe thread export cleanup", output_dir=str(output_dir))
+        return False
 
 
 def _clear_disabled_agent_exports(

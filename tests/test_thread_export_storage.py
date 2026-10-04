@@ -84,11 +84,12 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
     note = output_dir / "operator-note.txt"
     note.write_text("keep", encoding="utf-8")
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is True
 
     assert not room_dir.exists()
     assert (output_dir / _ROOT_MARKER_FILENAME).exists()
     assert note.read_text(encoding="utf-8") == "keep"
+    assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
     prepare_export_root(output_dir, trusted_root=tmp_path)
 
@@ -96,12 +97,14 @@ def test_clear_thread_export_root_removes_only_owned_content(tmp_path: Path) -> 
 def test_clear_thread_export_root_retains_empty_owned_directory(
     tmp_path: Path,
 ) -> None:
-    """Cleanup retains the owned root so later exports can reuse it safely."""
+    """Cleanup retains the owned root so later exports can reuse it safely, and an empty one costs no fsync."""
     output_dir = tmp_path / "agent" / "workspace" / "thread_exports"
     _mark_export_root(output_dir)
 
-    clear_thread_export_root(output_dir, trusted_root=tmp_path)
+    with patch.object(thread_export_storage, "_fsync_directory_fd") as fsync:
+        assert clear_thread_export_root(output_dir, trusted_root=tmp_path) is False
 
+    fsync.assert_not_called()
     assert (output_dir / _ROOT_MARKER_FILENAME).read_text(encoding="utf-8") == _ROOT_MARKER_TEXT
 
 

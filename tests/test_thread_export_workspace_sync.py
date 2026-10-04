@@ -563,6 +563,16 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
     assert not ghost_thread.exists()
     # Every instance from before an upgrade looks like this one until its requester's next turn, so it never warns.
     assert [log["event"] for log in logs if log["log_level"] == "warning"] == []
+    clearing = "Clearing exports of private instance until the primary records its owner"
+    assert [log["instance_root"] for log in logs if log["event"] == clearing] == [str(ghost_root)]
+
+    # Later passes find the ownerless tree already empty, so they stay quiet.
+    with patch(EXPORT_PATH, new=export), capture_logs() as logs:
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+
+    assert [log for log in logs if log["event"] == clearing] == []
+    assert (ghost_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME / _ROOT_MARKER_FILENAME).exists()
 
 
 async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> None:
