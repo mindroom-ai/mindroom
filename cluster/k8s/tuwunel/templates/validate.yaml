@@ -1,3 +1,6 @@
+{{- if not (or (kindIs "invalid" .Values.tuwunel.settings) (kindIs "map" .Values.tuwunel.settings)) -}}
+{{- fail "tuwunel.settings must be a map" -}}
+{{- end -}}
 {{- $rendersConfig := and .Values.config.create (not .Values.config.existingConfigMap) -}}
 {{- if $rendersConfig -}}
 {{- if not .Values.tuwunel.serverName -}}
@@ -34,6 +37,15 @@
 {{- if not .Values.tuwunel.oidc.clientId -}}
 {{- fail "tuwunel.oidc.clientId is required when tuwunel.oidc.enabled=true" -}}
 {{- end -}}
+{{- end -}}
+{{- else -}}
+{{- range $key, $value := .Values.tuwunel.settings -}}
+{{- if not (kindIs "invalid" $value) -}}
+{{- fail (printf "tuwunel.settings.%s requires the chart-managed tuwunel.toml" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.tuwunel.extraConfig -}}
+{{- fail "tuwunel.extraConfig requires the chart-managed tuwunel.toml" -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.tuwunel.oidc.enabled -}}

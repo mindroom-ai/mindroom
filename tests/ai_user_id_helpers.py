@@ -534,7 +534,6 @@ def _build_response_runner(
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
-            register_approval_interruption=lambda _source_event_id, _room_id: None,
             turn_store=MagicMock(spec=TurnStore),
             held_replies=EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_path)).held_replies(),
         ),

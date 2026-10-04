@@ -26,6 +26,9 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
             "show_computer",
             *(f"open_settings/{section}" for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])),
             *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
+            "show_canvas",
+            "show_canvas/update",
+            "show_canvas/document",
         )
     }
 
@@ -46,6 +49,22 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         else:
             assert metadata["thread_id"] is None
             assert "m.relates_to" not in content
+        if case["id"].endswith("/show_canvas"):
+            assert metadata["canvas"]["title"] == "Choose a plan"
+            assert "<form" in metadata["canvas"]["html"]
+        if case["id"].endswith("/show_canvas/document"):
+            assert metadata["canvas"]["document"]["url"] == "mxc://localhost/canvas-document"
+            assert metadata["canvas"]["document"]["mimetype"] == "text/html"
+            assert "html" not in metadata["canvas"]
+        if case["id"].endswith("/show_canvas/update"):
+            replacement = case["replacement"]["content"]
+            assert replacement["m.relates_to"] == {"rel_type": "m.replace", "event_id": case["event"]["event_id"]}
+            new_metadata = replacement["m.new_content"]["io.mindroom.ui_action"]
+            # Chat accepts an edit only when every authority field equals the original request's.
+            assert {key: value for key, value in new_metadata.items() if key != "canvas"} == {
+                key: value for key, value in metadata.items() if key != "canvas"
+            }
+            assert "Seats chosen" in new_metadata["canvas"]["html"]
 
 
 @pytest.mark.asyncio
@@ -53,8 +72,8 @@ async def test_contract_rejects_unmapped_registered_action(tmp_path: Path, monke
     """Adding a public tool must require a corresponding client contract case."""
     original_init = ChatUITools.__init__
 
-    def init_with_new_action(self: ChatUITools) -> None:
-        original_init(self)
+    def init_with_new_action(self: ChatUITools, **kwargs: object) -> None:
+        original_init(self, **kwargs)  # type: ignore[arg-type]
         self.register(self.show_computer, name="new_action")
 
     monkeypatch.setattr(ChatUITools, "__init__", init_with_new_action)

@@ -17,7 +17,6 @@ from mindroom.dispatch_handoff import DispatchIngressMetadata, DispatchPayloadMe
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
-from mindroom.matrix import stale_stream_cleanup
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -75,21 +74,13 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             turn_policy=turn_policy,
         ),
     )
-    content = stale_stream_cleanup._build_auto_resume_content(
-        stale_stream_cleanup._InterruptedThread(
-            room_id="!room:localhost",
-            thread_id="$thread",
-            target_event_id="$target",
-            partial_text="partial",
-            agent_name="test_agent",
-            original_sender_id=bridge_human,
-        ),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    content = {
+        "msgtype": "m.text",
+        "body": "relay",
+        ORIGINAL_SENDER_KEY: bridge_human,
+        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    }
 
-    assert content[ORIGINAL_SENDER_KEY] == bridge_human
-    assert content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
     assert (
         validator.requester_user_id(
             sender=ids["router"].full_id,

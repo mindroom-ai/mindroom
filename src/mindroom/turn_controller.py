@@ -25,7 +25,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SCHEDULED_MODEL_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -138,7 +138,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget, ResponseLifecycleKey
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
-    from mindroom.sync_restart_retry import InterruptedTurnRooms
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -308,7 +307,6 @@ class TurnControllerDeps:
     coalescing_gate: CoalescingGate
     edit_regenerator: _EditRegenerator
     ingress: IngressValidator
-    interrupted_turn_rooms: InterruptedTurnRooms
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
@@ -1493,10 +1491,9 @@ class TurnController:
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
                 room_id=response_target.room_id,
-                recovery_proof_ready=lambda: (
-                    response_target.source_thread_id is not None
-                    and self.deps.interrupted_turn_rooms.contains(source_event_id)
-                ),
+                # No turn record proves a selection reply recoverable, so orderly
+                # shutdown waits out its budget for one still running.
+                recovery_proof_ready=lambda: False,
                 on_failure=lambda: self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,)),
                 source_event_ids=(source_event_id,),
             )
@@ -1781,9 +1778,7 @@ class TurnController:
             attachment_ids=selection_attachment_ids,
         )
 
-        record_interrupted_turn, record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
-            room,
-            source_event_id=source_event_id,
+        record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
             handled_turn=selection_handled_turn,
         )
 
@@ -1815,7 +1810,6 @@ class TurnController:
                     terminal_source_event_ids=selection_handled_turn.source_event_ids,
                     thread_history=history,
                 ),
-                on_interrupted_response_recoverable=record_interrupted_turn,
                 on_deferred_outcome_handled=record_deferred_outcome,
                 on_user_stop_handled=record_user_stop,
                 source_handoff=source_handoff,
@@ -1944,7 +1938,7 @@ class TurnController:
             self.deps.agent_name,
             runtime_paths=self.deps.runtime_paths,
         )
-        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}
+        terminal_extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         if existing_event_id is not None:
             edited = await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
@@ -1979,19 +1973,13 @@ class TurnController:
 
     def _build_response_settlement_callbacks(
         self,
-        room: nio.MatrixRoom,
         *,
-        source_event_id: str,
         handled_turn: TurnRecord,
     ) -> tuple[
-        Callable[[], None],
         Callable[[str], Awaitable[None]],
         Callable[[str, int], Awaitable[None]],
     ]:
-        """Build callbacks for interrupted-turn recording and deferred handled recording."""
-
-        def record_interrupted_turn() -> None:
-            self.deps.interrupted_turn_rooms.register(source_event_id, room_id=room.room_id)
+        """Build callbacks that record a deferred handled outcome or a user stop."""
 
         async def record_deferred_outcome(response_event_id: str) -> None:
             await record_deferred_outcome_response(
@@ -2008,7 +1996,7 @@ class TurnController:
                 stop_receipt_order,
             )
 
-        return record_interrupted_turn, record_deferred_outcome, record_user_stop
+        return record_deferred_outcome, record_user_stop
 
     async def _execute_response_action(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -2113,12 +2101,8 @@ class TurnController:
                         self.deps.runtime_paths,
                     )
 
-            record_interrupted_turn, record_deferred_outcome, record_user_stop = (
-                self._build_response_settlement_callbacks(
-                    room,
-                    source_event_id=event.event_id,
-                    handled_turn=handled_turn,
-                )
+            record_deferred_outcome, record_user_stop = self._build_response_settlement_callbacks(
+                handled_turn=handled_turn,
             )
 
             recovered_response_event_id = (
@@ -2175,7 +2159,6 @@ class TurnController:
                         thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
-                    on_interrupted_response_recoverable=record_interrupted_turn,
                     on_deferred_outcome_handled=record_deferred_outcome,
                     on_no_response_handled=record_no_response,
                     on_user_stop_handled=record_user_stop,

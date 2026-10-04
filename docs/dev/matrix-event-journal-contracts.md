@@ -27,13 +27,13 @@ One shared boundary helper encodes `None` to the empty string and decodes it bac
 ### Durable sync batch boundary
 
 The Matrix client uses `nio.durable.open_durable_sync` with Classic or Simplified Sliding Sync.
-The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.3`; `uv.lock` resolves version `1.1.3` from the package registry, with no Git source override.
+The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.4`; `uv.lock` resolves version `1.1.4` from the package registry, with no Git source override.
 Account, device, consumer and stream ownership bind once when opening the session.
 Soft-logout renewal requests the existing device; it preserves the bound stream, membership positions, and attempted-delivery sending identity.
 Hard logout, missing device storage, or changed identity stops startup instead of attempting a stream replacement.
 Initial credentials are persisted after the local store exists and before journal binding, so an interrupted bind reopens the same device.
 The application trusts nio's typed records and does not reproduce a canonical JSON, digest, or per-record proof protocol.
-Existing deployments use the automatic in-place migration in [the Nio 1.0 upgrade guide](../deployment/nio-upgrade.md), preserving journal identity, message history, Matrix accounts, devices, and encryption keys while retiring unfinished old work.
+Existing deployments use the automatic in-place migration in [the Nio 1.0 upgrade guide](../deployment/upgrades.md#upgrading-to-nio-10), preserving journal identity, message history, Matrix accounts, devices, and encryption keys while retiring unfinished old work.
 
 One `SyncBatch` becomes an ordered vector of application dispositions.
 One journal transaction advances the consumer's `next_sequence` (starting at 1), applies every record, and freezes interactive associations for newly admitted actionable sources.

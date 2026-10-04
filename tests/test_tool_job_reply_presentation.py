@@ -29,7 +29,7 @@ from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel, _call
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_interrupted_reply_recovery import _attempt_context, _crashed_turn, _replay, _streamed
+from tests.test_interrupted_reply_recovery import _crashed_turn, _replay, _streamed
 from tests.tool_job_helpers import completed_delegation_job
 
 if TYPE_CHECKING:
@@ -251,7 +251,7 @@ async def test_blocking_continuation_cancellation_preserves_the_held_presentatio
 
 @pytest.mark.asyncio
 async def test_replay_account_shows_a_detached_job_start_as_finished_with_its_job_id(tmp_path: Path) -> None:
-    """A crash's replay names a detached job start as already called, and its handle tells the new attempt the job."""
+    """A restart's account lists a detached job start as finished, and its handle tells the new attempt the job."""
     running = replace(completed_delegation_job(), status="running", result=None)
     _text, started = format_tool_completed_event(
         ToolExecution(
@@ -263,12 +263,12 @@ async def test_replay_account_shows_a_detached_job_start_as_finished_with_its_jo
     assert started is not None
     bot = _bot(tmp_path)
 
-    (context,), _fetch = await _replay(
+    (call,), _fetch = await _replay(
         bot,
         await _crashed_turn(bot),
         _streamed("🔧 `sleep` [1]\n\nStarted sleeping.", trace=(started,)),
     )
 
-    (instruction,) = _attempt_context(context)
-    assert f'\\"job_id\\": \\"{running.job_id}\\"' in instruction
-    assert instruction.endswith("Already called for the current message, so do not repeat: `sleep` (1 call).")
+    assert call.account is not None
+    assert "The `sleep` tool finished" in call.account
+    assert f'\\"job_id\\": \\"{running.job_id}\\"' in call.account

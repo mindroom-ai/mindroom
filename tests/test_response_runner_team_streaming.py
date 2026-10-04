@@ -39,7 +39,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
+from mindroom.streaming import StreamingDeliveryError, StreamingPresentation, UnfinishedStreamedReply
 from mindroom.tool_jobs.completion import HeldContinuation
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
@@ -1415,6 +1415,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=recorder,
         accumulated_text="Partial answer\n\n**[Response interrupted by an error: boom]**",
         tool_trace=[],
+        resumed=None,
     )
 
     snapshot = recorder.interrupted_snapshot()
@@ -1428,6 +1429,7 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=paused_recorder,
         accumulated_text="delivery failed",
         tool_trace=[],
+        resumed=None,
     )
     assert paused_recorder.original_status is RunStatus.paused
 
@@ -1436,8 +1438,43 @@ def test_record_stream_delivery_error_preserves_hidden_tool_state_when_visible_t
         recorder=empty_recorder,
         accumulated_text="",
         tool_trace=[],
+        resumed=None,
     )
     assert empty_recorder.original_status is RunStatus.error
+
+
+def test_record_stream_delivery_error_leaves_out_the_resumed_attempt(tmp_path: Path) -> None:
+    """A continuation that fails to deliver records only its own work; the stopped attempt above it is in the saved account."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+    )
+    stopped_call = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="counter",
+        args_preview="{}",
+        result_preview="1",
+    )
+    new_call = ToolTraceEntry(type="tool_call_completed", tool_name="search", args_preview="q=x", result_preview="hit")
+    resumed = UnfinishedStreamedReply(visible_text="🔧 `counter` [1]\n\nHalf of the report", tool_trace=(stopped_call,))
+    recorder = TurnRecorder(user_message="Hello")
+
+    assert coordinator._record_stream_delivery_error(
+        recorder=recorder,
+        accumulated_text=f"{resumed.resumed_text}🔧 `search` [2]\n\nThe second half",
+        tool_trace=[stopped_call, new_call],
+        resumed=resumed,
+    )
+
+    snapshot = recorder.interrupted_snapshot()
+    assert snapshot.partial_text == "The second half"
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["search"]
 
 
 @pytest.mark.asyncio

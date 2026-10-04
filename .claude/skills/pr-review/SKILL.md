@@ -56,18 +56,28 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **Code reuse**: Are there parts that should be reused from other places?
 - **Organization**: Is everything in the right place?
 - **Consistency**: Is it in the same style as other parts of the codebase?
-- **Simplicity**: Is it not over-engineered? Remember KISS and YAGNI. No dead code paths and NO defensive programming. No unnecessary try-excepts.
-- **No pointless wrappers**: Identify functions/methods that just call another function and return its result. Callers should call the underlying function directly instead of going through unnecessary indirection.
-- **Functional style**: Does it prefer functions over classes where appropriate? Are dataclasses used instead of raw dicts?
+- **Simplicity**: Is it not over-engineered?
+  Remember KISS and YAGNI.
+  No dead code paths and NO defensive programming.
+  No unnecessary try-excepts.
+- **No pointless wrappers**: Identify functions/methods that just call another function and return its result.
+  Callers should call the underlying function directly instead of going through unnecessary indirection.
+- **Functional style**: Does it prefer functions over classes where appropriate?
+  Are dataclasses used instead of raw dicts?
 - **Imports**: Are imports at file top, with function imports used to avoid cycles or defer heavy/optional dependencies until first use, as required by [AGENTS.md](../../../AGENTS.md#1-core-philosophy)?
 - **Deferred imports**: Are these explicit (`from x import Y`), annotated with `# noqa: PLC0415` where needed, and consistent with `tests/test_import_graph.py`?
 - **User experience**: Does it provide a good user experience?
 - **PR**: Is the PR description and title clear and informative?
-- **Docs**: Are docs updated anywhere the change affects users, operators, developers, configuration, tooling, workflows, or behavior that someone would need to learn later? Missing required docs is a blocker.
-- **Tests**: Are there tests, and do they cover the changes adequately? Are they testing something meaningful or are they just trivial? On NixOS, run them inside `nix-shell shell.nix` (or use `nix-shell shell.nix --run 'uv run pytest -x -n 0 --no-cov -v'`). If `<nixpkgs>` is unresolved, retry with `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
+- **Docs**: Do docs changes follow the Documentation Policy in @AGENTS.md?
+  A change to configuration, user-visible behavior, or an operator procedure without an update to its owning page is a blocker.
+  Docs text that narrates a bug fix or describes implementation mechanics outside `docs/architecture/` is also a blocker; a fix that restores documented behavior needs no docs change.
+- **Tests**: Are there tests, and do they cover the changes adequately?
+  Are they testing something meaningful or are they just trivial?
+  On NixOS, run them inside `nix-shell shell.nix` (or use `nix-shell shell.nix --run 'uv run pytest -x -n 0 --no-cov -v'`).
+  If `<nixpkgs>` is unresolved, retry with `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
 - **Live tests**: If feasible, test the changes with a local Matrix stack (`just local-matrix-up`) and the Matty CLI to verify agent behavior end-to-end.
 - **Rules**: Does the code follow the project's coding standards and guidelines as laid out in @AGENTS.md?
 
 ## How to review
 
-Look at `git diff origin/main..HEAD` for the changes made in this pull request.
+Look at `git diff origin/main...HEAD` for the changes made in this pull request.

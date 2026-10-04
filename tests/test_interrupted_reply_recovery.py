@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import asyncio
+import contextlib
+import html
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, patch
 
@@ -26,11 +29,17 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, TEAM_PROGRESS_PLACEHOLDER, unfinished_streamed_reply
+from mindroom.streaming import (
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
+    USER_STOP_CANCEL_MSG,
+    build_cancelled_response_update,
+    format_stream_error_note,
+    unfinished_streamed_reply,
+)
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     build_tool_trace_content,
-    earlier_tool_trace_content,
     tool_trace_from_content,
 )
 from mindroom.turn_record import TurnRecord
@@ -86,6 +95,7 @@ def test_unfinished_streamed_reply_keeps_text_and_trace(status: str) -> None:
     reply = unfinished_streamed_reply(PARTIAL, _content(status))
 
     assert reply is not None
+    assert reply.visible_text == PARTIAL
     assert reply.partial_text == "Half of the report"
     assert reply.tool_trace == TRACE
 
@@ -97,16 +107,6 @@ def test_a_tool_trace_without_text_is_still_unfinished_work() -> None:
     assert reply is not None
     assert reply.partial_text == ""
     assert reply.tool_trace == TRACE[:1]
-
-
-def test_tool_calls_carried_from_earlier_attempts_come_first() -> None:
-    """A reply regenerated after a stop carries the stopped attempts' calls, so its own stop keeps them."""
-    content = {**_content(STREAM_STATUS_STREAMING, TRACE[1:]), **earlier_tool_trace_content(TRACE[:1])}
-
-    reply = unfinished_streamed_reply("Thinking...", content)
-
-    assert reply is not None
-    assert reply.tool_trace == TRACE
 
 
 @pytest.mark.parametrize("body", ["Thinking...", TEAM_PROGRESS_PLACEHOLDER, "   "])
@@ -130,7 +130,6 @@ def test_a_trace_beside_placeholder_text_is_still_carried(body: str) -> None:
     "status",
     [
         None,
-        STREAM_STATUS_APPROVAL_PENDING,
         STREAM_STATUS_CANCELLED,
         STREAM_STATUS_COMPLETED,
         STREAM_STATUS_ERROR,
@@ -138,8 +137,17 @@ def test_a_trace_beside_placeholder_text_is_still_carried(body: str) -> None:
     ],
 )
 def test_only_in_progress_streams_are_unfinished(status: str | None) -> None:
-    """Terminal, approval-owned and non-stream messages already have their own owners."""
+    """Terminal and non-stream messages show no stopped work."""
     assert unfinished_streamed_reply(PARTIAL, _content(status)) is None
+
+
+def test_a_reply_still_waiting_on_its_approval_is_unfinished() -> None:
+    """A restart can stop an approved run before its first edit, so the reply still shows the pause."""
+    reply = unfinished_streamed_reply(PARTIAL, _content(STREAM_STATUS_APPROVAL_PENDING))
+
+    assert reply is not None
+    assert reply.visible_text == PARTIAL
+    assert reply.tool_trace == TRACE
 
 
 def _streamed(
@@ -218,120 +226,79 @@ def _hooks_prepare(runner: ResponseRunner) -> AbstractContextManager[AsyncMock]:
     )
 
 
+@dataclass(frozen=True)
+class _ModelCall:
+    """One model call of the replayed turn, with the prompt the model saw."""
+
+    context: ResponseTurnContext
+    model_prompt: str
+    streamed: bool
+
+    @property
+    def account(self) -> str | None:
+        """Return the stopped attempt's account saved in the prompt, unescaped."""
+        prompt = html.unescape(self.model_prompt)
+        opening = '<item key="interrupted_attempt" cache_policy="volatile">\n'
+        if opening not in prompt:
+            return None
+        return prompt.split(opening, 1)[1].split("\n</item>", 1)[0]
+
+
 async def _replay(
     bot: AgentBot,
     request: ResponseRequest,
     visible: ResolvedVisibleMessage | Exception | None,
-) -> tuple[list[ResponseTurnContext], AsyncMock]:
-    """Run the replayed turn with the model and the Matrix read replaced at their seams."""
+) -> tuple[list[_ModelCall], AsyncMock]:
+    """Run the replayed turn with the model and the Matrix read replaced at their seams; presence says offline."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    contexts: list[ResponseTurnContext] = []
+    calls: list[_ModelCall] = []
 
-    async def fake_ai_response(*args: object, **_kwargs: object) -> str:
-        contexts.append(cast("ResponseTurnContext", args[0]))
+    async def fake_ai_response(*args: object, **kwargs: object) -> str:
+        calls.append(_ModelCall(cast("ResponseTurnContext", args[0]), cast("str", kwargs["model_prompt"]), False))
         return "The complete report."
+
+    async def fake_stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+        calls.append(_ModelCall(cast("ResponseTurnContext", args[0]), cast("str", kwargs["model_prompt"]), True))
+        yield "The complete report."
 
     fetch = AsyncMock(side_effect=visible) if isinstance(visible, Exception) else AsyncMock(return_value=visible)
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=fetch),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+        patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
         _hooks_prepare(runner),
     ):
         await runner.generate_response(request)
-    return contexts, fetch
+    return calls, fetch
 
 
-def _attempt_context(context: ResponseTurnContext) -> list[str]:
-    return [item.text for item in context.transient_enrichment_items if item.key == "interrupted_attempt"]
-
-
-@pytest.mark.asyncio
-async def test_replay_answers_again_in_place_knowing_what_the_stopped_attempt_did(tmp_path: Path) -> None:
-    """The new attempt sees the earlier text and finished tools, then replaces the reply like any answer."""
-    bot = _bot(tmp_path)
-
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
-
-    assert HOOK_CONTEXT in context.transient_enrichment_items
-    (item,) = [item for item in context.transient_enrichment_items if item.key == "interrupted_attempt"]
-    assert item.minimal_required
-    assert not item.persist
-    instruction = item.text
-    assert instruction.startswith("Your previous attempt at replying to the current message was interrupted")
-    assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in instruction
-    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in instruction
-    assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in instruction
-    store = bot.journal_principal()
-    final = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
-    assert final is not None
-    assert final.edits_event_id == REPLY_ID
-    answer = cast("dict[str, Any]", final.payload["m.new_content"])
-    assert answer["body"] == "The complete report."
-    assert RESTART_INTERRUPTED_RESPONSE_NOTE not in answer["body"]
-    assert not await store.is_pending("$source")
-    assert not bot.pending_sync_restart_retry_room_ids
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("trace", "closing_line"),
-    [
-        (
-            (
-                *TRACE,
-                ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="2"),
-            ),
-            "Already called for the current message, so do not repeat: `counter` (2 calls).",
-        ),
-        (TRACE[1:], None),
-        ((), None),
-    ],
-    ids=["finished_calls_listed", "still_running_only", "text_only"],
-)
-async def test_the_new_attempt_is_told_which_calls_not_to_repeat(
-    tmp_path: Path,
-    trace: tuple[ToolTraceEntry, ...],
-    closing_line: str | None,
-) -> None:
-    """A closing line counts every finished call; a call still running may need to run again for its lost result."""
-    bot = _bot(tmp_path)
-
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed("Half of the report", trace=trace))
-
-    (instruction,) = _attempt_context(context)
-    if closing_line is None:
-        assert "Already called" not in instruction
-    else:
-        assert instruction.endswith(closing_line)
-
-
-@pytest.mark.asyncio
-async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path) -> None:
-    """The streaming path receives the same context and still delivers through the adopted reply."""
-    bot = _bot(tmp_path)
-    request = replace(await _crashed_turn(bot), payload_preparation=None)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    contexts: list[ResponseTurnContext] = []
-
-    async def fake_stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        contexts.append(ctx)
-        yield "The complete report."
-
-    with (
-        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_runner.stream_agent_response", new=fake_stream),
-    ):
-        await runner.generate_response(request)
-
-    ((instruction,),) = [_attempt_context(context) for context in contexts]
-    assert "The `counter` tool finished" in instruction
+async def _final_answer(bot: AgentBot) -> dict[str, Any]:
     final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is not None
     assert final.edits_event_id == REPLY_ID
-    answer = cast("dict[str, Any]", final.payload["m.new_content"])
-    assert answer["body"] == "The complete report."
-    # The in-progress edits a later replay would read carry the stopped attempt's calls.
+    return cast("dict[str, Any]", final.payload["m.new_content"])
+
+
+@pytest.mark.asyncio
+async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(tmp_path: Path) -> None:
+    """The stopped text and calls stay above the continuation, which streams even to an offline requester."""
+    bot = _bot(tmp_path)
+    (call,), _fetch = await _replay(bot, await _crashed_turn(bot), _streamed())
+
+    assert call.streamed
+    assert call.model_prompt.startswith("CRASHTEST write the report\n\n<mindroom_message_context>")
+    account = call.account
+    assert account is not None
+    assert account.startswith("Your reply to the current message was interrupted by a restart before it finished.")
+    assert "Half of the report\n\n(turn stopped before completion; 1 tool call(s) had finished; " in account
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+    assert 'The `report` tool was still running with input preview "{\\"pages\\": 3}"' in account
+    # The account is saved with the turn, not passed once beside it.
+    assert call.context.transient_enrichment_items == (HOOK_CONTEXT,)
+    answer = await _final_answer(bot)
+    assert answer["body"] == f"{PARTIAL}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+    assert tool_trace_from_content(answer) == list(TRACE)
     sent = [call.kwargs["content"] for call in bot.client.room_send.await_args_list]
     in_progress = [
         content.get("m.new_content", content)
@@ -339,7 +306,54 @@ async def test_a_streamed_replay_carries_the_stopped_attempt_too(tmp_path: Path)
         if content.get("m.new_content", content).get(STREAM_STATUS_KEY) == STREAM_STATUS_STREAMING
     ]
     assert in_progress
+    assert all(content["body"].startswith(PARTIAL) for content in in_progress)
     assert all(tool_trace_from_content(content) == list(TRACE) for content in in_progress)
+    assert not await bot.journal_principal().is_pending("$source")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "terminal_note", "stream_status"),
+    [
+        (RuntimeError("model unavailable"), format_stream_error_note("model unavailable"), STREAM_STATUS_ERROR),
+        (
+            asyncio.CancelledError(USER_STOP_CANCEL_MSG),
+            build_cancelled_response_update("", cancel_source="user_stop")[0],
+            STREAM_STATUS_CANCELLED,
+        ),
+    ],
+    ids=["failure", "user_stop"],
+)
+async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
+    tmp_path: Path,
+    stop: BaseException,
+    terminal_note: str,
+    stream_status: str,
+) -> None:
+    """A run that fails or is stopped before it streams ends the stopped attempt's text with its note instead of redacting it."""
+    bot = _bot(tmp_path)
+    request = await _crashed_turn(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    def ending_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        raise stop
+
+    with (
+        patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch("mindroom.response_runner.stream_agent_response", new=ending_stream),
+        _hooks_prepare(runner),
+        contextlib.suppress(RuntimeError, asyncio.CancelledError),
+    ):
+        await runner.generate_response(request)
+
+    bot.client.room_redact.assert_not_awaited()
+    final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert final is None
+    ended = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
+    assert ended["body"] == f"{PARTIAL}\n\n{terminal_note}"
+    assert ended[STREAM_STATUS_KEY] == stream_status
+    assert tool_trace_from_content(ended) == list(TRACE)
 
 
 @pytest.mark.asyncio
@@ -348,9 +362,11 @@ async def test_a_terminal_reply_is_answered_as_before(tmp_path: Path) -> None:
     bot = _bot(tmp_path)
     visible = _streamed(f"Done.\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}", status=STREAM_STATUS_ERROR)
 
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), visible)
+    (call,), _fetch = await _replay(bot, await _crashed_turn(bot), visible)
 
-    assert _attempt_context(context) == []
+    assert call.account is None
+    assert not call.streamed
+    assert (await _final_answer(bot))["body"] == "The complete report."
     assert not await bot.journal_principal().is_pending("$source")
 
 
@@ -373,10 +389,11 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
     """Unknown is not nothing: the turn is answered, warned that side effects may already have happened."""
     bot = _bot(tmp_path)
 
-    (context,), _fetch = await _replay(bot, await _crashed_turn(bot), read)
+    (call,), _fetch = await _replay(bot, await _crashed_turn(bot), read)
 
-    (instruction,) = _attempt_context(context)
-    assert "what that attempt did is unknown" in instruction
+    assert call.account is not None
+    assert "what that attempt did is unknown" in call.account
+    assert (await _final_answer(bot))["body"] == "The complete report."
     assert not await bot.journal_principal().is_pending("$source")
 
 
@@ -386,7 +403,7 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
     existing_event_id: str | None,
 ) -> None:
-    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery (as an edit regeneration does), is not read."""
+    """Only the recovered flag opens the gate: a reply this attempt sends itself, or one adopted without recovery, is not read."""
     bot = _bot(tmp_path)
     request = replace(
         await _crashed_turn(bot),
@@ -395,22 +412,22 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
         existing_event_is_recovered=False,
     )
 
-    (context,), fetch = await _replay(bot, request, _streamed())
+    (call,), fetch = await _replay(bot, request, _streamed())
 
     fetch.assert_not_awaited()
-    assert _attempt_context(context) == []
+    assert call.account is None
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_chrome(tmp_path: Path) -> None:
-    """The streamed team path carries the account too, minus its display chrome, and carries the calls forward."""
+async def test_a_stopped_team_reply_continues_with_its_account_minus_display_chrome(tmp_path: Path) -> None:
+    """The team leader gets the account without the team chrome, and the team stream continues below the stopped reply."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    contexts: list[ResponseTurnContext] = []
+    messages: list[str] = []
 
     async def fake_team_stream(**kwargs: object) -> AsyncIterator[str]:
-        contexts.append(cast("ResponseTurnContext", kwargs["ctx"]))
+        messages.append(cast("str", kwargs["message"]))
         # Run metadata the turn recorded but never published to the live collector.
         cast("TurnRecorder", kwargs["turn_recorder"]).set_run_metadata({AI_RUN_METADATA_KEY: {"version": 1}})
         yield "Team answer"
@@ -420,7 +437,7 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
     )
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=visible)),
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_runner.team_response_stream", new=fake_team_stream),
     ):
         coordinator = _build_response_runner(
@@ -457,14 +474,12 @@ async def test_a_stopped_team_reply_reaches_the_team_turn_without_its_display_ch
             team_mode="coordinate",
         )
 
-    ((instruction,),) = [_attempt_context(context) for context in contexts]
-    assert "\n\nHalf of the report\n\n(turn stopped before completion" in instruction
-    assert "Team Response" not in instruction
-    assert "consensus" not in instruction
-    # The stream applies this content to every edit, so stopping the team's new attempt keeps the calls.
+    (message,) = messages
+    account = html.unescape(message)
+    assert "\n\nHalf of the report\n\n(turn stopped before completion" in account
+    assert "Team Response" not in account
+    assert "consensus" not in account
     ((stream,),) = [delivered]
-    assert stream.extra_content is not None
-    assert tool_trace_from_content(stream.extra_content) == list(TRACE)
-    # The carried calls in the live dict must not hide the recorded run metadata from the final edit.
+    assert stream.resumed == unfinished_streamed_reply(visible.body, visible.content)
     finalized = finalize.await_args.args[0]
     assert finalized.extra_content[AI_RUN_METADATA_KEY] == {"version": 1}

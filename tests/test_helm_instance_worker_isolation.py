@@ -695,6 +695,13 @@ _BOOTSTRAP_CONTENT_BUNDLE_SETTINGS = (
 )
 
 
+def _bootstrap_bundle_mount(mount_path: str) -> tuple[str, ...]:
+    return (
+        "contentBundles[1].volumeMounts[0].name=scratch",
+        f"contentBundles[1].volumeMounts[0].mountPath={mount_path}",
+    )
+
+
 @pytest.mark.parametrize(
     ("sub_path", "source", "image_dir"),
     [
@@ -759,17 +766,23 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
             ("config.bootstrapContentBundle.subPath=environments/../../active",),
             "config.bootstrapContentBundle.subPath must be a relative path without .. segments",
         ),
+        (("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"), None),
+        (_bootstrap_bundle_mount("/scratch"), None),
+        (_bootstrap_bundle_mount("/bundle-cache"), None),
         (
-            ("contentBundles[1].seed.enabled=true", "contentBundles[1].seed.command[0]=/bin/true"),
-            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+            _bootstrap_bundle_mount("/bundle"),
+            'contentBundles entry "team-config" volumeMounts to stay clear of its sourcePath /bundle; mountPath /bundle',
+        ),
+        (_bootstrap_bundle_mount("/bundle/environments/"), "sourcePath /bundle; mountPath /bundle/environments"),
+        (
+            _bootstrap_bundle_mount("/app/agent_data/config-source"),
+            "targetPath /app/agent_data/config-source; mountPath /app/agent_data/config-source overlaps",
         ),
         (
-            (
-                "contentBundles[1].volumeMounts[0].name=config-input",
-                "contentBundles[1].volumeMounts[0].mountPath=/bundle",
-            ),
-            'contentBundles entry "team-config" to keep overwrite enabled, with no seed or volumeMounts',
+            _bootstrap_bundle_mount("/app/agent_data/config-source/cache"),
+            "targetPath /app/agent_data/config-source; mountPath /app/agent_data/config-source/cache overlaps",
         ),
+        (_bootstrap_bundle_mount("/app"), "targetPath /app/agent_data/config-source; mountPath /app overlaps"),
         (
             ("contentBundles[1].targetPath=/app/agent_data/active/incoming",),
             "config.bootstrapContentBundle must not overlap the config.path directory",
@@ -791,15 +804,16 @@ def test_runtime_chart_bootstrap_content_bundle_uses_default_target_path() -> No
         ),
     ],
 )
-def test_runtime_chart_rejects_invalid_bootstrap_content_bundle(settings: tuple[str, ...], message: str) -> None:
-    """A derived bootstrap must name one digest-pinned, fully replaced bundle and a contained subPath."""
+def test_runtime_chart_validates_bootstrap_content_bundle(settings: tuple[str, ...], message: str | None) -> None:
+    """A derived bootstrap needs a digest-pinned, fully replaced bundle with unmounted paths and a contained subPath."""
     result = _run_helm_template(
         Path("cluster/k8s/runtime"),
         *_BOOTSTRAP_CONTENT_BUNDLE_SETTINGS,
         *settings,
     )
-    assert result.returncode != 0
-    assert message in result.stderr
+    assert (result.returncode == 0) is (message is None), result.stderr
+    if message is not None:
+        assert message in result.stderr
 
 
 @pytest.mark.parametrize(("replicas", "allowed"), [(0, True), (1, True), (2, False)])
@@ -2384,7 +2398,10 @@ def test_chart_progress_deadline_is_optional(
 
 
 @_PROGRESS_DEADLINE_CHARTS
-@pytest.mark.parametrize("deadline", [0, -1, 1.5, "abc", True, "", 2147483648, 999999999999999999999999])
+@pytest.mark.parametrize(
+    "deadline",
+    [0, -1, 1.5, "abc", True, "", 2147483648, 99999999999999999999, 999999999999999999999999],
+)
 @pytest.mark.parametrize("from_values_file", [False, True])
 def test_chart_rejects_invalid_progress_deadline(
     tmp_path: Path,
@@ -2583,17 +2600,56 @@ def _agent_vault_network_policies(tmp_path: Path, values: dict[str, Any]) -> lis
     ]
 
 
+_NODE_LOCAL_DNS_BLOCK = {"cidr": "169.254.20.10/32"}
+
+
 @pytest.mark.parametrize(
-    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy"),
+    ("approved_egress", "parent_proxy", "worker_ports", "squid_reaches_proxy", "dns", "dns_peers"),
     [
         # Vault-first: workers send tool egress to agentVault.proxyUrl directly.
-        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False),
+        # Without a worker egress policy the DNS setting is unused, so vault DNS stays port-only.
+        (False, False, [_VAULT_API_PORT, _VAULT_PROXY_PORT], False, {"ipBlocks": [_NODE_LOCAL_DNS_BLOCK]}, None),
         # Squid-first: only approved egress forwards token-bearing traffic to the proxy port.
-        (True, True, [_VAULT_API_PORT], True),
+        # Vault DNS uses the worker egress policy's default cluster DNS destination.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            None,
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                },
+            ],
+        ),
         # Approved egress with an external proxyUrl: nothing in the chart uses the proxy port.
-        (True, False, [_VAULT_API_PORT], False),
+        # Vault DNS follows a configured destination that replaces the default selectors.
+        (
+            True,
+            False,
+            [_VAULT_API_PORT],
+            False,
+            {"namespaceSelector": None, "podSelector": None, "ipBlocks": [_NODE_LOCAL_DNS_BLOCK]},
+            [{"ipBlock": _NODE_LOCAL_DNS_BLOCK}],
+        ),
+        # A pod-only DNS destination is pinned to the worker namespace, not the vault's release namespace.
+        (
+            True,
+            True,
+            [_VAULT_API_PORT],
+            True,
+            {"namespaceSelector": None, "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}}},
+            [
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "mindroom-workers"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+                },
+            ],
+        ),
     ],
-    ids=["vault-first", "squid-first", "external-proxy"],
+    ids=["vault-first", "squid-first", "external-proxy", "pod-only-dns"],
 )
 def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clients(
     tmp_path: Path,
@@ -2601,8 +2657,10 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
     parent_proxy: bool,
     worker_ports: list[dict[str, Any]],
     squid_reaches_proxy: bool,
+    dns: dict[str, Any] | None,
+    dns_peers: list[dict[str, Any]] | None,
 ) -> None:
-    """Workers, the control plane, and the vault Jobs reach the API; the proxy port follows the egress chain."""
+    """Workers, the control plane, and the vault Jobs reach the API; the proxy port and DNS follow the egress chain."""
     agent_vault: dict[str, Any] = {
         "enabled": True,
         "cliImage": "example.test/vault:test",
@@ -2639,6 +2697,8 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
             "image": {"tag": "v0.1.0"},
             "parentProxy": {"enabled": parent_proxy},
         }
+    if dns is not None:
+        values["egressProxy"] = {"networkPolicy": {"dns": dns}}
 
     [policy] = _agent_vault_network_policies(tmp_path, values)
 
@@ -2678,9 +2738,12 @@ def test_runtime_chart_agent_vault_server_network_policy_admits_only_chart_clien
                 "ports": [_VAULT_PROXY_PORT],
             },
         )
+    dns_egress, web_egress = _VAULT_BASE_EGRESS
+    if dns_peers is not None:
+        dns_egress = {"to": dns_peers, **dns_egress}
     assert policy["metadata"]["name"] == "agent-vault"
     assert policy["spec"]["ingress"] == expected_ingress
-    assert policy["spec"]["egress"] == _VAULT_BASE_EGRESS
+    assert policy["spec"]["egress"] == [dns_egress, web_egress]
 
 
 @pytest.mark.parametrize("smtp_enabled", [False, True])
@@ -4009,6 +4072,42 @@ def test_runtime_chart_agent_vault_server_runs_as_numeric_non_root_user() -> Non
     }
 
 
+@pytest.mark.parametrize("override", [None, "podSecurityContext", "securityContext", "kubectlSecurityContext"])
+def test_runtime_chart_agent_vault_bootstrap_security_contexts(tmp_path: Path, override: str | None) -> None:
+    """The bootstrap Job pod and both containers get configurable security contexts with hardened defaults."""
+    custom = {"runAsUser": 1234}
+    bootstrap: dict[str, Any] = {"enabled": True, "kubectlImage": "registry.example.test/kubectl:1"}
+    if override:
+        bootstrap[override] = custom
+    agent_vault = {
+        "enabled": True,
+        "cliImage": "infisical/agent-vault:test",
+        "ownerEmail": "owner@example.test",
+        "workerCaConfigMapName": "agent-vault-ca",
+        "bootstrap": bootstrap,
+    }
+    values = {"workers": {"backend": "kubernetes", "kubernetes": {"agentVault": agent_vault}}}
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        values_files=_values_files(tmp_path, values),
+        release_name="mindroom-runtime",
+    )
+    job = _resource(docs, "Job", "agent-vault-bootstrap")
+    drop_all = {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+    expected = {
+        "podSecurityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, **drop_all},
+        "kubectlSecurityContext": drop_all,
+    }
+    if override:
+        # Helm deep-merges a values-file map into the chart default.
+        expected[override] = {**expected[override], **custom}
+
+    assert job["spec"]["template"]["spec"]["securityContext"] == expected["podSecurityContext"]
+    assert _init_container(job, "bootstrap-owner")["securityContext"] == expected["securityContext"]
+    assert _container(job, "publish-ca")["securityContext"] == expected["kubectlSecurityContext"]
+
+
 def test_runtime_chart_state_storage_renders_existing_pvc_mounts_and_init_permissions(tmp_path: Path) -> None:
     """Hosted runtimes should keep Matrix client state on a dedicated PVC."""
     values_path = tmp_path / "values.yaml"
@@ -4114,39 +4213,6 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
         "storageClassName": "fast-rwo",
         "resources": {"requests": {"storage": "20Gi"}},
     }
-
-
-@pytest.mark.parametrize(
-    ("config_path", "extra_args"),
-    [
-        ("/app/agent_data/encryption_keys/config.yaml", ()),
-        ("/app/agent_data/sync_continuity/config.yaml", ("stateStorage.syncContinuity.enabled=true",)),
-        ("/app/agent_data/active/config.yaml", ("stateStorage.encryptionKeys.mountPath=/app/agent_data/active/keys",)),
-        (
-            "/app/agent_data/active/config.yaml",
-            ("extraVolumeMounts[0].name=custom", "extraVolumeMounts[0].mountPath=/app/agent_data/active/keys"),
-        ),
-    ],
-)
-def test_runtime_chart_rejects_bootstrap_target_overlapping_mount(
-    config_path: str,
-    extra_args: tuple[str, ...],
-) -> None:
-    """Chart-known mounts must not become bootstrap target or its nested children."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/runtime"),
-        "eventCache.postgres.auth.password=test-password",
-        "config.source=file",
-        f"config.path={config_path}",
-        "config.bootstrapBundlePath=/bundle",
-        "workers.backend=kubernetes",
-        "stateStorage.enabled=true",
-        "stateStorage.existingClaim=mindroom-state",
-        *extra_args,
-        release_name="mindroom-runtime",
-    )
-    assert completed.returncode != 0
-    assert "config.path directory overlaps a mounted volume" in completed.stderr
 
 
 @pytest.mark.parametrize(

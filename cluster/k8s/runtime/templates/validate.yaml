@@ -63,8 +63,17 @@
 {{- if not $selectedBundle -}}
 {{- fail (printf "config.bootstrapContentBundle.name %q must match a contentBundles entry" $bootstrapContentBundle.name) -}}
 {{- end -}}
-{{- if or (and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite)) (and $selectedBundle.seed $selectedBundle.seed.enabled) $selectedBundle.volumeMounts -}}
-{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, with no seed or volumeMounts, so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- if and (hasKey $selectedBundle "overwrite") (not $selectedBundle.overwrite) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q to keep overwrite enabled, so the source matches its image digest" $bootstrapContentBundle.name) -}}
+{{- end -}}
+{{- $bundlePaths := dict "targetPath" (include "mindroom-runtime.contentBundleTargetPath" (list $ $selectedBundle)) "sourcePath" (include "mindroom-runtime.contentBundleSourcePath" (list $ $selectedBundle)) -}}
+{{- range $mount := $selectedBundle.volumeMounts -}}
+{{- $mountPath := clean (printf "/%s" $mount.mountPath) -}}
+{{- range $key, $path := $bundlePaths -}}
+{{- if or (eq $mountPath $path) (hasPrefix (printf "%s/" (trimSuffix "/" $mountPath)) $path) (hasPrefix (printf "%s/" (trimSuffix "/" $path)) $mountPath) -}}
+{{- fail (printf "config.bootstrapContentBundle requires contentBundles entry %q volumeMounts to stay clear of its %s %s; mountPath %s overlaps it" $bootstrapContentBundle.name $key $path $mountPath) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if or (hasPrefix "/" $bootstrapContentBundle.subPath) (has ".." (splitList "/" $bootstrapContentBundle.subPath)) -}}
 {{- fail "config.bootstrapContentBundle.subPath must be a relative path without .. segments" -}}
@@ -100,39 +109,6 @@
 {{- $copyRoot := clean $bootstrap.root -}}
 {{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $copyRoot)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
 {{- fail (printf "%s must not overlap the config.path directory" $bootstrapKey) -}}
-{{- end -}}
-{{- $mountPaths := list (clean .Values.storage.mountPath) -}}
-{{- if .Values.stateStorage.enabled -}}
-{{- if .Values.stateStorage.mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.mountPath) -}}
-{{- end -}}
-{{- if .Values.stateStorage.encryptionKeys.enabled -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.encryptionKeys.mountPath) -}}
-{{- end -}}
-{{- if .Values.stateStorage.syncContinuity.enabled -}}
-{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.syncContinuity.mountPath) -}}
-{{- end -}}
-{{- range .Values.stateStorage.extraSubPaths -}}
-{{- if .mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .mountPath) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if and .Values.sessionStorage.enabled .Values.sessionStorage.mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .Values.sessionStorage.mountPath) -}}
-{{- end -}}
-{{- if .Values.knowledgeStorage.enabled -}}
-{{- $mountPaths = append $mountPaths (include "mindroom-runtime.knowledgeStorageMountPath" .) -}}
-{{- end -}}
-{{- range include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray -}}
-{{- if .mountPath -}}
-{{- $mountPaths = append $mountPaths (clean .mountPath) -}}
-{{- end -}}
-{{- end -}}
-{{- range $mount := $mountPaths -}}
-{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
-{{- fail "config.path directory overlaps a mounted volume" -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
@@ -274,6 +250,15 @@
 {{- $mountPath := include "mindroom-runtime.knowledgeStorageMountPath" . -}}
 {{- if hasKey $claimedMountPaths $mountPath -}}
 {{- fail (printf "%s, where knowledgeStorage is mounted, must differ from %s" $mountPath (get $claimedMountPaths $mountPath)) -}}
+{{- end -}}
+{{- $_ := set $claimedMountPaths $mountPath "knowledgeStorage" -}}
+{{- end -}}
+{{- if $bootstrap.path -}}
+{{- $target := dir (clean .Values.config.path) -}}
+{{- range $mount := keys $claimedMountPaths -}}
+{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
+{{- fail "config.path directory overlaps a mounted volume" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- $contentBundleNames := dict -}}

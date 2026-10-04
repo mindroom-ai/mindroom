@@ -49,6 +49,7 @@ from mindroom.streaming import (
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
+    push_stream_chunk,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -735,7 +736,7 @@ class TestStreamingFinalizeStatuses:
                 runtime_paths=runtime_paths,
             )
 
-            await streaming.update_content("Partial answer", client)
+            await push_stream_chunk(streaming, "Partial answer", client)
             await streaming.finalize(client)
 
         initial_content = mock_send_message.await_args.args[2]
@@ -763,7 +764,7 @@ class TestStreamingFinalizeStatuses:
                 runtime_paths=runtime_paths,
             )
 
-            await streaming.update_content("Partial answer", client)
+            await push_stream_chunk(streaming, "Partial answer", client)
             await streaming.finalize(client, cancelled=True)
 
         final_content = mock_edit_message.await_args.args[3]
@@ -789,7 +790,7 @@ class TestStreamingFinalizeStatuses:
                 runtime_paths=runtime_paths,
             )
 
-            await streaming.update_content("Partial answer", client)
+            await push_stream_chunk(streaming, "Partial answer", client)
             await streaming.finalize(client, error=RuntimeError("boom"))
 
         final_content = mock_edit_message.await_args.args[3]
@@ -815,7 +816,7 @@ class TestStreamingFinalizeStatuses:
                 runtime_paths=runtime_paths,
             )
 
-            await streaming.update_content("Partial answer", client)
+            await push_stream_chunk(streaming, "Partial answer", client)
             await streaming.finalize(client, cancelled=True)
 
         assert mock_edit_message.await_count == 2
@@ -842,7 +843,7 @@ class TestStreamingFinalizeStatuses:
                 runtime_paths=runtime_paths,
             )
 
-            await streaming.update_content("Partial answer", client)
+            await push_stream_chunk(streaming, "Partial answer", client)
             await streaming.finalize(client, cancelled=True)
 
         assert mock_edit_message.await_count == 2

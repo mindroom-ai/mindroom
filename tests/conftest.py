@@ -157,6 +157,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.response_sources import ResponseAttempt
+    from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -1209,6 +1210,13 @@ def serve_media_from_download(client: AsyncMock) -> None:
 
     client.access_token = TEST_ACCESS_TOKEN
     client.send = AsyncMock(side_effect=send)
+
+
+async def push_stream_chunk(streaming: "StreamingResponse", chunk: str, client: object) -> None:
+    """Apply one visible chunk to a stream and let its throttle decide whether to deliver it."""
+    prior_delta_at = streaming.last_delta_at
+    streaming._update(chunk)
+    await streaming._throttled_send(client, prior_delta_at=prior_delta_at)
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:

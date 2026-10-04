@@ -1,120 +1,64 @@
 # Web Scraping & Browser
 
-Use these tools to read pages, extract article text, crawl websites, and drive either a local browser runtime or a hosted browser API.
+This page covers the built-in tools that read web pages, extract article text, crawl sites, call hosted scraping APIs, and drive a browser.
+Use it to pick a tool, configure it, and understand why a URL was refused.
 
-## What This Page Covers
+## Choosing a Tool
 
-This page documents the built-in tools in the `web-scraping-and-browser` group.
-Use these tools when you need lightweight text extraction, structured scraping APIs, or browser automation against live websites.
+| Tool | Use it for | Credentials |
+| --- | --- | --- |
+| [`website`](#website) | Reading one page quickly | None |
+| [`trafilatura`](#trafilatura) | Local text, metadata, HTML-to-text, batch extraction, and small crawls | None |
+| [`newspaper`](#newspaper) | News articles and blog posts with title, authors, and publish date | None |
+| [`crawl4ai`](#crawl4ai) | Local browser-rendered reads of one or a few URLs, optionally focused on a query | None |
+| [`jina`](#jina) | Jina Reader page reads and optional search | Optional `JINA_API_KEY` |
+| [`firecrawl`](#firecrawl) | Hosted scrape, crawl, map, and search | `FIRECRAWL_API_KEY` |
+| [`spider`](#spider) | Spider Cloud search, scrape, and crawl | `SPIDER_API_KEY` |
+| [`scrapegraph`](#scrapegraph) | Prompt-driven structured extraction | `SGAI_API_KEY` |
+| [`apify`](#apify) | Running an Apify Actor as a tool | `APIFY_API_TOKEN` |
+| [`brightdata`](#brightdata) | Markdown scraping, screenshots, SERP queries, and data feeds | `BRIGHT_DATA_API_KEY` |
+| [`oxylabs`](#oxylabs) | Google SERP, Amazon product data, and generic scraping | `OXYLABS_USERNAME` and `OXYLABS_PASSWORD` |
+| [`agentql`](#agentql) | AgentQL query extraction in a local browser | `AGENTQL_API_KEY` |
+| [`browserbase`](#browserbase) | Hosted remote browser sessions for navigation, screenshots, and page reads | `BROWSERBASE_API_KEY` and `BROWSERBASE_PROJECT_ID` |
+| [`browser`](#browser) | Multi-step automation of MindRoom's browser or the user's own signed-in browser | None |
+| [`web_browser_tools`](#web_browser_tools) | Opening a URL in the host computer's browser for a person | None |
 
-## Tools On This Page
+Each credential can be stored as the tool's `api_key` (or `apify_api_token`, `username`, and `password`) through the dashboard or credential store, or supplied as the environment variable shown.
+Keep password fields out of inline YAML.
+`crawl4ai`, `agentql`, `browserbase`, and `browser` need a working Playwright browser runtime.
+For a visible, persistent browser that the user can watch or control in MindRoom Chat, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) and [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/).
 
-- [`crawl4ai`] - Local Crawl4AI crawling with readable-text extraction and optional query-aware filtering.
-- [`website`] - Simple website reader and optional knowledge-base ingester.
-- [`trafilatura`] - Local page extraction, metadata extraction, HTML-to-text conversion, batch extraction, and focused crawling.
-- [`newspaper`] - News-article reader backed by the `newspaper4k` dependency.
-- [`jina`] - Jina Reader URL reading and optional web search with an optional API key.
-- [`firecrawl`] - Firecrawl API for scrape, crawl, map, and search jobs.
-- [`spider`] - Spider Cloud API for search, scrape, and crawl.
-- [`scrapegraph`] - ScrapeGraph AI extraction, markdown conversion, search scraping, structured crawling, and raw scraping.
-- [`apify`] - Apify Actor runner that turns configured actors into tool functions.
-- [`brightdata`] - Bright Data scraping, screenshots, SERP queries, and feed endpoints.
-- [`oxylabs`] - Oxylabs Google search, Amazon data, and general web scraping.
-- [`agentql`] - AgentQL browser-assisted scraping with optional custom extraction queries.
-- [`browserbase`] - Browserbase-hosted browser sessions with remote navigation, screenshots, and page reads.
-- [`browser`] - MindRoom's local Playwright browser controller.
-- [`web_browser_tools`] - Host OS browser opener for launching a real browser tab or window.
+## Network Access
 
-## Common Setup Notes
+Tools that fetch pages from MindRoom itself (`website`, `trafilatura`, `newspaper`, `crawl4ai`, `agentql`, and the `browser` host target) reach only public HTTP(S) addresses.
+Private, loopback, link-local, multicast, reserved, and cloud-metadata targets are refused, and so are redirects, crawled links, and page resources that lead to them.
+Unless a worker egress proxy is set, DNS answers that change after a URL is checked cannot redirect the connection to an internal service.
+Only the `browser` tool can opt into private networks, with [`allow_private_networks`](#browser-configuration).
+In Computer mode, the `browser` tool also opens worker-local loopback previews such as `http://localhost:5173` without that option; see [Preview a local web app](https://docs.mindroom.chat/tools/worker-computer/#preview-a-local-web-app).
 
-`crawl4ai`, `website`, `trafilatura`, `newspaper`, and `web_browser_tools` are the lowest-friction no-config options on this page.
-`firecrawl`, `browserbase`, `agentql`, `scrapegraph`, `apify`, `brightdata`, and `oxylabs` are all credentialed tools that normally need stored credentials or SDK environment variables before they are useful.
-`spider` also needs credentials in practice even though the current MindRoom metadata marks it as `setup_type: none`, because the installed `spider-client` raises when `SPIDER_API_KEY` is missing.
-`jina` is the middle ground here, because the installed `JinaReaderTools` only adds an `Authorization` header when `api_key` is present, so public `read_url()` usage works without a key while authenticated plans can still set one.
-`browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
-For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
-MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
-To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` with the opt-in [Chat UI toolkit](https://docs.mindroom.chat/tools/chat-ui/).
-That request only reveals the Computer panel in watch mode; it does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
-`src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
-Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
-`crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+### Egress Proxy for Browsers
 
-## No-Config Scrapers
+`crawl4ai`, `agentql`, the `browser` host target, and [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) in a Worker Computer send every connection through an operator egress proxy set with `http_proxy`, `https_proxy`, or `all_proxy`, using HTTP `CONNECT`.
+In the primary process, `http_proxy` applies to port 80, `https_proxy` to every other port, and `all_proxy` to either when its own variable is unset.
+The proxy must allow `CONNECT` to ports 80 and 443, because plain-HTTP pages are tunneled too; Squid's default `http_access deny CONNECT !SSL_ports` rule refuses plain HTTP.
+In the primary process it must also allow `CONNECT` to IP addresses, so proxies that allow only hostnames are unsupported there.
+Loopback destinations are always dialed directly, and `no_proxy` is honored only when `allow_private_networks` is enabled; it never makes a refused destination reachable.
+A refused tunnel fails that connection without a direct fallback and logs `browser_egress_proxy_refused_tunnel`.
+The primary process logs a warning and dials directly when the proxy is SOCKS, has credentials or a path in its URL, or is set through `auto_proxy` or `socks_server`.
+In a worker, every set proxy variable must name the same HTTP(S) proxy, or the browser does not start; hostnames must also resolve in the worker's DNS.
+That proxy receives hostnames and resolves them itself, so it must block private and metadata addresses and resist DNS rebinding.
+WebRTC cannot send UDP from these browsers.
 
-### [`crawl4ai`]
-
-`crawl4ai` is the best local option on this page when you want one tool that can fetch readable page content from one URL or a short URL list.
-
-#### What It Does
-
-`crawl4ai` exposes `crawl(url, search_query=None)`.
-It accepts either one URL string or a list of URLs and returns readable extracted content for each one.
-When you pass `search_query`, the tool enables BM25-based content filtering to keep the extracted text focused on that query.
-When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
-The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
-This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
-Crawled URLs must be public HTTP(S) addresses, and a route guard on the browser context blocks private, loopback, metadata, and non-HTTP(S) requests from every page, including popups.
-Every TCP connection the browser opens, including WebSockets, redirects, and service-worker fetches, goes through a loopback relay that resolves the destination itself and dials only a validated public address, so DNS answers that change after validation cannot reach internal services.
-WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-An operator egress proxy sits behind the relay, which tunnels validated destinations through it as the [browser](#browser) notes describe.
-The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `max_length` | `number` | `no` | `5000` | Maximum returned character count after extraction. |
-| `timeout` | `number` | `no` | `60` | Crawl timeout in seconds. |
-| `use_pruning` | `boolean` | `no` | `false` | Enable pruning-based cleanup when no `search_query` is provided. |
-| `pruning_threshold` | `number` | `no` | `0.48` | Threshold passed to Crawl4AI pruning mode. |
-| `bm25_threshold` | `number` | `no` | `1.0` | Threshold passed to BM25 filtering when `search_query` is used. |
-| `headless` | `boolean` | `no` | `true` | Launch Crawl4AI's browser in headless mode. |
-| `wait_until` | `text` | `no` | `domcontentloaded` | Playwright wait condition before extraction. |
-| `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
-
-```yaml
-agents:
-  researcher:
-    tools:
-      - crawl4ai:
-          max_length: 8000
-          use_pruning: true
-          wait_until: networkidle
-```
-
-```python
-crawl("https://matrix.org/blog/", search_query="bridges and federation")
-```
-
-#### Notes
-
-- Use `crawl4ai` when you want a local scraper instead of a hosted API.
-- For heavily protected or browser-hostile sites, `browserbase`, `brightdata`, or `browser` can be a better fit.
+## No-Key Scrapers
 
 ### [`website`]
 
-`website` is the lightest built-in page reader on this page.
+`website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
+Pages larger than 2 MiB fail, as do pages a server sends compressed.
 
-#### What It Does
-
-With normal MindRoom YAML configuration, `website` exposes `read_url(url)` and returns JSON-serialized `Document` objects from MindRoom's WebsiteReader variant.
-That reader keeps Agno's crawl and document shape while filtering search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
-If a `Knowledge` object is injected programmatically through the `knowledge` constructor argument, the tool exposes `add_website_to_knowledge(url)` instead of `read_url()`.
-That means the same registry entry can act either as a simple page reader or as a knowledge-base ingestion hook depending on how it is constructed.
-In normal hand-authored `config.yaml`, you should treat this as a quick page-reading tool.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `knowledge` | `object` | `no` | `null` | Advanced programmatic `Knowledge` object injection that changes the tool surface from `read_url()` to `add_website_to_knowledge()`. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `knowledge` | `object` | `null` | Programmatic `Knowledge` object only; it replaces `read_url()` with `add_website_to_knowledge(url)`. |
 
 ```yaml
 agents:
@@ -123,59 +67,35 @@ agents:
       - website
 ```
 
-```python
-read_url("https://docs.mindroom.chat")
-```
-
-#### Notes
-
-- `website` is the simplest default when you just need to read one page.
-- Server-side `website` reads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
-- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected.
-- Redirects are revalidated before they are followed, so a public URL that redirects to a blocked target is skipped.
-- Each page and redirect hop is requested uncompressed and read up to 2 MiB; a larger page, or one the server compresses anyway (`gzip`, `x-gzip`, `deflate`, `br`, or `zstd`), fails instead of being buffered or inflated in the primary process.
-- The `knowledge` field is not typical hand-written YAML and is mainly useful in programmatic setups.
-- If you need metadata-only extraction, batch extraction, or crawling, `trafilatura` is usually a better fit.
-
 ### [`trafilatura`]
 
-`trafilatura` is the most capable local extractor on this page when you want text extraction, metadata, HTML conversion, and lightweight crawling from one toolkit.
-
-#### What It Does
-
 `trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
-It fetches pages locally through Trafilatura and can return plain text, Markdown, JSON, XML, CSV, or HTML output depending on `output_format`.
-`extract_metadata_only()` returns metadata without full article text.
-`extract_batch()` loops over multiple URLs and returns one JSON payload with successes and failures.
-`crawl_website()` uses Trafilatura's focused spider support when that module is importable in the runtime.
-If the spider module is missing, the tool skips crawler registration instead of exposing a broken crawl function.
+`extract_batch()` returns one JSON payload listing successes and failures.
+`crawl_website()` stops with an error when it reaches a refused target, while `extract_content=True` reports each refused page individually.
+A server that sends a compressed body fails the download.
 
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `output_format` | `text` | `no` | `txt` | Default extraction format such as `txt`, `json`, `markdown`, `xml`, `csv`, or `html`. |
-| `include_comments` | `boolean` | `no` | `true` | Include comment content in extracted output. |
-| `include_tables` | `boolean` | `no` | `true` | Keep table content in extracted output. |
-| `include_images` | `boolean` | `no` | `false` | Include image information where Trafilatura supports it. |
-| `include_formatting` | `boolean` | `no` | `false` | Preserve formatting markers in extracted output. |
-| `include_links` | `boolean` | `no` | `false` | Preserve links in extracted output. |
-| `with_metadata` | `boolean` | `no` | `false` | Include metadata in extraction output. |
-| `favor_precision` | `boolean` | `no` | `false` | Bias extraction toward precision. |
-| `favor_recall` | `boolean` | `no` | `false` | Bias extraction toward recall. |
-| `target_language` | `text` | `no` | `null` | Optional ISO 639-1 language filter such as `en` or `de`. |
-| `deduplicate` | `boolean` | `no` | `false` | Deduplicate repeated content segments. |
-| `max_tree_size` | `number` | `no` | `null` | Optional parser tree-size limit. |
-| `max_crawl_urls` | `number` | `no` | `10` | Maximum URLs to visit when crawling. |
-| `max_known_urls` | `number` | `no` | `100000` | Maximum discovered URLs to track while crawling. |
-| `enable_extract_text` | `boolean` | `no` | `true` | Enable `extract_text()`. |
-| `enable_extract_metadata_only` | `boolean` | `no` | `true` | Enable `extract_metadata_only()`. |
-| `enable_html_to_text` | `boolean` | `no` | `true` | Enable `html_to_text()`. |
-| `enable_extract_batch` | `boolean` | `no` | `true` | Enable `extract_batch()`. |
-| `enable_crawl_website` | `boolean` | `no` | `true` | Enable `crawl_website()` when Trafilatura spider support is available. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `output_format` | `text` | `txt` | `txt`, `json`, `markdown`, `xml`, `csv`, or `html`. |
+| `include_comments` | `boolean` | `true` | Include comments. |
+| `include_tables` | `boolean` | `true` | Include tables. |
+| `include_images` | `boolean` | `false` | Include image information where supported. |
+| `include_formatting` | `boolean` | `false` | Preserve formatting markers. |
+| `include_links` | `boolean` | `false` | Preserve links. |
+| `with_metadata` | `boolean` | `false` | Include metadata in extraction output. |
+| `favor_precision` | `boolean` | `false` | Bias extraction toward precision. |
+| `favor_recall` | `boolean` | `false` | Bias extraction toward recall. |
+| `target_language` | `text` | `null` | ISO 639-1 language filter such as `en`. |
+| `deduplicate` | `boolean` | `false` | Remove repeated segments. |
+| `max_tree_size` | `number` | `null` | Parser tree-size limit. |
+| `max_crawl_urls` | `number` | `10` | Maximum URLs visited per crawl. |
+| `max_known_urls` | `number` | `100000` | Maximum discovered URLs tracked per crawl. |
+| `enable_extract_text` | `boolean` | `true` | Enable `extract_text()`. |
+| `enable_extract_metadata_only` | `boolean` | `true` | Enable `extract_metadata_only()`. |
+| `enable_html_to_text` | `boolean` | `true` | Enable `html_to_text()`. |
+| `enable_extract_batch` | `boolean` | `true` | Enable `extract_batch()`. |
+| `enable_crawl_website` | `boolean` | `true` | Enable `crawl_website()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
 agents:
@@ -187,144 +107,83 @@ agents:
           include_links: true
 ```
 
-```python
-extract_text("https://matrix.org/blog/", output_format="markdown")
-extract_metadata_only("https://matrix.org/blog/")
-```
-
-#### Notes
-
-- `trafilatura` is the strongest no-key option when you want more than a plain page read.
-- Server-side `trafilatura` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses.
-- Private, loopback, link-local, multicast, reserved, and metadata-style targets are rejected with an error result before any connection is made.
-- Redirects, `robots.txt`, meta-refresh targets, and links discovered while crawling are validated the same way.
-- `crawl_website()` stops with that error when the crawler reaches a blocked target, while `extract_content=True` reports each blocked page individually.
-- Pages are downloaded uncompressed, and a server that answers with a compressed body is treated as a failed download.
-- `crawl_website()` depends on Trafilatura spider support in the runtime, so verify the crawler function exists if crawling matters to your workflow.
-- For news-article specific extraction with titles, authors, and publish dates, `newspaper` can be a better fit.
-
 ### [`newspaper`]
 
-`newspaper` is the article-focused extractor for news pages and blog posts.
+`newspaper` exposes `read_article(url)` and returns JSON with whichever of title, authors, text, and publish date were extracted.
+It is tuned for article pages, not arbitrary sites, and returns no image fields.
+Use `newspaper` in `tools:`, not `newspaper4k`.
 
-#### What It Does
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `article_length` | `number` | `null` | Truncate article text to this many characters. |
+| `enable_read_article` | `boolean` | `true` | Enable `read_article()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
-`newspaper` exposes `read_article(url)`.
-It returns JSON with whichever article fields were extracted successfully, including title, authors, text, and publish date.
-`article_length` truncates article text after extraction.
-The registry name is `newspaper`, but the underlying module and dependency still come from `newspaper4k`.
-That means old references to `newspaper4k` are stale for current MindRoom config.
+### [`crawl4ai`]
 
-#### Configuration
+`crawl4ai` exposes `crawl(url, search_query=None)`, where `url` is one URL or a list, and returns readable text for each page from a local headless browser.
+With `search_query`, the text is filtered toward that query; without one, `use_pruning` trims noisy content.
+Results skip Crawl4AI's cache and are truncated to `max_length`.
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `article_length` | `number` | `no` | `null` | Truncate article text to this many characters. |
-| `enable_read_article` | `boolean` | `no` | `true` | Enable `read_article()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
-
-```yaml
-agents:
-  newsdesk:
-    tools:
-      - newspaper:
-          article_length: 6000
-```
-
-```python
-read_article("https://matrix.org/blog/")
-```
-
-#### Notes
-
-- Use `newspaper` in `tools:`, not `newspaper4k`.
-- Server-side `newspaper` downloads accept only HTTP(S) URLs whose resolved targets are public Internet addresses, and redirects are validated the same way.
-- Pages are downloaded uncompressed, and images listed in a page are never downloaded, so the result has no image fields.
-- This tool is tuned for article-style pages rather than arbitrary websites.
-- For generic site crawling or metadata extraction across many URLs, use `trafilatura` or `crawl4ai`.
-
-### [`jina`]
-
-`jina` wraps Jina Reader's read and search endpoints and is the easiest hosted option on this page when you want an optional-key reader rather than a strict credential gate.
-
-#### What It Does
-
-`jina` exposes `read_url(url)` and, when enabled, `search_query(query)`.
-`read_url()` prepends the target URL to `base_url`, which defaults to `https://r.jina.ai/`.
-`search_query()` posts the query to `search_url`, which defaults to `https://s.jina.ai/`.
-When `search_query_content` is false, the tool adds `X-Respond-With: no-content` to avoid returning full page text in search results.
-Returned content is truncated to `max_content_length`.
-The installed implementation only adds the `Authorization` header when an API key is present, so unauthenticated public-reader usage still works.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Optional Jina API key, with `JINA_API_KEY` as the SDK fallback. |
-| `base_url` | `url` | `no` | `https://r.jina.ai/` | Base URL for `read_url()`. |
-| `search_url` | `url` | `no` | `https://s.jina.ai/` | Base URL for `search_query()`. |
-| `max_content_length` | `number` | `no` | `10000` | Maximum returned character count. |
-| `timeout` | `number` | `no` | `null` | Optional Jina timeout header in seconds. |
-| `search_query_content` | `boolean` | `no` | `true` | Return full content in search results instead of metadata-only search summaries. |
-| `enable_read_url` | `boolean` | `no` | `true` | Enable `read_url()`. |
-| `enable_search_query` | `boolean` | `no` | `false` | Enable `search_query()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `max_length` | `number` | `5000` | Maximum returned characters. |
+| `timeout` | `number` | `60` | Crawl timeout in seconds. |
+| `use_pruning` | `boolean` | `false` | Prune noisy content when no `search_query` is given. |
+| `pruning_threshold` | `number` | `0.48` | Pruning threshold. |
+| `bm25_threshold` | `number` | `1.0` | Query-filter threshold when `search_query` is given. |
+| `headless` | `boolean` | `true` | Run the browser headless. |
+| `wait_until` | `text` | `domcontentloaded` | Playwright wait condition before extraction. |
+| `enable_crawl` | `boolean` | `true` | Enable `crawl()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
 agents:
   researcher:
     tools:
-      - jina:
-          enable_search_query: true
-          search_query_content: false
+      - crawl4ai:
+          max_length: 8000
+          use_pruning: true
+          wait_until: networkidle
 ```
 
-```python
-read_url("https://matrix.org/blog/")
-search_query("latest Matrix bridge updates")
-```
+### [`jina`]
 
-#### Notes
+`jina` exposes `read_url(url)` through Jina Reader and, when enabled, `search_query(query)`.
+It works without a key for public reads; a key helps with paid plans and rate limits.
+Returned content is truncated to `max_content_length`.
 
-- `jina` works without a key for public reader endpoints, but a key is still useful for authenticated plans or rate limits.
-- The current MindRoom metadata marks this tool as `requires_config`, but the installed code only treats auth as optional.
-- Pick `jina` when you specifically want Jina Reader semantics instead of local extraction libraries.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Optional; falls back to `JINA_API_KEY`. |
+| `base_url` | `url` | `https://r.jina.ai/` | Reader endpoint for `read_url()`. |
+| `search_url` | `url` | `https://s.jina.ai/` | Search endpoint for `search_query()`. |
+| `max_content_length` | `number` | `10000` | Maximum returned characters. |
+| `timeout` | `number` | `null` | Jina timeout in seconds. |
+| `search_query_content` | `boolean` | `true` | Include full page content in search results; `false` returns summaries only. |
+| `enable_read_url` | `boolean` | `true` | Enable `read_url()`. |
+| `enable_search_query` | `boolean` | `false` | Enable `search_query()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
-## API-Based Scrapers
+## Hosted Scraping APIs
 
 ### [`firecrawl`]
 
-`firecrawl` is the hosted scraper on this page that covers scrape, crawl, map, and search from one API.
-
-#### What It Does
-
 `firecrawl` exposes `scrape_website()`, `crawl_website()`, `map_website()`, and `search_web()`.
-`formats` is applied to scrape, crawl, and search requests.
-`limit` acts as the default result cap for crawl and search operations.
-`poll_interval` controls how often crawl jobs are polled.
-The upstream `search_params` mapping is not exposed in authored YAML or dashboard configuration.
-The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provided directly.
+It requires `api_key` or `FIRECRAWL_API_KEY`.
 
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Firecrawl API key, with `FIRECRAWL_API_KEY` as the SDK fallback. |
-| `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
-| `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl_website()`. |
-| `enable_mapping` | `boolean` | `no` | `false` | Enable `map_website()`. |
-| `enable_search` | `boolean` | `no` | `false` | Enable `search_web()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats as a list of strings, such as `markdown` or `html`. |
-| `limit` | `number` | `no` | `10` | Default page or result limit for crawl and search. |
-| `poll_interval` | `number` | `no` | `30` | Crawl polling interval in seconds. |
-| `api_url` | `url` | `no` | `https://api.firecrawl.dev` | Firecrawl API base URL. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Falls back to `FIRECRAWL_API_KEY`. |
+| `enable_scrape` | `boolean` | `true` | Enable `scrape_website()`. |
+| `enable_crawl` | `boolean` | `false` | Enable `crawl_website()`. |
+| `enable_mapping` | `boolean` | `false` | Enable `map_website()`. |
+| `enable_search` | `boolean` | `false` | Enable `search_web()`. |
+| `all` | `boolean` | `false` | Enable every function. |
+| `formats` | `string[]` | `null` | Output formats for scrape, crawl, and search, such as `markdown` or `html`; check them against your plan. |
+| `limit` | `number` | `10` | Default result cap for crawl and search. |
+| `poll_interval` | `number` | `30` | Seconds between crawl status checks. |
+| `api_url` | `url` | `https://api.firecrawl.dev` | Firecrawl API base URL. |
 
 ```yaml
 agents:
@@ -336,133 +195,52 @@ agents:
           limit: 5
 ```
 
-```python
-scrape_website("https://matrix.org/blog/")
-search_web("latest Matrix bridges")
-```
-
-#### Notes
-
-- Use `firecrawl` when you want scrape, crawl, map, and search in one hosted API.
-- Verify the requested `formats` against your Firecrawl plan and endpoint version.
-- This is usually a better fit than `crawl4ai` when you want provider-hosted crawling instead of local browser work.
-
 ### [`spider`]
 
-`spider` is Spider Cloud's search, scrape, and crawl toolkit for LLM-ready output.
+`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
+Search results do not include full page content.
+It requires `SPIDER_API_KEY` in the environment even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
-#### What It Does
-
-`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`.
-The current wrapper calls Spider search with `fetch_page_content: false`, so search is primarily discovery rather than full-content extraction.
-`scrape()` and `crawl()` request Markdown-style output from Spider.
-The upstream `optional_params` mapping is not exposed in authored YAML or dashboard configuration.
-The installed `spider-client` constructor raises when no API key is available, even though the current MindRoom metadata says this tool is available without setup.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `max_results` | `number` | `no` | `null` | Default result count override for `search_web()`. |
-| `url` | `url` | `no` | `null` | Optional default URL constructor argument from the upstream toolkit. |
-| `enable_search` | `boolean` | `no` | `true` | Enable `search_web()`. |
-| `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape()`. |
-| `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
-
-```yaml
-agents:
-  crawler:
-    tools:
-      - spider:
-          max_results: 8
-          enable_crawl: true
-```
-
-```python
-search_web("MindRoom Matrix setup", max_results=5)
-scrape("https://matrix.org/blog/")
-```
-
-#### Notes
-
-- Treat `spider` as a credentialed tool and set `SPIDER_API_KEY`, even though the current MindRoom metadata still says `setup_type: none`.
-- If you want a cleaner, explicitly credentialed hosted scraper with clearer metadata, `firecrawl` is usually simpler.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `max_results` | `number` | `null` | Default result count for `search_web()`. |
+| `url` | `url` | `null` | Unused; `scrape()` and `crawl()` always take the URL as an argument. |
+| `enable_search` | `boolean` | `true` | Enable `search_web()`. |
+| `enable_scrape` | `boolean` | `true` | Enable `scrape()`. |
+| `enable_crawl` | `boolean` | `true` | Enable `crawl()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ### [`scrapegraph`]
 
-`scrapegraph` is the prompt-driven extractor on this page for turning web pages into structured answers.
+`scrapegraph` turns pages into structured answers from natural-language prompts.
+`smartscraper(url, prompt)` extracts data from one page, `markdownify()` converts a page to Markdown, `crawl()` applies a prompt and JSON schema across a crawl, `searchscraper()` searches the web before extracting, and `scrape()` returns raw HTML.
+It requires `api_key` or `SGAI_API_KEY`.
+Keep at least one function enabled, or set `all: true`.
+The upstream `headers` option is not supported in `config.yaml`.
 
-#### What It Does
-
-`scrapegraph` exposes `smartscraper()`, `markdownify()`, `crawl()`, `searchscraper()`, and `scrape()`.
-`smartscraper()` extracts structured data from one page based on a natural-language prompt.
-`markdownify()` returns a Markdown version of a page.
-`crawl()` applies a prompt plus JSON schema across a crawl.
-`searchscraper()` searches the web before extracting information.
-`render_heavy_js` only affects the low-level `scrape()` path.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | ScrapeGraph API key, with `SGAI_API_KEY` as the SDK fallback. |
-| `enable_smartscraper` | `boolean` | `no` | `true` | Enable `smartscraper()`. |
-| `enable_markdownify` | `boolean` | `no` | `false` | Enable `markdownify()`. |
-| `enable_crawl` | `boolean` | `no` | `false` | Enable `crawl()`. |
-| `enable_searchscraper` | `boolean` | `no` | `false` | Enable `searchscraper()`. |
-| `enable_scrape` | `boolean` | `no` | `false` | Enable raw `scrape()`. |
-| `render_heavy_js` | `boolean` | `no` | `false` | Ask ScrapeGraph to render heavy JavaScript for `scrape()`. |
-| `crawl_poll_interval` | `number` | `no` | `3` | Seconds between crawl-status polls. |
-| `crawl_max_wait` | `number` | `no` | `180` | Maximum seconds to wait for a crawl to complete. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-The upstream toolkit also accepts a `headers` mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields, so do not put `headers` in `config.yaml`.
-
-#### Example
-
-```yaml
-agents:
-  extractor:
-    tools:
-      - scrapegraph:
-          enable_searchscraper: true
-          enable_markdownify: true
-```
-
-```python
-smartscraper("https://matrix.org/blog/", "Extract the title, date, and three main points.")
-markdownify("https://matrix.org/blog/")
-```
-
-#### Notes
-
-- Keep at least one function enabled, or set `all: true`; disabling every function flag registers an empty toolkit surface.
-- Use `scrapegraph` when you want prompt-shaped extraction rather than generic page text.
-- For purely local extraction with no hosted API dependency, use `crawl4ai` or `trafilatura`.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Falls back to `SGAI_API_KEY`. |
+| `enable_smartscraper` | `boolean` | `true` | Enable `smartscraper()`. |
+| `enable_markdownify` | `boolean` | `false` | Enable `markdownify()`. |
+| `enable_crawl` | `boolean` | `false` | Enable `crawl()`. |
+| `enable_searchscraper` | `boolean` | `false` | Enable `searchscraper()`. |
+| `enable_scrape` | `boolean` | `false` | Enable `scrape()`. |
+| `render_heavy_js` | `boolean` | `false` | Render heavy JavaScript in `scrape()` only. |
+| `crawl_poll_interval` | `number` | `3` | Seconds between crawl status checks. |
+| `crawl_max_wait` | `number` | `180` | Maximum seconds to wait for a crawl. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ### [`apify`]
 
-`apify` is the dynamic tool on this page, because its callable surface depends on which Actors you register.
+`apify` registers one tool function per configured Apify Actor, with parameters from the Actor's input schema, and returns the Actor's dataset items as JSON.
+Without `actors`, it provides no functions.
+Function names derive from the Actor ID, so check the agent's tool list for the exact name.
 
-#### What It Does
-
-`apify` does not expose one fixed method like the other tools on this page.
-Instead, it reads the configured Actor IDs and registers one tool function per Actor at startup.
-Each generated tool uses the Actor's input schema to build parameters and returns that Actor's dataset items as JSON.
-Without configured `actors`, there is no practical tool surface.
-This is best thought of as a hosted Actor adapter rather than a single scraper API.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `apify_api_token` | `password` | `yes` | `null` | Apify API token, with `APIFY_API_TOKEN` as the SDK fallback. |
-| `actors` | `text` | `yes` | `null` | Actor ID string such as `apify/rag-web-browser`, with the current MindRoom metadata also claiming comma-separated lists even though the installed upstream class treats a plain string as one actor ID. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `apify_api_token` | `password` | `null` | Falls back to `APIFY_API_TOKEN`. |
+| `actors` | `text` | `null` | One Actor ID, such as `apify/rag-web-browser`; a comma-separated list is treated as a single ID. |
 
 ```yaml
 agents:
@@ -472,127 +250,54 @@ agents:
           actors: apify/rag-web-browser
 ```
 
-#### Notes
-
-- `actors` is the important field here, because it determines which functions actually exist at runtime.
-- The current metadata advertises comma-separated Actor IDs, but the installed upstream constructor does not split plain strings, so the safest documented path on this branch is a single Actor ID.
-- Generated tool names are derived from the Actor ID, so check the runtime tool list if you need the exact callable name.
-
 ### [`brightdata`]
 
-`brightdata` is the hosted toolkit for markdown scraping, screenshots, SERP queries, and provider-specific web data feeds.
+`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()` for Google, Bing, and Yandex, and `web_data_feed()` for Bright Data's supported source types.
+`get_screenshot()` returns the image directly to the model rather than a file path.
+It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
-#### What It Does
-
-`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()`, and `web_data_feed()`.
-`scrape_as_markdown()` uses the configured web-unlocker zone and returns Markdown output.
-`get_screenshot()` returns a `ToolResult` with an image artifact instead of just raw text.
-`search_engine()` supports Google, Bing, and Yandex search through Bright Data's SERP infrastructure.
-`web_data_feed()` accesses Bright Data feed endpoints for supported source types.
-Zone selection is controlled by `serp_zone` and `web_unlocker_zone`, which can also be overridden by environment variables.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Bright Data API key, with `BRIGHT_DATA_API_KEY` as the SDK fallback. |
-| `enable_scrape_markdown` | `boolean` | `no` | `true` | Enable `scrape_as_markdown()`. |
-| `enable_screenshot` | `boolean` | `no` | `true` | Enable `get_screenshot()`. |
-| `enable_search_engine` | `boolean` | `no` | `true` | Enable `search_engine()`. |
-| `enable_web_data_feed` | `boolean` | `no` | `true` | Enable `web_data_feed()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `serp_zone` | `text` | `no` | `serp_api` | SERP zone, with `BRIGHT_DATA_SERP_ZONE` able to override it. |
-| `web_unlocker_zone` | `text` | `no` | `web_unlocker1` | Web unlocker zone, with `BRIGHT_DATA_WEB_UNLOCKER_ZONE` able to override it. |
-| `verbose` | `boolean` | `no` | `false` | Emit extra Bright Data request logging. |
-| `timeout` | `number` | `no` | `600` | Timeout in seconds. |
-
-#### Example
-
-```yaml
-agents:
-  research:
-    tools:
-      - brightdata:
-          enable_web_data_feed: false
-          timeout: 300
-```
-
-```python
-scrape_as_markdown("https://matrix.org/blog/")
-search_engine("Matrix hosting", engine="google", num_results=5)
-```
-
-#### Notes
-
-- `brightdata` is the better fit than `firecrawl` when screenshots and feed endpoints matter.
-- Zone environment variables can override the inline config values, so document your deployment defaults if multiple zones exist.
-- `get_screenshot()` returns an image artifact rather than a file path string, which is useful for agents that need to hand the screenshot to a model immediately.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Falls back to `BRIGHT_DATA_API_KEY`. |
+| `enable_scrape_markdown` | `boolean` | `true` | Enable `scrape_as_markdown()`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `get_screenshot()`. |
+| `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
+| `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
+| `all` | `boolean` | `false` | Enable every function. |
+| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` overrides it. |
+| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` overrides it. |
+| `verbose` | `boolean` | `false` | Log extra request detail. |
+| `timeout` | `number` | `600` | Timeout in seconds. |
 
 ### [`oxylabs`]
 
-`oxylabs` is the e-commerce and SERP-oriented scraper on this page.
-
-#### What It Does
-
 `oxylabs` exposes `search_google()`, `get_amazon_product()`, `search_amazon_products()`, and `scrape_website()`.
-It uses the Oxylabs realtime client for Google and Amazon scraping rather than a generic HTML fetch path.
-`search_google()` returns parsed organic results with title, URL, description, and position.
-The Amazon functions expose both product-detail and product-search workflows.
-`scrape_website()` is the generic fallback when you just want one URL scraped.
-This tool is credentialed with a username and password pair rather than one API key.
+`search_google()` returns organic results with title, URL, description, and position.
+Pass `domain_code`, such as `com` or `de`, to choose the regional Google or Amazon domain.
+It requires both a username and password.
 
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `username` | `text` | `yes` | `null` | Oxylabs username, with `OXYLABS_USERNAME` as the SDK fallback. |
-| `password` | `password` | `yes` | `null` | Oxylabs password, with `OXYLABS_PASSWORD` as the SDK fallback. |
-
-#### Example
-
-```yaml
-agents:
-  commerce:
-    tools:
-      - oxylabs
-```
-
-```python
-search_google("Matrix hosting", domain_code="com")
-search_amazon_products("ergonomic keyboard", domain_code="com")
-```
-
-#### Notes
-
-- `oxylabs` needs both `username` and `password`, so it is not a single-key setup like `firecrawl` or `brightdata`.
-- Use `domain_code` to switch between regional Google and Amazon domains.
-- Pick `oxylabs` when Google SERP plus Amazon data matters more than generic website crawling.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `username` | `text` | `null` | Falls back to `OXYLABS_USERNAME`. |
+| `password` | `password` | `null` | Falls back to `OXYLABS_PASSWORD`. |
+| `markdown` | `boolean` | `false` | Return `scrape_website()` content as Markdown instead of parsed HTML. |
 
 ## Browser Tools
 
 ### [`agentql`]
 
-`agentql` is the browser-assisted extractor for sites where you want AgentQL queries rather than plain text scraping.
+`agentql` exposes `scrape_website(url)`, which extracts generic page text, and `custom_scrape_website(url)`, which runs your `agentql_query` and returns the extracted values as JSON.
+Setting `agentql_query` registers `custom_scrape_website()` even when `enable_custom_scrape_website` is `false`.
+It opens only HTTP(S) URLs and launches a visible browser window, so it needs a GUI-capable runtime or virtual display.
+It requires `api_key` or `AGENTQL_API_KEY`; AgentQL SDK settings and CLI credential files do not override that key.
 
-#### What It Does
-
-`agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`.
-`scrape_website()` uses a built-in query that extracts generic page text.
-`custom_scrape_website()` uses the configured `agentql_query` and returns JSON that preserves extracted values and nested lists and objects.
-The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false.
-The toolkit launches Playwright with `headless=False`, which matters on headless-only runtimes.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Stored AgentQL API key; falls back to `AGENTQL_API_KEY` when no key is supplied. |
-| `enable_scrape_website` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
-| `enable_custom_scrape_website` | `boolean` | `no` | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `agentql_query` | `text` | `no` | `""` | Custom AgentQL query used by `custom_scrape_website()`. |
-
-#### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Falls back to `AGENTQL_API_KEY`. |
+| `enable_scrape_website` | `boolean` | `true` | Enable `scrape_website()`. |
+| `enable_custom_scrape_website` | `boolean` | `false` | Enable `custom_scrape_website()`. |
+| `all` | `boolean` | `false` | Enable every function. |
+| `agentql_query` | `text` | `""` | AgentQL query for `custom_scrape_website()`. |
 
 ```yaml
 agents:
@@ -606,133 +311,85 @@ agents:
             }
 ```
 
-```python
-scrape_website("https://matrix.org/blog/")
-custom_scrape_website("https://matrix.org/blog/")
-```
-
-#### Notes
-
-- Each request uses the toolkit's resolved key without changing shared AgentQL SDK configuration or environment credentials.
-- AgentQL query API redirects are rejected before any follow-up request, so the resolved key stays with the configured API endpoint.
-- Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
-- AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
-- The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
-- `agentql` opens only HTTP(S) URLs, and the browser reaches only public Internet addresses: every connection, including redirects and page resources, goes through the same destination relay as `crawl4ai`.
-- Setting `agentql_query` is enough to register the custom scrape function on this branch.
-- Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
-
 ### [`browserbase`]
 
-`browserbase` is the hosted browser session tool for navigation, screenshots, and page-content reads over a remote browser.
+`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()` against a hosted Browserbase session that it creates automatically.
+It still needs local Playwright to connect to the remote browser.
+It requires an API key and project ID.
+Use it when you need remote navigation, screenshots, and page reads without the full action set of `browser`.
 
-#### What It Does
-
-`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()`, plus async variants for async agent execution.
-The tool auto-creates a Browserbase session, stores its `connect_url`, and connects to it over Playwright CDP.
-`get_page_content()` returns visible cleaned text when `parse_html` is true and raw HTML when `parse_html` is false.
-Long page content is truncated to `max_content_length`.
-`base_url` configures the Browserbase API endpoint, not the website you want to visit.
-This is simpler than `browser` when you only need remote navigation, screenshots, and page reads.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | Browserbase API key, with `BROWSERBASE_API_KEY` as the SDK fallback. |
-| `project_id` | `text` | `yes` | `null` | Browserbase project ID, with `BROWSERBASE_PROJECT_ID` as the SDK fallback. |
-| `base_url` | `url` | `no` | `null` | Optional Browserbase API endpoint override, with `BROWSERBASE_BASE_URL` as the SDK fallback. |
-| `enable_navigate_to` | `boolean` | `no` | `true` | Enable `navigate_to()`. |
-| `enable_screenshot` | `boolean` | `no` | `true` | Enable `screenshot()`. |
-| `enable_get_page_content` | `boolean` | `no` | `true` | Enable `get_page_content()`. |
-| `enable_close_session` | `boolean` | `no` | `true` | Enable `close_session()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `parse_html` | `boolean` | `no` | `true` | Return cleaned visible text instead of raw HTML. |
-| `max_content_length` | `number` | `no` | `100000` | Maximum returned character count for page content. |
-
-#### Example
-
-```yaml
-agents:
-  browser_worker:
-    tools:
-      - browserbase:
-          parse_html: true
-          max_content_length: 20000
-```
-
-```python
-navigate_to("https://matrix.org/blog/")
-get_page_content()
-```
-
-#### Notes
-
-- `browserbase` needs both `api_key` and `project_id`.
-- It still depends on local Playwright support because the client connects to the remote browser over CDP.
-- Use `browserbase` when you want a hosted browser session but do not need the broader local action surface of `browser`.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Falls back to `BROWSERBASE_API_KEY`. |
+| `project_id` | `text` | `null` | Falls back to `BROWSERBASE_PROJECT_ID`. |
+| `base_url` | `url` | `null` | Browserbase API endpoint, not the site to visit; falls back to `BROWSERBASE_BASE_URL`. |
+| `enable_navigate_to` | `boolean` | `true` | Enable `navigate_to()`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `screenshot()`. |
+| `enable_get_page_content` | `boolean` | `true` | Enable `get_page_content()`. |
+| `enable_close_session` | `boolean` | `true` | Enable `close_session()`. |
+| `all` | `boolean` | `false` | Enable every function. |
+| `parse_html` | `boolean` | `true` | Return visible text instead of raw HTML. |
+| `max_content_length` | `number` | `100000` | Maximum returned characters of page content. |
 
 ### [`browser`]
 
-`browser` is MindRoom's browser controller for multi-step browser sessions, snapshots, screenshots, PDFs, uploads, dialogs, and semantic actions.
+`browser` exposes one function, `browser_control(action=...)`, for multi-step browser sessions.
+It can drive two targets:
 
-#### What It Does
+- `target="host"` (default) controls MindRoom's own Chromium on the MindRoom host, or in the agent's worker when `browser` is listed in `worker_tools`.
+- `target="desktop"` controls the user's own signed-in Chrome or Brave profile through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/), which owns extension installation, the local control lease, and the trust model.
 
-`browser` exposes one callable, `browser_control(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
-With `target="host"`, it manages named browser profiles on the MindRoom host or its routed worker, with `mindroom` as the default profile name.
-To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` after any desired browser navigation.
-The Computer request accepts no URL and reports only that the UI request was sent.
-With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
-The desktop target supports observations (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`) and the controls `start`, `stop`, and `open`.
-It rejects `targetId` and existing-page controls (`focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`) because Playwright MCP cannot bind these actions to a stable page identity.
-The host target creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
-The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
-Host-target `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
-The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge and the local extension option, with a local control lease for `start`, `stop`, and `open`.
-Host screenshots return model-visible image content by default plus their retained path; `saveOnly=True` preserves an explicit save-only mode.
-Host captures and `view_file` use shared bounded image delivery, with any resizing or first-frame handling disclosed.
-Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
-Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
-Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
-Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
-For the host target, `output_dir` defaults to `browser/` in the agent's state root for screenshots, PDFs, and other artifacts, which is `<storage>/agents/<agent>/browser` for a shared agent and lies under the requester's own private-instance root for a private agent, so no other agent or private requester can upload them.
+Call `action="help"` or `action="actions"` to list the actions and `act` request kinds.
+
+| Action | Host | Desktop |
+| --- | --- | --- |
+| `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `snapshot`, `screenshot`, `console` | Yes | Yes |
+| `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act` | Yes | No |
+| `help`, `actions` | Yes | Yes |
+
+On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
+`act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
+The desktop target returns the browser's native accessibility snapshot and rejects `targetId` and host-only options such as `profile`, snapshot format hints, `inputRef`, and `timeoutMs`.
+Desktop-target calls always run in the primary process, so routing `browser` to a worker isolates only host-target calls.
+To show the worker browser to the user, see [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#control-the-browser-then-show-it).
+
+#### Screenshots and Files
+
+Screenshots are shown to the model by default; host screenshots are also saved, and `saveOnly=True` saves without showing.
+Large images may be resized before the model sees them.
+Model-visible screenshots can be kept in the agent's session history.
+On the desktop target, `returnAttachment=True` with `action="screenshot"` also returns an `att_*` handle, valid until the turn ends, that `matrix_message` can send.
+
+Host screenshots, PDFs, and other artifacts go to `output_dir`.
+In the primary process it defaults to `browser/` in the agent's state root: `<storage>/agents/<agent>/browser` for a shared agent, or the requester's private-instance root for a private agent.
+In a worker it defaults to `browser/` in the worker workspace, and a custom `output_dir` must stay inside that workspace.
+`output_dir` must not point at runtime state, and it does not affect the desktop target.
+
 Which files `upload` may read follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting.
-With the default `workspace`, host `upload` accepts files in that artifact directory, files in the agent's workspace (absolute or workspace-relative paths), and `att_*` IDs of attachments available in the current conversation; use `./` for a workspace file whose name starts with `att_`.
-Everything else under the runtime storage root, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces, is rejected, so `output_dir` must not point at runtime state.
-On a routed worker, `workspace` mode reads only files inside the worker workspace.
-With `unrestricted`, `upload` accepts any existing file its process can read, which on a routed worker is the worker container.
-`upload` copies each file into a private snapshot that stays on disk until its tab closes, and one browser keeps at most 256 MiB of snapshots, so an upload past that is refused until a tab closes.
-The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
-The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
-Host profiles are agent state: a primary-process browser keeps `<profile>` under the agent's state root at `browser-profiles/<profile>`, which is `<storage>/agents/<agent>` for a shared agent and the requester's own private-instance root for a private agent.
-Every requester of a shared agent therefore shares its signed-in browser sessions, while agents never share them; use a private agent when requesters need separate browser sessions.
-This includes a shared agent with `worker_scope: user` or `user_agent` whose `browser` runs in the primary process; route `browser` to workers with `worker_tools` to give each worker scope its own profiles.
-A routed worker keeps profiles under its own storage root, and profile names that start with a dot, such as `..`, are rejected.
-The host target's destination policy applies to every TCP connection Chromium opens, including WebSockets, redirects, subresources, and service-worker fetches, because a loopback relay is Chromium's only proxy, loopback included, and resolves and validates each destination before it dials anything.
-WebRTC may send UDP only through a proxy, and the relay carries no UDP, so pages cannot send STUN, TURN, or media datagrams to any address.
-An operator egress proxy sits behind the relay: after validating a destination, the relay dials it directly or opens an HTTP `CONNECT` tunnel through that proxy.
-In the primary process, the tunnel names the address the relay validated, so the proxy cannot resolve the hostname to anything else, and the proxy variables follow curl precedence: `http_proxy` for port 80, `https_proxy` for every other port, and `all_proxy` for either when its own variable is unset.
-Loopback destinations the policy allows are always dialed directly, because a proxy's loopback is another host, and with `allow_private_networks` so are destinations `no_proxy` names, whether by hostname suffix or address range; `no_proxy` can never make a destination the policy refuses, such as a metadata address, reachable.
-The proxy must allow `CONNECT` to ports 80 and 443, port 80 carrying plain-HTTP pages; Squid's default `http_access deny CONNECT !SSL_ports` rule refuses plain HTTP.
-In the primary it must also allow `CONNECT` to IP addresses, so egress proxies that allow only hostnames are unsupported for the primary browser.
-A refused tunnel fails that connection without any direct fallback and logs `browser_egress_proxy_refused_tunnel` with the requirement it failed.
-A SOCKS proxy, credentials inside a proxy URL, a proxy URL with a path, `auto_proxy`, or `socks_server` cannot be followed; the primary logs a warning and the relay dials those destinations directly within the same policy.
-In a sandbox runner, where the proxy may be what enforces approved egress, every set proxy variable must name one such HTTP(S) proxy, spellings that differ only in letter case, a trailing slash, an omitted default port, or a missing `http://` counting as one, and anything else stops the browser from starting.
-The tunnel there names the hostname, because an approved-egress proxy decides by name, so that proxy's own resolution and any rebinding against it are its responsibility; the relay still validates the name against the worker's DNS first.
+With the default `workspace`, `upload` accepts files in the artifact directory, files in the agent's workspace, and `att_*` IDs of attachments in the current conversation; use `./` for a workspace file whose name starts with `att_`.
+Everything else is refused, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces; in a worker only the worker workspace is readable.
+With `unrestricted`, `upload` accepts any file its process can read.
+One browser holds at most 256 MiB of uploaded files until their tabs close, so a larger upload is refused until a tab is closed.
 
-#### Configuration
+#### Profiles and Signed-In Sessions
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `output_dir` | `text` | `host only` | `null` | Optional host-target directory for screenshots, PDFs, and other browser artifacts, with `browser/` in the agent's state root as the runtime default when omitted. |
-| `allow_private_networks` | `boolean` | `no` | `false` | Allow `open`, `navigate`, and every page connection to reach trusted private or loopback addresses while continuing to block metadata and link-local destinations; this does not sandbox or restrict the desktop target's normal browser network access. |
-| `default_target` | `select` | `no` | `host` | Use `host` for MindRoom's managed profile or `desktop` for the pinned local Playwright extension. |
-| `device_user_id` | `text` | `desktop only` | `null` | Dedicated Matrix user for the local desktop bridge. |
-| `device_id` | `text` | `desktop only` | `null` | Exact local Matrix device ID. |
-| `device_ed25519` | `text` | `desktop only` | `null` | Exact Ed25519 fingerprint for the local Matrix device. |
-| `timeout_seconds` | `number` | `no` | `90` | Matrix and local Playwright MCP timeout from 1 to 120 seconds. |
+Host-target profiles are named, with `mindroom` as the default; names starting with a dot are rejected.
+In the primary process a profile lives at `browser-profiles/<profile>` under the agent's state root, so every requester of a shared agent shares its signed-in sessions, while different agents never share them.
+This holds even with `worker_scope: user` or `user_agent` unless `browser` is in `worker_tools`, which gives each worker scope its own profiles.
+Use a private agent when requesters need separate browser sessions.
+Chromium is taken from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable`.
 
-#### Example
+#### Browser Configuration
+
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `output_dir` | `text` | `null` | Host-target artifact directory; defaults to `browser/` in the agent's state root, or in the worker workspace when routed to a worker. |
+| `allow_private_networks` | `boolean` | `false` | Let the host target, and URLs passed to desktop-target `open`, reach trusted private and loopback addresses; metadata and link-local addresses stay blocked. Pages on the desktop target keep the profile's normal network access either way. |
+| `default_target` | `select` | `host` | `host` or `desktop`. |
+| `device_user_id` | `text` | `null` | Required for the desktop target: Matrix user the desktop bridge signs in as. |
+| `device_id` | `text` | `null` | Required for the desktop target: device ID printed by `mindroom desktop login`. |
+| `device_ed25519` | `text` | `null` | Required for the desktop target: Ed25519 fingerprint of that device. |
+| `timeout_seconds` | `number` | `90` | Desktop-target timeout, from 1 to 120 seconds. |
 
 ```yaml
 agents:
@@ -748,58 +405,21 @@ agents:
 ```python
 browser_control(action="start", target="desktop")
 browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser_control(action="snapshot", target="desktop")
-browser_control(action="screenshot", target="desktop", fullPage=True)
 browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
-#### Notes
-
-- The host target uses MindRoom's managed Playwright profile, while the desktop target uses the user's connected local browser profile through Matrix.
-- Host-only options such as `profile`, `targetId`, snapshot formatting hints, `inputRef`, and `timeoutMs` are rejected for the desktop target instead of being silently ignored.
-- `returnAttachment` is accepted only by `action="screenshot"` with `target="desktop"`, and the returned handle expires when the current turn ends.
-- See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide for extension installation, Brave paths, the local lease, and the full trust model.
-
 ### [`web_browser_tools`]
 
-`web_browser_tools` is the simplest browser-related tool here, because it just opens a URL in the host's real browser.
+`web_browser_tools` exposes `open_page(url, new_window=False)`, which opens an `http` or `https` URL in a tab or window of the host computer's browser for a person to use.
+It refuses `file:` paths, other schemes, and scheme-less strings, and returns no page content, so it is not a scraper.
+It only works on a host with a desktop browser.
 
-#### What It Does
-
-`web_browser_tools` exposes `open_page(url, new_window=False)`.
-It uses Python's standard-library `webbrowser` module to open a tab or window on the host operating system.
-It opens only `http` and `https` URLs and refuses `file:` paths, other URI schemes, and scheme-less strings, so the host never hands local files or application links to their operating-system handlers.
-It does not return page content, DOM state, screenshots, or automation handles.
-This makes it useful for human handoff or local desktop workflows, but not for scraping.
-
-#### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_open_page` | `boolean` | `no` | `true` | Enable `open_page()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-#### Example
-
-```yaml
-agents:
-  assistant:
-    tools:
-      - web_browser_tools
-```
-
-```python
-open_page("https://docs.mindroom.chat")
-open_page("https://matrix.org/blog/", new_window=True)
-```
-
-#### Notes
-
-- `web_browser_tools` only makes sense on a host that can launch a real browser window or tab.
-- This tool is not a scraper and does not feed page content back to the model.
-- Use `browser` or `browserbase` when you need browser automation or content returned to the agent.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enable_open_page` | `boolean` | `true` | Enable `open_page()`. |
+| `all` | `boolean` | `false` | Enable every function. |
 
 ## Related Docs
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
-- [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)

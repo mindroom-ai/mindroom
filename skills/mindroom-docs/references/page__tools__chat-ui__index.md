@@ -1,8 +1,8 @@
 # Agent Chat UI Actions
 
-The `chat_ui` toolkit opens MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel, open Settings, or show room members.
-It sends a normal Matrix notice with a readable fallback and bounded action metadata.
-The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
+The `chat_ui` toolkit lets an agent show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, which the user can answer), the Members panel, or a Settings section.
+Each call posts a notice in the current conversation that MindRoom Chat turns into the requested view.
+Success means the request was sent, not that the user saw it.
 
 ## Enable the tool
 
@@ -20,54 +20,60 @@ agents:
       - shell
 ```
 
-The toolkit is opt-in and requires a live Matrix room context.
-It does not accept a URL, credential, API endpoint, DOM selector, Matrix identity, room ID, or thread ID from the model.
-MindRoom supplies the addressed requester, configured agent sender, current room, and canonical thread from the active turn.
-Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
+The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the router cannot use it.
+A subagent running as a different agent cannot use it; the replying agent must make the request.
+Canvases need a separate opt-in; see [Turn canvases on](https://docs.mindroom.chat/canvases/#turn-canvases-on).
+The agent cannot choose the recipient, room, thread, or a URL: every request goes to the current conversation and is addressed to the user the agent is answering.
 
 ## Actions
 
-- `open_panel(panel="computer")` asks Chat to reveal the current agent's worker browser in the Computer panel in watch mode.
-- `open_panel(panel="members")` requests the room's Members side panel and remains the default when `panel` is omitted.
-  `computer` and `members` are the only supported panel values; `browser` is not a panel value.
-- `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
-- `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
+None of the actions touches the user's own computer or browser:
 
-Each call sends an `m.room.message` notice in the current conversation.
-Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
-The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
-Both Computer entry points retain the existing `action: "show_computer"` transport metadata and result action for compatibility with existing clients.
-Members retains `action: "open_panel", panel: "members"`; Settings retains `action: "open_settings"` and its `section`.
+| Call | What the user sees | What it works on | What comes back to the agent |
+| --- | --- | --- | --- |
+| `open_panel(panel="computer")` or `show_computer()` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
+| `show_canvas(title, html=None, path=None, canvas_event_id=None)` | Canvas panel | A web page the agent wrote; it cannot load any website | The user's confirmed answer, as their next message |
+| `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
+| `open_settings(section="general")` | Settings dialog | The user's Chat settings, opened at one section; nothing is changed | Nothing |
+
+- `open_panel` accepts only `members` (the default) and `computer`; `show_computer()` is the same as `open_panel(panel="computer")`.
+- `open_settings` accepts `general` (the default), `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
+- `show_canvas` exists only when canvases are turned on for the agent; [Interactive Canvases](https://docs.mindroom.chat/canvases/) covers turning them on, answers, updates, and writing pages.
+
+The Computer, Canvas, and Members panels share one place on the screen, so opening one replaces whichever is open.
+Requests made in a thread are posted in that thread; requests made at room level stay at room level.
+A sent request returns `UI action request sent.`
 
 ## Control the browser, then show it
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')`.
-If the user asks to visit a page and show it, navigate separately before requesting the panel:
+Opening the Computer panel does not navigate or take control, so navigate first and then request the panel:
 
 ```python
 browser_control(action="open", target="host", targetUrl="https://example.org")
 chat_ui.open_panel(panel="computer")
 ```
 
-Opening Computer only requests display of the worker browser.
-It does not navigate, send a prompt to ChatGPT, take control, or open or control the user's local browser.
-It does not send a chat prompt or mutate an account; the Matrix notice carries only the UI request.
-The user's connected local browser uses the separately configured `browser` desktop target and [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
-`web_browser_tools` instead asks the host operating system to open a browser; it does not reveal a worker browser in Chat.
-Panel calls accept no `url` or `targetUrl`; browser navigation belongs in `browser_control`.
-Success returns `UI action request sent.`, which confirms delivery of the request without confirming that any panel opened.
+To control the user's own local browser instead, use the `browser` tool's `desktop` target through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
+`web_browser_tools` opens a browser on the host operating system and does not show anything in Chat.
+
+The Computer panel needs an enabled [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/), which owns the worker, browser, proxy, and Chat configuration and describes watching, taking control, and handing back.
+If the computer is unavailable, Chat shows an unavailable state in the notice.
+An automatic request never replaces a session the user is currently controlling; the user can open it from the notice instead.
 
 ## What the user sees
 
-MindRoom Chat automatically acts only for the addressed user when that exact room and thread are active, the client is visible and focused, the request arrived as a current live event, and the deployment explicitly trusts the agent's homeserver for automatic opening.
-When the conversation is inactive, the event is historical, or automatic opening is otherwise unavailable, the notice remains in the conversation with a button the addressed user can choose later.
-A dismissed request stays dismissed, while a new event can request the action again.
+MindRoom Chat opens the requested view automatically only when all of these hold:
 
-Other Matrix clients display the notice's fallback text, such as “Open Settings (general) in MindRoom Chat.”
-Receiving or sending the notice is not evidence that a client opened anything.
+- The request is addressed to this user and arrives live, not from history.
+- The user has that exact room and thread open, and the Chat window is visible and focused.
+- The agent's homeserver is listed in `autoOpenFromHomeservers`.
 
-The Chat deployment controls automatic opening through its runtime `config.json`:
+Otherwise the notice stays in the conversation with a button the user can choose later.
+Chat acts only on requests from a joined `mindroom_` agent account on the user's own homeserver.
+Other Matrix clients show the notice's text, such as "Open Settings (general) in MindRoom Chat."
+
+The Chat deployment controls automatic opening in its runtime `config.json`:
 
 ```json
 {
@@ -80,18 +86,6 @@ The Chat deployment controls automatic opening through its runtime `config.json`
 ```
 
 The shipped MindRoom Chat configuration lists `mindroom.chat`.
-An absent or empty list keeps requests passive with explicit buttons.
-Entries match the exact server name in the agent's Matrix ID, including any port; URLs, wildcards, and implicit subdomain matching are unsupported.
-The existing joined, same-homeserver `mindroom_` identity checks still apply.
+An absent or empty list keeps every request behind its button.
+Entries match the exact server name in the agent's Matrix ID, including any port; URLs, wildcards, and subdomain matching are unsupported.
 Operators must reserve and control the agent username namespace on any homeserver they allow, as `mindroom.chat` does.
-UI requests reveal only the bounded Chat surfaces described above; worker computer access remains independently authorized by the configured computer gateway.
-
-## Worker computer requirements
-
-`open_panel(panel="computer")` and its `show_computer()` alias use the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
-The target agent still needs a dedicated Docker or Kubernetes worker, effective `worker_scope: user_agent`, worker-routed browser tools, and an operator-configured Chat computer API origin.
-See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) for the backend, worker, proxy, and Chat configuration.
-
-If the computer gateway or requesting agent is unavailable, Chat keeps the request visible and shows an unavailable state instead of using an event-provided endpoint.
-When a worker computer is already under human control, an automatic request does not replace that session; the notice remains available for the user to choose.
-Opening the worker from a request starts watch mode, and another request for the same agent preserves the current worker view instead of resetting it.

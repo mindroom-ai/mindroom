@@ -1,65 +1,60 @@
 ---
-icon: lucide/wrench
+icon: lucide/clapperboard
 ---
 
 # Media & Content
 
-Use these tools to process local video files, search GIFs and stock images, inspect YouTube videos, fetch brand assets, and work with Spotify content.
-
-## What This Page Covers
-
-This page documents the built-in tools in the `media-and-content` group.
-Use these tools when you need local video processing, media lookup, brand asset retrieval, or Spotify-backed search and playlist workflows.
+Use these tools to caption and extract audio from local videos, search GIFs and stock photos, read YouTube metadata and transcripts, look up brand assets, and work with Spotify.
 
 ## Tools On This Page
 
-- [`moviepy_video_tools`] - Local video helpers for audio extraction, SRT creation, and caption burn-in.
-- [`giphy`] - GIF search that returns Giphy-hosted animated images.
-- [`youtube`] - YouTube URL inspection for video metadata, captions, and timestamped transcript lines.
-- [`unsplash`] - Stock photo search and photo metadata lookup from Unsplash.
-- [`brandfetch`] - Brand asset and identity lookup by domain, brand ID, ISIN, stock ticker, or brand name.
-- [`spotify`] - Spotify search, playlist, profile, recommendation, and playback actions.
+- [`moviepy_video_tools`] - Extract audio, save SRT files, and burn word-highlighted captions into local videos.
+- [`giphy`] - Search Giphy for animated GIFs.
+- [`youtube`] - Read metadata, captions, and timestamped transcript lines for a YouTube URL.
+- [`unsplash`] - Search Unsplash stock photos and read photo metadata.
+- [`brandfetch`] - Look up logos, colors, fonts, and other brand data by domain, brand ID, ISIN, stock ticker, or name.
+- [`spotify`] - Search music, manage playlists, get recommendations, and control playback.
 
-## Common Setup Notes
+## Setup
 
-`moviepy_video_tools` and `youtube` are `setup_type: none`, so they do not need dashboard OAuth or stored API credentials.
-`giphy`, `unsplash`, `brandfetch`, and `spotify` all use stored credentials, and password-type fields such as `api_key`, `access_key`, and `access_token` should be managed through the dashboard or credential store instead of inline YAML.
-The upstream toolkits for `giphy`, `unsplash`, and `brandfetch` also fall back to provider-specific environment variables such as `GIPHY_API_KEY`, `UNSPLASH_ACCESS_KEY`, `BRANDFETCH_API_KEY`, and `BRANDFETCH_CLIENT_ID`.
-These tools operate on external URLs or local file paths rather than Matrix attachment IDs directly.
-When you pass local files, the paths must exist inside the runtime that executes the tool.
-Missing optional Python dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
-That matters most on this page for `moviepy_video_tools`, `giphy`, `brandfetch`, `spotify`, and `youtube`.
-`spotify` is the only tool on this page with dedicated integration routes in `src/mindroom/api/integrations.py`.
-MindRoom treats `spotify` as a shared-only integration, so dashboard credential management and tool support require `worker_scope` unset or `shared`, not `user` or `user_agent`.
+`moviepy_video_tools` and `youtube` need no credentials.
+`giphy` and `unsplash` need an API key, `brandfetch` needs an API key or a client ID depending on the enabled function, and `spotify` needs an OAuth access token, normally from the dashboard connection.
+Enter `api_key`, `access_key`, and `access_token` in the dashboard **Tools** tab, not in `config.yaml` (see [Security Restrictions](index.md#security-restrictions)).
+`giphy`, `unsplash`, and `brandfetch` also read the environment variables named in their configuration tables when no key is stored.
+Missing Python dependencies install on first use (see [Automatic Dependency Installation](index.md#automatic-dependency-installation)).
 
 ## [`moviepy_video_tools`]
 
-`moviepy_video_tools` is the local video-processing toolkit for extracting audio, saving SRT text, and burning captions into a rendered video file.
+`moviepy_video_tools` processes video files on disk; it cannot search for, download, or host videos.
 
 ### What It Does
 
-`moviepy_video_tools` exposes `extract_audio(video_path, output_path)`, `create_srt(transcription, output_path)`, and `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)`.
-Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface.
-`create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content.
-`embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output.
-`font_size` sets the pixel size of words and spaces; `font_color` sets the base text color, while the active word remains yellow.
-`stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
-Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
-This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
-Every path follows the agent's `file_access`: with the default `workspace`, relative paths resolve from the agent workspace and paths that leave it are refused, while `unrestricted` reaches any file the runtime can.
-MoviePy and FFmpeg read private copies of the inputs and write into a private staging directory, so video and caption inputs must be local files rather than URLs, and each output inside the workspace replaces its target only once it is complete, while `unrestricted` writes an output outside the workspace in place.
-A video input above 1 GiB or a caption file above 1 MiB returns an error.
-Video inputs must be plain media files in one of these formats, and other formats are refused: MP4, MOV, M4A, 3GP, 3G2, Motion JPEG 2000, Matroska, WebM, AVI, MPEG-TS, MPEG program stream (`.mpg`, `.vob`), FLV, WMV or other ASF, GIF, Ogg, WAV, MP3, FLAC, and AAC.
-FFmpeg playlists and manifests such as HLS and DASH are refused whatever their file name, because FFmpeg would open the files and URLs they list.
+- `extract_audio(video_path, output_path)` saves a video's audio track to `output_path`.
+- `create_srt(transcription, output_path)` writes the given text to disk unchanged, so the text must already be SRT-formatted.
+- `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)` renders an MP4 with word-by-word highlighted captions from an SRT file.
+
+In `embed_captions()`, `font_size` is the caption text size in pixels and `font_color` is the base text color, while the word being spoken is always yellow.
+`stroke_color` and `stroke_width` set the text outline, and `stroke_width=0` removes it.
+Captions sit at the bottom of the video, and a word or caption line too large to fit at the requested size returns an error.
+Without `output_path`, the output is `<video>_captioned.mp4` next to the input, where `<video>` is the input file name without its extension.
+
+### Files And Limits
+
+All inputs are local file paths, not URLs or attachment IDs.
+Paths follow the agent's [`file_access`](../configuration/agents.md): with the default `workspace`, relative paths resolve from the agent workspace and paths outside it are refused, while `unrestricted` allows any file the runtime can reach.
+A video larger than 1 GiB or a caption file larger than 1 MiB returns an error.
+Video inputs must be MP4, MOV, M4A, 3GP, 3G2, Motion JPEG 2000, Matroska, WebM, AVI, MPEG-TS, MPEG program stream (`.mpg`, `.vob`), FLV, WMV or other ASF, GIF, Ogg, WAV, MP3, FLAC, or AAC.
+Other formats, including HLS and DASH playlists and manifests, return an error containing `Video input must be a supported plain media file; playlists and manifests are refused.`
+Real audio and video processing needs FFmpeg in the runtime that executes the tool.
 
 ### Configuration
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_process_video` | `boolean` | `no` | `true` | Enable `extract_audio()`. |
-| `enable_generate_captions` | `boolean` | `no` | `true` | Enable `create_srt()`. |
-| `enable_embed_captions` | `boolean` | `no` | `true` | Enable `embed_captions()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enable_process_video` | `boolean` | `true` | Enable `extract_audio()`. |
+| `enable_generate_captions` | `boolean` | `true` | Enable `create_srt()`. |
+| `enable_embed_captions` | `boolean` | `true` | Enable `embed_captions()`. |
+| `all` | `boolean` | `false` | Enable all three functions regardless of the `enable_*` options. |
 
 ### Example
 
@@ -68,42 +63,26 @@ agents:
   editor:
     tools:
       - moviepy_video_tools:
-          enable_embed_captions: true
+          enable_process_video: false
 ```
 
 ```python
-extract_audio("clips/demo.mp4", "clips/demo.wav")
 create_srt(transcription_srt, "clips/demo.srt")
 embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
 ```
 
-### Notes
-
-- `moviepy` is the declared Python dependency, and the upstream toolkit also expects FFmpeg support for real audio and video processing.
-- `embed_captions()` writes `<video>_captioned.mp4` next to the input video when `output_path` is omitted, where `<video>` is the input file name without its extension.
-- Use this tool for simple local media transforms, not remote video discovery or hosting.
-
 ## [`giphy`]
 
-`giphy` searches Giphy for animated GIFs and returns image artifacts that agents can reuse in a response.
+`giphy` provides `search_gifs(query)`, which returns Giphy-hosted GIF URLs and attaches the GIFs as images to the tool result.
+The number of GIFs per search is set by `limit`, not per call.
+A Giphy API key is needed for searches to succeed, even though the field is marked optional.
 
-### What It Does
-
-`giphy` exposes `search_gifs(query)`.
-The upstream method signature includes the active agent or team object, but MindRoom callers only provide the search query because the runtime injects the current tool context.
-Successful calls return a `ToolResult` with both plain-text URLs and attached image artifacts for each GIF.
-`limit` is fixed at toolkit construction time, so callers do not set result count per request.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Giphy API key, with `GIPHY_API_KEY` as the upstream fallback. |
-| `limit` | `number` | `no` | `1` | Number of GIFs returned per search. |
-| `enable_search_gifs` | `boolean` | `no` | `true` | Enable `search_gifs()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Giphy API key; falls back to `GIPHY_API_KEY`. |
+| `limit` | `number` | `1` | GIFs returned per search. |
+| `enable_search_gifs` | `boolean` | `true` | Enable `search_gifs()`. |
+| `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml
 agents:
@@ -113,40 +92,26 @@ agents:
           limit: 3
 ```
 
-```python
-search_gifs("matrix code review celebration")
-```
-
-### Notes
-
-- The metadata marks `api_key` as optional, but successful requests effectively require a real Giphy API key.
-- `search_gifs()` returns hosted GIF URLs, not downloaded local files.
-- Use this when you want animated reaction media rather than stock photography or brand assets.
-
 ## [`youtube`]
 
-`youtube` works from a YouTube video URL and extracts metadata, captions, or timestamped transcript lines.
+`youtube` works on one YouTube video URL; it cannot search YouTube by keyword, so use a search tool such as `serpapi` for discovery.
 
-### What It Does
+- `get_youtube_video_data(url)` returns title, author, thumbnail, size, and provider fields.
+- `get_youtube_video_captions(url)` returns the video's transcript text.
+- `get_video_timestamps(url)` returns transcript lines with timestamps.
 
-`youtube` exposes `get_youtube_video_data(url)`, `get_youtube_video_captions(url)`, and `get_video_timestamps(url)`.
-`get_youtube_video_data()` uses YouTube's oEmbed endpoint and returns metadata such as title, author, thumbnail, size, and provider fields.
-`get_youtube_video_captions()` and `get_video_timestamps()` use `youtube_transcript_api` against the parsed video ID.
-The current tool does not perform keyword-based YouTube search.
-It expects a specific YouTube URL and then fetches metadata or transcript-derived output for that video.
+Invalid or unsupported URLs return an error message.
 
-### Configuration
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enable_get_video_captions` | `boolean` | `true` | Enable `get_youtube_video_captions()`. |
+| `enable_get_video_data` | `boolean` | `true` | Enable `get_youtube_video_data()`. |
+| `enable_get_video_timestamps` | `boolean` | `true` | Enable `get_video_timestamps()`. |
+| `all` | `boolean` | `false` | Enable all functions. |
+| `languages` | `string[]` | `null` | Preferred transcript languages, for example `["en", "es"]`; affects only the caption and timestamp functions. |
+| `timeout` | `number` | `30` | Timeout in seconds for `get_youtube_video_data()`; caption and timestamp requests do not use it. |
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `enable_get_video_captions` | `boolean` | `no` | `true` | Enable `get_youtube_video_captions()`. |
-| `enable_get_video_data` | `boolean` | `no` | `true` | Enable `get_youtube_video_data()`. |
-| `enable_get_video_timestamps` | `boolean` | `no` | `true` | Enable `get_video_timestamps()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `languages` | `string[]` | `no` | `null` | Preferred transcript languages, for example `["en", "es"]`. |
-| `proxies` | mapping | unsupported | — | The upstream library accepts a proxy mapping, but MindRoom's authored tool-config schema does not currently expose mapping-valued fields. |
-
-### Example
+Proxy settings are not configurable.
 
 ```yaml
 agents:
@@ -156,90 +121,48 @@ agents:
           languages: [en]
 ```
 
-```python
-get_youtube_video_data("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-get_youtube_video_captions("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-get_video_timestamps("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-```
-
-### Notes
-
-- If you need keyword-based YouTube discovery rather than URL-based transcript or metadata extraction, use a search tool such as `serpapi` instead of `youtube`.
-- `languages` only affects transcript retrieval methods, not `get_youtube_video_data()`.
-- Invalid or unsupported URLs return plain-text error strings from the upstream toolkit.
-
 ## [`unsplash`]
 
-`unsplash` searches Unsplash for stock photography, fetches one photo's metadata, or requests random photo selections.
+`unsplash` returns stock photo metadata and image URLs, not downloaded files, and is not a source for logos or brand assets.
 
-### What It Does
+- `search_photos(query, per_page=10, page=1, orientation=None, color=None)` returns the total match count and a list of photos with author and image URLs.
+- `get_photo(photo_id)` adds details such as EXIF data, views, downloads, and location when Unsplash provides them.
+- `get_random_photo(query=None, orientation=None, count=1)` returns one or more random photos, optionally matching a query.
+- `download_photo(photo_id)` reports a download to Unsplash, as its API guidelines require, and returns the download URL without fetching the image.
 
-`unsplash` exposes `search_photos(query, per_page=10, page=1, orientation=None, color=None)`, `get_photo(photo_id)`, `get_random_photo(query=None, orientation=None, count=1)`, and optionally `download_photo(photo_id)`.
-`search_photos()` returns a JSON payload with total counts plus a simplified list of photo metadata, author info, and image URLs.
-`get_photo()` adds extra fields such as EXIF data, views, downloads, and location when the API returns them.
-`get_random_photo()` supports an optional query filter and returns one or more formatted photo records.
-`download_photo()` does not fetch the image binary.
-It triggers Unsplash's required download-tracking endpoint and returns the download URL that the caller can fetch separately.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `access_key` | `password` | `yes` | `null` | Unsplash access key. The upstream toolkit also checks `UNSPLASH_ACCESS_KEY`. |
-| `enable_search_photos` | `boolean` | `no` | `true` | Enable `search_photos()`. |
-| `enable_get_photo` | `boolean` | `no` | `true` | Enable `get_photo()`. |
-| `enable_get_random_photo` | `boolean` | `no` | `true` | Enable `get_random_photo()`. |
-| `enable_download_photo` | `boolean` | `no` | `false` | Enable `download_photo()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-
-### Example
-
-```yaml
-agents:
-  designer:
-    tools:
-      - unsplash:
-          enable_download_photo: true
-```
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `access_key` | `password` | `null` | Required Unsplash access key; falls back to `UNSPLASH_ACCESS_KEY`. Get one from [Unsplash Developers](https://unsplash.com/developers). |
+| `enable_search_photos` | `boolean` | `true` | Enable `search_photos()`. |
+| `enable_get_photo` | `boolean` | `true` | Enable `get_photo()`. |
+| `enable_get_random_photo` | `boolean` | `true` | Enable `get_random_photo()`. |
+| `enable_download_photo` | `boolean` | `false` | Enable `download_photo()`. |
+| `all` | `boolean` | `false` | Enable all functions. |
+| `timeout` | `number` | `30` | Request timeout in seconds. |
 
 ```python
 search_photos("conference stage lighting", per_page=5, orientation="landscape")
 get_random_photo(query="workspace desk", count=3)
-get_photo("abcd1234")
 ```
-
-### Notes
-
-- `download_photo()` is off by default because it exists mainly for Unsplash API compliance and usage tracking.
-- The tool returns URLs and metadata, not local downloaded image files.
-- Use `unsplash` for stock photography, not logos or brand identity assets.
 
 ## [`brandfetch`]
 
-`brandfetch` retrieves brand identity data such as logos, colors, fonts, and related brand metadata.
+`brandfetch` returns brand identity data such as logos, colors, and fonts.
 
-### What It Does
+- `search_by_identifier(identifier)` looks up a domain, Brandfetch brand ID, ISIN, or stock ticker and needs `api_key`.
+- `search_by_brand(name)` finds brands by name when you do not know the domain, needs `client_id`, and is off by default.
 
-`brandfetch` exposes `search_by_identifier(identifier)` and optionally `search_by_brand(name)`.
-`search_by_identifier()` uses the Brand API and accepts domains, Brandfetch brand IDs, ISINs, or stock tickers.
-`search_by_brand()` uses the Brand Search API and is useful when you only know the brand name and need to discover the canonical brand entry first.
-The two methods use different credentials.
-`search_by_identifier()` requires `api_key`, while `search_by_brand()` requires `client_id`.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Brand API key for `search_by_identifier()`; falls back to `BRANDFETCH_API_KEY`. |
+| `client_id` | `text` | `null` | Brand Search client ID for `search_by_brand()`; falls back to `BRANDFETCH_CLIENT_ID`. |
+| `enable_search_by_identifier` | `boolean` | `true` | Enable `search_by_identifier()`. |
+| `enable_search_by_brand` | `boolean` | `false` | Enable `search_by_brand()`. |
+| `base_url` | `url` | `https://api.brandfetch.io/v2` | Brandfetch API base URL. |
+| `timeout` | `number` | `20.0` | Request timeout in seconds. |
+| `all` | `boolean` | `false` | Enable all functions. |
 
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Brandfetch API key for `search_by_identifier()`. The upstream toolkit also checks `BRANDFETCH_API_KEY`. |
-| `client_id` | `text` | `no` | `null` | Brandfetch Client ID for `search_by_brand()`. The upstream toolkit also checks `BRANDFETCH_CLIENT_ID`. |
-| `enable_search_by_identifier` | `boolean` | `no` | `true` | Enable `search_by_identifier()`. |
-| `enable_search_by_brand` | `boolean` | `no` | `false` | Enable `search_by_brand()`. |
-| `base_url` | `url` | `no` | `https://api.brandfetch.io/v2` | Base Brandfetch API URL. |
-| `timeout` | `number` | `no` | `20.0` | Request timeout in seconds. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `async_tools` | `boolean` | `no` | `false` | Deprecated upstream flag that is no longer needed for normal use. |
-
-### Example
+Get keys from [Brandfetch Developers](https://developers.brandfetch.com/).
 
 ```yaml
 agents:
@@ -247,7 +170,6 @@ agents:
     tools:
       - brandfetch:
           enable_search_by_brand: true
-          timeout: 10
 ```
 
 ```python
@@ -255,42 +177,35 @@ search_by_identifier("openai.com")
 search_by_brand("OpenAI")
 ```
 
-### Notes
-
-- The credential you need depends on which Brandfetch API surface you enable.
-- `search_by_identifier()` is the better default when you already know the brand domain or ticker.
-- `async_tools` is kept only for upstream compatibility and should be left at its default.
-
 ## [`spotify`]
 
-`spotify` is the richest content tool on this page, covering music search, recommendations, playlists, profile lookups, and limited playback control.
+`spotify` acts on the connected Spotify account.
+It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
 
-### What It Does
+### Connect Spotify
 
-`spotify` exposes a broad toolkit including `search_tracks()`, `search_playlists()`, `search_artists()`, `search_albums()`, `get_user_playlists()`, `get_track_recommendations()`, `get_artist_top_tracks()`, `get_album_tracks()`, `get_my_top_tracks()`, `get_my_top_artists()`, `create_playlist()`, `add_tracks_to_playlist()`, `get_playlist()`, `update_playlist_details()`, `remove_tracks_from_playlist()`, `get_current_user()`, `play_track()`, and `get_currently_playing()`.
-The tool itself consumes an `access_token`, but MindRoom also provides a dedicated dashboard OAuth flow in `src/mindroom/api/integrations.py` via `/api/integrations/spotify/connect`, `/spotify/status`, `/spotify/callback`, and `/spotify/disconnect`.
-That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
-Before a tool call or dashboard status check, MindRoom renews an access token that expires within a minute with the stored `refresh_token`, `SPOTIFY_CLIENT_ID`, and `SPOTIFY_CLIENT_SECRET`, and saves the new `access_token`, `expires_at`, and any rotated `refresh_token`, so connections keep working past Spotify's one-hour token lifetime.
-A shared-scope agent that uses an installation-wide connection through `defaults.worker_grantable_credentials` does not renew it, so reconnect Spotify when that token expires.
-The connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`, which cover the playlist and playback methods.
-Connections made before these scopes were added keep their older read-only grant, so disconnect and reconnect Spotify to enable playlist changes and playback control.
-`get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
-Spotify's [endpoint access notice](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) restricts new and affected Development Mode apps while preserving access for qualifying existing Extended Quota Mode apps.
+1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<dashboard URL>/api/integrations/spotify/callback`.
+2. Set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in MindRoom's environment; without them, connecting fails with `Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.`
+3. If the dashboard is reached through a different public URL than the one MindRoom sees, set `SPOTIFY_REDIRECT_URI` to the exact registered redirect URI.
+4. In the dashboard **Tools** tab, connect Spotify and approve access.
+
+The connection requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`.
+MindRoom renews the access token automatically, so a connection keeps working after Spotify's one-hour token lifetime.
+A connection that a shared-scope agent uses through `defaults.worker_grantable_credentials` is not renewed, so reconnect Spotify when its token expires.
+
+`spotify` requires `worker_scope` unset or `shared` and always runs in the primary runtime (see [Shared-only integrations](../deployment/sandbox-proxy.md#shared-only-integrations)).
 
 ### Configuration
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `access_token` | `password` | `yes` | `null` | Spotify OAuth access token used by the toolkit. |
-| `default_market` | `text` | `no` | `US` | Default market code for search and album lookup methods. |
-| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `access_token` | `password` | `null` | Required Spotify OAuth access token, saved by the dashboard connection or entered manually; a manually entered token is not renewed and stops working when it expires. |
+| `default_market` | `text` | `US` | Default market code for search and album lookups. |
+| `timeout` | `number` | `30` | Request timeout in seconds. |
 
 ```yaml
 agents:
   dj:
-    worker_scope: shared
     tools:
       - spotify:
           default_market: GB
@@ -298,21 +213,17 @@ agents:
 
 ```python
 search_tracks("ambient coding music", max_results=5)
-get_my_top_tracks(time_range="short_term", limit=10)
 create_playlist("MindRoom Picks", description="Tracks from this week's chat")
-get_currently_playing()
 ```
 
-### Notes
+### Troubleshooting
 
-- `spotify` is shared-only in MindRoom, so agents using `worker_scope=user` or `worker_scope=user_agent` will see it marked unsupported and the dashboard status/connect routes will reject that scope.
-- `spotify` always runs in the primary process, even when listed in `worker_tools`, because renewing its token needs `SPOTIFY_CLIENT_SECRET`, which never reaches workers.
-- The redirect URI defaults to the API callback URL, but `SPOTIFY_REDIRECT_URI` can override it when the dashboard is behind a different public URL.
-- `play_track()` requires an active Spotify device and returns a specific `NO_ACTIVE_DEVICE` error when playback cannot start anywhere.
-- The current OAuth helper marks saved Spotify credentials as UI-managed so unscoped and shared execution can mirror them correctly.
+- If playlist changes or playback control fail with a permissions error, disconnect and reconnect Spotify to grant the current scopes.
+- `play_track()` needs an active Spotify device and returns a `NO_ACTIVE_DEVICE` error when no device can play.
+- `get_track_recommendations()` also needs a Spotify app with access to the Recommendations endpoint, which OAuth scopes cannot grant; Spotify [restricts this endpoint](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) for new and affected Development Mode apps.
 
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)
 - [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)

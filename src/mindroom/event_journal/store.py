@@ -1542,21 +1542,14 @@ class PrincipalStore:
             ),
         )
 
-    async def approval_interruption_is_recoverable(
-        self,
-        delivery_id: str,
-        *,
-        visible_text: str,
-        failure_reason: str | None = None,
-    ) -> bool:
-        """Prove an acknowledged interruption still belongs to this response attempt."""
-        return await self._backend.read(
-            lambda transaction: approval_continuations.interruption_is_recoverable(
+    async def release_approval_continuation(self, approval_id: str, *, expected_generation: int) -> bool:
+        """Hand an interrupted continuation's still-pending sources back to ordinary replay."""
+        return await self._backend.write(
+            lambda transaction: approval_continuations.release(
                 transaction,
                 self._principal_id,
-                delivery_id,
-                visible_text=visible_text,
-                failure_reason=failure_reason,
+                approval_id=approval_id,
+                expected_generation=expected_generation,
             ),
         )
 

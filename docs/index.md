@@ -4,234 +4,119 @@ icon: lucide/bot
 
 # MindRoom
 
-AI agents that live in Matrix and work everywhere via bridges.
+**AI agents that know you and your work, in a chat app anyone can use.**
+
+MindRoom gives you a personal AI agent for everything from family trips to your homelab, and gives teams shared agents connected to their email, chat, calendar, documents, tickets, and code.
+They find what you need, write what you ask for, run recurring jobs on their own, and learn from every conversation, so they get better the more they are used.
+It is open source, and you choose each agent's model: a local one that keeps your private life at home, or a frontier one for hard problems.
+You can run all of it yourself: the chat app, the server, and the AI backend.
 
 <video controls playsinline preload="metadata" aria-label="Tour of MindRoom: approvals, a team thread, code, documents, and the browser" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/d24be091-deb0-4be0-8346-3faa6b1e40c4#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
   <source src="https://github.com/user-attachments/assets/7c51fefe-a5d5-460b-ad97-d7886839af3b#t=0.1" type="video/mp4">
 </video>
 
-See the [Showcase](showcase.md) for more recordings.
+**[Get started](getting-started.md)** · **[See it in action](showcase.md)** · **[Coming from OpenClaw?](openclaw.md)**
 
-## What is MindRoom?
+## What People Use It For
 
-MindRoom is an AI agent orchestration system with Matrix integration. It provides:
+=== "Personal"
 
-- **Multi-agent collaboration** - Configure multiple specialized agents that can work together
-- **Matrix-native** - Agents live in Matrix rooms and respond to messages
-- **Persistent memory** - Agent and team-scoped memory that persists across conversations
-- **100+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
-- **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
-- **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
-- **Voice messages** - Speech-to-text transcription with mention normalization and light ASR cleanup
-- **Image analysis** - Pass images to vision-capable AI models for analysis
-- **Matrix desktop bridge** - Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands without opening inbound ports
-- **Authorization** - Fine-grained access control for users and rooms
+    - Plan a family trip: flights, places to stay, a day-by-day itinerary, and a packing list.
+    - Keep your calendar, reminders, and to-do lists in order, by voice from your phone.
+    - Sort your personal email and draft replies, approving each one before it goes out.
+    - Keep notes, a journal, and memories you can still find months later.
+    - Track your budget, workouts, or anything else in files the agent keeps up to date.
+    - Follow the topics you care about, with a digest that only arrives when there is something new.
+    - Look after your homelab and smart home: check services, read logs, change configs, and control devices through Home Assistant, with approval rules for anything risky.
+    - Build quick tools and scripts in the agent's own workspace.
 
-> [!TIP]
-> **Matrix is the backbone** - MindRoom agents communicate through the Matrix protocol, which means they can be bridged to Discord, Slack, Telegram, and other platforms.
+=== "Work"
 
-## Quick Start
+    - Find anything across email, chat, documents, tickets, and code, and see where each answer came from.
+    - Get a morning briefing, or a summary of your week before every one-on-one.
+    - Write status updates from what actually happened in chat and the tracker, not from what people remembered to report.
+    - Turn a question into a report or an interactive presentation built from your own documents.
+    - Triage the inbox, prepare for meetings, and draft emails, then approve each one before it is sent.
+    - Investigate a technical question across specifications, code, and records, with every claim traced to its source.
+    - Join a new team and ask its agent how the work fits together and whom to ask.
 
-### Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
+## Why MindRoom
 
-You only run MindRoom locally; the Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`.
-Watch the 2-minute setup video:
+### Agents that know you and your work
 
-[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
+Agents connect to 100+ tools, including Gmail, Google Drive, Slack, Jira, Confluence, GitHub, and any MCP server ([Tools](tools/index.md), [MCP Servers](mcp.md)), and search knowledge bases built from your folders and Git repositories ([Knowledge Bases](knowledge.md)).
+Each person can get a private room with their own agent ([Personal Rooms](personal-rooms.md)), each team can share agents that answer only its members ([Access Control](authorization.md)), and agents can work as a team or hand tasks to each other ([Teams](configuration/teams.md), [Agent Orchestration](tools/agent-orchestration.md)).
 
-**Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+### Private where it matters
 
-```bash
-uvx mindroom run
-# First run: choose a model provider; anthropic, openai, and openrouter also ask for an API key (Enter skips).
-# MindRoom writes ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults,
-# then prints a link and QR code: approve it with your MindRoom Chat account,
-# or enter the code in MindRoom Chat → Settings → Local MindRoom.
-# Finally, Enter keeps MindRoom running in the background as a login service (systemd or launchd); n runs it here
-```
+You choose the model for each agent.
+A private agent can run on a local model through Ollama or llama.cpp, so you can share your most personal data with it, while an agent that writes code uses a frontier model from Anthropic, OpenAI, or Google ([Models](configuration/models.md)).
+Pair a local model with local memory and your own server, and nothing that agent sees leaves your home ([Memory](memory.md), [Deployment](deployment/index.md)).
+Each agent keeps its own memory, tools, and access, so what you tell a private agent stays out of shared ones, and rooms can be end-to-end encrypted ([End-to-End Encryption](matrix.md#end-to-end-encryption)).
 
-To create the files without starting, use `uvx mindroom config init` and edit `~/.mindroom/.env` before `uvx mindroom run`.
+### They remember, and keep improving
 
-See [Getting Started](getting-started.md) for the full walkthrough and [Hosted Matrix Deployment](deployment/hosted-matrix.md) for architecture details.
+Agents keep what is worth remembering from every conversation without being asked, and look it up again when it becomes relevant ([Memory](memory.md)).
+A shared agent gets better as more people use it: what it learns while helping one person helps the next.
+With skill learning on, an agent also turns work it repeats into reusable skills, following the self-improvement loop of Hermes Agent ([Automatic Skill Learning](skills.md#automatic-skill-learning)).
+You can teach it directly too: tell it a preference or a correction, and it is remembered.
 
-### Preferred alternative: NixOS LXC container (agent-controlled machine)
+### They work while you don't
 
-Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-A standalone NixOS flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and secrets wiring, so the agent can rebuild and manage the persistent virtual machine it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
-It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
-See [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) for the full setup.
+Schedule recurring jobs in plain language, such as a daily briefing or a weekly report, including silent checks that post only when something changed ([Scheduling](scheduling.md)).
+Send a voice message from your phone ([Voice Messages](voice.md)), or call an agent and talk while it hands longer tasks to background agents ([Voice Calls](voice-calls.md)).
 
-### Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+### Safe to give real access
 
-Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
+- Sending or changing something can wait for your one-tap approval, which shows exactly what will be sent and to whom ([Tool Approval](tool-approval.md)).
+- Code runs in isolated workers ([Workers & Sandboxing](deployment/sandbox-proxy.md)), and agents can be kept off the open internet except for sites a person approves ([Approved Egress](deployment/approved-egress.md)).
+- Each agent answers only the people and rooms you allow ([Access Control](authorization.md)).
+- It all runs on [Matrix](matrix.md), an open, end-to-end encrypted messaging standard that governments chose for their own secure messaging: France's Tchap, the German armed forces' BwMessenger, Germany's national healthcare messenger TI-Messenger, and a messenger NATO is testing all run on it.
 
-**Prereqs:** Docker + Docker Compose.
+The [Security Model](architecture/security-posture.md) documents exactly which boundary protects what.
 
-```bash
-git clone https://github.com/mindroom-ai/mindroom-stack
-cd mindroom-stack
-cp .env.example .env
-$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
+### A chat app built for agents
 
-docker compose up -d
-```
+MindRoom builds its own client, MindRoom Chat, on the [web](https://chat.mindroom.chat), on [iPhone and iPad](ios.md), and on the [Mac](installation/macos-app.md), along with the server and the AI backend.
+So agents are not limited to what Slack or WhatsApp can display:
 
-The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
-To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
+- Replies stream in with every tool call shown, and you can stop them at any time ([Streaming Responses](streaming.md)).
+- Approval cards and clickable questions sit right in the conversation ([Interactive Questions](interactive.md)).
+- An agent can work in its own browser that you watch live and take over, for example to log in ([Worker Computer](tools/worker-computer.md#watch-take-control-and-resume)).
+- An agent can use the apps and folders you select on your own computer, and runs shell commands only after you approve them ([Desktop Bridge](tools/desktop.md)).
+- An agent can open an interactive page next to the conversation, such as a dashboard, a presentation, or a form you answer in place ([Interactive Canvases](canvases.md)).
+- You can switch the model for a thread or a room from the chat ([Model Overrides in Chat](configuration/models.md#model-overrides-in-chat)).
 
-Open:
+### Yours to own
 
-- MindRoom UI: http://localhost:8765
-- MindRoom client: http://localhost:8080
-- Matrix homeserver: http://localhost:8008
+- **Open source:** MindRoom is Apache 2.0 licensed, so you can run the whole stack on your own hardware, or use the [hosted Matrix server](deployment/hosted-matrix.md) and run only the backend yourself.
+- **Any model:** pick a model per agent, room, or thread, and switch the day a better one comes out ([Models](configuration/models.md)).
+- **Federated like email:** separate MindRoom deployments, such as groups with different data rules, can still share rooms where that is allowed.
+- **Extensible:** add your own tools, skills, and event hooks as plugins, which reload while MindRoom keeps running ([Plugins](plugins.md), [Hooks](hooks.md)).
 
-The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
+### Works where you already are
 
-If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
+Matrix bridges bring the same agents, with the same memory, to Slack, Telegram, WhatsApp, Discord, and email ([Bridges](deployment/bridges/index.md)).
+Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](openai-api.md)), and tools like Claude Code and Codex can use them through the [MCP Gateway](deployment/mcp-gateway.md).
 
-### Manual Install (advanced)
+## How MindRoom Compares
 
-Use this if you already have a Matrix homeserver and want to run MindRoom directly.
+Agents such as OpenClaw and Hermes Agent plug into existing messaging apps through one adapter per app.
+That lets them reach many apps, but each app decides what the agent can show.
+MindRoom takes the opposite approach.
 
-```bash
-# Using uv
-uv tool install mindroom
+| | Agents inside other messaging apps | MindRoom |
+|---|---|---|
+| Who they serve | Usually one person's assistant | Personal agents for everyone and shared agents for teams, in rooms where people and agents work together, with access control |
+| What agents can show | Whatever each app allows, mostly text and simple buttons | Its own client: approval cards, live tool traces, voice calls, a browser you can take over, and interactive pages |
+| How they connect | One adapter per messaging app | One open, encrypted protocol, plus bridges for reach |
+| Where messages go | Through each messaging platform | End-to-end encrypted, on servers you can run yourself |
 
-# Or using pip
-pip install mindroom
-```
+Coming from OpenClaw? MindRoom reads OpenClaw workspace files and skills; see [Import from OpenClaw](openclaw.md).
 
-### Basic Usage (manual)
+## Get Started
 
-1. Create a `config.yaml`:
-
-```yaml
-agents:
-  assistant:
-    display_name: Assistant
-    role: A helpful AI assistant
-    model: default
-    rooms: [lobby]
-
-models:
-  default:
-    provider: openai
-    id: gpt-6-astra
-
-defaults:
-  tools: [scheduler]
-  markdown: true
-
-administrators:
-  - "@alice:matrix.example.com"
-room_defaults:
-  invite_users:
-    - "@alice:matrix.example.com"
-```
-
-2. Set up your environment in `.env`:
-
-```bash
-# Matrix homeserver must allow agent registration, either through a
-# registration token/provisioning service or intentionally open registration.
-MATRIX_HOMESERVER=https://matrix.example.com
-# MATRIX_REGISTRATION_TOKEN=your-registration-token
-
-# AI provider API keys
-OPENAI_API_KEY=your_api_key
-```
-
-3. Run MindRoom:
-
-```bash
-mindroom run
-```
-
-For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
-
-```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
-mindroom run
-```
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| **Agents** | Single-specialty actors with specific tools and instructions |
-| **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
-| **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Pluggable Mem0/ChromaDB and Markdown-file backends with agent and team scopes |
-| **Knowledge Bases** | File-backed semantic RAG or files-only access with per-agent base assignment |
-| **Tools** | 100+ integrations for external services |
-| **Skills** | OpenClaw-compatible skills system for extended agent capabilities |
-| **Scheduling** | Schedule tasks with cron expressions or natural language |
-| **Voice** | Speech-to-text transcription for voice messages |
-| **Images** | Pass user-sent images to vision-capable AI models |
-| **Matrix Desktop Bridge** | Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands over pinned Matrix E2EE without opening inbound ports |
-| **File & Video Attachments** | Context-scoped file and video handling with attachment IDs |
-| **Interactive Q&A** | Clickable multiple-choice questions via Matrix reactions |
-| **Authorization** | Fine-grained user and room access control |
-| **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
-| **Streaming** | Progressive message edits with presence-based gating and tool-call markers |
-| **Chat Commands** | Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup\|status\|confirm\|rotate\|disconnect]`, `!mode <agent> minimal\|standard\|show\|reset` (minimal runs Bash where the agent's shell runs), `!model [name\|list\|reset]`, `!room_model [name\|list\|reset]` (set/reset require a room admin), `!thread_mode [room\|thread\|reset\|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi`; commands are normally handled by the router, while a Desktop-enabled agent can handle `!desktop` directly in a room containing only it and the requester |
-| **Hot Reload** | Config changes are detected and agents restart automatically |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│                 Matrix Homeserver                    │
-└─────────────────────┬───────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────┐
-│              MultiAgentOrchestrator                  │
-│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   │
-│  │ Router  │ │ Agent 1 │ │ Agent 2 │ │  Team   │   │
-│  └─────────┘ └─────────┘ └─────────┘ └─────────┘   │
-└─────────────────────────────────────────────────────┘
-```
-
-## Documentation
-
-- [Getting Started](getting-started.md) - Installation and first steps
-- [Hosted Matrix Deployment](deployment/hosted-matrix.md) - Run only `uvx mindroom` locally against hosted Matrix
-- [Configuration](configuration/index.md) - All configuration options
-- [Dashboard](dashboard.md) - Web UI for configuration
-- [OpenAI-Compatible API](openai-api.md) - Use agents from any OpenAI-compatible client
-- [Tools](tools/index.md) - Available tool integrations
-- [Matrix Desktop Bridge](tools/desktop.md) - Securely observe or locally lease desktop and signed-in browser control, read selected folders, and run locally approved shell commands over Matrix
-- [OpenClaw Import](openclaw.md) - Reuse OpenClaw workspace files in MindRoom
-- [MCP](mcp.md) - Configure native MCP client servers and expose their tools to agents
-- [Skills](skills.md) - OpenClaw-compatible skills system
-- [Plugins](plugins.md) - Extend with custom tools, OAuth providers, and skills
-- [OAuth Framework](oauth-framework.md) - Build scoped OAuth-backed tool integrations
-- [Knowledge Bases](knowledge.md) - Configure semantic indexing or files-only knowledge access
-- [Memory System](memory.md) - How agent memory works
-- [Scheduling](scheduling.md) - Schedule tasks with cron or natural language
-- [External Triggers](external-triggers.md) - Wake agents from signed watcher events
-- [Agent Callbacks](agent-callbacks.md) - One-shot completion callbacks for spawned sub-agents
-- [Voice Messages](voice.md) - Voice message transcription
-- [Image Messages](images.md) - Image analysis with vision models
-- [File & Video Attachments](attachments.md) - Context-scoped file and video handling
-- [Streaming Responses](streaming.md) - Progressive message edits with presence-based gating
-- [Chat Commands](chat-commands.md) - Built-in `!schedule <task>`, `!list_schedules`, `!cancel_schedule <id>`, `!edit_schedule <id> <task>`, `!desktop [setup|status|confirm|rotate|disconnect]`, `!mode <agent> minimal|standard|show|reset` (minimal runs Bash where the agent's shell runs), `!model [name|list|reset]`, `!room_model [name|list|reset]` (set/reset require a room admin), `!thread_mode [room|thread|reset|show]`, `!encrypt [confirm]`, `!e2ee`, `!help [topic]`, admin `!reload-plugins`, opt-in admin `!config <operation>`, and `!hi` commands
-- [Interactive Q&A](interactive.md) - Clickable multiple-choice questions via Matrix reactions
-- [Authorization](authorization.md) - User and room access control
-- [Matrix Space](matrix-space.md) - Optional root Matrix Space for grouping managed rooms
-- [Architecture](architecture/index.md) - How it works under the hood
-- [Deployment](deployment/index.md) - Docker and Kubernetes deployment
-- [Bridges](deployment/bridges/index.md) - Connect Telegram, Slack, and other platforms to Matrix
-- [Sandbox Proxy](deployment/sandbox-proxy.md) - Isolate code-execution tools in a sandbox
-- [Google Services OAuth](deployment/google-services-oauth.md) - Custom admin OAuth setup for Gmail/Calendar/Drive/Docs/Sheets/Tasks
-- [Google Services OAuth (Local Install)](deployment/google-services-user-oauth.md) - Connect Google locally without Cloud setup
-- [CLI Reference](cli.md) - Command-line interface
-- [Support](support.md) - Contact and troubleshooting help
-- [Privacy Policy](privacy.md) - Privacy and data handling information
-- [Terms of Service](terms.md) - Terms for using MindRoom services and clients
-
-## License
-
-- **Repository (except `saas-platform/`)**: Apache License 2.0
-- **SaaS Platform** (`saas-platform/`): Business Source License 1.1 (converts to Apache 2.0 on 2030-02-06)
+1. [Install & First Run](getting-started.md): run `uvx mindroom run` and pair it with your MindRoom Chat account.
+2. [Configuration](configuration/index.md): define agents, models, and teams in `config.yaml` or the [Dashboard](dashboard.md); most changes apply without a restart.
+3. [Deployment](deployment/index.md): run MindRoom with Docker or Kubernetes when you are ready to share it.

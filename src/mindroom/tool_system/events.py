@@ -16,8 +16,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
-# Tool calls that stopped attempts at the same reply had shown, carried by the attempt that replaced them.
-_EARLIER_TOOL_TRACE_KEY = "io.mindroom.earlier_tool_trace"
 _TOOL_TRACE_VERSION = 2
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
@@ -850,21 +848,10 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
 
 
 def tool_trace_from_content(content: Mapping[str, object]) -> list[ToolTraceEntry]:
-    """Read back every tool call one message shows, after those its stopped earlier attempts had shown."""
-    earlier = content.get(_EARLIER_TOOL_TRACE_KEY)
+    """Read back the tool calls one message shows."""
     payload = content.get(_TOOL_TRACE_KEY)
     events = cast("Mapping[str, object]", payload).get("events") if isinstance(payload, Mapping) else None
-    return deserialize_tool_trace(
-        [
-            *cast("list[Mapping[str, object]]", earlier if isinstance(earlier, list) else []),
-            *cast("list[Mapping[str, object]]", events if isinstance(events, list) else []),
-        ],
-    )
-
-
-def earlier_tool_trace_content(tool_trace: Sequence[ToolTraceEntry]) -> dict[str, object]:
-    """Carry tool calls stopped attempts had shown on the attempt that replaces them, so its own stop keeps them."""
-    return {_EARLIER_TOOL_TRACE_KEY: list(serialize_tool_trace(tool_trace))} if tool_trace else {}
+    return deserialize_tool_trace(cast("list[Mapping[str, object]]", events) if isinstance(events, list) else [])
 
 
 def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:

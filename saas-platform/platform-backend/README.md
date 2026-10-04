@@ -59,8 +59,8 @@ Requires:
 - `SUPABASE_SERVICE_KEY` - Service role key for admin operations
 - `STRIPE_SECRET_KEY` - Stripe API key
 - `STRIPE_WEBHOOK_SECRET` - Webhook endpoint secret
-- Optional: `ENABLE_CLEANUP_SCHEDULER=true` to enable the daily cleanup job (runs at 03:00 UTC): GDPR hard deletes after uninstalling the account's instances (see `docs/deployment/kubernetes.md#account-deletion`), log and metric retention, and the hosted instance lifecycle
-- Optional: `INSTANCE_TEARDOWN_GRACE_DAYS` (default `30`) days an instance of an inactive subscription stays stopped before teardown; see `docs/deployment/kubernetes.md#subscription-lifecycle`
+- Optional: `ENABLE_CLEANUP_SCHEDULER=true` to enable the daily cleanup job (runs at 03:00 UTC): GDPR hard deletes after uninstalling the account's instances (see `docs/deployment/saas-platform.md#account-deletion`), log and metric retention, and the hosted instance lifecycle
+- Optional: `INSTANCE_TEARDOWN_GRACE_DAYS` (default `30`) days an instance of an inactive subscription stays stopped before teardown; see `docs/deployment/saas-platform.md#subscription-lifecycle`
 
 ## Backfilling Stripe payments
 

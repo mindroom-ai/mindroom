@@ -1,8 +1,7 @@
 ---
-icon: lucide/shield-check
+icon: lucide/eye-off
 ---
 
-<!-- This page exists for iOS App Store submission requirements. Not included in sidebar nav. -->
 
 # Privacy Policy
 

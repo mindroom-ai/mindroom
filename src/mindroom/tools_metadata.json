@@ -4,21 +4,47 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Let the agent show interactive web pages in the Canvas panel. MindRoom Chat must also turn canvases on (mindroom.canvas.enabled).",
+          "label": "Enable Show Canvas",
+          "name": "enable_show_canvas",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries).",
+          "label": "Enable Canvas Libraries",
+          "name": "enable_canvas_libraries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
-      "description": "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel with open_panel(panel='computer'), open Settings, or show room members. Sends a UI request; does not navigate or control the user's local browser.",
+      "description": "Show parts of MindRoom Chat to the user: the Computer panel (a live view of the agent's own worker browser), the Canvas panel (an interactive web page the agent writes, such as a dashboard, slides, or a form, which the user can answer; opt in with enable_show_canvas), the Members panel, or a Settings section. Sends a UI request; does not navigate or control the user's own browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "executes_code": false,
-      "file_access": "none",
+      "file_access": "agent",
       "function_names": [
         "show_computer",
         "open_settings",
-        "open_panel"
+        "open_panel",
+        "show_canvas"
       ],
       "helper_text": null,
       "icon": "PanelsTopLeft",
@@ -7866,7 +7892,7 @@
       ],
       "description": "Create a single-use script that wakes this agent when background work finishes",
       "display_name": "Callback Manager",
-      "docs_url": "https://docs.mindroom.chat/agent-callbacks/",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/#agent-callbacks",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
@@ -8331,7 +8357,7 @@
       ],
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [

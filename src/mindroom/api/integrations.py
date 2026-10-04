@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -153,7 +154,8 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
         )
 
     state = issue_pending_oauth_state(request, "spotify", agent_name)
-    _, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
+    # Importing, or first installing, spotipy blocks; keep it off the event loop.
+    _, spotify_oauth_cls = await asyncio.to_thread(_ensure_spotify_packages, runtime_paths)
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
@@ -194,18 +196,19 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
         raise HTTPException(status_code=500, detail="Spotify OAuth not configured")
 
     try:
-        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
+        # spotipy's package setup and HTTP calls block; keep them off the event loop.
+        spotify_cls, spotify_oauth_cls = await asyncio.to_thread(_ensure_spotify_packages, runtime_paths)
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=_get_spotify_redirect_uri(request, runtime_paths),
         )
 
-        token_info = sp_oauth.get_access_token(code)
+        token_info = await asyncio.to_thread(sp_oauth.get_access_token, code)
 
         # Get user info
         sp = spotify_cls(auth=token_info["access_token"])
-        user = sp.current_user()
+        user = await asyncio.to_thread(sp.current_user)
 
         # Save credentials
         credentials = {

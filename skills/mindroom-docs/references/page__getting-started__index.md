@@ -1,11 +1,20 @@
 # Getting Started
 
-This guide will help you set up MindRoom and create your first AI agent.
+This page installs MindRoom and gets a first agent answering in chat.
+Pick one setup:
 
-## Recommended: Hosted Matrix + Local MindRoom (`uv` only)
+| Setup | Use when |
+| --- | --- |
+| [Hosted Matrix + local MindRoom](#recommended-hosted-matrix-local-mindroom-uvx-only) (recommended) | You want the simplest start: you run only MindRoom, and Matrix and the chat UI are hosted at `mindroom.chat` |
+| [NixOS LXC container](#preferred-alternative-nixos-lxc-container-agent-controlled-machine) | You want an agent to fully manage its own persistent machine while the host controls what it can see |
+| [Full stack Docker Compose](#alternative-full-stack-docker-compose) | You want everything local: dashboard, Matrix homeserver, and chat client |
+| [Manual install](#manual-install-with-your-own-matrix-homeserver) | You already run a Matrix homeserver |
 
-If you do not want to self-host Matrix yet, this is the simplest setup.
-You only run MindRoom locally.
+
+
+## Recommended: Hosted Matrix + Local MindRoom (`uvx` only)
+
+The Matrix homeserver is hosted at `mindroom.chat` and the chat UI at `chat.mindroom.chat`; only MindRoom runs on your machine.
 Watch the 2-minute setup video:
 
 [![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
@@ -18,135 +27,76 @@ Watch the 2-minute setup video:
 uvx mindroom run
 ```
 
-When no config exists yet and MindRoom runs in a terminal, it asks a few setup questions first:
+When no config exists and MindRoom runs in a terminal, it asks a few setup questions:
 
-1. Choose a model provider preset (default `openai`).
-2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden and never printed.
-   Press Enter to skip, then connect the provider later through the dashboard's provider setup, or add the key to `~/.mindroom/.env` and restart `mindroom run`.
+1. Choose a model provider preset (default `openai`; the choices are listed under [`config init`](https://docs.mindroom.chat/cli/#config-init)).
+2. For `anthropic`, `openai`, or `openrouter`, paste the API key; input is hidden.
+   Press Enter to skip, then connect the provider later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider), or add the key to `~/.mindroom/.env` and restart `mindroom run`.
    MindRoom does not ask when the key is already set in your environment.
-   Other presets print their remaining setup step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting `mindroom run`.
+   Other presets print their remaining step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
-MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and continues straight into pairing.
-Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`, unless the flags below answer the questions.
+MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
 
-Flags answer the same questions up front, which lets a coding agent or script set up MindRoom without a terminal:
+### 2. Approve pairing
+
+MindRoom prints a pairing link and QR code.
+Open the link or scan the QR code with your MindRoom Chat account to approve, or enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
+After approval, MindRoom prints the approving account and asks `Is this your account? [Y/n]` before saving anything.
+Pair codes expire after 10 minutes, and `mindroom run` prints a new one when that happens.
+See [connect](https://docs.mindroom.chat/deployment/hosted-matrix/#connect) for pairing details, the credentials it saves, and how to revoke a pairing.
+
+### 3. Choose how MindRoom keeps running
+
+After pairing, first-run setup asks whether to run MindRoom in the background and start it at login, as a systemd user service on Linux or a launchd agent on macOS.
+Pressing Enter installs and starts the service, the same as `mindroom service install`, and returns to your shell.
+Check it with `mindroom service status`, and run `mindroom service restart` after editing `~/.mindroom/.env`.
+Answering `n` runs MindRoom and the dashboard in the terminal instead, which also happens when the service cannot be installed.
+See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the question is skipped.
+
+### Set up without a terminal
+
+Without a terminal (services, Docker, the macOS app), a missing config is an error that points to `mindroom config init`, unless you pass `--provider`.
+Flags answer the setup questions up front, which lets a script or coding agent set up MindRoom:
 
 ```bash
 OPENAI_API_KEY=sk-... uvx mindroom run --provider openai --service
 ```
 
-`--provider` picks the preset, the API key comes from the environment, and `--service` installs the login service after pairing (`--no-service` skips the question).
-Without a terminal, MindRoom prints the pairing link and code for a person to approve, and the approving account is printed instead of asked about.
+`--provider` picks the preset and the API key comes from the environment.
+`--service` installs the login service after pairing, and `--no-service` skips the question.
+MindRoom prints the pairing link and code for a person to approve, and prints the approving account instead of asking about it.
 
-On first run, MindRoom automatically initiates pairing.
-It prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
-Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-After approval, MindRoom prints the approving account and, in a terminal, asks `Is this your account? [Y/n]` before saving anything.
+### Create the config first with `config init`
 
-After pairing completes, first-run setup asks whether to run MindRoom in the background and start it at login, as a systemd user service on Linux or a launchd agent on macOS.
-Pressing Enter installs and starts the service, the same as `mindroom service install`, and returns to your shell; check it with `mindroom service status`, and run `mindroom service restart` after editing `~/.mindroom/.env`.
-Answering `n` starts the runtime and dashboard in the terminal instead, which also happens on platforms without launchd or systemd or when the service cannot be installed.
-See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the question is skipped.
-
-Notes:
-
-- Pair codes are short-lived (10 minutes).
-- `mindroom run` automatically prints a new link and code when the previous one expires, while `mindroom connect` exits after 10 minutes and asks you to run it again.
-- `mindroom run` (or explicit `mindroom connect`) writes local provisioning values (including `MINDROOM_NAMESPACE`) into `~/.mindroom/.env`.
-- Pairing writes `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` to `.env` and replaces owner placeholders in `config.yaml`.
-
-### 2. Optional: set up explicitly with `config init`
-
-Use `config init` to create or review the files before starting, to pick a preset non-interactively, or to use a self-hosted homeserver:
+Use `config init` to review the files before starting, to choose a preset without prompts, or to use a self-hosted homeserver:
 
 ```bash
-uvx mindroom config init
-```
-
-This creates:
-
-- `~/.mindroom/config.yaml`
-- `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
-
-The default `--matrix-server mindroom.chat` preset uses hosted Matrix and defaults to the `openai` provider.
-Use `--provider` to select a different provider preset:
-
-```bash
-# Use Anthropic Claude
 uvx mindroom config init --provider anthropic
-
-# Use Azure OpenAI
-uvx mindroom config init --provider azure
-
-# Use a Codex CLI ChatGPT login
-uvx mindroom config init --provider codex
-
-# Use local Ollama
-uvx mindroom config init --provider ollama
-
-# Use local llama.cpp through its OpenAI-compatible server
-uvx mindroom config init --provider llama.cpp
-
-# Use Vertex AI Claude (Google Cloud)
-uvx mindroom config init --provider vertexai_claude
-```
-
-Use `--matrix-server mindroom.chat` for hosted Matrix and `--matrix-server self-hosted` when you run your own homeserver.
-Use `--provider` for the model provider.
-Run `codex login` before starting MindRoom when using `--provider codex`.
-
-`--provider azure` uses Azure OpenAI through your deployment name.
-Set `models.default.id` to the Azure deployment name you created.
-
-`--provider ollama` uses local Ollama with `gemma4` by default and also configures `qwen3.8:27b`.
-Run `ollama pull gemma4` and `ollama pull qwen3.8:27b` before starting MindRoom.
-
-`--provider llama.cpp` uses a local OpenAI-compatible llama.cpp server on `http://localhost:8080/v1`.
-Start `llama-server` with one of the configured Unsloth GGUF refs before starting MindRoom.
-These local provider configs run entirely locally and do not require real cloud API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` unless you switch the config to a remote provider.
-
-Use `--provider vertexai_claude` for Vertex AI Claude on hosted Matrix.
-
-Then add remote-provider credentials when needed:
-
-```bash
 $EDITOR ~/.mindroom/.env
+uvx mindroom run
 ```
 
-For hosted providers, set the credentials for the provider you selected:
+The generated `.env` lists the credentials the chosen preset needs; set them before running.
+See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
 
-- `ANTHROPIC_API_KEY=...`, or
-- `AZURE_OPENAI_API_KEY=...` and `AZURE_OPENAI_ENDPOINT=...`, or
-- `OPENAI_API_KEY=...`, or
-- `OPENROUTER_API_KEY=...`, or
-- For Codex CLI ChatGPT authentication: run `codex login`.
-- For Kimi Code CLI authentication: run `kimi` and `/login`.
-- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5.5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
-Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
+### Verify
 
-Then run `uvx mindroom run`.
+- **Chat:** open `https://chat.mindroom.chat` and send `@mind hello` in the `Personal` room.
+- **Dashboard:** open `http://localhost:8765` to configure agents, models, and tools.
+  It asks for the `MINDROOM_API_KEY` that setup generated in `~/.mindroom/.env`, because `mindroom run` serves the dashboard on every network interface by default.
+- **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](https://docs.mindroom.chat/cli/#doctor).
 
-### 3. Verify
-
-**In chat:** Open `https://chat.mindroom.chat` and send a message mentioning your agent in a room where it is configured (e.g., "@general hello" in "Lobby").
-
-**Dashboard:** Access the web dashboard at `http://localhost:8765` to configure agents, models, and tools.
-Setup writes a generated `MINDROOM_API_KEY` to your `.env`, and the dashboard asks for it before loading, because `mindroom run` serves the dashboard on every network interface by default.
-
-**Preflight check:** Run `uvx mindroom doctor` before `uvx mindroom run` to verify config, API keys, Matrix connectivity, pairing, and storage in one pass.
-Before the first run, doctor reports `Not paired yet` as a passing check, because `mindroom run` pairs automatically.
-
-For a detailed architecture and credential model, see:
-[Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/).
+See [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/) for what runs where and the credential and trust model.
+To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ## Preferred alternative: NixOS LXC container (agent-controlled machine)
 
 Use this when you want to give a MindRoom agent full freedom over its own virtual machine while you, from the host, control precisely what it can see.
-The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions the virtual machine — an Incus LXC system container running NixOS — with the full MindRoom stack (MindRoom, Tuwunel Matrix homeserver, MindRoom Chat, and Caddy) plus Docker and `ragenix`-based secrets wiring.
-Because the whole virtual machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on — unlike the mostly stateless Docker Compose stack below — without ever touching the host.
-It is slightly harder to set up by hand, but asking a coding agent such as Codex or Claude Code to do it is trivial: the repo ships machine-oriented instructions in `AGENTS.md`.
-It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/).
+The [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) flake provisions an Incus LXC system container running NixOS with MindRoom, the Tuwunel Matrix homeserver, MindRoom Chat, and Caddy, plus Docker and `ragenix`-based secrets.
+Because the whole machine is declared in the flake, the agent can rebuild and manage the persistent system it runs on without touching the host, unlike the mostly stateless Docker Compose stack.
+It is harder to set up by hand, but a coding agent such as Codex or Claude Code can follow the repo's `AGENTS.md` runbook directly.
+
+It requires a Linux host running [Incus](https://linuxcontainers.org/incus/docs/main/installing/):
 
 ```bash
 git clone https://github.com/mindroom-ai/lxc-nixos.git
@@ -155,56 +105,38 @@ incus launch images:nixos/unstable mindroom -c security.nesting=true
 incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=true
 ```
 
-Then follow the repo README for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment flow.
+Then follow the repo's `AGENTS.md` runbook for operator SSH keys, secrets bootstrap, and the `nixos-rebuild switch` deployment.
 
-## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
+## Alternative: Full Stack Docker Compose
 
-Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
-
-**Prereqs:** Docker + Docker Compose.
-
-### 1. Clone the full stack repo
+Use this when you want everything local: the MindRoom dashboard, a Matrix homeserver, and the MindRoom Chat client in one stack.
+It requires Docker and Docker Compose.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
-```
-
-### 2. Add your API keys
-
-```bash
 cp .env.example .env
 $EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
+./scripts/quickstart.py
 ```
 
+The quickstart validates provider configuration, starts the stack, waits until it is ready, and explains common port and startup failures.
 The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
-To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
+To use another provider, edit `config/config.yaml` and supply its credentials before starting; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
-### 3. Start everything
+The stack serves the MindRoom dashboard at `http://localhost:8765`, the MindRoom Chat client at `http://localhost:8080`, and Matrix at `http://localhost:8008`, using the published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images.
+To reach it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting.
+See the [stack README](https://github.com/mindroom-ai/mindroom-stack) for running `docker compose` directly, changing host ports, and pinning images.
 
-```bash
-docker compose up -d
-```
-
-Open:
-
-- MindRoom UI: http://localhost:8765
-- MindRoom client: http://localhost:8080
-- Matrix homeserver: http://localhost:8008
-
-The stack uses published `mindroom`, `mindroom-chat`, and `mindroom-tuwunel` images by default.
-
-If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
-
-## Manual Install (advanced)
+## Manual install with your own Matrix homeserver
 
 Use this if you already have a Matrix homeserver and want to run MindRoom directly.
 
-### Prerequisites
+Prerequisites:
 
-- Python 3.12 or higher
-- A Matrix homeserver (or use a public one like matrix.org)
-- API keys for your preferred AI provider (Anthropic, OpenAI, etc.)
+- Python 3.12 or higher.
+- A Matrix homeserver where MindRoom can create agent accounts (see [Matrix account provisioning](#matrix-account-provisioning)).
+- Credentials for at least one AI provider.
 
 ### Installation
 
@@ -230,13 +162,15 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
     ```
 
     Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
-    Without assets and Bun, the API is available but the dashboard is unavailable.
+    Without assets and Bun, the API is available but the dashboard is not.
 
 ### Configuration
 
-#### 1. Create your config file
+Generate a starter with `mindroom config init --matrix-server self-hosted`, or write `config.yaml` yourself.
+A generated config contains `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` placeholders; replace each with your quoted Matrix user ID, such as `"@alice:matrix.example.com"`, because only hosted pairing fills them in.
+See [Configuration](https://docs.mindroom.chat/configuration/#configuration-file) for where MindRoom looks for `config.yaml`.
 
-Create a `config.yaml` in your working directory:
+A minimal hand-written `config.yaml`:
 
 ```yaml
 agents:
@@ -244,10 +178,7 @@ agents:
     display_name: Assistant
     role: A helpful AI assistant that can answer questions
     model: default
-    include_default_tools: true
     rooms: [lobby]
-    # Optional: file-based context (OpenClaw-style)
-    # context_files: [SOUL.md, USER.md]
 
 models:
   default:
@@ -267,68 +198,58 @@ room_defaults:
 timezone: America/Los_Angeles
 ```
 
-#### 2. Set up environment variables
-
-Create a `.env` file with your credentials:
+Put credentials in a `.env` next to `config.yaml`:
 
 ```bash
-# Matrix homeserver must allow managed account provisioning.
 MATRIX_HOMESERVER=https://matrix.example.com
 
 # Recommended when the homeserver supports token-gated registration.
 # MATRIX_REGISTRATION_TOKEN=your-registration-token
 
-# Optional: For self-signed certificates (development)
+# Optional: for self-signed certificates (development)
 # MATRIX_SSL_VERIFY=false
 
-# Optional: For federation setups where server_name differs from homeserver hostname
+# Optional: when server_name differs from the homeserver hostname
 # MATRIX_SERVER_NAME=example.com
 
 # AI provider API keys
 OPENAI_API_KEY=your_openai_key
-# OPENROUTER_API_KEY=your_openrouter_key
 # ANTHROPIC_API_KEY=your_anthropic_key
+# OPENROUTER_API_KEY=your_openrouter_key
 
 # Dashboard API key; generate one with `openssl rand -hex 32`.
 # Set it empty (MINDROOM_API_KEY=) only with `--api-host 127.0.0.1`; `mindroom run` listens on every interface by default.
 MINDROOM_API_KEY=replace-with-a-long-random-secret
 ```
 
-#### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
+See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for every setting.
 
-Use the core [MindRoom repository](https://github.com/mindroom-ai/mindroom)'s `local/matrix` development Compose files with a host-installed backend:
+### Matrix account provisioning
+
+MindRoom creates a Matrix account for each agent, team, and the router.
+Configure one way for it to do so: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, an [application service](https://docs.mindroom.chat/matrix/#agent-users), or intentionally open registration.
+If registration fails, check the selected credentials and the homeserver's registration policy.
+
+### Optional: local Synapse and MindRoom Chat with Docker
+
+On Linux or macOS, `local-stack-setup` starts Synapse and a MindRoom Chat container from the core MindRoom repository's `local/matrix` Compose files and writes the matching Matrix settings to the `.env` next to your active config:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
-If you're running from source in this repo, use:
+From a source checkout, run `uv run mindroom local-stack-setup --synapse-dir local/matrix`.
+With a custom config path, export `MINDROOM_CONFIG_PATH` first so it updates the matching `.env`.
+See [local-stack-setup](https://docs.mindroom.chat/cli/#local-stack-setup) for its options.
 
-```bash
-uv run mindroom local-stack-setup --synapse-dir local/matrix
-```
-
-This starts Synapse from the core repository development Compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active config file.
-If you use a custom config path, export `MINDROOM_CONFIG_PATH` before running the helper so it updates the matching `.env`.
-The full `mindroom-stack` workflow above uses Tuwunel instead.
-
-> [!NOTE]
-> MindRoom automatically creates Matrix user accounts for each agent.
-> Configure one supported provisioning path: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or intentionally open registration.
-> If registration fails, check the selected provisioning credentials and homeserver policy.
-
-#### 3. Run MindRoom
+### Run MindRoom
 
 ```bash
 mindroom run
 ```
 
-MindRoom will:
-
-1. Connect to your Matrix homeserver
-2. Create Matrix users for each agent
-3. Create any rooms that don't exist and join them
-4. Start listening for messages
+MindRoom connects to the homeserver, creates Matrix users for each agent, creates and joins the configured rooms, and starts answering messages.
+See [`mindroom run`](https://docs.mindroom.chat/cli/#run) for options such as `--config` and `--storage-path`.
 
 ## Next Steps
 

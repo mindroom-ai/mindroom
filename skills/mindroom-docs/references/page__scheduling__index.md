@@ -1,16 +1,7 @@
 # Scheduling
 
-Schedule agents or teams to perform tasks at specific times or intervals using natural language.
-
-By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
-The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
-A fire's text never runs as a chat command, even when it starts with `!`; it reaches the agents as an ordinary scheduled message.
-
-Schedules with a recorded creator are automatically canceled once live membership checks confirm that neither the creator nor any permitted human alias is joined to the room.
-Configured bot accounts and managed identities do not count as human aliases.
-The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
-A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
-Membership checks use the runtime's current applied configuration, so revoking a human alias takes effect on the next check without recreating the runner.
+Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
+Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
 <video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/cfbbac8e-6942-4bac-a920-ac3946951174#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
@@ -19,128 +10,168 @@ Membership checks use the runtime's current applied configuration, so revoking a
 
 ## Commands
 
-### Schedule a Task
+Use `!help schedule` for inline help on the scheduling commands.
+
+### `!schedule`
+
+Schedule a one-time or recurring task.
 
 ```
 !schedule <natural-language-request>
 ```
 
-**One-Time Tasks:**
-
 ```
 !schedule in 5 minutes Check the deployment
 !schedule tomorrow at 3pm Send the weekly report
-```
-
-**Recurring Tasks:**
-
-```
 !schedule Every hour, @shell check server status
 !schedule Daily at 9am, @finance market report
 !schedule Weekly on Friday, @analyst prepare weekly summary
 ```
 
-**Conditional Workflows (polling-based):**
+Include `@agent_name` or `@team_name` to choose who answers each run.
+MindRoom checks that mentioned agents and teams are available in the room before it creates the task.
 
-Conditional or event-like requests are converted to recurring cron-based polling schedules.
+A task runs where it was created: in the room timeline for a room-level schedule, or in the current thread for a threaded schedule.
+The task text never runs as a chat command, even when it starts with `!`; agents receive it as an ordinary message.
 
-For predictable behavior, include an explicit polling cadence.
-
-The condition is embedded in the task message so the scheduled responder checks it on each poll cycle.
-
-These are **not** real event subscriptions — they are periodic checks.
+Conditional requests such as `if` or `when` become recurring polling schedules, not event subscriptions.
+The condition is part of the task message, so the responder checks it on each run.
+Include an explicit polling cadence for predictable behavior.
 
 ```
 !schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
 !schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
 ```
 
-### Edit a Schedule
+Add phrases to the request to change how each run behaves:
+
+| Phrase | Effect |
+| --- | --- |
+| `with no history`, `without context`, `context-free` | Each run sees no prior messages; see [History limits](#history-limits) |
+| `with only the last 5 messages of context` | Each run sees only recent messages |
+| `silently`, `quietly` | Hide the trigger and post only findings; see [Silent delivery](#silent-delivery) |
+
+### `!edit_schedule`
+
+Replace an existing task's timing and content.
 
 ```
 !edit_schedule <task-id> <new-task-description>
 ```
 
-Edits an existing scheduled task by ID.
-
-The task description is re-parsed to update timing and content.
-
-### List and Cancel Schedules
+MindRoom re-parses the description to update timing and content.
+Omitted settings stay unchanged, including the history limit, silent mode, and model.
+A task cannot switch between one-time and recurring; cancel it and create a new one instead.
 
 ```
-!list_schedules                  # Show pending tasks
-!cancel_schedule <task-id>       # Cancel specific task
-!cancel_schedule all             # Cancel all tasks in room
+!edit_schedule task42 keep the same schedule but restore full history
+!edit_schedule task42 every weekday at 8am check build status with no history
+!edit_schedule task42 keep the same schedule but make it silent
 ```
 
-Aliases: `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`, `!cancelschedule`, `!cancel-schedule`, `!editschedule`, `!edit-schedule`
+**Aliases:** `!editschedule`, `!edit-schedule`
 
-Use `!help schedule` for detailed inline help on scheduling commands.
+### `!list_schedules`
 
-Schedules are room-managed resources rather than creator-private resources.
-Thread context filters schedule listings for usability, but it is not an authorization boundary.
-An authorized participant in the room can edit or cancel any room schedule by task ID, and `!cancel_schedule all` applies to the whole room.
+List pending tasks in the current room, or in the current thread when used inside one.
+Each entry shows its task ID, timing, mode (`Silent` or `Visible`), and selected model if any.
+
+```
+!list_schedules
+```
+
+**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`
+
+### `!cancel_schedule`
+
+Cancel one task, or every task in the room.
+
+```
+!cancel_schedule <task-id>
+!cancel_schedule all
+```
+
+Use `!list_schedules` to find task IDs.
+
+**Aliases:** `!cancelschedule`, `!cancel-schedule`
+
+## [`scheduler`]
+
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%">
+  <source src="https://github.com/user-attachments/assets/41986747-dfb3-41cd-b3c6-b60f8eabdab8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/d8729fbc-7377-4b80-b3c2-c39394eb19a4#t=0.1" type="video/mp4">
+</video>
+
+The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
+It is included in `defaults.tools` by default, needs no setup, and has no tool-specific configuration fields.
+It only works from a live room or thread; elsewhere it returns `Scheduler tool is unavailable in this context.`
+
+```yaml
+agents:
+  assistant:
+    tools:
+      - scheduler
+```
+
+| Function | Arguments |
+| --- | --- |
+| `schedule(request, new_thread, history_limit=None, silent=None, model=None)` | `new_thread` is required |
+| `edit_schedule(task_id, request, history_limit=None, silent=None, model=None)` | Omitted arguments keep the task's current settings |
+| `list_schedules()` | |
+| `cancel_schedule(task_id)` | |
+
+- `new_thread=False` posts each run in the current room or thread.
+  `new_thread=True` posts each run as a new room-level message, and the responder answers in a new thread under it with a fresh session.
+- `history_limit` caps how many recent messages each run sees: `0` for none, a positive integer for that many, unset for full history.
+- `silent=True` turns on [silent delivery](#silent-delivery); unset infers the mode from the request text.
+- `model` picks a model alias for each run; see [Model selection](#model-selection).
+
+```python
+schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
+schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
+schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
+list_schedules()
+edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
+cancel_schedule("a1b2c3d4")
+```
+
+## History Limits
+
+Scheduled runs normally use the responder's configured conversation history.
+Use `with no history`, `without context`, or `context-free` when each run should see no prior room or thread messages; the system prompt and the task message remain available.
+Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each run to recent context.
+In an edit, say `restore full history` or `use unlimited history` to remove a limit.
+Agents set the same limit with the tool's `history_limit` argument.
 
 ## Silent Delivery
 
 Schedules are visible by default.
-Add `silently` or `quietly` to a natural-language request when the trigger and routine no-report result should stay out of the room timeline.
+Add `silently` or `quietly` to a request when the trigger and routine no-report results should stay out of the room timeline.
 
 ```
 !schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
 !schedule Daily at 9am, silently check whether the backup failed and report failures
 ```
 
-A silent schedule does not post its trigger as a visible room message.
-MindRoom sends no final message when a successful run returns only whitespace or the standalone marker `NO_REPLY`, matched case-insensitively after trimming.
-Findings, failures, and messages explicitly sent by tools remain visible.
-Silent runs also omit typing indicators, progress placeholders, stop controls, streaming updates, and tool-only final presentation.
+A silent schedule does not show its trigger in the room.
+A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
+Findings, failures, and messages that tools send explicitly remain visible.
+Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
+With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
+Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 
-Schedule confirmations and `!list_schedules` label each task as `Silent` or `Visible`.
-An edit preserves the current mode when visibility is omitted.
-Say `make this schedule silent` or `make this schedule visible` to change the mode through `!edit_schedule`.
+Silent delivery only hides messages from the room; the task text still travels through Matrix and is subject to homeserver retention.
 
-Silent delivery controls room presentation, not storage or transport.
-The task body still travels through Matrix as a custom timeline event and remains subject to homeserver retention, encrypted transport where enabled, and MindRoom's local durable recovery journal.
-Every admitted silent run also writes a versioned JSON receipt to `<agent-workspace>/.mindroom/scheduled_runs/<sha256(source-event-id)>.json`.
-The receipt starts with `status: "started"` before generation and is atomically replaced with `status: "completed"`, a `result` of `reported`, `no_report`, or `suppressed`, and the final response text after response hooks.
-A receipt left in `started` shows that the run began but did not reach a final response decision.
-Version 1 always includes `schema_version`, `source_event_id`, `entity_name`, `agent_name`, `room_id`, `thread_id`, `prompt`, `status`, `result`, `response_text`, `started_at`, and `completed_at`, with `result`, `response_text`, `thread_id`, and `completed_at` set to `null` until applicable.
-Timestamps use UTC RFC 3339 strings ending in `Z`.
-Replaying the same source event rewrites the same file and preserves a valid original `started_at` value.
-Team runs write one receipt to each member agent's workspace, and private agents write inside the matching requester-scoped workspace.
-The hidden `.mindroom` directory keeps receipts out of default workspace knowledge indexing.
-
-## Agent and Team Mentions
-
-Include `@agent_name` or `@team_name` in your schedule to have specific responders answer.
-
-The scheduler validates that mentioned agents and teams are available in the room before creating the task.
-
-## History Limits
-
-Scheduled tasks normally use the responder's configured conversation history policy.
-Add a context phrase when you want each run to see less of the current room or thread.
-Use `with no history`, `without context`, or `context-free` when the scheduled responder should see no prior room or thread messages; the system prompt and fired task message remain available.
-Use phrases such as `with only the last 5 messages of context` or `include the last 5 messages` to cap each scheduled run to recent context.
-
-```
-!schedule Every hour, @ops check deployment health with no history
-!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
-```
-
-For edits, omitted fields stay unchanged, including any existing history limit.
-Use `restore full history` or `use unlimited history` in an edit to remove a history limit.
-
-```
-!edit_schedule task42 keep the same schedule but restore full history
-!edit_schedule task42 every weekday at 8am check build status with no history
-```
+Each silent run writes a JSON receipt to `<agent-workspace>/.mindroom/scheduled_runs/`, so you can check what a silent run did.
+A receipt records the prompt, room, thread, `status` (`started` or `completed`), `result` (`reported`, `no_report`, or `suppressed`), the final response text, and UTC start and completion times.
+A receipt still in `started` means the run began but never reached a final response.
+Team runs write a receipt to each member agent's workspace, and private agents write to the requester's workspace.
+Workspace knowledge indexing skips these receipts.
 
 ## Model Selection
 
-Use the `model` argument on `schedule()` to choose a configured model alias for each run, for example a cheaper model for simple recurring checks.
-The alias must exist under `models:` in `config.yaml`.
+Pass `model` to `schedule()` to run each scheduled response with a model alias from `models:` in `config.yaml`, for example a cheaper model for simple recurring checks.
 
 ```python
 schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
@@ -148,86 +179,54 @@ edit_schedule("task42", "keep the same schedule and task", model="cheap")
 edit_schedule("task42", "keep the same schedule and task", model="")
 ```
 
-The override applies only to the scheduled response, including both the coordinator and members of a team.
+The model applies to the whole scheduled response, including a team's coordinator and members.
 It takes precedence over room and thread model settings without changing them for later messages.
-Omitting `model` on creation uses normal model selection; omitting it on an edit preserves the saved choice.
-Pass an empty string on an edit to remove the override and restore normal model selection.
-Schedule confirmations and listings show the selected alias.
-The option controls task execution; parsing the scheduling request still uses the default model.
+Omitting `model` on creation uses normal model selection; omitting it on an edit keeps the saved choice, and an empty string restores normal model selection.
+Parsing the scheduling request itself always uses the default model.
 
 ## Timezone
 
-The timezone in `config.yaml` controls natural-language time interpretation and displayed timestamps (defaults to UTC):
+The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
 
 ```yaml
 timezone: America/Los_Angeles
 ```
 
-Recurring schedules are stored and evaluated as UTC cron expressions.
-Their local execution time can shift when the timezone’s UTC offset changes, including daylight-saving transitions.
-Edit or recreate a recurring schedule after an offset change if it must keep the same local clock time.
+Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
+Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
 
-## Limitations
+## Permissions and Automatic Cancellation
 
-- **Schedule type cannot be changed** — editing a one-time task to be recurring (or vice versa) is not supported.
+Schedules belong to the room, not to their creator.
+Any authorized participant in the room can edit or cancel any of its schedules by task ID, and listing inside a thread only filters the view.
+Each run acts as the schedule's creator, as if the creator had sent the message, so it uses that person's access, per-user credentials, and private-agent workspace.
+Editing a schedule with `!edit_schedule` or the `scheduler` tool makes the editor its new creator.
 
-  Cancel the existing task and create a new one instead.
-- **Conditional workflows are polling** — event-like schedules (`If ...`, `When ...`) are converted to recurring cron polls, not real event subscriptions.
+MindRoom cancels a schedule automatically once neither its creator nor any of the creator's [bridge aliases](https://docs.mindroom.chat/authorization/#bridge-aliases) is joined to the room.
+Bot accounts and managed identities do not count.
+A run waits rather than proceeding when membership cannot be confirmed.
 
-## Persistence
+## Persistence and Missed Runs
 
-Schedules are stored in Matrix room state and persist across restarts.
+Schedules are stored in Matrix room state and survive restarts.
+MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
-MindRoom only lists, edits, cancels, restores, or runs schedule state whose Matrix sender is one of its bot accounts: the router, an agent, or a team, including agents and teams since removed from the configuration.
-Schedule state written by any other account, including a room admin or the internal `mindroom_user`, is ignored and logged, because a schedule's recorded creator is the requester its triggers run as.
-Ignored state is never canceled or overwritten automatically.
-The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16); Synapse, Tuwunel, and Dendrite do.
-Each read of one task compares the room's create event with and without `format=event`, so on a homeserver that ignores it, task reads fail instead of trusting a sender or an older bot-written version of the task that state content names.
+### Scheduled Task Restoration
 
-New schedules use the live runtime to start their in-memory runners immediately.
-
-Edits are state-only Matrix writes.
-
-Running tasks pick up edited state on their next poll instead of relying on caller-supplied cache or restart hooks.
-
-Past one-time tasks within the recovery grace window are queued and started in order after Matrix sync is ready.
-Older missed one-time tasks are marked failed instead of executing unexpectedly.
-
-Only the router restores persisted schedules after startup — individual agents do not restore their own.
-
-On shutdown, the router cancels its in-memory scheduled tasks before exiting.
+The router restores a room's schedules and pending configuration changes when it joins the room after startup.
+A one-time task missed by less than 24 hours runs once Matrix sync is ready; an older one is marked failed instead.
 
 ### Recurring task recovery
 
-Recurring timers save their next due time under the runtime storage directory in `tracking/recurring_schedules/`.
-After a restart, they wait for Matrix sync readiness and run the latest missed occurrence if it falls within the catch-up window.
-The same window applies when a live timer wakes late.
-The default window is one hour:
+After a restart or a late wake-up, a recurring task runs its latest missed occurrence if it is within the catch-up window, and multiple missed occurrences run once.
+Occurrences outside the window are skipped and logged, and later runs keep the normal cadence.
 
 ```yaml
-scheduler_catch_up_grace_seconds: 3600
+scheduler_catch_up_grace_seconds: 3600  # default; 0 disables catch-up
 ```
 
-Set this to `0` to disable catch-up for unattempted occurrences.
-Ordinary future timers still run when catch-up is disabled.
-Multiple missed occurrences coalesce into one run; older occurrences outside the window are skipped.
-The checkpoint retains the most recent skipped time and reason, and structured logs report skips and coalescing.
-Normal future occurrences keep their original cron cadence.
-
-Each trigger has a stable Matrix transaction ID derived from its schedule identity and intended execution time.
-Before sending, MindRoom durably freezes its content and sending device.
-Temporary checkpoint failures keep the timer alive and retry without repeating an acknowledged delivery.
-A retry reuses that content and transaction ID, so a restart after Matrix accepts a trigger does not create another trigger on the same device.
-Already-attempted deliveries remain pending until acknowledged, independently of the catch-up window.
-Already-triggered agent work continues through normal event recovery.
-Invalid content discovered before delivery is frozen fails the occurrence and advances the timer.
-If the Matrix login device changes while delivery is unresolved, automatic resending is held and logs report that reconciliation is needed.
-
-The checkpoint directory must survive restarts.
-On first adoption without a checkpoint, or after a workflow edit, MindRoom establishes a future cursor without replaying unknown past occurrences.
-Cancelling a schedule still prevents its pending timer from firing.
-Cancellation does not erase Matrix schedule history or local checkpoints.
-
-The trigger transaction does not make arbitrary `schedule:fired` hook side effects exactly-once.
-Hooks can replay after a crash or preparation failure before trigger content is durably frozen.
-Recurring hooks receive a `correlation_id` that is stable for that occurrence and changes for the next one; use it with an idempotent destination when performing side effects.
+Recurring progress is kept in `tracking/recurring_schedules/` under the storage directory, which must persist across restarts.
+Without it, or after a schedule edit, MindRoom resumes from the next future occurrence without replaying past ones.
+Restarts do not post the same trigger twice.
+For `schedule:fired` hooks that run more than once for the same occurrence, see [Hooks](https://docs.mindroom.chat/hooks/#event-notes).

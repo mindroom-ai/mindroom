@@ -1202,13 +1202,7 @@ async def test_thread_read_excludes_an_edit_whose_original_the_scan_never_saw() 
 
 @pytest.mark.asyncio
 async def test_thread_messages_from_source_raises_rather_than_returning_a_partial_thread() -> None:
-    """A scan that never finds the root must raise, not answer with what it saw.
-
-    The auto-resume freshness check dropped its explicit completeness guard
-    because this raises. If it returned the partial page instead, a thread
-    whose root scrolled past the scan window would look like it had no newer
-    human activity, and a stale turn would resume on top of one.
-    """
+    """A scan that never finds the root must raise, not answer with what it saw."""
     client = AsyncMock()
     client.room_messages = AsyncMock(
         side_effect=[

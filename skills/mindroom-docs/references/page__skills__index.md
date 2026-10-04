@@ -1,6 +1,8 @@
 # Skills
 
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata. Skills are instruction packs (a `SKILL.md` file) with optional scripts and references that guide agents without adding new code capabilities.
+Skills are instruction packs: a `SKILL.md` file with optional scripts and reference documents that guide an agent through a task without adding new code capabilities.
+MindRoom uses Agno's skills system with OpenClaw-compatible metadata.
+This page covers writing, installing, and allowlisting skills, skills agents keep in their own workspace, and opt-in automatic skill learning.
 
 ## Skill directory structure
 
@@ -14,8 +16,6 @@ my-skill/
 └── references/      # Optional: reference documents
     └── examples.md
 ```
-
-Agents access skills via `get_skill_instructions()`, scripts via `get_skill_script()`, and references via `get_skill_reference()`.
 
 ## SKILL.md format (OpenClaw compatible)
 
@@ -32,74 +32,27 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 2. Review open issues
 ```
 
-Notes:
-
-- `metadata` can be a JSON5 string (shown above) or a YAML mapping.
-- If `name` is omitted, MindRoom falls back to the skill directory name.
-- If `description` is omitted or blank, MindRoom falls back to the resolved skill name.
-- Workspace skill frontmatter must not use YAML aliases, start more than 16 lines with `%` as YAML directives do, nest collections more than 64 levels deep, hold more than 250,000 YAML nodes, put more than 64 `<<` merge keys or more than 1,024 integer or float keys in one mapping, or hold a base-60 integer longer than 64 characters; a workspace skill whose frontmatter does is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
-- If YAML frontmatter is omitted entirely, the skill still loads with those same name/description fallbacks. Frontmatter is still recommended for clearer listings and metadata.
-
-## Frontmatter fields
-
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | string | Unique skill identifier |
-| `description` | string | Brief summary shown to users/models; defaults to the skill name when omitted or blank |
-| `metadata` | mapping or JSON5 string | OpenClaw metadata and custom fields |
+| `name` | string | Unique skill identifier; defaults to the skill directory name |
+| `description` | string | Brief summary shown to users and models; defaults to the skill name when omitted or blank |
+| `metadata` | mapping or JSON5 string | OpenClaw metadata (see [Eligibility gating](#eligibility-gating-openclaw-metadata)) and custom fields |
 | `license` | string | Informational only; accepted but not used by the runtime |
 | `compatibility` | string | Informational only; accepted but not used by the runtime |
-| `allowed-tools` | list | Reserved; accepted in frontmatter but not enforced by the runtime |
+| `allowed-tools` | list | Reserved; accepted but not enforced by the runtime |
 
-## Eligibility gating (OpenClaw metadata)
+A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
+Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-If `metadata.openclaw` is present, MindRoom filters skills using these rules:
-
-- `os: ["linux", "darwin", "windows"]`
-- `always: true` bypasses `requires`, but it does not bypass an OS mismatch
-- `requires.env`: env var set or credential key exists
-- `requires.config`: config path is truthy (e.g., `agents.code.tools`)
-- `requires.bins`: all binaries must exist in PATH
-- `requires.anyBins`: at least one binary must exist in PATH
-
-Skills without `metadata.openclaw` are always eligible.
+Workspace skill frontmatter must not use YAML aliases or unusually large or deeply nested structures.
+A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
 
 ## Installing and managing skills
 
-Install a user skill manually at `~/.mindroom/skills/<name>/SKILL.md`, or use the dashboard Skills page to create, view, edit, and delete user skills.
+Install a user skill at `~/.mindroom/skills/<name>/SKILL.md`, or use the dashboard Skills page to create, view, edit, and delete user skills.
 Bundled and plugin-provided skills are visible but read-only in the dashboard.
-Add a bundled, plugin, or user skill name to the agent's `skills:` allowlist before that agent can use it.
 
-## Skill locations and precedence
-
-MindRoom resolves skills for each agent from these locations, in this order:
-
-1. Bundled skills: `skills/` at the repository root (if present)
-2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
-3. User skills: `~/.mindroom/skills/`
-4. Agent workspace skills: `<resolved workspace>/skills/`
-
-For agents without `private`, this is `<storage>/agents/<agent>/workspace/skills/`.
-Private instances use `<storage>/private_instances/<scope-directory>/<agent>/<private.root>/skills/`; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
-
-If multiple skills share the same name, the last one wins (agent workspace > user > plugin > bundled).
-
-Agent workspace skills are only available to the owning agent or private instance at runtime.
-They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
-Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
-
-## Authoring skills as an agent
-
-Agents never need write access to a global skill root to create skills.
-The bundled, plugin, and user roots can be read-only at runtime, for example in container or Kubernetes deployments where the image filesystem and `~/.mindroom` are not writable.
-An agent with a canonical workspace and authorized workspace-rooted file or shell tools can author skills at `<workspace>/skills/<skill-name>/SKILL.md`, using the same `SKILL.md` format described above.
-Workspace-rooted file tools address this location as the relative path `skills/<skill-name>/SKILL.md`.
-Agents with the required workspace and authoring access receive this guidance in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which can be overridden via the root `prompts` block (see [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides)).
-A new or edited workspace skill is picked up on the agent's next run without a config change.
-
-## Configuring skills
-
-Add skills to an agent allowlist in `config.yaml`:
+An agent can use a bundled, plugin, or user skill only after you add its name to the agent's `skills:` allowlist in `config.yaml`:
 
 ```yaml
 agents:
@@ -112,51 +65,70 @@ agents:
       - code-review
 ```
 
-The `skills:` list is an allowlist for bundled, plugin, and user skills.
 If `skills` is empty or unset, the agent gets no bundled, plugin, or user skills.
-Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for that agent or private instance.
-This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
+Skills in the agent's own workspace load without being listed; see [Workspace skills](#workspace-skills).
 
-Workspace auto-loading is a runtime capability, not a proactive behavior policy.
-If you want agents to create skills on their own when they notice reusable workflows, add that guidance to the agent's prompt or instructions, or enable [automatic skill learning](#automatic-skill-learning).
+## Skill locations and precedence
+
+MindRoom resolves skills for each agent from these locations, in this order:
+
+1. Bundled skills shipped with MindRoom
+2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
+3. User skills: `~/.mindroom/skills/`
+4. Agent workspace skills: `<resolved workspace>/skills/`
+
+For agents without `private`, the workspace skills directory is `<storage>/agents/<agent>/workspace/skills/`.
+Private instances use `<storage>/private_instances/<scope-directory>/<agent>/<private.root>/skills/`; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
+
+If several skills share a name, the later location wins: agent workspace over user, user over plugin, and plugin over bundled.
+
+## Workspace skills
+
+Workspace skills are available only to the owning agent or private instance.
+They do not appear in the dashboard Skills page or the skills API, because those views are not agent-scoped.
+Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
+
+Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
+An agent with a workspace and workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
+Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
+A new or edited workspace skill is picked up on the agent's next run without a config change.
+
+Being able to write workspace skills does not make an agent create them.
+To have agents save reusable workflows on their own, add that guidance to the agent's instructions, or enable [automatic skill learning](#automatic-skill-learning).
+
+MindRoom loads at most 256 workspace skills per agent, skips a skill whose `SKILL.md` exceeds 1 MiB or whose name exceeds 64 characters, and truncates descriptions to 1,024 characters, logging a warning in each case.
+
+## Eligibility gating (OpenClaw metadata)
+
+If `metadata.openclaw` is present, MindRoom loads the skill only when these rules pass:
+
+- `os: ["linux", "darwin", "windows"]`: the current OS must be listed
+- `always: true` bypasses `requires`, but not an OS mismatch
+- `requires.env`: each environment variable is set, or a stored credential with that key exists
+- `requires.config`: each config path is truthy, for example `agents.code.tools`
+- `requires.bins`: all binaries exist in `PATH`
+- `requires.anyBins`: at least one binary exists in `PATH`
+
+Skills without `metadata.openclaw` are always eligible.
 
 ## Using skills at runtime
 
-Agents see available skills in the system prompt and can load details using these tools:
+Agents see their available skills in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` - Load the full instructions for a skill
-- `get_skill_reference(skill_name, reference_path)` - Access reference documentation
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` - Read or execute scripts
+- `get_skill_instructions(skill_name)` loads the full instructions for a skill
+- `get_skill_reference(skill_name, reference_path)` reads a reference document
+- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
 
-Workspace skill scripts can be read with `get_skill_script(..., execute=False)`.
-Workspace skill scripts cannot be executed through `get_skill_script(..., execute=True)`.
-Agents that have shell or file execution permissions can still read and execute workspace files through their normal authorized tools.
+Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
+Agents with shell or file execution tools can still run workspace files through those tools.
 
-## Skill vs tool
-
-| Aspect | Skills | Tools |
-| --- | --- | --- |
-| Definition | Markdown + YAML | Python code |
-| Location | File system | Code/plugins |
-| Filtering | Automatic by requirements | Configured per agent; may be deferred or disabled |
-| Instructions | Rich markdown | Docstrings |
-| Invocation | Model via skill tools | Model only |
-
-## Hot reloading
-
-MindRoom polls skill directories every second. When a `SKILL.md` file is added, removed, or modified, the skill cache is automatically cleared so agents pick up the new instructions on their next request.
-For workspace skills created during an agent turn, assume they become available on the next agent run rather than in the same response.
-
-## Best practices
-
-1. Keep skills focused - one skill per capability
-2. Declare dependencies with `metadata.openclaw.requires`
-3. Use descriptive names like `code-review`
+Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
+A workspace skill created during a turn becomes available on the next agent run, not in the same response.
 
 ## Automatic skill learning
 
 Automatic skill learning follows the self-improvement loop of [Hermes Agent](https://github.com/NousResearch/hermes-agent).
-After enough work in a conversation, a background review maintains a small library of class-level skills in the agent's workspace, and a curator pass archives the ones nobody uses.
+After enough work in a conversation, a background review maintains a small library of class-level skills in the agent's workspace, and unused learned skills are archived.
 It is opt-in for each agent:
 
 ```yaml
@@ -174,73 +146,73 @@ agents:
 
 Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Self-hosted configurations from `mindroom config init` leave it off.
+Reviews incur additional model usage, reported under `kind: skill_learning` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage).
+Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 
-All fields, defaults, and bounds are listed in the [agent configuration reference](https://docs.mindroom.chat/configuration/agents/#automatic-skill-learning).
+### Settings
+
+All `agents.<name>.skill_learning` fields are optional, and unknown fields are rejected.
+
+| Field | Type | Default | Bounds and behavior |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Count completed standalone responses, review conversations that reach the interval, and offer the `skill_manage` tool. |
+| `model` | string or null | `null` | Review model alias from `models`; null reviews on the model the response used and reuses its prompt cache, while another model replays a digest of the conversation. |
+| `review_interval` | integer | `10` | 1–1000 model replies per conversation between reviews, counting each tool-calling step. |
+| `timeout_seconds` | integer | `120` | 10–900 seconds per review. |
+| `notify` | boolean | `true` | Post an `m.notice` in the conversation when a review changes skills. |
+| `archive_after_days` | integer | `30` | 0–3650 days with no use, creation, or `skill_manage` edit before a learned skill is archived; `0` keeps learned skills indefinitely. |
 
 ### When reviews run
 
-Like Hermes' `creation_nudge_interval`, each conversation keeps a count of model replies, one for each tool-calling step and one for the final answer.
-Each successful standalone-agent response to a person in Matrix adds the replies of its final run when it completes.
-A response that resumes after an approval does not count, and one that continued in a new run after loading a tool counts only that run, which only delays a review.
-Like Hermes restarting its count when the agent saves a skill with `skill_manage`, a response that calls `skill_manage` restarts the count, which then holds only the replies after its last call.
-Minimal-mode agents call `skill_manage` through their command line, which does not restart the count.
-Once the count reaches `review_interval`, the count restarts and the review starts in the background right after that response, so it never delays a reply.
-A response that starts in the same conversation stops a running review, as a new Hermes turn cancels its review.
-Automated responses from schedules, hooks, and external triggers, responses another agent asked for, and runs resumed after a restart never count, just as Hermes skips reviews for cron jobs; they still appear in the conversation a review reads when people also use the thread.
-Team responses are excluded.
-Conversations are counted per agent and private instance, not per requester, so a thread shared by several people is reviewed once.
-Like Hermes' counter, counts live in memory, so a restart starts every count over, and a review that fails or is stopped is not retried.
+Each conversation keeps a count of model replies: one for each tool-calling step and one for the final answer.
+Only successful standalone-agent responses to a person in Matrix count.
+Team responses, responses another agent asked for, scheduled, hook, and external-trigger responses, responses that resume after an approval, and runs resumed after a restart never count.
+A response that calls `skill_manage` restarts the count from its last call, except in minimal mode, where `skill_manage` runs through the command line.
+Once the count reaches `review_interval`, it restarts and the review starts in the background, so it never delays a reply.
+A new response in the same conversation stops a running review.
+Counts are per agent or private instance and conversation, not per requester, so a thread shared by several people is reviewed once.
+Counts live in memory, so a restart starts every count over, and a review that fails or is stopped is not retried.
 
 ### What a review sees
 
-Like Hermes' default review, the review forks the final model request of the response that made the conversation due.
-It sends that request again on the same model, with the same tools, the model's final answer, and the review prompt appended, so the provider can serve the conversation from its prompt cache and the review sees it verbatim, including every tool call and result.
-On a stored OpenAI Responses conversation, the fork continues from the response with `previous_response_id`, so the provider rebuilds the same conversation.
-Only the skill tools run in MindRoom; like Hermes' denial message, a call to any other tool the request offered answers that it is not available and names the skill tools the review can use, while a tool that needs approval answers only that it is not available.
-Provider-hosted tools the request offered, such as a provider's web search, stay available to the fork, because the provider runs them.
-Hermes' review may also read files with `read_file` and `search_files`; here the review reads only through the skill tools, because the agent's other tools run with a response's worker routing, file access, and approvals, which a review does not have.
-The fork sends the conversation unredacted, because it is the request the same provider just received; learned files are checked for credentials when they are written.
+By default, the review resends the final model request of the response that made the conversation due, on the same model with the review prompt appended.
+The provider can serve it from its prompt cache, and the review sees the conversation verbatim, including tool calls and results.
+This request is sent unredacted, because it is the request the same provider just received.
 
-The review replays the stored conversation as a digest instead, like Hermes' routed review, when `skill_learning.model` names a model other than the one the response used, when the agent runs in minimal mode, when the response's final attempt left no request to fork, when the response compressed tool results, and when the final request cannot be forked because the response ended on a tool call or without a text answer, or offered no `skill_manage` the review can run.
-Unlike Hermes' fork, which compacts the conversation between its requests, the fork resends the whole conversation with each request, so a response whose final request already used more than a quarter of the review's input budget is replayed as a digest too.
-A replay without its own `skill_learning.model` runs on the model the response used, or, when the response left no request, on the agent's model for that room and thread.
-A digest replay runs on a separate request with only the skill tools and receives the persisted conversation as evidence it must not obey: the newest 24 messages verbatim, including tool calls and results, and each older message shortened to a digest line.
-Older tool results are left out, and a very long message keeps its start and end.
-Credential-like values are redacted on a best-effort basis.
-Runs that model history hides, such as errored, cancelled, or paused runs, are left out.
-When compaction has replaced older turns with a summary, the digest starts with that summary, as a Hermes review sees the compressed conversation.
+The review instead replays a digest of the stored conversation on a separate request when `skill_learning.model` names another model, the agent runs in minimal mode, or the final request cannot be reused or is too large for the review's input budget.
+A digest shows the newest 24 messages verbatim and older messages shortened, leaves out older tool results, and redacts credential-like values on a best-effort basis.
+Without its own `model`, a digest replay runs on the model the response used.
 
-One review may read about 75% of the review model's `context_window` across all of its requests, capped at 600,000 tokens and defaulting to 120,000 tokens when the model sets no window.
-Set `context_window` on the agent's model so long conversations can still be forked; without it, a final request of more than about 30,000 input tokens is replayed as a digest.
-Like Hermes, each request adds the input tokens the provider reported, prompt-cache reads included, and the review ends before a request once the total reached the budget.
-A digest replay's transcript may use a quarter of that budget, estimated at four characters per token.
-A review makes at most 16 tool calls and stops after `timeout_seconds`.
-The review prompt adapts Hermes' rules: build class-level skills, capture lessons rather than logs, treat user corrections as first-class signals, prefer patches over rewrites, and never capture environment-specific failures, negative claims about tools, transient errors, one-off narratives, or unresolved attempts.
-It also lists the skill tools the review can run, and the agent's skills and who owns each.
+A review's input budget scales with the review model's `context_window`.
+Set `context_window` on the agent's model so long conversations can still be reviewed verbatim; without it, a final request over about 30,000 input tokens is replayed as a digest.
+A review makes a bounded number of tool calls and stops after `timeout_seconds`.
+
+Only the skill tools run during a review; any other tool the agent has answers that it is not available, and scripts never run.
+Provider-hosted tools, such as a provider's web search, stay available because the provider runs them.
+The review prompt asks for class-level skills that capture lessons rather than logs, treats user corrections as first-class signals, prefers patches over rewrites, and excludes environment-specific failures, transient errors, one-off narratives, and unresolved attempts.
 Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 
-### Skill tools
+### The skill_manage tool
 
-Agents with skill learning on have a `skill_manage` tool, as Hermes agents do, and the review writes with the same tool.
-Other agents can list `skill_manage` in `tools` to save skills in chat; like `self_config`, it is not available to scripts and workflow participants.
-It can create a skill, patch text, replace `SKILL.md`, and write or remove one support file directly under `references/` or `scripts/`, the support files the agent's skill tools can serve; Hermes' `templates/` and `assets/` are left out for that reason.
-Hermes' `delete` action is left out too: the curator archives unused learned skills, and a person removes a skill by deleting its directory.
-In chat, `skill_manage` changes any workspace skill, and a skill it creates belongs to its human owner, like one Hermes' foreground `skill_manage` creates; configured skills are read-only.
-It works on skills in their own `skills/<name>/` directories, so a workspace whose `skills/SKILL.md` makes the whole directory one skill gets no new skills, edits, or usage records until that file moves into `skills/<name>/`.
-An edit of `SKILL.md` keeps the name the skill loads under.
-Approval rules for `skill_manage` apply to chat calls like to any tool; the review, which has nobody to ask, writes only learner-owned skills.
-The review reads skills with the agent's own skill tools: `get_skill_instructions` returns the full current `SKILL.md` with its owner and support files, and `get_skill_reference` and `get_skill_script` return one support file; scripts never run in a review.
-Before changing an existing file, the review must load its current version in the same review, and a write against any other version is refused; a chat call changes the file as it is when the call runs.
-A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters, and one the review creates also needs the `learned` marker shown below.
-Skills past the workspace loading limits are skipped with a warning, as hand-written skills are.
-Files that contain a likely literal credential are refused with the offending line named, using Hermes Agent's skill guard patterns: a quoted api-key, token, secret, or password value of at least 20 characters that does not name an environment variable, a private key header, and GitHub, OpenAI, Anthropic, AWS, and GitLab token formats.
-This is a heuristic for common formats, not a guarantee.
-Workspace skill scripts still cannot be executed through `get_skill_script`.
+Agents with skill learning enabled get a `skill_manage` tool, and the review writes skills with the same tool.
+Other agents can list `skill_manage` in `tools` to save skills from chat.
+Its actions are `create` a skill from a full `SKILL.md`, `patch` text in `SKILL.md` or a support file, `edit` to replace `SKILL.md`, and `write_file` or `remove_file` for one support file directly under `references/` or `scripts/`.
+It cannot delete a skill; unused learned skills are archived, and you remove any skill by deleting its directory.
+
+In chat, `skill_manage` can change any workspace skill, and a skill it creates belongs to the person, not the learner.
+Configured bundled, plugin, and user skills are read-only.
+Tool approval rules apply to chat calls as to any tool.
+`skill_manage` works only on skills in their own `skills/<name>/` directories, so a workspace whose `skills/SKILL.md` makes the whole directory one skill gets no new skills or edits until that file moves into `skills/<name>/`.
+
+A new skill needs a lowercase hyphenated name matching its directory and a description of at most 60 characters.
+Files that contain a likely literal credential are refused with the offending line named: a quoted API key, token, secret, or password of at least 20 characters that does not name an environment variable, a private key header, or a GitHub, OpenAI, Anthropic, AWS, or GitLab token.
+This check is a heuristic for common formats, not a guarantee.
 
 ### Ownership
 
-Like Hermes' usage records, ownership is recorded outside the skill file, in `skills/.usage.json`, so a skill the learner created stays learner-owned when the agent or a person later rewrites it.
-New learned skills also carry a visible marker in their frontmatter:
+The review edits only learned skills, never bundled, plugin, or user skills or workspace skills someone else wrote, and its new skills cannot reuse their names.
+Ownership is recorded in `skills/.usage.json`, so a learned skill stays learner-owned when the agent or a person later rewrites it.
+Skills the review creates also carry a visible marker in their frontmatter:
 
 ```yaml
 metadata:
@@ -248,27 +220,23 @@ metadata:
     learned: true
 ```
 
-Add the marker to a skill you wrote to hand it to the learner.
-Add `pinned: true` under `metadata.mindroom` to take any skill away from the learner and the curator, which then never edit or archive it.
-The review never edits bundled, plugin, and user skills or workspace skills that someone else wrote, and new skills cannot reuse their names.
+Add this marker to a skill you wrote to hand it to the learner.
+Add `pinned: true` under `metadata.mindroom` to any skill to keep the review and archival from ever editing or archiving it.
 Private agents learn only from and into the requester's private workspace, and shared agents use `<storage>/agents/<agent>/workspace/skills/`.
 
 ### History, archive, and notices
 
 Before `skill_manage` replaces or removes a file, in chat or in a review, it saves the previous version under `skills/.history/<skill>/`, keeping the ten newest versions.
 Copy a saved version back to restore it.
-Before each review, learned skills with no use, creation, or `skill_manage` edit for `archive_after_days` days move to `skills/.archive/`, and nothing is deleted.
-Archived directories are named `<skill>--<timestamp>`; move one back to `skills/<skill>/` to restore it.
-Archiving a skill forgets its record in `skills/.usage.json`, and the record of a deleted skill is forgotten at the next review that finds its directory gone.
-A skill restored or recreated after that starts a new inactivity period and belongs to whoever wrote it, and so does one recreated with `skill_manage` at any time; one recreated with other tools under the same name before that review stays learner-owned unless it carries `pinned: true`.
-The archival pass examines only the first 1,024 entries of `skills/`, hidden ones included, and forgets no records when `skills/` holds 1,024 entries or more.
-A use is recorded in `skills/.usage.json` whenever an agent loads a workspace skill or one of its files through the skill tools, also for agents without skill learning.
+
+Before each review, learned skills with no use, creation, or `skill_manage` edit for `archive_after_days` days move to `skills/.archive/<skill>--<timestamp>`; nothing is deleted.
+Move a directory back to `skills/<skill>/` to restore it.
+Archiving a skill forgets its ownership record, and a deleted skill's record is forgotten at the next review, so a skill restored or recreated after that starts a new inactivity period.
+A restored learned skill still carries `learned: true` and stays learner-owned; add `pinned: true` to keep the learner from editing or archiving it.
+Loading a workspace skill or one of its files through the skill tools counts as a use, also for agents without skill learning.
 Minimal-mode agents read skills through their command line, which records no use, so a learned skill used only in minimal mode is archived after `archive_after_days`.
-Usage records that cannot be read, for example after a hand edit, read as absent, and a usage write that fails is logged and never fails the skill change it records.
-`skill_manage` rewrites of skill files keep their existing permissions, and new skill files and history snapshots are created with mode `0644`, like a hand-written skill.
 Archival is logged rather than announced, because other conversations may share the workspace.
-With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming only the skills that review changed, such as ``💾 Skill review: created `deploy-checks` ``, also when a new response stopped it after its writes landed; a review stopped by shutdown posts none.
-The notice carries `io.mindroom.skill_review` metadata and is left out of later model context, like compaction notices.
-Review usage counts against the source conversation as `kind: skill_learning` in the [dashboard usage reports](https://docs.mindroom.chat/dashboard/), also for a review that times out or is interrupted.
-A review's log lines, including its `LLM usage` lines, carry `kind: skill_learning` with the conversation's `agent_id`, `session_id`, `room_id`, `thread_id`, and `requester_id`, and the `correlation_id` of the response that made the conversation due.
-Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
+
+With `notify: true`, a review that changed skills posts an `m.notice` in the conversation naming those skills, such as ``💾 Skill review: created `deploy-checks` ``.
+The notice is also posted when a new response stopped the review after its changes landed, and it is left out of later model context.
+Review log lines carry `kind: skill_learning`, so you can filter logs for them.

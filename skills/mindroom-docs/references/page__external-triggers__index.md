@@ -1,45 +1,25 @@
 # External Triggers
 
-External triggers let a watcher wake MindRoom without keeping an agent turn alive.
+External triggers let a process outside MindRoom wake an agent or team with one HTTP request, without keeping an agent turn alive while it waits.
 
-A watcher process runs outside the agent loop, detects a meaningful change, and sends one signed HTTP event to MindRoom.
+Use them for watchers that detect a meaningful change, such as a campground site opening or a Git branch moving, and for background tasks that should report back when they finish.
 
-MindRoom verifies the signature, checks replay and size limits, checks that the owner can still talk to the target agent in the target room, then posts a Matrix message with the target agent or team mention.
+A watcher sends a signed event to `POST /api/triggers/<trigger_id>`, and MindRoom posts a Matrix message that mentions the target agent or team in the target room.
+The message contains the event's `title` and `message`, followed by its `data` as a JSON block.
+MindRoom does not run watcher code or poll external systems; the watcher decides when to send.
 
-MindRoom does not run watcher code and does not poll external systems from the agent turn loop.
+There are two kinds of triggers:
 
-For background-agent completion, use [Agent Callbacks](https://docs.mindroom.chat/agent-callbacks/): one tool call creates a single-use capability trigger and a Bash/curl script that wakes the originating agent and thread.
+- Reusable signed triggers, created with the `external_trigger_manager` tool, authenticate each request with an Ed25519 signature.
+- Single-use [agent callbacks](#agent-callbacks), created with the `callback_manager` tool, give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-## Use Cases
-
-- A campground cancellation watcher checks a booking site and sends an event only when a matching site opens.
-- A Git repo watcher tracks a branch, tag, or webhook payload and sends an event only when the observed commit or digest changes.
-
-## Model
-
-Reusable signed triggers are managed by the `external_trigger_manager` tool, not by authored per-trigger YAML.
-
-The `callback_manager` tool uses the same trigger records and ingress route to mint single-use bearer-capability triggers.
-
-`config.yaml` contains only global policy for the feature.
-
-Trigger records live in primary-runtime control state under `MINDROOM_CONTROL_STATE_PATH` or under `mindroom_data/control_state` by default.
-
-Workers, sandbox runners, and public runtime environments do not receive `MINDROOM_CONTROL_STATE_PATH`.
-
-The `mindroom trigger keygen` command prints the private key, public key, and public key fingerprint.
-
-Share only the printed public key with the agent, and keep the private key in the watcher runtime.
-
-The external trigger manager accepts only that public key and returns the endpoint path and public key fingerprint, never raw key material.
-
-Both auth modes use the public API endpoint `POST /api/triggers/<trigger_id>`.
+Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml`.
+Trigger records are stored in the primary runtime's control state, `MINDROOM_CONTROL_STATE_PATH` when set and `control_state/` under the storage root otherwise.
+Agent workers and sandbox runners do not receive that path.
 
 ## Configuration
 
-Add the manager tool to agents that should be allowed to request triggers.
-
-Use tool approval rules to gate `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger` when users should not self-provision triggers without approval.
+Add `external_trigger_manager` to agents that may create triggers.
 
 ```yaml
 agents:
@@ -51,91 +31,96 @@ agents:
     tools:
       - external_trigger_manager
 
-models:
-  default:
-    provider: openai
-    id: gpt-6-astra
-
 external_trigger_policy:
   enabled: true
-  default_replay_window_seconds: 300
-  max_replay_window_seconds: 3600
-  default_max_body_bytes: 65536
-  max_body_bytes: 262144
   max_triggers_per_owner: 20
   admin_users:
     - "@admin:example.org"
 ```
 
-`enabled: false` makes signed and capability trigger endpoints return not found.
+`external_trigger_policy` is optional; every field has a default.
 
-Top-level platform `administrators` can list, rotate, enable, disable, or delete triggers across owners.
+| Field | Type | Default | Valid values | Meaning |
+| --- | --- | --- | --- | --- |
+| `enabled` | bool | `true` | | When `false`, every trigger endpoint, including callbacks, answers not found, and `callback_manager` refuses to mint callbacks. |
+| `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new signed triggers that do not set their own window. |
+| `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any trigger's replay window. |
+| `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new triggers that do not set their own. |
+| `max_body_bytes` | int | `262144` | 1024 to 262144 | Cap on any trigger's body limit. |
+| `max_triggers_per_owner` | int | `20` | 1 to 1000 | Trigger records one owner may hold, including unused callbacks. |
+| `admin_users` | list of Matrix IDs | `[]` | | Trigger-only administrators. |
 
-`admin_users` adds trigger-only administrators who receive the same cross-owner trigger authority without receiving wider platform authority.
+Each default must not exceed its matching cap.
+Lowering a cap also limits existing triggers.
 
-Both administrator lists use canonical identities after `authorization.aliases` resolution.
+Top-level `administrators` and `admin_users` can list, enable, disable, rotate, and delete any owner's triggers, and can target other agents, teams, and rooms.
+`admin_users` grants only this trigger authority, not wider administrator rights.
+Both lists match canonical identities after `authorization.aliases` resolution.
 
-Administrator-created triggers are still owned by the administrator requester, but administrators can choose a different target agent, team, or room.
-
-Non-admin callers can create triggers only for the current agent and current room in the live Matrix tool context, but can still choose either `target_thread_id` or `new_thread` inside that room.
-
-For shared agents and teams, the target room must already be configured for the target entity.
-
-For private agents, a trigger created by that same private agent may target the current live Matrix room even when the room is dynamically provisioned and not listed in `rooms`.
-
-Triggers do not create rooms or make agents join rooms.
-
-No new Matrix room is created for a trigger.
-
-## Delivery Modes
-
-Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
-
-Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
-
-Single-use triggers are consumed after Matrix delivery succeeds and local replay state is recorded, so a failed delivery can be retried without minting a new callback.
-
-A failed HTTP request can occur after Matrix accepted the message but before local replay state or trigger consumption was saved.
-If the trigger remains unconsumed, a retry after its 24-hour replay claim expires can deliver the message again.
-Single-use capability consumption is not an exactly-once delivery guarantee.
-
-The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
+To stop users from creating triggers without review, add [tool approval](https://docs.mindroom.chat/tool-approval/) rules for `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger`.
 
 ## Signed Trigger Setup Flow
 
-Generate a watcher signing key.
+1. Generate a signing key where the watcher runs.
 
-```bash
-mindroom trigger keygen --private-key-file /etc/mindroom/triggers/campground.key
-```
+   ```bash
+   mindroom trigger keygen --private-key-file /etc/mindroom/triggers/campground.key
+   ```
 
-Give the printed `public_key` to the agent in a live Matrix conversation and ask it to call `external_trigger_manager.create_trigger`.
+   The command prints `private_key`, `public_key`, and `public_key_fingerprint`.
+   Keep the private key only in the watcher runtime.
 
-Keep the printed `private_key` and any `--private-key-file` output only in the watcher runtime.
+2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `external_trigger_manager.create_trigger`.
 
-Example tool arguments:
+   ```json
+   {
+     "trigger_id": "campground",
+     "public_key": "BASE64_PUBLIC_KEY_FROM_KEYGEN",
+     "key_id": "campground-main",
+     "description": "Campground availability watcher",
+     "allowed_kinds": ["campground.availability"],
+     "replay_window_seconds": 300,
+     "max_body_bytes": 65536
+   }
+   ```
 
-```json
-{
-  "trigger_id": "campground",
-  "public_key": "BASE64_PUBLIC_KEY_FROM_KEYGEN",
-  "key_id": "campground-main",
-  "description": "Campground availability watcher",
-  "allowed_kinds": ["campground.availability"],
-  "replay_window_seconds": 300,
-  "max_body_bytes": 65536
-}
-```
+   The tool returns the endpoint path `/api/triggers/<trigger_id>` and the public key fingerprint, never key material.
 
-For a non-admin caller, the target agent and room are the current agent and current room, and either `target_thread_id` or `new_thread` may still choose placement inside that room.
+3. Have the watcher send events with `mindroom trigger send` and the same `key_id`, as shown in [Sending Events](#sending-events).
+
+### `create_trigger` arguments
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `trigger_id` | required | Endpoint name; ASCII letters, digits, `_`, and `-` only. |
+| `public_key` | required | Ed25519 public key as raw base64, an OpenSSH `ssh-ed25519 ...` line, or PEM. |
+| `key_id` | `default` | Key ID the sender must present. |
+| `description` | `""` | Human-readable purpose. |
+| `target_agent` | current agent | Agent or team to wake; only administrators can choose another. |
+| `target_room_id` | current room | Room to post in; only administrators can choose another. |
+| `target_thread_id` | none | Post every delivery into this existing thread. |
+| `new_thread` | `false` | Post each delivery as a new room-level message so the agent answers in a fresh thread with a fresh session. |
+| `allowed_kinds` | any | Accepted `kind` values; others are rejected. |
+| `replay_window_seconds` | policy default | Maximum signature age, capped by policy. |
+| `max_body_bytes` | policy default | Request body limit, capped by policy. |
 
 `target_thread_id` and `new_thread` are mutually exclusive.
-With `new_thread`, each delivery posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
-A sender can group related deliveries on a `new_thread` trigger by passing the same `thread_key`; see [Grouping Deliveries Into One Thread](#grouping-deliveries-into-one-thread).
+Without either, deliveries post to the room's main timeline.
 
-For an administrator caller, `target_agent` and `target_room_id` can additionally target a different agent, team, or room.
+The requester who asks for the trigger becomes its owner and must be a human user, not a bot account.
+An administrator who creates a trigger for another agent or room still owns it.
+Shared agents and teams can only be targeted in rooms already configured for them.
+A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) creating its own trigger may target its current room even when that room is not listed in `rooms`.
+Triggers never create rooms or make agents join rooms.
 
-The tool returns `/api/triggers/<trigger_id>` when creation succeeds.
+### Managing triggers
+
+The `external_trigger_manager` tool also provides these functions, available to the trigger owner and administrators:
+
+- `list_triggers` lists the requester's triggers, or every trigger for administrators.
+- `disable_trigger(trigger_id, enabled=False)` disables a trigger; pass `enabled=True` to re-enable it.
+- `rotate_trigger_key(trigger_id, public_key, key_id)` replaces the signing key.
+- `delete_trigger(trigger_id)` removes the trigger.
 
 ## Sending Events
 
@@ -153,54 +138,35 @@ mindroom trigger send campground \
   --data-json '{"campground":"Yosemite","site":"42","date":"2026-07-04"}'
 ```
 
-The request body contains `kind`, `message`, optional `event_id`, optional `title`, optional `thread_key`, and optional `data`.
-
-`kind` must match `allowed_kinds` when the trigger record has an allowlist.
-
+`--url` defaults to `MINDROOM_URL`, then `http://127.0.0.1:8765`.
+See [`mindroom trigger send`](https://docs.mindroom.chat/cli/#trigger-send) for every option.
 Use `--no-verify-tls` only for local development against a trusted endpoint.
 
-## Runtime Checks
+The JSON request body has a required non-empty `kind` and `message`, and optional `event_id`, `title`, `thread_key`, and `data` object; other fields are rejected.
 
-Each request uses one immutable trigger snapshot.
+### Signing requests without the CLI
 
-That snapshot includes the record version, auth mode, target, authentication material, policy-capped replay window, policy-capped body size, and current API config generation.
+A watcher can sign requests itself with the Ed25519 private key.
+Sign the UTF-8 string below, joined with `\n`, where `<path>` is the request path such as `/api/triggers/campground`, `<timestamp>` is Unix seconds, `<nonce>` is a fresh random string, and the last line is the lowercase hex SHA-256 of the exact body bytes.
 
-The API authenticates the signature or bearer capability, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
-The owner's canonical Matrix ID or a configured human alias must be in the live joined-member roster; configured bot accounts and managed identities do not count as human aliases.
-If the live roster cannot be fetched, the request is rejected before replay state is claimed.
+```text
+MINDROOM-TRIGGER-V1
+POST
+<path>
+<timestamp>
+<nonce>
+<sha256-hex-of-body>
+```
 
-Target runtime readiness requires both the router and target bot to be running and joined to the resolved target room.
-
-The delivered Matrix message stamps the original Matrix requester as trusted trigger owner metadata.
-
-That metadata lets private work agents treat the trigger as a turn from the owner, not from the router bot.
-
-### Private Agents
-
-External triggers can target agents configured with `private.per`.
-
-The trigger owner is the private-scope requester for the triggered turn.
-
-A trigger created by `@alice:example.org` wakes Alice's private state for that agent.
-
-An administrator-created trigger for another private agent still wakes the administrator's private state, because trigger ownership always stays with the requester that created it.
-
-The API does not store private workspace paths, worker keys, OAuth tokens, or serialized execution identities.
-
-Shared target agents must still be configured for the target room.
-
-Private target agents created from their current live room may use that room even when it is not listed in `rooms`.
-
-The router plus target transport bot must be joined before delivery.
+Send the base64 signature with the headers `X-MindRoom-Trigger-Key-Id`, `X-MindRoom-Trigger-Timestamp`, `X-MindRoom-Trigger-Nonce`, and `X-MindRoom-Trigger-Signature`.
+The timestamp must not be in the future and must be within the trigger's replay window.
 
 ## Grouping Deliveries Into One Thread
 
-A `new_thread` trigger opens a fresh Matrix thread for every delivery.
-That is right for independent events and noisy for a conversation that arrives as many events, such as replies in one upstream chat thread.
+On a `new_thread` trigger, every delivery opens a new thread.
+That suits independent events but is noisy for a conversation that arrives as many events, such as replies in one support ticket.
 
-Pass `thread_key` to group deliveries.
-The first delivery with a key posts the usual per-fire root and records the key.
-Later deliveries with the same key post into that thread instead of opening another root, so the agent keeps one session and one context for the whole upstream conversation.
+Pass the same `thread_key` to group deliveries: the first delivery with a key opens a thread, and later deliveries with that key post into it, so the agent keeps one session for the whole conversation.
 
 ```bash
 mindroom trigger send support-inbox \
@@ -211,91 +177,123 @@ mindroom trigger send support-inbox \
   --message "Customer replied on ticket 812."
 ```
 
-Choose a key that names the upstream conversation, not the message: a ticket ID, an upstream thread timestamp, or a chat channel ID for a direct-message conversation.
-
-Thread key records live in the same replay store as `event_id` records, scoped per trigger and signing key epoch, and are retained for 7 days after the most recent delivery that used them.
-After that, or after `rotate_trigger_key`, the next delivery with the key starts a new thread.
-
-Opening a thread is atomic per key.
-While one delivery is posting the first root, a concurrent delivery with the same key receives `409 External trigger thread is being opened by another delivery`; retry it with a fresh signed request and the same `event_id`, and it will join the thread.
-A reservation whose first delivery fails is released immediately; a crashed delivery releases it after 5 minutes.
-Reservations are fenced: a delivery that outlives its reservation can neither bind its root over a newer reservation nor release it, so a slow first delivery cannot orphan the thread that replaced it.
-If the trigger's `thread_key` records reach their limit while such a slow delivery is posting, its message is still recorded as delivered but its key is not kept, so a later delivery with that key opens a new thread once there is room.
-
-A follow-up that fails to send keeps the key bound to its thread, so a transient error never splits one conversation across two threads.
-
-`thread_key` has no effect on triggers with a fixed `target_thread_id`; that thread already collects every delivery.
+Choose a key that names the upstream conversation, not the message, such as a ticket ID, an upstream thread timestamp, or a direct-message channel ID.
+A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `rotate_trigger_key`, the next delivery with the key opens a new thread.
+If two deliveries with a new key arrive together, one may receive `409 External trigger thread is being opened by another delivery`; retry it as a fresh signed request with the same `event_id` and it joins the thread.
+`thread_key` has no effect on triggers with a fixed `target_thread_id` or without `new_thread`.
 
 ## Reusable Trigger Idempotency
 
-Use a stable `--event-id` for the same external event.
+Give the same external event the same `--event-id`, such as a reservation ID, Git commit SHA, release tag, webhook delivery ID, or a hash of the changed state.
+After a successful delivery, a request with the same `event_id` is answered as a duplicate and posts nothing for the next 24 hours.
+If `--event-id` is omitted, the CLI generates a random one, so repeated sends are not deduplicated.
 
-For example, use a reservation ID, Git commit SHA, release tag, webhook delivery ID, or deterministic hash of the changed state.
+To retry, send a fresh signed request with the same `event_id`; replaying identical request bytes and headers is rejected because each nonce is single-use.
 
-If delivery succeeds, a later signed request with the same `event_id` is treated as a duplicate and does not post another Matrix message while the replay record is retained.
+`event_id`, `thread_key`, and the signature nonce are each limited to 256 bytes, so use short ASCII identifiers.
+Each trigger holds at most 10,000 recent nonces, 10,000 recent `event_id` values, and 10,000 active `thread_key` values; beyond that, requests receive `429` until older entries expire.
+Rotating a trigger's key or deleting the trigger forgets its delivered `event_id` values.
 
-Delivered `event_id` records are retained for 24 hours in the current JSON replay store.
+Deduplication requires every API process that accepts triggers to share one control-state filesystem.
 
-Because the replay store retains them, `event_id`, `thread_key`, and the signature nonce are each limited to 256 bytes as the JSON replay store writes them: printable ASCII characters other than `"` and `\` take one byte each, and every other character takes the 2 to 12 bytes of its JSON escape.
+## Delivery Requirements
 
-Each trigger may hold at most 10,000 unexpired nonces, 10,000 unexpired `event_id` records, and 10,000 unexpired `thread_key` records, and a request that would add one more is answered with `429` until older records expire.
+A request is delivered only when all of these hold:
 
-Rotating a trigger's key deletes the replay records kept for its previous key, and deleting a trigger deletes all of its replay records.
+- The trigger exists, is enabled, and `external_trigger_policy.enabled` is true.
+- The owner is still allowed to talk to the target agent in the target room.
+- The owner, or one of the owner's `authorization.aliases`, is currently joined to the target room; bot accounts do not count.
+- The router and the target agent or team are running and joined to the target room.
 
-Retries must create a fresh signed request with the same `--event-id`.
+The triggered turn runs on behalf of the trigger owner, not the router.
+For a private agent (`private.per`), the trigger wakes the owner's private instance, so a trigger created by `@alice:example.org` uses Alice's private state.
+An administrator's trigger for a private agent wakes the administrator's private state.
 
-Each nonce-bearing HTTP request is single-use.
+## Troubleshooting Responses
 
-Do not reuse the same HTTP request body and headers as a retry strategy.
+A successful request returns `202` with `accepted: true`, the `event_id`, and the posted Matrix event ID, or `duplicate: true` when the `event_id` was already delivered.
 
-Replay state lives in one file per trigger and signing key epoch under `<control-state>/external_triggers/replay/`, each with its own advisory file lock, so one trigger's records never slow another trigger's deliveries.
-
-Deploy trigger ingress with a single shared control-state filesystem, or keep one API writer until replay storage moves to a distributed atomic backend.
-
-If `--event-id` is omitted, the CLI generates a random event ID, so repeated sends are not idempotent.
+| Status | Detail | Cause and fix |
+| --- | --- | --- |
+| `401` | `Invalid external trigger signature` | Wrong private key, `key_id` mismatch, missing signature headers, or a timestamp outside the replay window; check the watcher's clock. |
+| `403` | `External trigger owner is not authorized for this target room` | The owner lost access to the target agent in that room. |
+| `403` | `External trigger owner is not joined to the target room` | The owner left the room; rejoin it. |
+| `404` | `External trigger not found` | Unknown, disabled, deleted, or consumed trigger, triggers disabled in policy, or a wrong callback token. |
+| `409` | `External trigger nonce has already been used` | The same signed request was sent twice; sign a new one. |
+| `409` | `External trigger event is already in progress` | Another request with this `event_id` is still being delivered. |
+| `413` | `External trigger body exceeds configured limit` | Shrink the body or raise `max_body_bytes`. |
+| `422` | `External trigger kind is not allowed` | `kind` is not in the trigger's `allowed_kinds`; other `422` responses list invalid body fields. |
+| `429` | `External trigger replay limit reached` | Too many recent events for one trigger; wait for older entries to expire. |
+| `503` | `External trigger target runtime is not available` | The router or target bot is not running or not joined to the room yet; retry later. |
 
 ## Watcher Behavior
 
-Watcher code should call `mindroom trigger send` only when something meaningful changes.
-
-For a polling watcher, store the last observed state and compare before sending.
-
-For a webhook watcher, deduplicate webhook delivery IDs before calling MindRoom.
-
-MindRoom receives trigger events.
-
-MindRoom does not host watcher loops, schedule watcher polls, or keep an agent turn alive while waiting for external state.
+A polling watcher should store the last observed state and compare before sending.
+A webhook watcher should deduplicate webhook delivery IDs before calling MindRoom.
 
 ## Security Modes
 
 ### Kubernetes Hardened Mode
 
-Keep the trigger private key outside the agent sandbox.
-
-Do not mount the private key into the agent sandbox.
-
-The agent can see the watcher script if it is in its workspace, but it should not see the private key or control-state path.
-
-Run always-on polling watchers as a top-level runtime sidecar, a CronJob, or an external deployment.
-
-Worker pods can call MindRoom when a watcher is intentionally scoped to that worker lifecycle.
-
-Mount the trigger private key only into the watcher container that needs it.
-
-Do not mount the trigger private key into `sandbox-runner` or the agent workspace.
-
-Set `MINDROOM_URL` to your deployed MindRoom service URL, or pass `--url` to `mindroom trigger send`.
-
-The watcher image must contain the watcher code and the `mindroom` CLI if the watcher shells out to `mindroom trigger send`.
+Keep the trigger private key out of the agent's reach.
+Run always-on watchers as a sidecar of the MindRoom runtime pod, a CronJob, or a separate deployment, and mount the private key only into that watcher container, never into `sandbox-runner` or the agent workspace.
+A watcher script may live in the agent's workspace as long as the key does not.
+A worker pod can send triggers when the watcher is meant to live only as long as that worker.
+Set `MINDROOM_URL` to the MindRoom service URL or pass `--url`.
+If the watcher calls `mindroom trigger send`, its image needs the `mindroom` CLI.
 
 ### Personal VM Or Unsandboxed Mode
 
-A cron job can run as the same user as MindRoom and call `http://127.0.0.1:8765`.
+On a personal VM, a cron job running as the MindRoom user can call `http://127.0.0.1:8765`.
+This does not hide the private key from an agent with unsandboxed shell access as that same user.
+To hide the key from agent code, run the watcher as a separate OS user or keep the agent's code tools in a sandbox.
 
-This is convenient for a personal VM.
+## Agent Callbacks
 
-This is not a secret boundary if the agent has unsandboxed shell access as that same user.
+Agent callbacks let an agent hand a background task a script that wakes the same agent in the same thread when the task finishes.
 
-In that mode, the agent can usually read the same user's files or invoke the same local tools.
+1. The agent starts a background Codex session or another long-running task.
+2. It calls `mint_callback` with a short label for that task.
+3. It includes the returned instruction in the background task's prompt.
+4. The background task runs the script with a short result summary when it finishes.
 
-Use a separate OS user, sandbox, Kubernetes sidecar, or CronJob isolation when the private key must be hidden from agent code.
+### Configuration
+
+Enable the tool on agents that launch background work:
+
+```yaml
+agents:
+  orchestrator:
+    role: Launch and supervise coding agents.
+    tools:
+      - callback_manager
+```
+
+No callback-specific configuration exists.
+Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_owner` until used or deleted.
+
+### Tool Result
+
+`mint_callback(label)` returns a script path and an instruction like this:
+
+```text
+When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
+```
+
+The script needs only Bash and curl.
+It posts the summary to the room and thread where the callback was minted, which wakes the agent.
+After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
+Unused callbacks never expire, so delete abandoned ones with `external_trigger_manager.delete_trigger`.
+
+### Network Access
+
+The script calls the address of the MindRoom API server that was running when the callback was minted, including a non-default `--api-port`, or `http://127.0.0.1:8765` when none was running.
+When the background process must reach MindRoom at another address, set `MINDROOM_URL` in MindRoom's own environment before the agent mints the callback, because the address is written into the script.
+Point `MINDROOM_URL` only at a trusted MindRoom endpoint because the script sends its token there.
+
+### Security
+
+Each script contains a random bearer token that can only wake the agent, room, and thread captured when it was minted.
+A missing or wrong token gets the same not-found response as an unknown trigger.
+Callback deliveries pass the same [delivery requirements](#delivery-requirements) as signed triggers.
+Use signed triggers for reusable integrations that need a stable identity.

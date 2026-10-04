@@ -154,7 +154,7 @@ async def _cancel_and_drain_background_tasks(
             request_task_cancel(
                 task,
                 cancel_source=shutdown_intent.cancel_source,
-                process_shutdown=shutdown_intent.stop_reason == "shutdown",
+                process_shutdown=shutdown_intent.hands_off_unfinished_work,
             )
         done, _pending = await asyncio.wait(
             pending_tasks,

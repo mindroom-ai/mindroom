@@ -1,61 +1,44 @@
 ---
-icon: lucide/wrench
+icon: lucide/map-pin
 ---
 
 # Location, Commerce, & Home
 
-Use these tools to search places, fetch weather data, analyze Shopify stores, and control Home Assistant devices.
+These tools let an agent look up places and weather, analyze a Shopify store, and control a Home Assistant smart home.
 
-## What This Page Covers
+| Tool | Service | Functions |
+| --- | --- | --- |
+| [`google_maps`](#google_maps) | Google Maps | Place search, directions, geocoding, address validation, distances, elevation, timezones |
+| [`openweather`](#openweather) | OpenWeather | Current weather, forecast, air pollution, location geocoding |
+| [`shopify`](#shopify) | Shopify Admin API | Shop info, products, orders, customers, inventory, sales analytics |
+| [`homeassistant`](#homeassistant) | Home Assistant | Entity states, device control, scenes, automations, service calls |
 
-This page documents the built-in tools in the `location-commerce-and-home` group.
-Use these tools when you need physical-world lookup data, store analytics, or smart home control.
+## Setup
 
-## Tools On This Page
+Every tool on this page stays unavailable until its credentials are configured.
+Store password fields such as `key`, `api_key`, and `access_token` through the dashboard or credential store, because they cannot be set inline in YAML (see [Security Restrictions](index.md#security-restrictions)).
+Missing Python dependencies install automatically on first use (see [Automatic Dependency Installation](index.md#automatic-dependency-installation)).
+`homeassistant` is connected through its own dashboard flow instead (see [Connecting Home Assistant](#connecting-home-assistant)).
 
-- [`google_maps`] - Google Maps place search, directions, geocoding, address validation, elevation, and timezone lookups.
-- [`openweather`] - Current weather, multi-day forecast, air pollution, and location geocoding from OpenWeather.
-- [`shopify`] - Shopify Admin API analytics for shop info, products, orders, customers, inventory, and sales trends.
-- [`homeassistant`] - Home Assistant entity state queries, device control, scene activation, and generic service calls.
+## `google_maps`
 
-## Common Setup Notes
+`google_maps` provides `search_places()`, `get_directions()`, `validate_address()`, `geocode_address()`, `reverse_geocode()`, `get_distance_matrix()`, `get_elevation()`, and `get_timezone()`.
+`search_places()` returns place details including name, address, rating, reviews, phone number, website, and opening hours.
 
-All four tools on this page are `requires_config`, so they only become available after the needed credentials or integration setup is present.
-MindRoom validates inline overrides against the declared `config_fields`, and `type="password"` fields such as `key`, `api_key`, `access_token`, and `HOMEASSISTANT_TOKEN` must be stored through the dashboard or credential store instead of inline YAML.
-`google_maps`, `openweather`, and `shopify` are standard credential-backed tools with no dedicated MindRoom integration routes in `src/mindroom/api/integrations.py`.
-Their upstream Agno toolkits also support environment fallbacks through `GOOGLE_MAPS_API_KEY`, `OPENWEATHER_API_KEY`, `SHOPIFY_SHOP_NAME`, and `SHOPIFY_ACCESS_TOKEN`.
-`homeassistant` is different because MindRoom ships a dedicated integration flow in `src/mindroom/api/homeassistant_integration.py` with both OAuth and long-lived-token setup paths.
-`homeassistant` is also a shared-only integration, so it requires `worker_scope` to be unset or `shared`.
-Like the Google OAuth tools and `spotify`, `homeassistant` always stays local and is never proxied through worker sandbox routing.
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `search_places` | `boolean` | `true` | Enable `search_places()`. |
+| `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
+| `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
+| `geocode_address` | `boolean` | `true` | Enable `geocode_address()`. |
+| `reverse_geocode` | `boolean` | `true` | Enable `reverse_geocode()`. |
+| `get_distance_matrix` | `boolean` | `true` | Enable `get_distance_matrix()`. |
+| `get_elevation` | `boolean` | `true` | Enable `get_elevation()`. |
+| `get_timezone` | `boolean` | `true` | Enable `get_timezone()`. |
 
-## [`google_maps`]
-
-`google_maps` is the Google Maps toolkit for place search, routing, geocoding, address validation, and location metadata.
-
-### What It Does
-
-`google_maps` exposes `search_places()`, `get_directions()`, `validate_address()`, `geocode_address()`, `reverse_geocode()`, `get_distance_matrix()`, `get_elevation()`, and `get_timezone()`.
-The upstream toolkit builds both a `googlemaps.Client` and a `google.maps.places_v1.PlacesClient`.
-`search_places()` returns rich place details including name, formatted address, rating, reviews, phone number, website, and opening hours.
-`validate_address()` uses Google's Address Validation API rather than normal geocoding.
-MindRoom does not add extra runtime behavior on top of the upstream toolkit beyond metadata, dependency management, and credential storage.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `key` | `password` | `no` | `null` | Google Maps API key stored through the dashboard or credential store. |
-| `search_places` | `boolean` | `no` | `true` | Enable `search_places()`. |
-| `get_directions` | `boolean` | `no` | `true` | Enable `get_directions()`. |
-| `validate_address` | `boolean` | `no` | `true` | Enable `validate_address()`. |
-| `geocode_address` | `boolean` | `no` | `true` | Enable `geocode_address()`. |
-| `reverse_geocode` | `boolean` | `no` | `true` | Enable `reverse_geocode()`. |
-| `get_distance_matrix` | `boolean` | `no` | `true` | Enable `get_distance_matrix()`. |
-| `get_elevation` | `boolean` | `no` | `true` | Enable `get_elevation()`. |
-| `get_timezone` | `boolean` | `no` | `true` | Enable `get_timezone()`. |
-
-### Example
+The toolkit needs Google Application Default Credentials for place search in addition to the API key, so configure both.
+`validate_address()` uses Google's Address Validation API, which must be enabled in the same Google Cloud project as the key.
 
 ```yaml
 agents:
@@ -67,42 +50,26 @@ agents:
 ```python
 search_places("coffee shops near Pike Place Market")
 get_directions("Seattle, WA", "Portland, OR", mode="driving")
-geocode_address("1600 Amphitheatre Parkway, Mountain View, CA")
 reverse_geocode(47.6205, -122.3493)
 validate_address("1600 Amphitheatre Pkwy, Mountain View, CA", region_code="US")
 ```
 
-### Notes
+## `openweather`
 
-- `key` is optional in MindRoom metadata only because the upstream toolkit can also read `GOOGLE_MAPS_API_KEY` from the runtime environment.
-- The upstream toolkit also constructs a Google Places client through Google Application Default Credentials, so configure ADC in addition to a valid Google Maps API key.
-- If you plan to use `validate_address()`, enable the Address Validation API for the same Google Cloud project as the key.
+`openweather` provides `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
+`get_forecast()` returns 3-hour entries for up to 5 days.
+Weather lookups use the first geocoding match for the location name, so ambiguous names such as "Springfield" can resolve to an unexpected place; add a region or country to the query.
 
-## [`openweather`]
-
-`openweather` is the OpenWeather toolkit for weather, forecast, air quality, and place geocoding.
-
-### What It Does
-
-`openweather` exposes `get_current_weather()`, `get_forecast()`, `get_air_pollution()`, and `geocode_location()`.
-The weather, forecast, and air pollution methods geocode the requested location first and then query OpenWeather by latitude and longitude.
-`units` controls whether the toolkit requests `standard`, `metric`, or `imperial` output from the API.
-`get_forecast()` uses the 5-day forecast endpoint and caps the response to 40 three-hour entries.
-MindRoom does not add custom behavior here beyond metadata, dependency management, and credential storage.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | OpenWeather API key stored through the dashboard or credential store. |
-| `units` | `text` | `no` | `metric` | Measurement units passed to the OpenWeather API. |
-| `enable_current_weather` | `boolean` | `no` | `true` | Enable `get_current_weather()`. |
-| `enable_forecast` | `boolean` | `no` | `true` | Enable `get_forecast()`. |
-| `enable_air_pollution` | `boolean` | `no` | `true` | Enable `get_air_pollution()`. |
-| `enable_geocoding` | `boolean` | `no` | `true` | Enable `geocode_location()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full OpenWeather toolkit. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
+| `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
+| `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
+| `enable_air_pollution` | `boolean` | `true` | Enable `get_air_pollution()`. |
+| `enable_geocoding` | `boolean` | `true` | Enable `geocode_location()`. |
+| `all` | `boolean` | `false` | Enable all four functions regardless of the `enable_*` options. |
+| `timeout` | `number` | `30` | Per-request timeout in seconds. |
 
 ```yaml
 agents:
@@ -116,38 +83,32 @@ agents:
 ```python
 get_current_weather("San Francisco")
 get_forecast("Chicago", days=3)
-get_air_pollution("Los Angeles")
 geocode_location("Reykjavik", limit=3)
 ```
 
-### Notes
+## `shopify`
 
-- `api_key` is optional in MindRoom metadata only because the upstream toolkit can also read `OPENWEATHER_API_KEY` from the runtime environment.
-- In practice, the tool still needs a valid OpenWeather API key before any call succeeds.
-- Because weather lookups reuse the first geocoding match, ambiguous location names can resolve to an unexpected city unless you make the query more specific.
+`shopify` provides `get_shop_info()`, `get_products()`, `get_orders()`, `get_top_selling_products()`, `get_products_bought_together()`, `get_sales_by_date_range()`, `get_order_analytics()`, `get_product_sales_breakdown()`, `get_customer_order_history()`, `get_inventory_levels()`, `get_low_stock_products()`, `get_sales_trends()`, `get_average_order_value()`, and `get_repeat_customers()`.
+List functions return at most 250 products or orders per call.
+Analytics such as sales totals, trends, and average order value use at most 250 matching orders per query, so results for a busy store or a long date range can be incomplete.
+Date filters such as `created_after` and `created_before` take `YYYY-MM-DD`.
 
-## [`shopify`]
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `shop_name` | `text` | `null` | Required. Store subdomain, such as `my-store` from `my-store.myshopify.com`. Falls back to `SHOPIFY_SHOP_NAME`. |
+| `access_token` | `password` | `null` | Required. Admin API access token. Falls back to `SHOPIFY_ACCESS_TOKEN`. |
+| `api_version` | `text` | `2025-10` | Shopify Admin API version. |
+| `timeout` | `number` | `30` | Request timeout in seconds. |
 
-`shopify` is the Shopify Admin GraphQL toolkit for store analytics, catalog inspection, order reporting, customer lookups, and inventory visibility.
+To get an access token:
 
-### What It Does
+1. Create and install an app through the [Shopify Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard) with the `read_orders`, `read_products`, `read_customers`, and `read_analytics` scopes.
+   Shopify returns only the last 60 days of orders unless the app also has the approved `read_all_orders` scope, so request it for older sales reports.
+2. Obtain an Admin API access token through Shopify's authentication flow; for stores in your own organization, use the [client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant), whose tokens expire after 24 hours.
+3. Store the token as `access_token` through the dashboard or credential store.
 
-`shopify` exposes `get_shop_info()`, `get_products()`, `get_orders()`, `get_top_selling_products()`, `get_products_bought_together()`, `get_sales_by_date_range()`, `get_order_analytics()`, `get_product_sales_breakdown()`, `get_customer_order_history()`, `get_inventory_levels()`, `get_low_stock_products()`, `get_sales_trends()`, `get_average_order_value()`, and `get_repeat_customers()`.
-The toolkit talks to Shopify's Admin GraphQL endpoint at `https://<shop_name>.myshopify.com/admin/api/<api_version>/graphql.json`.
-Most list-style methods cap query size to Shopify's first-page limits, such as 250 products or orders.
-`get_orders()` supports `created_after`, `created_before`, and financial status filters, and the date filters expect `YYYY-MM-DD`.
-MindRoom does not wrap the Shopify API further, so behavior comes directly from the upstream Agno toolkit.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `shop_name` | `text` | `yes` | `null` | Store subdomain such as `my-store` from `my-store.myshopify.com`. |
-| `access_token` | `password` | `yes` | `null` | Shopify Admin API access token stored through the dashboard or credential store. |
-| `api_version` | `text` | `no` | `2025-10` | Shopify Admin API version used in GraphQL requests. |
-| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
-
-### Example
+MindRoom does not issue or refresh Shopify tokens, so replace an expired token yourself.
+[Existing legacy custom apps](https://changelog.shopify.com/posts/legacy-custom-apps-can-t-be-created-after-january-1-2026) keep working with their tokens, but new ones cannot be created in Shopify Admin.
 
 ```yaml
 agents:
@@ -155,58 +116,33 @@ agents:
     tools:
       - shopify:
           shop_name: my-store
-          api_version: 2025-10
           timeout: 45
 ```
 
 ```python
-get_shop_info()
 get_products(max_results=25, status="ACTIVE")
 get_orders(max_results=50, created_after="2026-03-01", created_before="2026-03-31")
 get_low_stock_products(threshold=10)
 get_average_order_value(group_by="day", created_after="2026-03-01", created_before="2026-03-31")
 ```
 
-### Notes
-
-- Create and install new custom apps through the [Shopify Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), select the required scopes, and obtain an Admin API access token using Shopify's authentication flow.
-- For stores in your own organization, follow Shopify's [client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant); these tokens expire after 24 hours.
-- Store the resulting token in `access_token` through the dashboard or credential store, and replace it when needed; this toolkit consumes supplied tokens and does not issue or refresh them.
-- [Existing legacy custom apps remain supported](https://changelog.shopify.com/posts/legacy-custom-apps-can-t-be-created-after-january-1-2026), but new apps cannot be created through Shopify Admin.
-- The upstream toolkit explicitly expects `read_orders`, `read_products`, `read_customers`, and `read_analytics` for its full analytics surface.
-- `shop_name` and `access_token` can also come from `SHOPIFY_SHOP_NAME` and `SHOPIFY_ACCESS_TOKEN`, but MindRoom's documented configuration path is stored tool credentials.
-
-## [`homeassistant`]
+## `homeassistant`
 
 <video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/ae8bf099-0f11-4097-8de1-de17efbb7bc8#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
   <source src="https://github.com/user-attachments/assets/01e6b9c7-db21-49e9-897c-d03ced90ee14#t=0.1" type="video/mp4">
 </video>
 
-`homeassistant` is MindRoom's custom Home Assistant toolkit for entity state queries, device control, scenes, automations, and generic service calls.
+`homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
+`list_entities()` returns at most 50 entities, so pass a domain such as `light` or `sensor` to narrow it.
+`set_brightness()` takes `0` to `255`, `set_color()` takes RGB channels in the same range, and `call_service()` takes extra service data as a JSON string.
+`set_temperature()` uses the temperature unit configured in Home Assistant.
 
-### What It Does
-
-`homeassistant` exposes `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
-The toolkit calls Home Assistant's REST API through `/api/states` and `/api/services/...`.
-`list_entities()` returns a simplified response and limits the output to the first 50 entities to avoid huge payloads.
-`set_brightness()` validates a `0` to `255` range, `set_color()` validates each RGB channel in the same range, and `call_service()` expects extra service data as a JSON string.
-MindRoom adds important runtime behavior here by loading scoped credentials, enforcing shared-only integration rules, and returning a clear error when the agent's `worker_scope` does not allow the integration.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `HOMEASSISTANT_URL` | `url` | `yes` | `null` | Dashboard field label for the Home Assistant base URL. The dedicated integration flow stores the normalized value as `instance_url`. |
-| `HOMEASSISTANT_TOKEN` | `password` | `yes` | `null` | Dashboard field label for a long-lived access token. OAuth setup stores `access_token` and `refresh_token` instead. |
-| `HOMEASSISTANT_ALLOW_PRIVATE_URL` | `boolean` | `no` | `false` | Allows a trusted self-hosted Home Assistant URL on a private, local, or loopback network. The dedicated integration flow stores this as `allow_private_url`. |
-
-### Example
+`homeassistant` requires `worker_scope` unset or `shared` (see [Shared-only integrations](../deployment/sandbox-proxy.md#shared-only-integrations)).
 
 ```yaml
 agents:
   home:
-    worker_scope: shared
     tools:
       - homeassistant
 ```
@@ -214,24 +150,29 @@ agents:
 ```python
 list_entities("light")
 get_entity_state("climate.thermostat")
-turn_on("light.living_room")
 set_brightness("light.living_room", 128)
 activate_scene("scene.movie_time")
 call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 ```
 
-### Notes
+### Connecting Home Assistant
 
-- `homeassistant` requires `worker_scope` to be unset or `shared`, and it is unavailable for `worker_scope: user` or `worker_scope: user_agent`.
-- `homeassistant`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `google_tasks` always stay local and are never proxied through the sandbox, even if you change `worker_tools`.
-- The current setup path is the dedicated Home Assistant integration flow in the dashboard or `src/mindroom/api/homeassistant_integration.py`, not generic env-to-credentials syncing.
-- That integration supports both OAuth and long-lived access tokens, and the OAuth flow requires a Home Assistant OAuth application with the callback URL `/api/homeassistant/callback` on the MindRoom dashboard host.
-- When Home Assistant rejects an expired OAuth access token, MindRoom renews it once with the stored `refresh_token`, saves it, and retries the request; it asks you to reconnect only when that renewal fails.
-- Home Assistant URLs are validated before server-side fetches, and private, local, or loopback URLs require the explicit `allow_private_url` opt-in.
-- The runtime tool itself looks for stored `instance_url` plus either `access_token` or `long_lived_token`, which is why tool availability checks differ from the raw metadata field names.
+Connect Home Assistant in the dashboard's **Tools** tab, using either method:
+
+- **OAuth**: enter the Home Assistant URL and, as the Client ID, the MindRoom dashboard URL, such as `https://mindroom.example.com`; Home Assistant needs no application registration, but the Client ID must use the same host and port as the dashboard you connect from.
+- **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
+
+Expired OAuth access tokens renew automatically.
+A Home Assistant URL on a private, local, or loopback network, such as `http://homeassistant.local:8123`, is rejected unless you enable **Allow private or local URL**; enable it only for a trusted self-hosted instance.
+
+| Error | Fix |
+| --- | --- |
+| `Home Assistant is not configured. Please connect through the dashboard.` | Connect Home Assistant as above. |
+| `Invalid authentication token. Please reconnect Home Assistant.` | The token was revoked or OAuth renewal failed; reconnect. |
+| `Private Home Assistant URLs require explicit opt-in. ...` | Enable **Allow private or local URL** and reconnect. |
+| `Connection timeout - check if Home Assistant is accessible` | Make sure the MindRoom server can reach the Home Assistant URL. |
 
 ## Related Docs
 
 - [Tools Overview](index.md)
-- [Per-Agent Tool Configuration](../configuration/agents.md#per-agent-tool-configuration)
-- [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md)
+- [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration)

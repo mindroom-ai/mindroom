@@ -1,33 +1,32 @@
 # Docker Deployment
 
-Deploy MindRoom using Docker for simple, containerized deployments.
+Run MindRoom as a single container when you already have a Matrix homeserver.
+For a hosted homeserver with only MindRoom local, see [Hosted Matrix](https://docs.mindroom.chat/deployment/hosted-matrix/); for other options, see [Deployment](https://docs.mindroom.chat/deployment/).
 
-## Quick Start
-
-MindRoom ships as a single runtime container that serves:
+The `ghcr.io/mindroom-ai/mindroom:latest` image runs `mindroom run` and serves, on port `8765`:
 
 - the bot orchestrator
 - the dashboard UI at `http://localhost:8765`
 - the dashboard API at `http://localhost:8765/api`
 - the OpenAI-compatible API at `http://localhost:8765/v1`
 
-MindRoom may atomically rewrite `config.yaml` at startup when an automatic configuration migration is required.
-Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
-Current configs can remain read-only as shown below.
+## Docker (single container)
 
-Create the host data directory before starting either container recipe below.
-The image runs as UID/GID `1000:1000`, so the bind-mounted directory and any existing contents must be writable by that container identity.
-For a new data directory on Linux with rootful Docker and no user-namespace remapping:
+### Prepare the data directory
+
+The container runs as UID/GID `1000:1000`, so the host data directory and everything in it must be writable by that identity.
+For a new directory on Linux with rootful Docker and no user-namespace remapping:
 
 ```bash
 mkdir -p ./mindroom_data
 sudo chown 1000:1000 ./mindroom_data
 ```
 
-For rootless Docker or user-namespace remapping, grant access using the corresponding host UID/GID mapping or suitable ACLs.
-A bind mount hides the image directory's ownership, so the image's preconfigured permissions do not make an unwritable host directory usable.
+For rootless Docker or user-namespace remapping, grant access to the host UID/GID that container UID 1000 maps to, or use suitable ACLs.
 
-Run it with:
+See [Data Persistence](https://docs.mindroom.chat/deployment/storage/#data-persistence) for what this directory holds and what to back up.
+
+### Run the container
 
 ```bash
 docker run -d \
@@ -39,10 +38,12 @@ docker run -d \
   ghcr.io/mindroom-ai/mindroom:latest
 ```
 
+Remove `:ro` from the config mount if you want configuration changes made from the dashboard or chat saved to `config.yaml`.
+When upgrading a config that still uses retired access fields, follow [Membership Access Migration](https://docs.mindroom.chat/deployment/upgrades/#membership-access-migration) on the host before starting the container.
+
 ## Docker Compose
 
-Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
-Create a `docker-compose.yml`:
+Prepare `./mindroom_data` as described [above](#prepare-the-data-directory), then create `docker-compose.yml`:
 
 ```yaml
 services:
@@ -57,17 +58,9 @@ services:
       - ./mindroom_data:/app/mindroom_data
     env_file:
       - .env
-    environment:
-      - MINDROOM_STORAGE_PATH=/app/mindroom_data
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
-      # Optional: for self-signed certificates
-      # - MATRIX_SSL_VERIFY=false
-      # Optional: override server name for federation
-      # - MATRIX_SERVER_NAME=example.com
 ```
 
-Run with:
+Start it with:
 
 ```bash
 docker compose up -d
@@ -75,29 +68,44 @@ docker compose up -d
 
 ## Environment Variables
 
-Key environment variables (set in `.env` or pass directly):
+Pass variables with `--env-file .env` or the Compose `env_file:` and `environment:` keys.
+For what the container needs, see [Required Configuration](https://docs.mindroom.chat/deployment/#required-configuration).
+Set `MATRIX_SSL_VERIFY=false` for a homeserver with a self-signed certificate, and set `MINDROOM_API_KEY` to require a key for the dashboard instead of leaving it open.
+All variables, defaults, and which ones only the process environment can set are listed in [Configuration — Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables).
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MATRIX_HOMESERVER` | Matrix server URL | `http://localhost:8008` |
-| `MATRIX_SSL_VERIFY` | Verify the TLS certificate of `MATRIX_HOMESERVER`; provisioning service requests and other homeservers are always verified | `true` |
-| `MATRIX_SERVER_NAME` | Server name for federation (optional) | - |
-| `MINDROOM_STORAGE_PATH` | Data storage directory | Relative to config file |
-| `MINDROOM_SESSION_STORAGE_PATH` | Dedicated root for agent and team session SQLite databases. Mount this path separately when sessions need their own persistent volume | `MINDROOM_STORAGE_PATH` |
-| `LOG_LEVEL` | Logging level | `INFO` |
-| `MINDROOM_LOGGER_LEVELS` | Optional per-logger overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING`; set `nio.crypto:WARNING` to inspect Matrix crypto decrypt warnings | - |
-| `MINDROOM_CONFIG_PATH` | Path to config.yaml | `./config.yaml`, then `~/.mindroom/config.yaml` |
-| `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude models) | - |
-| `OPENAI_API_KEY` | OpenAI API key (if using OpenAI models) | - |
-| `MINDROOM_PORT` | Port used by Google OAuth callback URL construction and deployment tooling. Does **not** change the API server bind port — use `mindroom run --api-port` for that | `8765` |
-| `MINDROOM_API_KEY` | API key for dashboard auth (standalone) | - (open access) |
+To change the API port or bind address, pass `--api-port` or `--api-host` to `mindroom run`, for example `command: ["mindroom", "run", "--api-port", "9000"]` in the Compose service, and update the published port to match.
+`MINDROOM_PORT` does not change the bind port.
 
-To change the API server port or bind address, pass `--api-port` or `--api-host` to the `mindroom run` command.
-For example, add `command: ["mindroom", "run", "--api-port", "9000"]` to the Docker Compose service.
+## With Local Matrix
 
-Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
+For development, start the repository's local Matrix stack (Synapse on port 8008, with PostgreSQL and Redis) and then MindRoom:
 
-If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via a same-origin login page before loading the UI.
+```bash
+docker compose -f local/matrix/docker-compose.yml up -d
+curl -s http://localhost:8008/_matrix/client/versions
+docker compose up -d
+```
+
+`MATRIX_HOMESERVER` must resolve from inside the MindRoom container, and the two Compose projects do not share a network automatically.
+Attach both services to one named external network and use the Synapse service name, such as `http://mindroom-synapse:8008`, or configure an explicit host-gateway address.
+Do not use `http://localhost:8008` inside the MindRoom container, because there `localhost` is the MindRoom container itself.
+
+To run the backend on the host instead of in a container, use [`mindroom local-stack-setup`](https://docs.mindroom.chat/cli/#local-stack-setup) to start Synapse and MindRoom Chat and save the Matrix variables:
+
+```bash
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
+mindroom run
+```
+
+## Health Checks
+
+```bash
+curl http://localhost:8765/api/health
+curl http://localhost:8765/api/ready
+```
+
+Use `/api/health` for liveness and `/api/ready` for readiness; responses are described in [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness).
+A hosted container waiting for pairing approval is live but not ready; find the approval link with `docker logs mindroom`.
 
 ## Building from Source
 
@@ -107,101 +115,5 @@ Build from the repository root:
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
-The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
-
-A `Dockerfile.mindroom-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
-
-## With Local Matrix
-
-For development, run MindRoom alongside a local Matrix server:
-
-```bash
-# Start Matrix (Synapse + Postgres + Redis) without changing directories
-docker compose -f local/matrix/docker-compose.yml up -d
-
-# Verify Matrix is running
-curl -s http://localhost:8008/_matrix/client/versions
-
-# Start MindRoom using the docker-compose.yml you created above.
-# Its MATRIX_HOMESERVER must resolve from inside the MindRoom container.
-docker compose up -d
-```
-
-The two Compose projects do not share a network automatically.
-Either attach both services to one named external network and use the Synapse service name, such as `http://mindroom-synapse:8008`, or configure an explicit host-gateway address.
-Do not use `http://localhost:8008` inside the MindRoom container; there, `localhost` means the MindRoom container itself.
-
-The local Matrix stack includes:
-
-- **Synapse**: Matrix homeserver on port 8008
-- **PostgreSQL**: Database backend
-- **Redis**: Caching layer
-
-For a host-installed backend, use `mindroom local-stack-setup` with the core MindRoom checkout's `local/matrix` directory to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
-
-```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
-mindroom run
-```
-
-## Health Checks
-
-The container exposes a health endpoint on port 8765:
-
-```bash
-curl http://localhost:8765/api/health
-```
-
-An unpaired hosted container answers `/api/health` with `200` while it waits for pairing approval, so a health check does not restart it and replace its pairing code.
-During that wait, `/api/ready` returns `503` with `"detail": "Waiting for local pairing approval"`.
-After approval, the port is briefly closed while the full API server takes it over, as at any startup, and `/api/ready` then reports normal startup progress until MindRoom is ready.
-Find the approval link in the container logs.
-
-## Data Persistence
-
-MindRoom stores data in the `mindroom_data` directory by default:
-
-- `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
-- `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
-- `knowledge_db/` - Knowledge base vector stores
-- `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
-- `credentials/` - Synchronized secrets from `.env`
-- `logs/` - Application logs
-- `matrix_state.yaml` - Matrix connection state
-- `encryption_keys/` - Matrix E2EE keys (if enabled)
-
-These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
-`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
-
-Keep `tracking/` on persistent storage and include it in backups.
-Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
-When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
-
-Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
-If required session columns are missing, MindRoom renames the complete `sessions/` directory to a unique sibling `sessions.incompatible-<id>/`, preserving the database and SQLite sidecars, and starts a fresh session store.
-These archives are retained for inspection or manual recovery; include them in backups and remove them only when no longer needed.
-Compatible history stays in place, including older readable run blobs alongside current run rows, extra columns, and stores awaiting lazy table creation.
-This check does not validate existing runs-table schemas or archive databases on permission, locking, I/O, or corruption errors.
-Learning, workspaces, credentials, encryption keys, custom stores, and durable journal state are outside this session recovery boundary.
-
-Dispatch-obligation databases retain one compact terminal row per settled callback except successful invites, whose synthetic obligations are deleted so later re-invites can run.
-The retained terminal rows have no automatic retention window because deleting them weakens replay deduplication.
-Pending rows temporarily retain the full event replay payload and should represent only actively deferred or retry-owned work, not completed ignore paths.
-Checkpoint invalidation can force a no-`since` limited sync that backfills older events, and opaque Matrix tokens provide no safe ordering frontier for pruning those exact keys.
-Size and monitor the volume for lifetime callback growth, and use the inspection and corruption-remediation guidance in [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runtime/#durable-dispatch-boundary).
-
-## Sandbox Proxy Isolation
-
-When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
-The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
-This provides real process-level isolation for code-execution tools.
-In a simple local static-runner install with no proxy URL and no YAML or environment settings requesting worker routing, execution tools run in the MindRoom process.
-Explicit YAML worker lists take precedence over environment execution modes.
-Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
-Dedicated Docker and Kubernetes workers do not allow that fallback.
-
-See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
-
-> [!TIP]
-> For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+`local/instances/deploy/Dockerfile.mindroom-minimal`, published as `ghcr.io/mindroom-ai/mindroom-minimal`, builds a smaller image without pre-installed tool extras, useful for sandbox runners; tools install their dependencies when first used.
+To run execution tools in isolated workers, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).

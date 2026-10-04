@@ -1,63 +1,52 @@
 ---
-icon: lucide/wrench
+icon: lucide/repeat
 ---
 
 # Automation & Platforms
 
-Use these tools to manage AWS-backed automation, edit Airflow DAG files, run code in hosted sandboxes, call arbitrary HTTP APIs, and bridge into broader integration platforms.
-
-## What This Page Covers
-
-This page documents the built-in tools in the `automation-and-platforms` group.
-Use these tools when you need infrastructure automation, generic API access, remote execution environments, or platform-level integration brokers.
+Use these tools to invoke AWS Lambda functions, send email through Amazon SES, edit Airflow DAG files, run code in hosted E2B or Daytona sandboxes, call Composio-connected apps, or make HTTP requests to APIs that have no dedicated MindRoom tool.
 
 ## Tools On This Page
 
-- [`aws_lambda`] - AWS Lambda function listing and invocation.
-- [`aws_ses`] - Amazon SES outbound email sending.
-- [`airflow`] - Local Airflow DAG file reads and writes.
-- [`e2b`] - Hosted E2B code-execution sandbox with file, command, and server helpers.
-- [`daytona`] - Persistent remote sandbox and dev-environment execution.
-- [`composio`] - Dynamic Composio-backed integration toolset for connected external apps.
-- [`custom_api`] - Generic HTTP requests to arbitrary APIs.
+| Tool | Needs | Best for |
+| --- | --- | --- |
+| [`aws_lambda`] | AWS credentials | Listing and invoking Lambda functions. |
+| [`aws_ses`] | AWS credentials and a verified SES sender | Sending plain-text email. |
+| [`airflow`] | Nothing | Reading and writing Airflow DAG source files. |
+| [`e2b`] | E2B API key | A hosted code interpreter with file transfer, commands, and temporary public URLs. |
+| [`daytona`] | Daytona API key | A remote sandbox that keeps state and a working directory across calls. |
+| [`composio`] | Composio API key and connected accounts | Calling selected actions from many apps through one Composio account. |
+| [`custom_api`] | Nothing, or the target API's credentials | HTTP requests to public APIs. |
 
-## Common Setup Notes
+## Setup
 
-All seven tools on this page default to the primary agent runtime instead of MindRoom's worker-routed execution set.
-`aws_lambda`, `airflow`, and `custom_api` use `setup_type: none`.
-`aws_ses`, `e2b`, `daytona`, and `composio` have `status: requires_config` and `setup_type: api_key`.
-`src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
-Password fields such as `api_key`, `password`, `custom_api` `headers`, and Daytona `sandbox_env_vars` must be stored through the dashboard or credential store instead of inline YAML.
-`aws_lambda` and `aws_ses` both rely on standard boto3 credential resolution, so normal AWS environment variables, shared config files, or instance-role credentials are the real authentication path.
-That matters especially for `aws_ses`, because the current registry marks it as `setup_type: api_key` even though the tool itself does not expose an API-key field.
-`e2b` accepts `api_key` inline from stored credentials or falls back to `E2B_API_KEY`.
-`daytona` accepts stored credentials or environment fallback through `DAYTONA_API_KEY`, and `api_url` can also fall back to `DAYTONA_API_URL`.
-`composio` can fall back to cached Composio user data or `COMPOSIO_API_KEY` when `api_key` is not stored directly.
-Several fields on this page are advanced raw constructor inputs rather than friendly hand-authored YAML values, including `sandbox_options`, `workspace_config`, `connected_account_ids`, `metadata`, and `processors`.
-Daytona's `sandbox_env_vars` and `sandbox_labels`, and `custom_api` `headers`, instead accept JSON objects that MindRoom validates and converts to upstream mappings.
-Missing optional dependencies can auto-install at first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set.
+Add the tool to an agent's `tools` list; see [Per-Agent Tool Configuration](index.md#per-agent-tool-configuration) for inline options and `include_tools`/`exclude_tools`.
+`password` fields, including `custom_api` `headers` and Daytona `sandbox_env_vars`, cannot be set inline; see [Security Restrictions](index.md#security-restrictions).
+`aws_lambda` and `aws_ses` have no key field and authenticate through the standard AWS credential chain: AWS environment variables, shared config and credentials files, or an instance or pod role.
+The sandbox and platform tools read their key from the environment when none is stored:
+
+| Tool | Environment variable |
+| --- | --- |
+| `e2b` | `E2B_API_KEY` |
+| `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
+| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+
+All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](../deployment/sandbox-proxy.md#worker-routed-execution)).
+Missing Python dependencies install on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
+Toolkits with an `all` option enable every function when `all: true`, regardless of the individual `enable_*` flags.
 
 ## [`aws_lambda`]
 
-`aws_lambda` lists Lambda functions and invokes them in the configured AWS region.
+`aws_lambda` provides `list_functions()` and `invoke_function(function_name, payload="{}")` in one AWS region.
+`invoke_function()` sends `payload` as a JSON string and returns the Lambda status code and the decoded response payload.
+`list_functions()` returns only the first page of results that AWS sends, so it is meant for simple invocation workflows rather than administering large accounts.
 
-### What It Does
-
-`aws_lambda` exposes `list_functions()` and `invoke_function(function_name, payload="{}")`.
-The toolkit constructs a boto3 Lambda client at init time with `region_name`.
-`invoke_function()` passes the payload through to boto3 as a string and returns the Lambda status code plus the decoded response payload.
-`list_functions()` currently makes one direct `list_functions()` call rather than using a paginator, so very large accounts may need a richer AWS-specific path than this thin wrapper.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `region_name` | `text` | `no` | `us-east-1` | AWS region used when constructing the boto3 Lambda client. |
-| `enable_list_functions` | `boolean` | `no` | `true` | Enable `list_functions()`. |
-| `enable_invoke_function` | `boolean` | `no` | `true` | Enable `invoke_function()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream Lambda toolkit surface. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `region_name` | `text` | `us-east-1` | AWS region. |
+| `enable_list_functions` | `boolean` | `true` | Enable `list_functions()`. |
+| `enable_invoke_function` | `boolean` | `true` | Enable `invoke_function()`. |
+| `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
 agents:
@@ -67,39 +56,20 @@ agents:
           region_name: us-west-2
 ```
 
-```python
-list_functions()
-invoke_function("daily-report", payload='{"date": "2026-03-31"}')
-```
-
-### Notes
-
-- Configure AWS credentials through the standard boto3 chain rather than expecting a MindRoom-specific key field.
-- The payload is a raw string in the upstream wrapper, so JSON requests should be serialized before invocation.
-- Use this tool for simple invocation workflows, not full Lambda administration.
-
 ## [`aws_ses`]
 
-`aws_ses` sends plain-text outbound email through Amazon SES with a configured sender identity.
+`aws_ses` provides `send_email(subject, body, receiver_email)`, which sends a plain-text email from `sender_name <sender_email>` to one recipient.
+Empty subjects and bodies are refused.
+It does not support HTML, templates, or attachments.
+Verify the sender identity in SES before use, and set both `sender_email` and `sender_name`, because an unset name appears literally as `None` in the sender.
 
-### What It Does
-
-`aws_ses` exposes `send_email(subject, body, receiver_email)`.
-The toolkit builds a boto3 SES client with `region_name` and then sends a plain-text message from `"{sender_name} <{sender_email}>"`.
-It validates that `subject` and `body` are non-empty before sending.
-The current wrapper does not add HTML email support, templates, attachments, or richer SES delivery controls on top of the basic send call.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `sender_email` | `text` | `no` | `null` | Sender email address used in the SES `Source` header. This is effectively required in practice. |
-| `sender_name` | `text` | `no` | `null` | Display name used in the SES `Source` header. Set this together with `sender_email` for a clean sender format. |
-| `region_name` | `text` | `no` | `us-east-1` | AWS region used when constructing the boto3 SES client. |
-| `enable_send_email` | `boolean` | `no` | `true` | Enable `send_email()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream SES toolkit surface. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `sender_email` | `text` | `null` | Sender address; required in practice. |
+| `sender_name` | `text` | `null` | Sender display name. |
+| `region_name` | `text` | `us-east-1` | AWS region of the SES identity. |
+| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
+| `all` | `boolean` | `false` | Enable `send_email()`. |
 
 ```yaml
 agents:
@@ -111,44 +81,21 @@ agents:
           region_name: us-east-1
 ```
 
-```python
-send_email(
-    subject="Nightly sync complete",
-    body="The nightly sync finished successfully.",
-    receiver_email="ops@example.com",
-)
-```
-
-### Notes
-
-- Despite the current `requires_config` and `api_key` registry metadata, authentication still comes from the standard boto3 AWS credential chain.
-- Verify the sender identity in SES before relying on this tool for real mail delivery.
-- This wrapper only sends plain-text email.
-
 ## [`airflow`]
 
-`airflow` is a local DAG-file helper for reading and writing Airflow Python files.
+`airflow` provides `read_dag_file(dag_file)` and `save_dag_file(contents, dag_file)` for editing DAG source files.
+It does not talk to the Airflow scheduler or REST API, so it cannot trigger runs or inspect task state.
+`dag_file` paths are relative to `dags_dir`, which defaults to the agent workspace and resolves relative to it.
+`save_dag_file()` creates missing parent directories, and `read_dag_file()` refuses files larger than 64 MiB.
+DAG paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): with the default `workspace`, files outside the agent workspace are refused, so a DAG folder elsewhere needs `file_access: unrestricted`.
+Point `dags_dir` at the folder your Airflow deployment actually watches.
 
-### What It Does
-
-`airflow` exposes `save_dag_file(contents, dag_file)` and `read_dag_file(dag_file)`.
-A relative `dags_dir` resolves from the agent workspace, which is also the default DAG directory.
-DAG paths follow the agent's `file_access`: with the default `workspace`, `read_dag_file()` and `save_dag_file()` refuse files outside the agent workspace, so a DAG folder elsewhere needs `file_access: unrestricted`.
-`read_dag_file()` refuses files larger than 64 MiB.
-`save_dag_file()` creates missing parent directories before writing the target DAG file.
-This tool manages DAG source files only.
-It does not talk to the Airflow scheduler, trigger DAG runs, inspect task state, or call the Airflow REST API.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `dags_dir` | `text` | `no` | `null` | Base directory for DAG files, resolved relative to the agent workspace when relative. |
-| `enable_save_dag_file` | `boolean` | `no` | `true` | Enable `save_dag_file()`. |
-| `enable_read_dag_file` | `boolean` | `no` | `true` | Enable `read_dag_file()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream Airflow toolkit surface. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `dags_dir` | `text` | `null` | DAG directory; relative values resolve from the agent workspace. |
+| `enable_save_dag_file` | `boolean` | `true` | Enable `save_dag_file()`. |
+| `enable_read_dag_file` | `boolean` | `true` | Enable `read_dag_file()`. |
+| `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
 agents:
@@ -158,42 +105,26 @@ agents:
           dags_dir: dags
 ```
 
-```python
-read_dag_file("daily_reporting.py")
-save_dag_file("from airflow import DAG\n", "generated/new_job.py")
-```
-
-### Notes
-
-- Use `airflow` when the job is editing DAG source files, not when you need live Airflow control-plane access.
-- `dags_dir` only sets where relative DAG paths start; the agent's `file_access` decides which files the tool may reach.
-- Keep the configured directory aligned with the filesystem path your Airflow deployment actually watches.
-
 ## [`e2b`]
 
-`e2b` provides a hosted code-execution sandbox with Python execution, file transfer, command execution, and temporary public URLs.
+`e2b` runs code in a hosted E2B sandbox.
+The tool creates one sandbox when it loads and reuses it for its calls.
+It fails to load when sandbox creation fails or no key is available, which reports `E2B_API_KEY not set. Please set the E2B_API_KEY environment variable.`
+It provides:
 
-### What It Does
+- Code and commands: `run_python_code()`, `run_command()`, `stream_command()`, `run_background_command()`, and `kill_background_command()`.
+- Results of the most recent `run_python_code()` call: `download_png_result()` and `download_chart_data()`.
+- Sandbox files: `upload_file()`, `download_file_from_sandbox()`, `list_files()`, `read_file_content()`, `write_file_content()`, and `watch_directory()`.
+- Servers and lifecycle: `run_server()`, `get_public_url()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
 
-`e2b` requires an API key from stored credentials or `E2B_API_KEY`.
-The toolkit creates one E2B sandbox at initialization time and reuses it for subsequent tool calls from that toolkit instance.
-It exposes `run_python_code()`, `upload_file()`, `download_png_result()`, `download_chart_data()`, `download_file_from_sandbox()`, `run_command()`, `stream_command()`, `run_background_command()`, `kill_background_command()`, `list_files()`, `read_file_content()`, `write_file_content()`, `watch_directory()`, `get_public_url()`, `run_server()`, `set_sandbox_timeout()`, `get_sandbox_status()`, `shutdown_sandbox()`, and `list_running_sandboxes()`.
-The media helpers operate on the most recent `run_python_code()` result, which is why chart and PNG download flows are companion actions instead of standalone reads.
-`upload_file()` follows the agent's [`file_access`](../architecture/security-posture.md#file-access) setting: `workspace` confines local paths to the agent workspace, and `unrestricted` allows any regular file MindRoom can read.
-`upload_file()` refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
-Local paths for `download_file_from_sandbox()`, `download_png_result()`, and `download_chart_data()` are always relative to the agent workspace.
-Absolute download paths, `..`, and symlinks that leave the workspace are rejected, and agents without a workspace cannot download local files.
-`timeout` is passed into `Sandbox.create(...)`, and `sandbox_options` is splatted directly into that constructor.
+`upload_file()` follows the agent's [`file_access`](../architecture/security-posture.md#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
+Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
 
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | E2B API key. The tool also falls back to `E2B_API_KEY`. |
-| `timeout` | `number` | `no` | `300` | Sandbox timeout in seconds passed into `Sandbox.create(...)`. |
-| `sandbox_options` | `text` | `no` | `null` | Advanced raw sandbox-constructor options. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | E2B API key. |
+| `timeout` | `number` | `300` | Sandbox timeout in seconds. |
+| `sandbox_options` | `text` | `null` | Extra E2B sandbox-creation options; the SDK expects a mapping that tool config cannot express, so leave it unset. |
 
 ```yaml
 agents:
@@ -203,57 +134,38 @@ agents:
           timeout: 600
 ```
 
-```python
-run_python_code("print('hello from e2b')")
-upload_file("data/report.csv", "workspace/report.csv")
-run_server("python -m http.server 8000", port=8000)
-```
-
-### Notes
-
-- The tool fails fast if no API key is available or if sandbox creation fails during initialization.
-- `sandbox_options` is mainly useful for advanced programmatic setup rather than normal handwritten YAML.
-- Use `e2b` when you want a cloud code interpreter with file and server helpers, not just a single command runner.
-
 ## [`daytona`]
 
-`daytona` runs code and shell commands in a remote sandbox that can persist across calls within one agent session.
+`daytona` runs code and shell commands in a remote Daytona sandbox.
+It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
+With `persistent: true`, the same sandbox is reused across calls in one agent session; set `sandbox_id` to use a known sandbox across sessions.
+The working directory persists in the session, so later relative paths resolve from it.
+Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
+When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
 
-### What It Does
+`verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
+Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
 
-`daytona` requires an API key from stored credentials or `DAYTONA_API_KEY`.
-`api_url` can also fall back to `DAYTONA_API_URL`.
-The toolkit exposes `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
-When `persistent` is true, the tool stores the active sandbox ID in `agent.session_state` and tries to reuse that sandbox on later calls.
-It also tracks a working directory in `agent.session_state`, and `run_shell_command()` treats `cd ...` specially so later relative-path commands and file operations stay in that directory.
-If no reusable sandbox exists, the toolkit creates one on the initial lookup path.
-`auto_create_sandbox: false` disables fallback creation after sandbox-management errors; it does not prevent initial creation when no sandbox is found.
-The bundled default instructions describe a code-write, execute, and show-results workflow, but those instructions are only added to the agent prompt when `add_instructions: true`.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Daytona API key. The tool also falls back to `DAYTONA_API_KEY`. |
-| `api_url` | `url` | `no` | `null` | Daytona API URL. The tool also falls back to `DAYTONA_API_URL`. |
-| `sandbox_id` | `text` | `no` | `null` | Explicit sandbox ID to reuse instead of creating or looking up a session-backed sandbox. |
-| `sandbox_language` | `text` | `no` | `python` | Primary sandbox language: `python`, `javascript`, or `typescript`. |
-| `sandbox_target` | `text` | `no` | `null` | Daytona target passed into `DaytonaConfig`. |
-| `sandbox_os` | `text` | `no` | `null` | Declared sandbox OS field. The current creation path stores this value but does not pass it into `CreateSandboxFromSnapshotParams`. |
-| `auto_stop_interval` | `number` | `no` | `60` | Auto-stop interval in minutes for created sandboxes. |
-| `sandbox_os_user` | `text` | `no` | `null` | OS user for the sandbox. |
-| `sandbox_env_vars` | `password` | `no` | `null` | JSON object of string environment-variable names and values, stored through the dashboard or credential store; MindRoom validates and converts it to the upstream mapping. |
-| `sandbox_labels` | `text` | `no` | `{}` | JSON object of string label names and values; MindRoom validates and converts it to the upstream mapping. |
-| `organization_id` | `text` | `no` | `null` | Daytona organization ID. |
-| `timeout` | `number` | `no` | `300` | Timeout in seconds for sandbox operations. |
-| `auto_create_sandbox` | `boolean` | `no` | `true` | Permit fallback creation after a sandbox-management error; initial no-match creation still occurs when false. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify Daytona TLS certificates. Setting `false` monkey-patches the Daytona client for the whole process, until it restarts, to disable certificate checks and their warnings. |
-| `persistent` | `boolean` | `no` | `true` | Reuse the same sandbox across calls in the current agent session; use `sandbox_id` for cross-session reuse. |
-| `sandbox_public` | `boolean` | `no` | `null` | Whether created sandboxes should be public. |
-| `instructions` | `text` | `no` | `null` | Custom toolkit instructions that replace the bundled default instructions. |
-| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit instructions into the agent prompt. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `api_key` | `password` | `null` | Daytona API key. |
+| `api_url` | `url` | `null` | Daytona API URL. |
+| `sandbox_id` | `text` | `null` | Existing sandbox to use instead of a session sandbox. |
+| `sandbox_language` | `text` | `python` | `python`, `javascript`, or `typescript`. |
+| `sandbox_target` | `text` | `null` | Daytona target. |
+| `sandbox_os` | `text` | `null` | Accepted but not applied to created sandboxes. |
+| `auto_stop_interval` | `number` | `60` | Minutes of inactivity before a created sandbox stops; `0` disables auto-stop. |
+| `sandbox_os_user` | `text` | `null` | OS user in the sandbox. |
+| `sandbox_env_vars` | `password` | `null` | JSON object of string environment-variable names and values. |
+| `sandbox_labels` | `text` | `{}` | JSON object of string label names and values. |
+| `organization_id` | `text` | `null` | Daytona organization ID. |
+| `timeout` | `number` | `300` | Timeout in seconds for sandbox operations. |
+| `auto_create_sandbox` | `boolean` | `true` | Create a replacement sandbox when finding, creating, or starting one fails. |
+| `verify_ssl` | `boolean` | `true` | Verify Daytona TLS certificates; see the warning above. |
+| `persistent` | `boolean` | `true` | Reuse one sandbox across calls in the current agent session. |
+| `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
+| `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
+| `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
 
 ```yaml
 agents:
@@ -261,60 +173,38 @@ agents:
     tools:
       - daytona:
           api_url: https://api.daytona.io
-          sandbox_language: python
           auto_stop_interval: 30
-          persistent: true
           add_instructions: true
 ```
 
-```python
-run_code("print('hello from daytona')")
-run_shell_command("pwd && ls -la")
-change_directory("project")
-create_file("main.py", "print('ok')")
-```
-
-### Notes
-
-- `sandbox_env_vars` and `sandbox_labels` accept validated JSON objects rather than raw upstream constructor objects.
-- `verify_ssl: false` is not a cosmetic flag here, because the upstream toolkit patches the Daytona client to skip certificate verification for every Daytona tool in the process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection; set it only for a self-hosted Daytona API with a certificate you cannot otherwise trust.
-- The dashboard used to save `verify_ssl: false` with every Daytona setup because that was the default, so the first start after upgrading drops a saved `false` once and logs a warning; save it again only if you need it.
-- Use `sandbox_id` when you want to pin the tool to a known sandbox instead of letting session-state reuse choose one.
-
 ## [`composio`]
 
-`composio` is a dynamic bridge into Composio's connected-app ecosystem rather than a fixed list of built-in actions.
+`composio` exposes the Composio actions listed in `actions` as agent tools.
+Callable names are the lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
+Before loading the tool, configure the API key and connect the apps' accounts for the chosen `entity_id` in Composio, because the agent cannot create connections itself.
+A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
+`composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
+It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](../architecture/security-posture.md#file-access)).
 
-### What It Does
-
-MindRoom requires a nonempty `actions` list of Composio action IDs.
-Its adapter instantiates `composio_agno.ComposioToolSet`, calls `get_tools(actions=...)`, and exposes the resulting action functions through an Agno toolkit.
-The callable tools depend on your selected actions, Composio workspace, and connected accounts.
-The SDK's management methods, such as `get_tools` and `initiate_connection`, are not exposed as agent tools.
-
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `actions` | `string[]` | `yes` | `null` | Nonempty list of Composio action IDs to expose, such as `GITHUB_GET_THE_AUTHENTICATED_USER`. |
-| `api_key` | `password` | `no` | `null` | Composio API key. The SDK can also fall back to cached Composio user data or `COMPOSIO_API_KEY`. |
-| `base_url` | `url` | `no` | `null` | Optional Composio API base URL. |
-| `entity_id` | `text` | `no` | `default` | Composio entity identifier used when executing actions. |
-| `workspace_id` | `text` | `no` | `null` | Optional Composio workspace identifier. |
-| `workspace_config` | `text` | `no` | `null` | Advanced raw workspace configuration. The upstream constructor expects a workspace-config object, while current MindRoom metadata exposes this as text. |
-| `connected_account_ids` | `text` | `no` | `null` | Advanced raw mapping of app names to connected account IDs. The upstream constructor expects a dict-like object, while current MindRoom metadata exposes this as text. |
-| `metadata` | `text` | `no` | `null` | Advanced raw metadata mapping used by Composio actions and processors. |
-| `processors` | `text` | `no` | `null` | Advanced raw processor mapping for request, response, or schema hooks. |
-| `output_dir` | `text` | `no` | `null` | Optional output directory for file-based results. |
-| `lockfile` | `text` | `no` | `null` | Optional lockfile path for action-version locking and concurrency control. |
-| `max_retries` | `number` | `no` | `3` | Maximum retries for failed Composio operations. |
-| `verbosity_level` | `number` | `no` | `null` | Optional verbosity level. |
-| `output_in_file` | `boolean` | `no` | `false` | Write operation output to files instead of only returning it directly. |
-| `allow_tracing` | `boolean` | `no` | `false` | Enable tracing support for debugging. |
-| `lock` | `boolean` | `no` | `true` | Enable lockfile-based coordination. |
-| `logging_level` | `text` | `no` | `INFO` | Composio logging level such as `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
-
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `actions` | `string[]` | required | Nonempty list of Composio action IDs, such as `GITHUB_GET_THE_AUTHENTICATED_USER`. |
+| `api_key` | `password` | `null` | Composio API key. |
+| `base_url` | `url` | `null` | Composio API base URL. |
+| `entity_id` | `text` | `default` | Composio entity whose connected accounts run the actions. |
+| `workspace_id` | `text` | `null` | Composio workspace ID. |
+| `workspace_config` | `text` | `null` | Composio workspace configuration object; tool config cannot express it, so leave it unset. |
+| `connected_account_ids` | `text` | `null` | Mapping of apps to connected account IDs; tool config cannot express it, so leave it unset. |
+| `metadata` | `text` | `null` | Action metadata mapping; tool config cannot express it, so leave it unset. |
+| `processors` | `text` | `null` | Request, response, and schema processor mapping; tool config cannot express it, so leave it unset. |
+| `output_dir` | `text` | `null` | Directory for file-based results. |
+| `output_in_file` | `boolean` | `false` | Write action output to files. |
+| `lockfile` | `text` | `null` | Lockfile path for action-version locking. |
+| `lock` | `boolean` | `true` | Enable lockfile-based coordination. |
+| `max_retries` | `number` | `3` | Retries for failed Composio operations. |
+| `verbosity_level` | `number` | `null` | Verbosity from `0` to `3`. |
+| `allow_tracing` | `boolean` | `false` | Enable Composio tracing. |
+| `logging_level` | `text` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ```yaml
 agents:
@@ -323,55 +213,40 @@ agents:
       - composio:
           actions:
             - GITHUB_GET_THE_AUTHENTICATED_USER
-          entity_id: default
-          logging_level: INFO
 ```
-
-### Notes
-
-- Configure the Composio API key and connect the selected app accounts for the chosen entity before loading the tool.
-- Callable names follow the SDK's lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
-- Omitting `actions` or supplying an empty list raises a configuration error.
-- `workspace_config`, `connected_account_ids`, `metadata`, and `processors` are advanced constructor inputs and are not the most ergonomic handwritten YAML fields in the current metadata model.
-- Use `composio` when you want one external platform to broker many app integrations instead of configuring each app-specific tool directly in MindRoom.
 
 ## [`custom_api`]
 
-`custom_api` makes requests to public HTTP(S) APIs that do not have a dedicated MindRoom tool.
+`custom_api` provides `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)` for public HTTP(S) APIs that have no dedicated MindRoom tool.
+`method` accepts `GET`, `POST`, `PUT`, `DELETE`, or `PATCH`.
+With `base_url` set, `endpoint` is a path joined to it; without `base_url`, `endpoint` must be a full URL.
+Localhost, loopback, private-network, cloud metadata, and non-HTTP(S) destinations are refused, including through redirects, and there is no setting to allow them.
 
-### What It Does
+Authentication:
 
-`custom_api` exposes `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)`.
-If `base_url` is set, the tool joins it with the passed endpoint.
-MindRoom validates the destination URL, resolved DNS addresses, and redirect destinations.
-Localhost, loopback, private-network, metadata-service, and non-HTTP(S) destinations are rejected; this tool has no opt-in for private or local access.
-If both `username` and `password` are nonempty, the request uses HTTP Basic Auth.
-If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
-Per-call headers are merged on top of configured default headers.
-Configured credentials, meaning `api_key`, a `username` / `password` pair, or `headers`, are only sent to the `base_url` origin.
-Without `base_url`, a call on a tool with configured credentials returns an error and sends nothing, so the model cannot choose where they go.
-Redirects are followed, but a hop to another scheme, host, or port drops the configured headers and `Authorization`, except a direct upgrade from `http` to `https` on the same host, matching how HTTPX already treats `Authorization`.
-With configured credentials, a per-call `Host` header is dropped, so only `base_url` chooses the virtual host that receives them.
-Up to 10 redirects are followed, and their bodies are never read.
-The tool asks for an uncompressed body (`Accept-Encoding: identity`, replacing any per-call value) and reads at most 8 MiB of it; a larger body, or one a server compressed with `gzip`, `x-gzip`, `deflate`, `br`, or `zstd` anyway, returns `status_code`, `headers`, and an `error` instead of `data`.
-The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
-Non-2xx responses still return a structured result object, with an added `"error": "Request failed"` field.
+- `api_key` sends `Authorization: Bearer <api_key>`.
+- A nonempty `username` and `password` pair sends HTTP Basic Auth instead of the bearer token.
+- `headers` adds default headers, and per-call headers are merged over them.
 
-### Configuration
+Configured credentials (`api_key`, `username`/`password`, or `headers`) are sent only to the `base_url` origin, also across redirects, except a same-host upgrade from `http` to `https`.
+A tool with credentials but no `base_url` sends nothing and returns `custom_api sends its configured api_key, username and password, and headers only to base_url; set base_url to call this API with them, or remove them to call arbitrary URLs`.
 
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `base_url` | `url` | `no` | `null` | Base URL joined with the `endpoint` argument when set. Required for `api_key`, `username` / `password`, and `headers`. |
-| `username` | `text` | `no` | `null` | Optional HTTP Basic Auth username. |
-| `password` | `password` | `no` | `null` | Optional HTTP Basic Auth password stored through the dashboard or credential store. |
-| `api_key` | `password` | `no` | `null` | Optional bearer token stored through the dashboard or credential store. |
-| `headers` | `password` | `no` | `null` | Default headers as a JSON object of string header names and values, such as `{"X-Api-Key": "value"}`, stored through the dashboard or credential store because headers can carry credentials. |
-| `verify_ssl` | `boolean` | `no` | `true` | Verify SSL certificates for outgoing HTTPS requests. |
-| `timeout` | `number` | `no` | `30` | Request timeout in seconds. |
-| `enable_make_request` | `boolean` | `no` | `true` | Enable `make_request()`. |
-| `all` | `boolean` | `no` | `false` | Enable the full upstream custom-API toolkit surface. |
+The result is JSON with `status_code`, response `headers`, and `data`, which holds the parsed JSON body or `{"text": ...}` for other bodies.
+Non-2xx responses add `"error": "Request failed"`.
+At most 10 redirects are followed.
+A body larger than 8 MiB, or one the server compressed despite being asked not to, returns `status_code`, `headers`, and an `error` instead of `data`.
 
-### Example
+| Option | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `base_url` | `url` | `null` | Base URL for `endpoint`; required to use `api_key`, `username`/`password`, or `headers`. |
+| `username` | `text` | `null` | HTTP Basic Auth username. |
+| `password` | `password` | `null` | HTTP Basic Auth password. |
+| `api_key` | `password` | `null` | Bearer token. |
+| `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
+| `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
+| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
+| `all` | `boolean` | `false` | Enable `make_request()`. |
 
 ```yaml
 agents:
@@ -379,20 +254,8 @@ agents:
     tools:
       - custom_api:
           base_url: https://api.example.com/v1
-          verify_ssl: true
           timeout: 20
 ```
-
-```python
-make_request("health")
-make_request("users/42", method="GET")
-make_request("reports", method="POST", json_data={"range": "7d"})
-```
-
-### Notes
-
-- If `base_url` is omitted, `endpoint` must be a full URL and the tool cannot use configured credentials.
-- A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
 
 ## Related Docs
 

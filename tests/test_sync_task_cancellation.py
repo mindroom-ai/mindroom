@@ -3587,8 +3587,8 @@ async def test_deferred_agent_stop_exposes_each_real_resource_release_phase() ->
     )
     gates = {phase: (asyncio.Event(), asyncio.Event()) for phase in phases}
 
-    def gated_call(phase: str) -> Callable[[], Awaitable[None]]:
-        async def gated() -> None:
+    def gated_call(phase: str) -> Callable[..., Awaitable[None]]:
+        async def gated(**_kwargs: object) -> None:
             started, release = gates[phase]
             started.set()
             await release.wait()
@@ -3663,7 +3663,7 @@ async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None
     dispatcher_started = asyncio.Event()
     release_dispatcher = asyncio.Event()
 
-    async def stop_dispatcher() -> None:
+    async def stop_dispatcher(**_kwargs: object) -> None:
         dispatcher_started.set()
         await release_dispatcher.wait()
 

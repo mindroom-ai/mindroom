@@ -59,7 +59,7 @@ async def _initial(principal: PrincipalStore, source: str, *, acknowledged: bool
 async def test_inventory_keeps_ack_before_turn_binding_and_excludes_other_owners(
     journal_store: EventJournalStore,
 ) -> None:
-    """Candidates include error FINALs, excluding pending sends and successful replies."""
+    """Candidates exclude pending sends and acknowledged FINALs, including interrupted error FINALs."""
     principal = journal_store.principal("agent@alice")
     await _initial(principal, "$orphan")
     await _initial(principal, "$unacknowledged", acknowledged=False)
@@ -87,7 +87,7 @@ async def test_inventory_keeps_ack_before_turn_binding_and_excludes_other_owners
             delivered_projections=(),
         )
     candidates = await principal.recovery_initial_deliveries()
-    assert [item.delivery_id for item in candidates] == ["$orphan", "$unsuccessful"]
+    assert [item.delivery_id for item in candidates] == ["$orphan"]
     assert candidates[0].acknowledged_event_id == "$orphan-response"
     assert await journal_store.turn_records("agent").load_all() == ()
 
@@ -189,14 +189,12 @@ async def test_empty_inventory_needs_no_matrix_discovery(journal_store: EventJou
     result = await recover_stale_streaming_messages(
         {BOT_USER_ID: client},
         principals={BOT_USER_ID: journal_store.principal("agent@alice")},
-        resume_client=None,
         response_recovery_scope=_permitted_recovery_scope,
         config=config,
         runtime_paths=runtime_paths_for(config),
         startup_cutoff_ms=NOW_MS,
-        scanned_room_ids=set(),
     )
-    assert result.room_count == result.cleaned_count == result.resumed_count == 0
+    assert result.room_count == result.cleaned_count == 0
     client.joined_rooms.assert_not_awaited()
     client.room_messages.assert_not_awaited()
     client.room_get_event.assert_not_awaited()
@@ -229,12 +227,10 @@ async def test_busy_room_ownership_does_not_delay_other_rooms(
         recover_stale_streaming_messages(
             {BOT_USER_ID: client},
             principals={BOT_USER_ID: principal},
-            resume_client=None,
             response_recovery_scope=ownership,
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=set(),
         ),
     )
     try:
@@ -246,23 +242,18 @@ async def test_busy_room_ownership_does_not_delay_other_rooms(
     client.room_get_event.assert_not_awaited()
 
 
-@pytest.mark.parametrize("router_unavailable", [False, True])
 @pytest.mark.parametrize("target_count", [1, 2])
 async def test_exact_inventory_repairs_response_without_room_scan(
     journal_store: EventJournalStore,
     tmp_path: Path,
-    router_unavailable: bool,
     target_count: int,
 ) -> None:
-    """Known delivery IDs suffice even when the resume identity is unavailable."""
+    """Known delivery IDs suffice to repair responses without scanning room history."""
     principal = journal_store.principal("agent@alice")
     for index in range(target_count):
         await _initial(principal, f"$orphan-{index}")
     client = _make_client()
     config = _make_config(tmp_path)
-    router = _make_client() if router_unavailable else None
-    if router is not None:
-        router.joined_rooms.side_effect = ConnectionError("router membership unavailable")
     client.room_get_event.side_effect = lambda _room, event_id: _room_get_event_response(
         _make_message_event(
             event_id=event_id,
@@ -286,12 +277,10 @@ async def test_exact_inventory_repairs_response_without_room_scan(
         result = await recover_stale_streaming_messages(
             {BOT_USER_ID: client},
             principals={BOT_USER_ID: principal},
-            resume_client=router,
             response_recovery_scope=_permitted_recovery_scope,
             config=config,
             runtime_paths=runtime_paths_for(config),
             startup_cutoff_ms=NOW_MS,
-            scanned_room_ids=set(),
         )
     assert result.cleaned_count == target_count
     assert edit.await_args.args[2] == f"$orphan-{target_count - 1}-response"
@@ -323,12 +312,10 @@ async def test_failed_ownership_read_does_not_block_other_candidates(
     await recover_stale_streaming_messages(
         {BOT_USER_ID: client},
         principals={BOT_USER_ID: principal},
-        resume_client=None,
         response_recovery_scope=ownership,
         config=config,
         runtime_paths=runtime_paths_for(config),
         startup_cutoff_ms=NOW_MS,
-        scanned_room_ids=set(),
     )
     assert visited == ["$broken-response", "$healthy-response"]
     client.room_get_event.assert_not_awaited()

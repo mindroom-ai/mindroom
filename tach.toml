@@ -2100,9 +2100,11 @@ path = "mindroom.custom_tools.chat_ui"
 depends_on = [
     "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
+    "mindroom.file_access",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.identity",
     "mindroom.matrix.message_builder",
+    "mindroom.path_confinement",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -4398,6 +4400,7 @@ depends_on = [
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
+    "mindroom.cli.debug_report",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
     "mindroom",
@@ -5929,6 +5932,7 @@ expose = [
     "send_message_result",
     "send_room_event_result",
     "send_runtime_encrypted_media_message",
+    "upload_media_bytes_as_mxc",
 ]
 from = ["mindroom.matrix.client_delivery"]
 
@@ -6426,7 +6430,6 @@ expose = [
     "build_tool_trace_content",
     "complete_pending_tool_block",
     "deserialize_tool_trace",
-    "earlier_tool_trace_content",
     "extract_tool_completed_info",
     "format_tool_combined",
     "format_tool_completed_event",
@@ -6837,6 +6840,21 @@ path = "mindroom.cli.response_activity"
 depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "mindroom.response_activity"]
 
 [[modules]]
+path = "mindroom.debug_report"
+depends_on = []
+visibility = ["mindroom.cli.debug_report"]
+
+[[modules]]
+path = "mindroom.cli.debug_report"
+depends_on = [
+    "mindroom.cli.config",
+    "mindroom.config.yaml_includes",
+    "mindroom.constants",
+    "mindroom.debug_report",
+]
+visibility = ["mindroom.cli.main"]
+
+[[modules]]
 path = "mindroom.config_reload"
 depends_on = []
 
@@ -6931,6 +6949,7 @@ depends_on = [
 path = "mindroom.delegation.records"
 depends_on = [
     "mindroom.atomic_file",
+    "mindroom.constants",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
@@ -8135,7 +8154,7 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.redaction"]
+depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.logging_config", "mindroom.redaction"]
 visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.response_lifecycle", "mindroom.response_runner"]
 
 [[modules]]

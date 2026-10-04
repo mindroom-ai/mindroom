@@ -404,8 +404,7 @@ async def test_supersession_survives_later_source_redaction(
         "canonical_streaming_old",
         "missing_old_attribution",
         "duplicate_reply",
-        "unrelated_recovery",
-        "duplicate_relay",
+        "router_relay_answer",
         "wrong_old_marker",
         "pending_cleanup",
         "wrong_log_thread",
@@ -504,33 +503,31 @@ async def test_supersession_rejects_missing_or_foreign_ownership(tmp_path: Path,
         case.auditor.pending_edit_markers = {"$old": {"$edit": "new revision"}}
     if defect == "duplicate_reply":
         case.events["$duplicate"] = {**case.events["$old-reply"], "event_id": "$duplicate"}
-    if defect in {"unrelated_recovery", "duplicate_relay"}:
-        case.oracle.internal_relay_senders = frozenset({"@router:example"})
-        for relay in ("$relay", "$duplicate-relay") if defect == "duplicate_relay" else ("$relay",):
-            case.events[relay] = {
-                **case.events["$old-reply"],
-                "event_id": relay,
-                "sender": "@router:example",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": live_fuzz.AUTO_RESUME_MESSAGE,
-                    live_fuzz.SOURCE_KIND_KEY: live_fuzz.TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$root",
-                        "m.in_reply_to": {"event_id": "$old-reply"},
-                    },
+    if defect == "router_relay_answer":
+        # No router message continues interrupted work, so an agent answer to one is a wrong reply.
+        case.events["$relay"] = {
+            **case.events["$old-reply"],
+            "event_id": "$relay",
+            "sender": "@router:example",
+            "content": {
+                "msgtype": "m.text",
+                "body": "@general continue",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root",
+                    "m.in_reply_to": {"event_id": "$old-reply"},
                 },
-            }
-        case.events["$unrelated"] = {
+            },
+        }
+        case.events["$relay-answer"] = {
             **case.events["$new-reply"],
-            "event_id": "$unrelated",
+            "event_id": "$relay-answer",
             "content": {
                 **case.events["$new-reply"]["content"],
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$root",
-                    "m.in_reply_to": {"event_id": "$other-relay"},
+                    "m.in_reply_to": {"event_id": "$relay"},
                 },
             },
         }

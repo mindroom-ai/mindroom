@@ -4,191 +4,119 @@ icon: lucide/radio
 
 # Streaming Responses
 
-MindRoom streams agent responses to Matrix by progressively editing a single message.
-Instead of waiting for the full response, users see text appear in real time as the model generates it.
+MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
+This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
 <video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%">
   <source src="https://github.com/user-attachments/assets/b5772e74-de93-4559-8f4f-b045add92caa#t=0.1" type="video/mp4" media="(prefers-color-scheme: dark)">
   <source src="https://github.com/user-attachments/assets/ec8dc609-e4b5-4db4-b806-d8c93fee52a0#t=0.1" type="video/mp4">
 </video>
 
+<a id="streaming-responses_1"></a>
+
 ## How It Works
 
-1. Agent starts generating a response.
-2. MindRoom sends an initial message with `io.mindroom.stream_status: pending`, using a plain `Thinking...` placeholder if no text has arrived.
-3. As more text arrives, MindRoom edits the same message with the accumulated content and status `streaming`.
-4. When the response completes successfully, the final edit sets status `completed`.
+1. MindRoom sends an initial message showing a `Thinking...` placeholder until text arrives.
+2. As text arrives, MindRoom edits the same message with the accumulated content.
+3. When the response finishes, a final edit holds the complete text.
 
-```
-User sends message
-       │
-       ▼
-┌──────────────┐     presence check
-│ Agent starts │ ──────────────────▶ Is user online?
-│ generating   │                          │
-└──────┬───────┘                    ┌─────┴─────┐
-       │                           Yes          No
-       ▼                            │            │
-  Stream chunks                     ▼            ▼
-  via edits                    Streaming     Single message
-  status: streaming            (progressive   (sent when
-       │                       edits)          complete)
-       ▼
-  Final edit
-  status: completed
-```
+When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
+Agents also show a typing indicator while they work on a response.
 
 ## Configuration
 
 Streaming is enabled by default.
-Disable it globally in `config.yaml`:
+These settings are global-only under `defaults` and cannot be overridden per agent.
 
 ```yaml
 defaults:
-  enable_streaming: false   # Default: true
-```
-
-`enable_streaming` is a global-only setting under `defaults` and cannot be overridden per agent.
-
-Tune the streaming edit cadence globally under `defaults.streaming`:
-
-```yaml
-defaults:
-  enable_streaming: true
+  enable_streaming: true         # Set false to disable progressive edits
   streaming:
-    update_interval: 5.0         # Default: 5.0 steady-state seconds between edits
-    min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
-    interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
-    max_idle: 2.0                # Default: 2.0 event-driven idle ceiling before the next edit
+    update_interval: 5.0
+    min_update_interval: 0.5
+    interval_ramp_seconds: 15.0
+    max_idle: 2.0
 ```
 
-These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable_streaming` | bool | `true` | Stream responses via progressive message edits. When `false`, the placeholder is replaced with the complete response in a single edit. |
+| `streaming.update_interval` | float, > 0 | `5.0` | Steady-state seconds between edits. |
+| `streaming.min_update_interval` | float, > 0 | `0.5` | Seconds between edits at the start of a response. |
+| `streaming.interval_ramp_seconds` | float, >= 0 | `15.0` | Seconds over which the interval ramps from `min_update_interval` to `update_interval`. Set `0` to use `update_interval` from the start. |
+| `streaming.max_idle` | float, > 0 | `2.0` | When no new text has arrived for this many seconds, the buffered text is shown with the next streaming update. |
+
+Edits also come sooner than the interval once enough new text has accumulated, and a tool-call marker appears as soon as the tool starts.
+Raise `update_interval` to reduce load on the homeserver, or lower it for smoother updates.
 
 ## Presence-Based Streaming
 
-Even when streaming is enabled, MindRoom only streams to users who are currently online.
-This is checked via `should_use_streaming()` which queries the Matrix presence API.
+Even when streaming is enabled, MindRoom streams a response only when the user who sent the message is `online` or `unavailable`; for an `offline` requester, the placeholder is replaced with the complete response.
+Everyone in the room sees the same edits.
+If the presence check fails, for example because the homeserver has presence disabled, MindRoom does not stream.
+A reply that continues after a restart always streams, even when streaming is off or the requester is offline, so the part it already showed stays in the message.
+When no requester can be identified, MindRoom streams.
 
-| Presence State | Streaming Used? |
-|----------------|-----------------|
-| `online`       | Yes             |
-| `unavailable`  | Yes             |
-| `offline`      | No (single message sent when complete) |
+## Presence
 
-If the presence check fails, MindRoom defaults to non-streaming (safer, fewer API calls).
-When no requester user ID is available, MindRoom defaults to streaming.
+Running agents appear `online` (or `unavailable` when idle) and `offline` when stopped or disconnected.
+Their presence status message shows the model, role, and tool count, for example `🤖 Model: anthropic/claude-sonnet-5-5 | 💼 Code assistant | 🔧 5 tools available`.
 
 ## Stream Status
 
-MindRoom records progress in the Matrix event content field `io.mindroom.stream_status`.
-The initial non-final event uses `pending`, and subsequent in-progress edits use `streaming`.
-A successful final edit uses `completed`; user cancellation uses `cancelled`, and failures or other interruptions use `error`.
-Inspect the latest message content in a client or event view that exposes this metadata to verify completion.
+Each streamed message carries its progress in the Matrix event content field `io.mindroom.stream_status`.
 
-If no text has arrived yet, the message body is a plain `Thinking...` placeholder.
-The backend does not append a cycling ellipsis to generated text; clients may render their own progress indicators.
+| Value | Meaning |
+|-------|---------|
+| `pending` | Initial message of the response |
+| `streaming` | Response is still being generated |
+| `approval_pending` | Response is paused until someone approves or denies a tool call (see [Tool Approval](tool-approval.md)) |
+| `completed` | Response finished successfully |
+| `cancelled` | User stopped the response |
+| `error` | Response failed or was otherwise interrupted |
 
-## Throttling
-
-MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
-
-- **Time-based**: `defaults.streaming.update_interval` sets the steady-state interval between edits (default: 5 seconds).
-- **Character-based**: An edit is also triggered when enough new characters have accumulated.
-  The character threshold ramps from 48 characters (fast start) to 240 characters (steady-state) over the ramp-up period.
-- **Ramp-up**: `defaults.streaming.min_update_interval` and `defaults.streaming.interval_ramp_seconds` control how quickly the time-based interval ramps from a fast start to the steady-state value. By default it ramps from 0.5s to 5s over 15 seconds. Setting `interval_ramp_seconds: 0` disables the ramp and uses the steady-state interval immediately.
-- **Shared ramp window**: The same ramp window also controls the built-in character threshold ramp from 48 characters (fast start) to 240 characters (steady-state).
-- **Minimum interval**: A hard floor (0.35s) applies to character-triggered and idle-triggered throttled edits.
-  Time-triggered edits still follow the current ramped interval.
-- **Idle flush**: `defaults.streaming.max_idle` triggers an edit on the next streaming event after 2.0s without a new delta, but only once `min_char_update_interval` has also elapsed.
-  This is event-driven and does not run on a background timer.
-- **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text.
-  Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
+To confirm a response finished, inspect the latest `io.mindroom.stream_status` in a client or event view that shows event content.
+MindRoom never appends an ellipsis to generated text, and clients may draw their own progress indicators, so a trailing ellipsis is not a progress signal.
 
 ## Tool Calls During Streaming
 
-When an agent calls tools during a streamed response, MindRoom shows inline markers in the message text:
+When an agent calls tools, MindRoom shows inline markers in the message text:
 
 ```
-🔧 `web_search` [1] ⏳       ← tool call started (pending)
+🔧 `web_search` [1] ⏳       ← tool call started
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets (`[N]`) is a 1-indexed counter per message.
-Each marker maps to `io.mindroom.tool_trace.events[N-1]` in the message metadata.
-
-When `show_tool_calls` is disabled for an entity, tool markers are omitted from the message text and tool-trace metadata is not attached.
-If a routed tool needs an isolated worker, streaming may still show a generic worker warmup line such as `Preparing isolated worker...`.
-That hidden-tool warmup copy never includes tool names or tool-trace metadata.
+The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, and result preview for call `[N]`.
+Tools that start in quick succession appear together in one edit.
+Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](configuration/agents.md#defaults)).
+With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
 
 ## Cancellation and Errors
 
 Users can cancel an in-progress response by reacting with 🛑 on the message being generated (see [Stop Button](chat-commands.md#stop-button)).
 Tool calls running in a [worker](deployment/sandbox-proxy.md), such as `run_shell_command` or `run_python_code`, stop with it, apart from the exceptions listed there.
-An explicit user stop finalizes the streamed message with:
+The partial text stays in the message, followed by a note explaining how it ended:
 
-```
-<partial text so far>
+| Note | Cause |
+|------|-------|
+| `**[Response cancelled by user]**` | The user stopped the response. |
+| `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
+| `**[Response interrupted]**` | The response was interrupted for another reason. |
+| `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
 
-**[Response cancelled by user]**
-```
+A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
+The agent is told which visible tool calls already finished so it does not repeat side effects; calls hidden by `show_tool_calls: false` cannot be passed on, so it is only warned that they may have run.
 
-Other non-error interruptions finalize the streamed message with one of these notes:
+## Large Messages
 
-```
-<partial text so far>
+A Matrix event holds at most about 64 KB, so `defaults.large_message_strategy` controls how a larger response is delivered.
 
-**[Response interrupted]**
-```
+| Value | Delivery |
+|-------|----------|
+| `sidecar` (default) | A preview with as much text as fits, plus the full message content attached as `message-content.json` (`message-content.json.enc`, encrypted, in encrypted rooms). |
+| `split` | Several complete rich-text messages: the first replaces the streaming placeholder and the rest follow it in the same thread or room. |
 
-```
-<partial text so far>
-
-**[Response interrupted by service restart]**
-```
-
-If an error occurs during streaming, the message is finalized with:
-
-```
-<partial text so far>
-
-**[Response interrupted by an error: <error description>]**
-```
-
-## Large Streamed Messages
-
-If a streamed response exceeds the Matrix event size limit (55KB for new messages, 27KB for edits), the large message system automatically uploads a JSON sidecar and includes a preview in the event body.
-With `defaults.large_message_strategy: split`, a splittable final text response is instead delivered as several complete rich-text messages so the whole Markdown answer stays visible without a sidecar.
-Payloads that cannot be safely segmented still use the sidecar path.
-See [Matrix Integration — Large Messages](architecture/matrix.md#large-messages) for details.
-
-## Visibility Toggles
-
-Two global defaults control what users see during streaming:
-
-```yaml
-defaults:
-  show_tool_calls: true     # Default: true — show inline tool markers and tool-trace metadata
-  show_stop_button: true    # Default: true — add 🛑 reaction for cancellation
-```
-
-When `show_tool_calls` is `false`, inline tool markers (`🔧 tool_name [N]`) are omitted from the message text and `io.mindroom.tool_trace` metadata is not attached.
-The agent still shows typing activity during hidden tool calls.
-If a routed tool needs an isolated worker, users may still see generic worker progress copy such as `Preparing isolated worker...` or `Preparing isolated worker... 17s elapsed.`.
-Hidden-tool mode never includes tool identifiers or tool-trace metadata in that worker progress text.
-`show_tool_calls` can also be overridden per agent in the agent config.
-
-When `show_stop_button` is `false`, the 🛑 reaction is not added to in-progress messages.
-Streaming itself still works — only the cancellation affordance is removed.
-`show_stop_button` is a global-only setting under `defaults`.
-
-`enable_streaming` is also global-only and cannot be overridden per agent.
-
-## Room Mode
-
-When an agent operates in `thread_mode: room` (see [Thread Mode Resolution](configuration/agents.md#thread-mode-resolution)), streaming skips all thread relations and sends plain room messages.
-This is used for bridges and mobile clients that don't support Matrix threads.
-
-## Replacement Streaming
-
-MindRoom also supports a `ReplacementStreamingResponse` variant where each chunk replaces the entire message content instead of appending to it.
-This is used for structured live rendering where the full document is rebuilt on each tick.
+The `sidecar` strategy applies to messages over about 55 KB and edits over about 27 KB, and the preview omits inline tool-trace metadata.
+With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response exactly.
+Even with `split`, non-text payloads, metadata that alone exceeds the size budget, and a single code block larger than one event use the sidecar.

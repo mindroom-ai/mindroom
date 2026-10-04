@@ -615,8 +615,13 @@ def _apply_implicit_toolkit_filters(
     *,
     include_tools: list[str] | None,
     exclude_tools: list[str] | None,
+    declared_functions: frozenset[str] = frozenset(),
 ) -> None:
-    """Apply Agno-equivalent filters after constructing a Toolkit subclass."""
+    """Apply Agno-equivalent filters after constructing a Toolkit subclass.
+
+    Excluding a declared function that an option left disabled (such as chat_ui's show_canvas) is a
+    no-op, so the exclusion cannot drop the whole toolkit.
+    """
     if include_tools is None and exclude_tools is None:
         return
 
@@ -625,7 +630,7 @@ def _apply_implicit_toolkit_filters(
     if missing_includes:
         msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
         raise ValueError(msg)
-    missing_excludes = sorted(set(exclude_tools or ()) - available_tools)
+    missing_excludes = sorted(set(exclude_tools or ()) - available_tools - declared_functions)
     if missing_excludes:
         msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
         raise ValueError(msg)
@@ -787,6 +792,7 @@ def _build_tool_instance(
         toolkit,
         include_tools=include_tools,
         exclude_tools=exclude_tools,
+        declared_functions=frozenset(metadata.function_names or ()),
     )
     output_file_policy = (
         ToolOutputFilePolicy.from_runtime(

@@ -26,7 +26,7 @@ from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_runner import ResponseShutdownTimeoutError
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.stop import StopManager
 from tests.conftest import unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
@@ -77,11 +77,13 @@ def _dispatcher(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_intent", [ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN], ids=["shutdown", "replacement"])
 async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     tmp_path: Path,
     journal_store: EventJournalStore,
+    shutdown_intent: RuntimeShutdownIntent,
 ) -> None:
-    """Cancellation reaches the mailbox as interruption, then replay commits the exact edit."""
+    """The edit is left pending for the successor runtime, then replay commits the exact edit."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store, agent_name=AGENT_NAME)
     await store.record_responded_turn(_turn_record(source_event_prompts={ORIGINAL_EVENT_ID: "original"}))
@@ -129,7 +131,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     dispatcher.release_turn_replay()
     dispatcher.start()
     await asyncio.wait_for(started.wait(), timeout=2)
-    await bot.stop(shutdown_intent=ORDERLY_SHUTDOWN)
+    await bot.stop(shutdown_intent=shutdown_intent)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
     interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)

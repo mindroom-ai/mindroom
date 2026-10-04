@@ -4,156 +4,129 @@ icon: lucide/cloud-cog
 
 # Hosted Matrix + Local Backend
 
-This guide covers the simplest production-like setup:
-
-- Matrix homeserver is hosted at `https://mindroom.chat`
-- Web chat runs at `https://chat.mindroom.chat`
-- You run only `mindroom run` locally via `uvx`
-
-Watch the 2-minute setup video:
-
-[![MindRoom: installing and talking to my first AI agent in 2 minutes](https://img.youtube.com/vi/jR3xLUxyWhg/maxresdefault.jpg)](https://youtu.be/jR3xLUxyWhg)
+In this setup the Matrix homeserver and chat UI are hosted at `mindroom.chat`, and only the MindRoom backend runs on your machine.
+This page covers pairing that backend with your MindRoom Chat account (`mindroom connect`), the credentials pairing saves, what the hosted server can see, and how to point the same flow at your own deployment.
+For first-run install steps, see [Getting Started](../getting-started.md#recommended-hosted-matrix-local-mindroom-uvx-only).
 
 ## What Runs Where
 
 | Component | Runs on | Purpose |
 |----------|---------|---------|
-| `chat.mindroom.chat` | Hosted web app | Login UI and pairing UI |
-| `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport + local onboarding API |
-| `uvx mindroom run` | Your machine/server | Agent orchestration, tools, model calls |
+| `chat.mindroom.chat` | Hosted web app | Login and pairing approval |
+| `mindroom.chat` | Hosted Matrix + provisioning API | Matrix transport and agent account registration |
+| `uvx mindroom run` | Your machine or server | Agent orchestration, tools, model calls |
 
-## Prerequisites
+You need a Matrix account that can sign in to `chat.mindroom.chat` and at least one working model provider, such as a provider API key, a Codex CLI ChatGPT login, or a local Ollama server (see [Supported Providers](../configuration/models.md#supported-providers)).
+`mindroom config init` (default `--matrix-server mindroom.chat`) and first-run `mindroom run` write the hosted defaults to `~/.mindroom/.env`: `MATRIX_HOMESERVER=https://mindroom.chat`, `MATRIX_SERVER_NAME=mindroom.chat`, and `MINDROOM_PROVISIONING_URL=https://mindroom.chat`.
+`mindroom run` pairs automatically before starting when `MINDROOM_PROVISIONING_URL` is set and none of `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, or saved pairing credentials are present.
+After pairing, MindRoom creates its agent accounts on `mindroom.chat`, joins or creates the configured rooms, and starts answering.
+While `run` waits for approval, the API port answers health and readiness probes, so container health checks do not restart it with a new code (see [Health & Readiness](operational-log-events.md#health-readiness)).
+To run code-execution tools in Docker workers on the same machine, see [Dedicated Docker workers](sandbox-proxy.md#host-machine-dedicated-docker-workers-mindroom_worker_backenddocker).
 
-- Python 3.12+
-- `uv` installed
-- A Matrix account that can sign in to `chat.mindroom.chat`
-- At least one AI provider API key, or a local Codex CLI ChatGPT login
+## connect
 
-Shortcut: in a terminal, `uvx mindroom run` with no config asks for a provider and API key, creates the files below, pairs, offers to install a login service, and otherwise starts in one command; the steps below are the explicit path.
-Without a terminal, `OPENAI_API_KEY=... uvx mindroom run --provider openai --service` answers those questions with flags.
-
-## 1. Initialize Local Config
-
-```bash
-uvx mindroom config init
-```
-
-This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
-Use `uvx mindroom config init --provider codex` if you want the starter config to use `provider: codex`.
-
-## 2. Add AI Provider Key
-
-Edit `~/.mindroom/.env` and set credentials matching the provider selected during `config init`.
-The default provider is OpenAI:
+`mindroom connect` pairs this machine with your MindRoom Chat account without starting MindRoom.
+You usually do not need it, because `mindroom run` pairs automatically and prints a new link whenever the previous one expires.
 
 ```bash
-OPENAI_API_KEY=...
+mindroom connect
 ```
 
-To use OpenRouter instead, regenerate with `uvx mindroom config init --provider openrouter` and then set `OPENROUTER_API_KEY`.
+| Option | Effect | Default |
+| --- | --- | --- |
+| `--provisioning-url URL` | Provisioning service to pair with | `MINDROOM_PROVISIONING_URL`, else `https://mindroom.chat` |
+| `--client-name NAME` | Name for this machine in the list of paired installs | Host name |
+| `--persist-env` / `--no-persist-env` | Save the credentials to `.env` next to `config.yaml`, or only print them as `export` lines | `--persist-env` |
+| `--open-browser` | Open the approval link in the default browser | Off |
+| `--path`, `-p` | Config file whose `.env` receives the credentials | Auto-detected |
+| `--force` | Pair again without asking when this machine is already connected | Off |
+| `--graceful-cancel` | SIGTERM while waiting exits with code `130` without saving (used by the macOS app) | Off |
 
-For Codex CLI ChatGPT authentication, run `codex login` instead of adding an API key.
-MindRoom reads `~/.codex/auth.json` by default.
+### Approve the pairing
 
-## 3. Start MindRoom (pairing happens automatically)
+`connect` and `run` print an approval link, a pair code, and, in a terminal, a QR code of the link.
+Open the link or scan the QR code while signed in to MindRoom Chat, or enter the code in MindRoom Chat → Settings → Local MindRoom.
+Approve only when the page shows the same code as your terminal (`Approve only if the page shows code ABCD-EFGH`), because anyone who sees the link or code can approve it, and the approving account becomes the one your agents trust.
+The page also shows the address the request came from.
 
-```bash
-uvx mindroom run
-```
+A pair code is valid for 10 minutes.
+`connect` makes one attempt and then exits with `Approval timed out. Run the command again to get a new link.`, while `run` keeps printing new codes.
 
-On first run, MindRoom prints a pairing link and QR code.
-Open the link or scan the QR code with your MindRoom Chat account to approve the pairing.
-Alternatively, enter the displayed code in MindRoom Chat → Settings → Local MindRoom.
-Approve only when the code on the page matches your terminal, because a link someone else sends you belongs to their machine; the page also shows the address the request came from.
+After approval, and before anything is saved, MindRoom prints the approving account, for example `Approved by @alice:mindroom.chat.`
+In a terminal it then asks `Is this your account? [Y/n]`.
+Pressing Enter or answering `y` saves the credentials.
+Answering `n`, pressing Ctrl+C, or closing input discards them without writing `.env` or `config.yaml`, and the command exits with an error (`run` does not start); revoke that connection in MindRoom Chat → Settings → Local MindRoom.
+Without a terminal, such as under a service or the macOS app, or when the provisioning service does not name the approving account, nothing is asked and MindRoom prints the same revoke hint.
 
-After approval, MindRoom prints the approving account, such as `Approved by @alice:mindroom.chat.`, before it saves anything.
-In a terminal, it asks `Is this your account? [Y/n]`; answering `n` or pressing Ctrl+C discards the credentials and stops, and you can revoke that connection in MindRoom Chat → Settings → Local MindRoom.
-Under a service or the macOS app, it prints the approving account without asking.
-While it waits for approval, `/api/health` on the API port already reports healthy and `/api/ready` reports `Waiting for local pairing approval`, so container health checks do not restart it with a new code.
+### What pairing saves
 
-Pair code behavior:
+With `--persist-env`, pairing writes these to `.env` next to `config.yaml`:
 
-- Valid for 600 seconds (10 minutes).
-- MindRoom automatically generates a new code if the previous expires.
-- Only used to bootstrap local pairing.
-
-After successful pairing, local provisioning credentials are written to `~/.mindroom/.env`.
-
-MindRoom then:
-
-1. Connects to `MATRIX_HOMESERVER`
-2. Creates/updates configured agent Matrix users
-3. Joins/creates configured rooms
-4. Starts processing messages
-
-## Optional: Docker worker isolation
-
-If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](sandbox-proxy.md).
-That especially includes `coding`, `docker`, `file`, `python`, and `shell`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets.
-Dedicated Docker workers do not get a bind mount of `~/.mindroom` or the raw config-adjacent `.env` file.
-They still receive a filtered public startup-runtime env payload derived from exported env vars and allowed `.env` values.
-Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools even though the raw file is not mounted.
-Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific secrets.
-Use `worker_scope: shared` when you want one persistent container per agent.
-Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
-
-## Credential Model (Important)
-
-`mindroom connect` returns local provisioning credentials:
-
+- `MINDROOM_PROVISIONING_URL`
 - `MINDROOM_LOCAL_CLIENT_ID`
 - `MINDROOM_LOCAL_CLIENT_SECRET`
 - `MINDROOM_NAMESPACE`
+- `MINDROOM_OWNER_USER_ID`, when the approving account is a valid Matrix user ID
 
-`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix user access tokens**.
-`MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases to avoid collisions on shared homeservers.
+It also replaces the owner placeholder `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` with the approving account in `config.yaml` and every file it pulls in with `!include`.
+An approving account that is not a valid Matrix user ID is printed as `Approved by '<value>', which is not a valid Matrix user ID.` and is never saved, so the placeholders stay for you to replace.
+`mindroom config init` likewise warns and leaves the placeholders when `MINDROOM_OWNER_USER_ID` in the environment or `.env` is not a valid Matrix user ID.
+Placeholders are replaced only once, so when a later pairing is approved by an account missing from `administrators`, MindRoom prints a note and leaves the config unchanged.
+Add that account to `administrators`, `room_defaults.invite_users`, and `room_defaults.admins` yourself if it should manage MindRoom.
+With `--no-persist-env`, MindRoom prints the variables as `export` lines, including the owner ID, and you replace the placeholders yourself.
 
-They can only call provisioning-service endpoints that accept local client credentials, including agent registration and retrieval of the Google desktop app client configuration.
-Agent registration never sends your agents' passwords to the provisioning service.
-The service creates each new agent account with a one-time password and returns it once, and the local process immediately changes it to a locally generated password that is never sent to the provisioning service.
-The Google app client configuration lets the local process exchange OAuth codes directly with Google; the provisioning service does not receive the resulting Google authorization code or tokens.
-Treat the local provisioning credentials as secrets because anyone who obtains them can use the same provisioning capabilities, including retrieving the Google desktop app client configuration.
-Revoke them from `Settings -> Local MindRoom` in the chat UI.
-That page shows when each paired install was last seen.
-Each account keeps at most 20 paired installs, revoked ones included; pairing another at the limit removes one, preferring a revoked install and otherwise the one seen least recently.
-A running `mindroom run` process reports itself to the provisioning service at startup and then every six hours.
-Each report is an empty request authenticated only by `MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET`, so it carries no messages, configuration, or other content.
-The service records these reports with ten-minute resolution.
-If the service rejects the credentials as invalid or revoked, the install logs a warning asking you to run `mindroom connect` again and stops reporting.
-The distributed Google desktop client secret is not confidential in the installed-app model because every paired install can retrieve it.
-Provisioning keeps that client out of published artifacts, gates casual retrieval, and enables centralized rotation.
-Rotate the Google OAuth client in response to observed client abuse or as an operational rotation, not merely because one pairing credential leaked.
+### Pair again
 
-## Trust Model (Hosted Server vs Message Privacy)
+Pairing a machine that is already connected creates a new connection and a new agent namespace: existing agents keep working, and new agents get the new namespace.
+In a terminal, `connect` asks `Pair again?` first.
+Without a terminal it does not pair and exits with code `3`, so scripts and the macOS app can tell this apart from a failure (exit code `1`).
+Add `--force` to pair again without asking.
 
-In end-to-end encrypted rooms, the homeserver stores message bodies as ciphertext.
-The local `mindroom run` process holds your agent account keys and performs decryption locally.
-Content privacy depends on authentic recipient devices and trusted clients.
+### Self-hosted homeservers
 
-MindRoom currently shares outbound encryption keys with unverified devices belonging to room members; it does not require recipient-device verification before sending.
-An actively malicious homeserver that advertises an attacker-controlled device for a participating account can therefore receive keys when MindRoom next shares an outbound session with that device.
-This limits protection against an active homeserver operator; it does not imply access to arbitrary stored history.
-See the [Matrix E2EE implementation guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery, session sharing, and verification.
+Pairing is only for hosted `mindroom.chat` or your own provisioning service.
+When neither `MINDROOM_PROVISIONING_URL` nor `--provisioning-url` is set and `MATRIX_HOMESERVER` is not `mindroom.chat`, `connect` refuses without contacting anything or writing files.
+This includes an unset `MATRIX_HOMESERVER`, which defaults to `http://localhost:8008`, so run `mindroom config init --matrix-server mindroom.chat` first for hosted defaults.
+Self-hosted servers without a provisioning service register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead (see [Configuration](../configuration/index.md)).
 
-Important limits:
+## Pairing Credentials
 
-- This does **not** hide metadata (room membership, timestamps, event IDs, sender IDs, traffic patterns).
-- If a room is not encrypted, the homeserver can read plaintext.
-- Any model/tool providers you send content to can still see the prompts/data you send to them.
+`MINDROOM_LOCAL_CLIENT_ID` and `MINDROOM_LOCAL_CLIENT_SECRET` are **not Matrix access tokens**.
+They only authorize provisioning-service requests from this install: registering agent accounts and retrieving the [Google desktop OAuth client](google-services-user-oauth.md).
+The provisioning service never learns your agents' Matrix passwords, because MindRoom replaces each new account's one-time password with a locally generated one.
+Treat the pairing credentials as secrets anyway, because anyone who has them can make the same requests.
+`MINDROOM_NAMESPACE` is appended to managed agent usernames and room aliases so installs do not collide on the shared homeserver.
 
-## If You Self-Host Later
+Revoke a pairing in MindRoom Chat → Settings → Local MindRoom, which also shows when each install was last seen.
+Each account keeps at most 20 paired installs, revoked ones included; pairing another at the limit removes a revoked install first, otherwise the one seen least recently.
+A running install reports itself to the provisioning service at startup and every six hours, and the report carries no messages, configuration, or other content.
+If the service rejects the credentials as invalid or revoked, MindRoom logs a warning to run `mindroom connect` again.
 
-You can keep the same local flow and switch endpoints:
+## What the Hosted Server Can See
+
+In end-to-end encrypted rooms, the homeserver stores message bodies as ciphertext, and your local `mindroom run` holds the agent keys and decrypts locally.
+Agents share encryption keys with room members' unverified devices (see [Delivery Policy](../matrix.md#delivery-policy)), so a malicious homeserver that adds an attacker-controlled device to a participating account can receive keys for messages sent after that.
+This does not give it access to earlier stored history.
+
+The homeserver can still see:
+
+- Metadata: room membership, timestamps, event IDs, sender IDs, and traffic patterns.
+- Plaintext of any room that is not encrypted.
+
+Model and tool providers see whatever prompts and data you send them.
+See the [Matrix E2EE guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery and verification.
+
+## Use Your Own Deployment
+
+Keep the same local flow and change the endpoints in `.env`:
 
 - `MATRIX_HOMESERVER=https://your-matrix.example.com`
 - `MATRIX_SERVER_NAME=your-matrix.example.com`
 - `MINDROOM_PROVISIONING_URL=https://your-matrix.example.com` (or your dedicated provisioning host)
 
-If the homeserver requires a registration token for managed agent accounts, also set `MATRIX_REGISTRATION_TOKEN`.
+Then run `mindroom run`, which pairs with your own deployment on first start.
+An install already paired with another provisioning service keeps its old pairing, so run `mindroom connect` first to pair it again.
+To register agent accounts directly with the homeserver without pairing, set `MATRIX_REGISTRATION_TOKEN`, or set `MATRIX_REGISTRATION_SHARED_SECRET` and unset `MINDROOM_PROVISIONING_URL`.
 
 On the provisioning service itself, set `MINDROOM_PROVISIONING_APPROVE_URL=https://chat.your-matrix.example.com/connect` so pairing links open your own chat UI.
 It defaults to `https://chat.mindroom.chat/connect` and is not read by the local `mindroom` process.
-
-Then run `mindroom connect` or `mindroom run` to pair with your own deployment.
-`mindroom connect` refuses to pair a non-mindroom.chat homeserver, including an unset `MATRIX_HOMESERVER` (which defaults to `http://localhost:8008`), unless `MINDROOM_PROVISIONING_URL` is set or `--provisioning-url` is given.
-Without a provisioning service, register agents with `MATRIX_REGISTRATION_TOKEN` or `MATRIX_REGISTRATION_SHARED_SECRET` instead of pairing.

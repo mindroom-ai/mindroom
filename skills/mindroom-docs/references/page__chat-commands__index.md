@@ -1,407 +1,104 @@
 # Chat Commands
 
-MindRoom provides chat commands that users can type in any Matrix room where MindRoom agents or teams are present.
-Commands start with `!` and are normally handled by the router agent.
-`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
+Chat commands are messages starting with `!` that you type in any Matrix room where MindRoom agents or teams are present.
+Use them to get help, manage schedules, switch models or modes, manage room encryption, and, when enabled, change configuration from chat.
+This page lists every command and fully covers `!help`, `!hi`, and `!config`; the other commands are documented on the linked pages.
 
-## Quick Reference
+## Command List
 
-| Command | Description |
-|---------|-------------|
-| `!help [topic]` | Get help on commands or a specific topic |
-| `!hi` | Show the welcome message again |
-| `!schedule <task>` | Schedule a task or reminder |
-| `!list_schedules` | List pending scheduled tasks |
-| `!cancel_schedule <id>` | Cancel a scheduled task |
-| `!edit_schedule <id> <task>` | Edit an existing scheduled task |
-| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent |
-| `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface |
-| `!model [name\|list\|reset]` | Show or switch the model used in the current thread |
-| `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) |
-| `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room |
-| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) |
-| `!e2ee` | Show encryption diagnostics for this room |
-| `!config <operation>` | View and modify configuration (disabled by default, admin only when enabled) |
-| `!reload-plugins` | Force-reload all configured plugins (admin only) |
+| Command | Description | Details |
+|---------|-------------|---------|
+| `!help [topic]` | Get help on commands or a specific topic | [`!help`](#help) |
+| `!hi` | Show the welcome message again | [`!hi`](#hi) |
+| `!schedule <task>` | Schedule a task or reminder | [Scheduling](https://docs.mindroom.chat/scheduling/#schedule) |
+| `!list_schedules` | List pending scheduled tasks | [Scheduling](https://docs.mindroom.chat/scheduling/#list_schedules) |
+| `!cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
+| `!edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#edit_schedule) |
+| `!desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
+| `!mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
+| `!model [name\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
+| `!room_model [name\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
+| `!thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
+| `!encrypt [confirm]` | Enable end-to-end encryption for this room (irreversible, room admin only) | [Matrix](https://docs.mindroom.chat/matrix/#encrypt) |
+| `!e2ee` | Show encryption diagnostics for this room | [Matrix](https://docs.mindroom.chat/matrix/#e2ee) |
+| `!config <operation>` | View and modify configuration (disabled by default, platform administrators only) | [`!config`](#config) |
+| `!reload-plugins` | Force-reload all configured plugins (platform administrators only) | [Plugins](https://docs.mindroom.chat/plugins/#reload-plugins) |
 
-## Who Handles Commands
+Command names are case-insensitive.
+Any other message starting with `!` gets `❌ Unknown command. Try !help for available commands.`
 
-The **router** normally handles commands.
-`!desktop` uses the direct Desktop pairing flow in a room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command.
-Commands work in both main room messages and within threads.
+## Command Handling
 
-Voice transcription is not rewritten into chat-command syntax; commands must arrive as text commands.
+The router answers commands, in the main room and in threads, even in rooms with a single agent.
+The exception is `!desktop`, which a private agent may answer itself when the room contains only you and that agent; see [`!desktop`](https://docs.mindroom.chat/tools/desktop/#desktop) for its room requirements.
 
-## Permission Behavior
+Commands follow the same [authorization](https://docs.mindroom.chat/authorization/) rules as ordinary messages.
+"Room admin" means a Matrix room administrator, while "platform administrator" means a user listed in `administrators`.
 
-Commands are subject to the same authorization rules as normal messages.
-The responder's `access` policy authorizes the sender.
-See [Authorization](https://docs.mindroom.chat/authorization/) for details.
+Commands must be typed as text; voice messages are never turned into commands.
 
-`!config` is disabled by default.
-Set `authorization.config_command_enabled: true` to enable it.
-When enabled, callers must be platform administrators.
-For `!config set`, only the user who requested the change can confirm or cancel it via reactions.
-Pending config changes expire after 24 hours.
+An agent can send `!help`, `!mode`, `!model`, and the schedule commands on your behalf, and they run with your permissions.
+Any other command sent by an agent for you is refused with `❌ Agents cannot run this command for you. Send it yourself.`
 
-## Commands
+## `!help`
 
-### `!help`
-
-Display available commands or get detailed help on a specific topic.
+`!help` lists all commands, and `!help <topic>` shows detailed usage and examples for one topic.
 
 ```
 !help
 !help schedule
 !help config
-!help cancel_schedule
-!help edit_schedule
 ```
 
-**Topics:** `schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
+**Topics:** `schedule`, `list_schedules`, `inspect_schedules`, `cancel`, `cancel_schedule`, `edit`, `edit_schedule`, `config`, `mode`, `model`, `room_model`, `room-model`, `roommodel`, `thread_mode`, `thread-mode`, `threadmode`, `reload-plugins`, `reload_plugins`, `encrypt`, `e2ee`, `encryption`
 
-### `!hi`
+Any other topic shows the general command list.
 
-Show the welcome message for the current room, listing available agents and teams, their roles and tools, and quick-start instructions.
+## `!hi`
 
-```
-!hi
-```
+`!hi` shows the room's welcome message again: the agents and teams you can address, their roles and tools, and quick-start instructions.
 
-### `!schedule`
+## `!config`
 
-Schedule a one-time or recurring task using natural language.
-
-Tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
-
-```
-!schedule <natural-language-request>
-```
-
-**One-time tasks:**
-
-```
-!schedule in 5 minutes Check the deployment
-!schedule tomorrow at 3pm Send the weekly report
-```
-
-**Recurring tasks:**
-
-```
-!schedule Every hour, @shell check server status
-!schedule Daily at 9am, @finance market report
-!schedule Weekly on Friday, @analyst prepare weekly summary
-```
-
-**Conditional workflows (polling-based):**
-
-Conditional requests are converted to recurring cron-based polling schedules.
-
-These are periodic checks, not real event subscriptions.
-
-For predictable behavior, include an explicit polling cadence.
-
-```
-!schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me
-!schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me
-```
-
-Include `@agent_name` or `@team_name` in your schedule to target specific responders.
-
-The scheduler validates that mentioned agents and teams are available in the room before creating the task.
-
-Add `with no history`, `without context`, or `context-free` when each scheduled run should see no prior conversation messages.
-
-Add a phrase such as `with only the last 5 messages of context` to cap each scheduled run to recent context.
-
-```
-!schedule Every hour, @ops check deployment health with no history
-!schedule Daily at 9am, @research summarize AI news with only the last 5 messages
-```
-
-Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools.
-
-```
-!schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives
-```
-
-Silent schedules hide their trigger and omit a successful final response that is empty or contains only `NO_REPLY`.
-Schedules remain visible by default.
-
-Schedules use the timezone from `config.yaml` (defaults to UTC).
-
-See [Scheduling](https://docs.mindroom.chat/scheduling/) for full details.
-
-### `!list_schedules`
-
-List pending scheduled tasks in the current room or thread.
-
-```
-!list_schedules
-```
-
-**Aliases:** `!listschedules`, `!list-schedules`, `!list_schedule`, `!listschedule`, `!list-schedule`, `!inspect_schedules`, `!inspectschedules`, `!inspect-schedules`, `!inspect_schedule`, `!inspectschedule`, `!inspect-schedule`
-
-### `!cancel_schedule`
-
-Cancel a specific scheduled task or all tasks in the room.
-
-```
-!cancel_schedule <task-id>
-!cancel_schedule all
-```
-
-Use `!list_schedules` to find task IDs.
-
-**Aliases:** `!cancelschedule`, `!cancel-schedule`
-
-### `!edit_schedule`
-
-Replace an existing scheduled task with new timing and content.
-Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
-Use `restore full history` or `use unlimited history` to remove a history limit.
-Use `make this schedule silent` or `make this schedule visible` to change its delivery mode.
-
-```
-!edit_schedule <task-id> <new-task-description>
-```
-
-The task description is re-parsed to update timing and content.
-
-Schedule type cannot be changed (one-time to recurring or vice versa) -- cancel and recreate instead.
-
-```
-!edit_schedule task42 keep the same schedule but restore full history
-!edit_schedule task42 every weekday at 8am check build status with no history
-!edit_schedule task42 keep the same schedule but make it silent
-```
-
-**Aliases:** `!editschedule`, `!edit-schedule`
-
-### `!desktop`
-
-Manage the current requester's Desktop target for one Desktop-enabled agent.
-
-Run these commands in a private Matrix room containing only the requester and one Desktop-enabled agent, plus the router when it serves the command:
-
-```text
-!desktop setup
-!desktop status
-!desktop confirm <code> <verification>
-!desktop rotate
-!desktop disconnect
-!desktop disconnect confirm
-```
-
-`!desktop setup` returns a local `mindroom desktop setup` command and a short-lived pairing code.
-The local pairing command presents that code through an authenticated encrypted Matrix device event.
-It then prints an exact chat confirmation command with a verification value derived from the authenticated local device key.
-Successful terminal setup also saves the connection for the macOS app; choose and save allowed apps in **Computer access**, then start observation there or with `mindroom desktop run`.
-Only the same Matrix requester in the same agent scope can confirm the matching claim.
-`!desktop rotate` starts the same flow while leaving the current target active until confirmation.
-The agent can report setup status, but it cannot start, confirm, rotate, or disconnect pairing on the requester's behalf.
-See [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) for local login and allowlist instructions.
-
-### `!mode`
-
-Switch one agent's tool interface for its next Matrix response in the current conversation.
-Minimal mode exposes only Bash to the model; the agent's configured tools remain available through the MindRoom CLI.
-Standard mode restores the usual tool interface.
-
-```
-!mode helper minimal
-!mode helper show
-!mode helper standard
-!mode helper reset
-```
-
-The choice survives restarts without changing `config.yaml`.
-For agents using threads, run the command inside an existing thread and continue talking to the agent in that same thread.
-For agents using `thread_mode: room`, the choice applies to the whole room, including commands sent from a thread.
-Private agents store the choice separately for each requester.
-Other agents and conversations are unaffected; teams and OpenAI-compatible API requests do not use this selection.
-
-You must be authorized to use the named agent.
-Minimal mode requires the agent's existing run, check, and kill shell permissions, a canonical workspace, and MindRoom's API server, reachable from wherever the agent's shell runs.
-When anything is missing, the reply lists every missing requirement with its fix and the `.env` file for deployment settings, without saving the choice.
-See [deployment requirements](https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements).
-If shell permissions or deployment settings later change, minimal responses fail closed.
-Run `!mode helper standard` or `!mode helper reset` in the same conversation to remove the saved choice and restore standard mode.
-
-### `!model`
-
-Show or switch the model that the agents, teams, and router you may address use in the current thread.
-
-```
-!model
-!model list
-!model opus
-!model reset
-```
-
-The override applies only to the entities whose `access` admits the user who set it in this room; every other entity keeps its own thread override or room-level model.
-During a configured team's turn, the team's thread override also applies to its member agents, because the team's `access` reaches them.
-`!model reset` likewise removes the override only for the entities you may address.
-
-`!model` and `!model list` show each thread override with the entities it applies to, and the available model names.
-Model names come from the `models:` section of `config.yaml`.
-The override applies from the next message in the thread and survives restarts.
-Other threads keep their own thread override when present and otherwise use their room's effective default; other rooms remain independent.
-Use `!room_model` for a durable runtime room default or `room_models` in `config.yaml` for an authored room default.
-Agents with the `thread_model` tool can list configured models and switch either after the tool call in the current response or from the next turn.
-
-### `!room_model`
-
-Show or switch the model that every agent, team, and the router uses by default in the current room.
-
-```
-!room_model
-!room_model list
-!room_model opus
-!room_model reset
-```
-
-`!room_model` and `!room_model list` show the current runtime override and available model names.
-`!room_model opus` stores a durable room override without modifying `config.yaml`.
-The new default applies to subsequent turns; an in-progress or approval-paused turn keeps the model choices it started with.
-`!room_model reset` removes the runtime override so the configured `room_models` choice or each entity's configured model applies again.
-Thread-level `!model` overrides and explicit per-run model choices take precedence over the room default.
-Set and reset are Matrix room-admin-only actions, while status is available to authorized room members.
-The override is keyed by Matrix room ID and stored under `mindroom_data/tracking`, so it survives restarts and room-alias changes.
-
-### `!thread_mode`
-
-Show or switch how future agent replies are grouped in the current Matrix room.
-
-```
-!thread_mode
-!thread_mode show
-!thread_mode room
-!thread_mode thread
-!thread_mode reset
-```
-
-`!thread_mode` and `!thread_mode show` show the current room override.
-`!thread_mode room` uses one continuous conversation for the whole room.
-`!thread_mode thread` uses Matrix threads for separate conversations in this room.
-`!thread_mode reset` removes the room override so agents use configured `thread_mode` and `room_thread_modes` values again.
-Set and reset are Matrix room-admin-only actions.
-The override is stored in MindRoom runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
-
-### `!encrypt`
-
-Enable Matrix end-to-end encryption for the current room.
-
-```
-!encrypt
-!encrypt confirm
-```
-
-`!encrypt` reviews what enabling encryption means for the room without changing anything.
-`!encrypt confirm` enables encryption and is a Matrix room-admin-only action.
-Enabling encryption is irreversible: a room can never go back to unencrypted, and people joining later cannot read messages sent before they joined.
-Managed rooms can also be encrypted with `rooms.<key>.encrypted: true`.
-
-### `!e2ee`
-
-Show encryption diagnostics for the current room.
-
-```
-!e2ee
-```
-
-The report includes the room's encryption state, the responding bot account and device, the encryption store status, and decryption-failure counters since startup.
-Use it when an agent seems to ignore messages in an encrypted room.
-
-### `!config`
-
-View and modify MindRoom configuration from chat.
-This command is disabled by default.
-Set `authorization.config_command_enabled: true` to enable it.
-When enabled, only platform administrators can use it.
-Changes are validated against the Pydantic config schema before applying.
-
-**View configuration:**
+`!config` views and changes `config.yaml` from chat.
+It is disabled by default; set `authorization.config_command_enabled: true` (boolean, default `false`) to enable it.
+Even when enabled, only platform administrators can use it.
+Otherwise it replies `❌ Config command disabled.` or `❌ Admin only.`
 
 ```
 !config show
 !config get agents
-!config get models.default
 !config get agents.analyst.display_name
-```
-
-Shown values, including the current and new values in a `!config set` preview, are redacted like `config_manager` inspection.
-Every value inside a field the config schema marks secret is masked, such as MCP server `env` and `headers`, plugin `settings`, model `extra_kwargs`, API keys, and Git repository URLs, except `${NAME}` environment references, which name where a secret lives and are shown as written.
-Other typed fields keep their values; entries in free-form maps, such as tool overrides, are also masked when their key names look like credentials, and credential patterns in any text, such as URL passwords and bearer tokens, are masked.
-In typed text fields such as `role` and `instructions`, an ordinary word after "API key" or "bearer" and a kebab-case name such as `sk-learn` are shown as written.
-
-**Modify configuration:**
-
-```
 !config set agents.analyst.display_name "Research Expert"
 !config set models.default.id gpt-6-astra
 !config set defaults.markdown false
-!config set timezone America/New_York
+!config set agents.analyst.tools [shell, file]
 ```
 
-**Path syntax:**
+`!config` alone is the same as `!config show`.
+Paths use dot notation, such as `agents.analyst.role`, and list items use indexes, such as `agents.analyst.tools.0` for the first tool.
+Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolean, a number, and a list.
+Quote a value to keep its exact spacing.
 
-- Use dot notation to navigate nested config (e.g., `agents.analyst.role`)
-- Arrays use indexes (e.g., `agents.analyst.tools.0` for first tool)
-- String values with spaces must be quoted
+Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](https://docs.mindroom.chat/tools/agent-orchestration/#access-redaction-and-saving).
+`!config set` refuses a value containing the `***redacted***` marker or a masked URL password such as `user:***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
 
-#### Confirmation flow
+### Configuration Confirmations
 
-When you use `!config set`, MindRoom:
-
-1. Validates the proposed change against the config schema
-2. Shows a preview with the current and new values
-3. Adds reaction buttons to the preview message
-4. Waits for the requester to react with ✅ (confirm) or ❌ (cancel)
-
-Only the user who requested the change can confirm or cancel it.
-Pending changes are persisted in Matrix room state and survive restarts.
-Room state is readable by every room member and is not end-to-end encrypted, so the pending change stores the requester, room, thread, creation time, configuration path, and decision progress, but never the current value.
-It stores the new value only when redaction leaves that value unchanged and room state can carry it, which rules out decimal numbers and integers beyond 2^53 - 1.
-Any other new value is kept only in the running MindRoom process; if MindRoom restarts before you confirm, the confirmation replies that the pending change was lost and asks you to run `!config set` again.
-`!config set` refuses a value containing the `***redacted***` marker or a URL password masked as `user:***@host`, which only appear in redacted output, so copying shown values back never replaces a hidden real value; set that field to its real value instead.
+`!config set` validates the change against the full configuration and replies with an error ending in `Changes were NOT applied.` when it is invalid.
+A valid change gets a preview of the current and new values from the router, with ✅ and ❌ reactions.
+Only the user who requested the change can confirm or cancel it, and that user must still be a platform administrator.
 Unconfirmed changes expire after 24 hours.
 
-Changes are saved to `config.yaml` immediately on confirmation and take effect for new agent interactions.
+Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `!config set` again.
 
-### `!reload-plugins`
-
-Force-reload every configured plugin from disk. Admin-only.
-
-```
-!reload-plugins
-```
-
-Plugins are also auto-reloaded on file save, typically about 1-2 seconds after save — see [plugins.md / Live development](https://docs.mindroom.chat/plugins/#live-development-hot-reload) for details.
-This command is the manual override: useful if the auto-watcher missed something, or to confirm a swap explicitly.
-
-**Reply format:**
-
-```
-✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
-```
-
-**Permission:** Caller must be a platform administrator. Aliases: `!reload-plugins`, `!reload_plugins`.
+On confirmation, the change is saved to `config.yaml` and applies to new agent interactions, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which apply after MindRoom restarts.
 
 ## Stop Button
 
-MindRoom supports cancelling in-progress responses via a reaction-based stop button, not a chat command.
+Cancel an in-progress response by reacting with 🛑 on the message being generated.
+When `defaults.show_stop_button` is `true` (the default), MindRoom adds that 🛑 reaction to the message for you to click.
+Setting `show_stop_button: false` hides only that reaction; a 🛑 reaction you add yourself still cancels.
 
-When `defaults.show_stop_button` is `true` (the default), MindRoom adds a 🛑 reaction to the agent's message while it is generating.
-React with 🛑 on the message to cancel the response.
-The agent finalizes the partial text with `**[Response cancelled by user]**`.
-
-The stop button only works on messages currently being generated.
-Only non-agent users can trigger cancellation — agent reactions are ignored.
-A 🛑 reaction only stops a response in the room where the reaction was sent.
-
-See [Streaming — Cancellation](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for details on how cancelled responses are finalized.
-
-## Unknown Commands
-
-Any message starting with `!` that does not match a known command returns an error message suggesting `!help`.
+The stop button only works on messages still being generated, and 🛑 reactions from agents are ignored.
+See [Cancellation and Errors](https://docs.mindroom.chat/streaming/#cancellation-and-errors) for how a cancelled response is finalized.

@@ -7,12 +7,11 @@ import builtins
 import ipaddress
 import os
 import signal
-import socket
 import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, closing, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,7 +90,6 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
@@ -623,7 +621,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
-        """The API gateway must receive the lifecycle-owned broker without replacing it."""
+        """The API gateway and its dedicated listener must receive the lifecycle-owned broker without replacing it."""
 
         class ReturningServer:
             should_exit = True
@@ -652,6 +650,7 @@ class TestAgentBot(AgentBotTestBase):
             touch_live_workers=MagicMock(),
             active_runs=AsyncMock(return_value=[]),
         )
+        runtime_paths = self._runtime_paths(tmp_path)
 
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
@@ -659,12 +658,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.api.main.initialize_api_app"),
             patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
             patch("mindroom.api.main.unbind_script_runtime") as unbind_script_runtime,
+            patch("mindroom.api.script_gateway.serve_script_gateway_listener", return_value=nullcontext()) as listener,
         ):
             await _run_api_server(
                 "127.0.0.1",
                 8765,
                 "INFO",
-                self._runtime_paths(tmp_path),
+                runtime_paths,
                 script_runtime=script_runtime,
                 shutdown_requested=shutdown_requested,
             )
@@ -677,6 +677,12 @@ class TestAgentBot(AgentBotTestBase):
         script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
         script_runtime.unbind_api.assert_awaited_once_with()
         unbind_script_runtime.assert_called_once_with(ANY)
+        listener.assert_called_once_with(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=script_runtime.broker,
+            log_level="INFO",
+        )
 
     @pytest.mark.asyncio
     async def test_run_api_server_starts_without_optional_worker_script_gateway(self, tmp_path: Path) -> None:
@@ -860,81 +866,6 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 shutdown_requested=asyncio.Event(),
             )
-
-    @pytest.mark.asyncio
-    async def test_run_api_server_serves_script_gateway_listener_beside_primary_api(self, tmp_path: Path) -> None:
-        """A configured gateway port serves only the bound gateway while the unchanged primary API runs."""
-        with closing(socket.create_server(("127.0.0.1", 0))) as probe:
-            gateway_port = int(probe.getsockname()[1])
-        observed: dict[str, object] = {}
-
-        class ProbingServer:
-            should_exit = True
-            force_exit = False
-
-            def __init__(
-                self,
-                config: uvicorn.Config,
-                _shutdown_requested: asyncio.Event | None,
-                *,
-                on_started: Callable[[str, int], Awaitable[None]] | None = None,
-            ) -> None:
-                del on_started
-                self.config = config
-
-            async def serve(self) -> None:
-                observed["primary_app"] = self.config.app
-                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{gateway_port}") as client:
-                    observed["health"] = (await client.get("/api/health")).status_code
-                    observed["receipt"] = (await client.get("/api/script-gateway/runs/run-1/calls/call-1")).json()
-
-        broker = SimpleNamespace(
-            get_authenticated=AsyncMock(
-                return_value=ScriptCallRecord(
-                    run_id="run-1",
-                    call_id="call-1",
-                    grant=ScriptToolGrant("calculator", "add"),
-                    arguments_digest="digest",
-                    state=ScriptCallState.COMPLETED,
-                    created_at="2026-01-01T00:00:00Z",
-                    result=3,
-                ),
-            ),
-        )
-        runtime_paths = resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            process_env={"MINDROOM_SCRIPT_GATEWAY_PORT": str(gateway_port)},
-        )
-        shutdown_requested = asyncio.Event()
-        shutdown_requested.set()
-
-        with (
-            patch("mindroom.orchestrator._SignalAwareUvicornServer", ProbingServer),
-            patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_script_runtime"),
-            patch("mindroom.api.main.unbind_script_runtime"),
-        ):
-            await _run_api_server(
-                "127.0.0.1",
-                8765,
-                "INFO",
-                runtime_paths,
-                script_runtime=SimpleNamespace(
-                    broker=broker,
-                    bind_api=MagicMock(),
-                    unbind_api=AsyncMock(),
-                    touch_live_workers=MagicMock(),
-                    active_runs=AsyncMock(return_value=[]),
-                ),
-                shutdown_requested=shutdown_requested,
-            )
-
-        assert observed["primary_app"] is api_main.app
-        assert observed["health"] == 404
-        assert cast("dict[str, object]", observed["receipt"])["result"] == 3
-        broker.get_authenticated.assert_awaited_once_with("run-1", "call-1", None)
-        with pytest.raises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", gateway_port), timeout=1).close()
 
     @pytest.mark.asyncio
     async def test_run_api_server_allows_expected_shutdown_after_serve_returns(self, tmp_path: Path) -> None:
@@ -4043,7 +3974,6 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_resolve_bot_room_aliases"),
             patch.object(orchestrator, "_start_sync_task"),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
         ):
             await orchestrator._run_bot_start_retry("general")
 
@@ -4093,7 +4023,6 @@ class TestMultiAgentOrchestrator:
                 side_effect=lambda *_args: order.append("sync_started"),
             ),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
-            patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()),
             patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),
         ):
             await orchestrator._run_bot_start_retry("general")
