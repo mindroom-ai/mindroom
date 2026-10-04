@@ -202,6 +202,8 @@ Create, view, edit, and validate `config.yaml`.
 │ validate          Validate config.yaml and check for common issues.                    │
 │ resolve           Print the fully merged config YAML with all !include tags resolved.  │
 │ path              Show the resolved config file path and search locations.             │
+│ use-local-model   Use a local model as the default, keeping explicitly selected agent  │
+│                   models.                                                              │
 │ migrate           Migrate config.yaml to membership access settings.                   │
 │ fingerprint       Print the config source SHA-256, including all transitively included │
 │                   files.                                                               │
