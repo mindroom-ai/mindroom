@@ -1391,7 +1391,7 @@ mindroom config validate --path /path/to/config.yaml
 
 ## Basic Structure
 
-All top-level sections are optional, but at least one agent is needed for Matrix interactions.
+All top-level sections are optional; configure at least one agent for conversational replies.
 Keep `models.default` configured, because room topic generation and automatic thread summaries fall back to it even when agents, teams, and the router select other models.
 
 ```yaml
@@ -1799,11 +1799,12 @@ Each rule must set exactly one of `action` or `script`.
 - Reply to the card to deny the call; the start of the reply, up to 2,000 plain ASCII characters or fewer with characters such as emoji, is recorded as the denial reason.
 - Only the original human requester can approve or deny their pending call.
 - Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
-  It covers the original call and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments, without further cards.
+  It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments, without further cards.
   For generic MCP dispatch, the server and remote tool name are part of the operation.
   Timed approval needs a thread and complete reviewable arguments; native tool-authored confirmations and background-script approvals stay per-call.
   The grant deadline is fixed when the call is accepted and survives restarts.
   The original requester can stop auto-approval from the originating card, and changes to configured bindings or room membership end matching grants.
+  Expiry or stopping auto-approval does not cancel calls already approved.
 
 While approval is pending, the agent stops typing and the conversation can continue.
 Pending approvals survive restarts and config reloads, and an approved call resumes the paused response.
@@ -1998,7 +1999,7 @@ Credential fields can read from env vars, from files, or from literal values:
 If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
-Seeded credentials are updated on later startups but never overwrite credentials saved through the dashboard.
+Seeded credentials are updated on later startups, but seeds only replace credentials previously imported from the environment; credentials saved through the dashboard or with no recorded source are preserved.
 OAuth token services whose names end with `_oauth` cannot be seeded; connect them through OAuth instead.
 OAuth client configuration services whose names end with `_oauth_client` can be seeded.
 To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
@@ -2632,14 +2633,17 @@ A model alias whose provider adds native tools that cannot be disabled is refuse
 For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
 The two backends get the same question and context, but their judgments can differ.
 
-Selecting either backend sends the agent's guidance and up to eight recent user and assistant messages to that backend, with Matrix identities replaced by aliases.
+Judgments share a process-wide limit of eight concurrent calls and one per agent, without a waiting queue.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+[Mid-Turn Coalescing](#mid-turn-coalescing) describes what its judge sees and what happens when a judgment fails.
+
+#### Participation Context and Fallback
+
+A participation judgment sends the agent's guidance and up to eight recent user and assistant messages to the backend, with Matrix identities replaced by aliases.
 System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
 When the context contains media, attachment references, detected secrets, or more than 16 KB of text, it is not sent and the reply model decides instead.
-
-Judgments share a process-wide limit of eight concurrent calls and one per agent, without a waiting queue.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention falls back to the reply model's own decision, and the agent stays quiet if that also fails.
 After a judgment backend approves, the agent replies normally, including with provider modes that the reply-model check cannot use.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
 
 ## Mid-Turn Coalescing
 

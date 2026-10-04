@@ -54,8 +54,8 @@ ls docs/configuration/
 Trace inheritance for every discovered class instead of assuming each Pydantic model directly subclasses `BaseModel`.
 
 Check:
-- All config keys documented, types and defaults match code
-- No models exist without corresponding docs (or vice versa)
+- Every public config field has one owning reference with accurate type, default, constraints, inheritance, and prerequisites
+- Internal models need no docs just because they exist
 - Example YAML would actually work
 
 ### 3. Verify Architecture Docs Against Source

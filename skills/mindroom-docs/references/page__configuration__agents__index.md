@@ -336,14 +336,17 @@ A model alias whose provider adds native tools that cannot be disabled is refuse
 For participation, a TypeSafe probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
 The two backends get the same question and context, but their judgments can differ.
 
-Selecting either backend sends the agent's guidance and up to eight recent user and assistant messages to that backend, with Matrix identities replaced by aliases.
+Judgments share a process-wide limit of eight concurrent calls and one per agent, without a waiting queue.
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
+[Mid-Turn Coalescing](#mid-turn-coalescing) describes what its judge sees and what happens when a judgment fails.
+
+#### Participation Context and Fallback
+
+A participation judgment sends the agent's guidance and up to eight recent user and assistant messages to the backend, with Matrix identities replaced by aliases.
 System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
 When the context contains media, attachment references, detected secrets, or more than 16 KB of text, it is not sent and the reply model decides instead.
-
-Judgments share a process-wide limit of eight concurrent calls and one per agent, without a waiting queue.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention falls back to the reply model's own decision, and the agent stays quiet if that also fails.
 After a judgment backend approves, the agent replies normally, including with provider modes that the reply-model check cannot use.
-Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe, without request text or credentials.
 
 ## Mid-Turn Coalescing
 

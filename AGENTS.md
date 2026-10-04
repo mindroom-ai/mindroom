@@ -504,11 +504,14 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - The primary reader of `docs/` is an AI agent running inside MindRoom, which loads whole pages through the bundled `mindroom-docs` skill to explain, configure, operate, and troubleshoot MindRoom for its user.
   Every sentence on a page costs context on every question that page answers, so a sentence belongs only when that agent needs it.
 - Keep a sentence only when the agent would answer a realistic user question worse without it, such as how to set something up, what a setting does, or why something did or did not happen.
-- Document what a reader can do, configure, observe, or rely on: features and when to use them, every config field with its type, default, valid values, and an example, common behavior and limits, errors and how to resolve them, and operator procedures such as install, deploy, upgrade, migrate, back up, and recover.
+- Document what a reader can do, configure, observe, or rely on: features and when to use them, common behavior and limits, errors and how to resolve them, and operator procedures such as install, deploy, upgrade, migrate, back up, and recover.
+- Document each public config field once, on its owning page, with its type, default, valid values, and any inheritance or prerequisites.
+  Show a few examples of realistic tasks instead of one example per field.
 - State guarantees as outcomes, such as "restarts do not produce duplicate replies", not as the mechanism that provides them.
 - Leave out implementation mechanics: locks, transactions, journals, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
   Also leave out behavior on rare failure, cancellation, recovery, and replay paths unless a user would plausibly ask about it.
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
+  `docs/architecture/` pages are for contributors and may explain mechanisms; other pages name implementation details only when a documented procedure needs them.
 - A bug fix that restores documented behavior needs no docs change.
   Change docs only when configuration, user-visible behavior, or an operator procedure changes.
 - Each topic has one owning page that states each of its facts once; other pages link to it instead of splitting its rules across pages.
