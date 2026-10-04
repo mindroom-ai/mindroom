@@ -526,34 +526,57 @@ async def test_editing_the_task_withdraws_an_approval_given_for_the_old_one(
 
 
 @pytest.mark.asyncio
-async def test_old_settled_bindings_are_pruned_when_tasks_fire(
+async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_retire(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retention does not depend on another call being scheduled later."""
+    """Retention runs with periodic approval maintenance and outlives no delivery it still explains."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
+    monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+    cards = journal.principal("router@shared")
+
+    async def binding_present() -> bool:
+        row = await journal.backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
+                (_TASK,),
+            ),
+        )
+        return row is not None
+
     try:
-        assert await _schedule(manager, execute_at=datetime.now(UTC) + timedelta(minutes=1))
-        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
-        await journal.principal("router@shared").maintain_approval_grants()
+        assert await _schedule(manager)
+        await _decide(manager, "approved")
+        await manager.arm_scheduled_call_approval(_TASK, "workflow")
+        await _fire_time_call(journal, manager, "first")
         await journal.backend.write(
             lambda transaction: transaction.execute(
                 "UPDATE scheduled_call_approvals SET execute_at_ns = 0 WHERE task_id = ?",
                 (_TASK,),
             ),
         )
-        await manager.recover_cards_on_startup()
-
-        assert await manager.arm_scheduled_call_approval("other-task", "workflow") == "none"
-
-        remaining = await journal.backend.read(
-            lambda transaction: transaction.fetchone(
-                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
-                (_TASK,),
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE matrix_delivery_outbox SET acknowledged_event_id = NULL WHERE delivery_id = ?",
+                ("card-first",),
             ),
         )
-        assert remaining is None
+
+        await cards.maintain_approval_grants()
+        assert await binding_present()
+
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE matrix_delivery_outbox SET acknowledged_event_id = ? WHERE delivery_id = ?",
+                ("$card-first", "card-first"),
+            ),
+        )
+        await manager.recover_cards_on_startup()
+
+        assert not await binding_present()
+        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$card-first")
     finally:
         await manager.shutdown()
 
@@ -884,13 +907,17 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
 
 @pytest.mark.asyncio
 async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
-    """Cancelling through any scheduler entry point denies the task's pending approval card."""
+    """Cancelling withdraws the approval before the cancellation is published, so a crash between them fails closed."""
     client = AsyncMock()
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
     )
     existing = {"status": "pending", "workflow": "{}"}
-    cancel = AsyncMock()
+    order: list[str] = []
+    cancel = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("withdraw"))
+    client.room_put_state.side_effect = lambda **_kwargs: (
+        order.append("state") or nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server")
+    )
 
     with (
         patch("mindroom.scheduling._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
@@ -905,3 +932,4 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
 
     assert result == "✅ Cancelled task `task1234`"
     cancel.assert_awaited_once_with("task1234", reason="Schedule cancelled.")
+    assert order == ["withdraw", "state"]

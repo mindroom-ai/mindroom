@@ -948,6 +948,7 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                     return None
                 if current_task != departed_task:
                     continue
+                await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                 await _persist_scheduled_task_state(
                     client=client,
                     room_id=room_id,
@@ -981,7 +982,6 @@ async def _reconcile_runnable_task_retrying(  # noqa: C901
                 task_id=task_id,
                 created_by=task.workflow.created_by,
             )
-            await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
             return None
 
 
@@ -1165,6 +1165,7 @@ async def save_edited_scheduled_task(
         if current_task != existing_task:
             msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
             raise ValueError(msg)
+        await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_EDITED_REASON)
         revision = await _persist_scheduled_task_state(
             client=client,
             room_id=room_id,
@@ -1175,7 +1176,6 @@ async def save_edited_scheduled_task(
             created_at=current_task.created_at,
             matrix_admin=matrix_admin,
         )
-    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_EDITED_REASON)
 
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -2212,7 +2212,10 @@ async def cancel_scheduled_task(
     if existing_content is None:
         return f"❌ Task `{task_id}` not found."
 
-    # Update to cancelled
+    # Withdraw a scheduled call's approval before publishing the cancellation, so an
+    # interruption between the two leaves a runnable task that asks again rather than
+    # a cancelled task whose approval still works.
+    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
     try:
         await _put_scheduled_task_state_content(
             client=client,
@@ -2226,7 +2229,6 @@ async def cancel_scheduled_task(
 
     if cancel_in_memory:
         _cancel_running_task(task_id)
-    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
 
     return f"✅ Cancelled task `{task_id}`"
 
@@ -2257,6 +2259,7 @@ async def cancel_all_scheduled_tasks(
 
                 # Update to cancelled in Matrix state
                 try:
+                    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     await _put_scheduled_task_state_content(
                         client=client,
                         room_id=room_id,
@@ -2265,7 +2268,6 @@ async def cancel_all_scheduled_tasks(
                         matrix_admin=matrix_admin,
                     )
                     _cancel_running_task(task_id)
-                    await withdraw_scheduled_call_approval(task_id, reason=_SCHEDULE_CANCELLED_REASON)
                     cancelled_count += 1
                     logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:

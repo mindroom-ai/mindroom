@@ -29,6 +29,7 @@ __all__ = [
     "ScheduledCallBinding",
     "apply_armed",
     "arm",
+    "prune",
     "reserve",
     "withdraw",
 ]
@@ -55,10 +56,18 @@ class ScheduledCallBinding:
     execute_at_ns: int
 
 
-def _prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
-    """Forget old bindings once their decided cards have retired."""
+def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
+    """Forget old bindings once their cards and any receipt they explain have retired."""
     rows = transaction.fetchall(
-        "SELECT task_id FROM scheduled_call_approvals WHERE principal_id = ? AND execute_at_ns < ?",
+        """
+        SELECT task_id FROM scheduled_call_approvals AS scheduled
+        WHERE principal_id = ? AND execute_at_ns < ?
+          AND NOT EXISTS (
+              SELECT 1 FROM matrix_delivery_outbox AS receipt
+              WHERE receipt.principal_id = scheduled.principal_id
+                AND receipt.delivery_id = scheduled.consumed_delivery_id
+          )
+        """,
         (principal_id, now_ns - _RETENTION_NS),
     )
     for row in rows:
@@ -82,7 +91,6 @@ def reserve(
     card: ApprovalCardReservation,
 ) -> bool:
     """Reserve the scheduling-time card and its binding in one commit."""
-    _prune(transaction, principal_id, time.time_ns())
     if not background_approvals.reserve_delivery(
         transaction,
         principal_id,
@@ -133,7 +141,6 @@ def arm(
     now_ns: int,
 ) -> ScheduledApprovalArmState:
     """Arm an approved binding for the unchanged task firing on time; only the requester's denial skips it."""
-    _prune(transaction, principal_id, now_ns)
     row = transaction.fetchone(
         """
         SELECT scheduled.workflow_digest, scheduled.execute_at_ns, scheduled.revoked_at_ns, scheduled.decided_by,

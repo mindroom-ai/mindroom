@@ -16,7 +16,7 @@ from mindroom.tool_approval_grants import (
     valid_auto_approve_seconds,
 )
 
-from . import approval_card_state, outbox
+from . import approval_card_state, outbox, scheduled_approvals
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -457,6 +457,7 @@ def maintain(transaction: Transaction, principal_id: str, *, grant_id: str | Non
     lock(transaction, principal_id)
     if grant_id is None:
         _retire_receipts(transaction, principal_id)
+        scheduled_approvals.prune(transaction, principal_id, time.time_ns())
         transaction.execute(
             """
             DELETE FROM approval_grant_cards
