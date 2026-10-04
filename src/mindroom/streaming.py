@@ -49,6 +49,7 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     complete_pending_tool_block,
     is_visible_tool_marker_line,
+    remap_visible_tool_marker_indices,
     tool_markers_match_trace,
     tool_trace_from_content,
 )
@@ -323,8 +324,19 @@ def build_restart_interrupted_body(text: str) -> str:
 class UnfinishedStreamedReply:
     """What one reply showed when the process streaming it stopped before finishing it."""
 
-    partial_text: str
+    # The visible text as the user saw it, tool markers included.
+    visible_text: str
     tool_trace: tuple[ToolTraceEntry, ...]
+
+    @property
+    def partial_text(self) -> str:
+        """Return the prose alone, without the display-only tool markers."""
+        return strip_visible_tool_markers(self.visible_text).strip()
+
+    @property
+    def resumed_text(self) -> str:
+        """Return the text a continuation streams below: what was shown, then the restart note."""
+        return f"{build_restart_interrupted_body(self.visible_text)}\n\n"
 
 
 def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> UnfinishedStreamedReply | None:
@@ -335,13 +347,13 @@ def unfinished_streamed_reply(body: str, content: Mapping[str, Any]) -> Unfinish
     """
     if content.get(STREAM_STATUS_KEY) not in _IN_PROGRESS_STREAM_STATUSES:
         return None
-    partial_text = clean_partial_reply_text(strip_visible_tool_markers(body)).strip()
-    if partial_text == TEAM_PROGRESS_PLACEHOLDER:
-        partial_text = ""
+    visible_text = clean_partial_reply_text(body)
+    if visible_text == TEAM_PROGRESS_PLACEHOLDER:
+        visible_text = ""
     tool_trace = tuple(tool_trace_from_content(content))
-    if not partial_text and not tool_trace:
+    if not visible_text and not tool_trace:
         return None
-    return UnfinishedStreamedReply(partial_text=partial_text, tool_trace=tool_trace)
+    return UnfinishedStreamedReply(visible_text=visible_text, tool_trace=tool_trace)
 
 
 @dataclass(frozen=True)
@@ -613,6 +625,11 @@ class StreamingResponse:
     # answer and stranding one the homeserver may already hold.
     transport_is_current: Callable[[], Awaitable[bool]] | None = None
     canonical_final_body_candidate: str | None = None
+    # What a stopped attempt at this reply showed, which stays above the
+    # continuation: its text ends in the restart note, and its tool calls keep
+    # the first trace slots so the continuation's markers number after them.
+    resumed_text: str = ""
+    resumed_tool_trace: tuple[ToolTraceEntry, ...] = ()
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -644,10 +661,21 @@ class StreamingResponse:
         self.thread_id = self.target.resolved_thread_id
         self.reply_to_event_id = self.target.reply_to_event_id
         self.room_mode = self.target.is_room_mode
+        if self.resumed_text or self.resumed_tool_trace:
+            self.accumulated_text = self.resumed_text
+            self.tool_trace = list(self.resumed_tool_trace)
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self._append_incremental_text(new_chunk)
+
+    def apply_tool_trace_snapshot(self, incoming: list[ToolTraceEntry]) -> None:
+        """Merge one trace snapshot after the stopped attempt's calls, which keep the first slots."""
+        resumed_count = len(self.resumed_tool_trace)
+        self.tool_trace = [
+            *self.tool_trace[:resumed_count],
+            *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
+        ]
 
     def uses_replacement_updates(self) -> bool:
         """Return whether text chunks replace the current visible body."""
@@ -1460,8 +1488,14 @@ class ReplacementStreamingResponse(StreamingResponse):
         return True
 
     def _update(self, new_chunk: str) -> None:
-        """Replace accumulated text with new chunk."""
-        self.accumulated_text = new_chunk
+        """Replace the text below any stopped attempt's text with new chunk, numbering its tools after that attempt's."""
+        resumed_count = len(self.resumed_tool_trace)
+        if resumed_count:
+            new_chunk = remap_visible_tool_marker_indices(
+                new_chunk,
+                {index: index + resumed_count for index in range(1, len(self.tool_trace) - resumed_count + 1)},
+            )
+        self.accumulated_text = self.resumed_text + new_chunk
         self.chars_since_last_update += len(new_chunk)
         self.last_delta_at = time.time()
 
@@ -1651,7 +1685,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         elif isinstance(chunk, StructuredStreamChunk):
             text_chunk = chunk.content
             if chunk.tool_trace is not None:
-                streaming.tool_trace = _merge_tool_trace(streaming.tool_trace, chunk.tool_trace)
+                streaming.apply_tool_trace_snapshot(chunk.tool_trace)
             if chunk.presentation_state is not None:
                 streaming.presentation_state = deepcopy(chunk.presentation_state)
         elif isinstance(chunk, RunContentEvent):
@@ -2073,8 +2107,13 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     interactive_creator_agent: str | None = None,
     interactive_source_event_id: str | None = None,
     allow_new_terminal_message: Callable[[], bool] | None = None,
+    resumed: UnfinishedStreamedReply | None = None,
 ) -> StreamTransportOutcome:
-    """Stream chunks to a Matrix room and return the canonical transport outcome."""
+    """Stream chunks to a Matrix room and return the canonical transport outcome.
+
+    ``resumed`` is what a stopped attempt at ``existing_event_id`` showed; the
+    stream continues below it instead of replacing it.
+    """
     sc = config.defaults.streaming
     streaming = streaming_cls(
         final_text_transform=final_text_transform,
@@ -2098,6 +2137,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         interactive_creator_agent=interactive_creator_agent,
         interactive_source_event_id=interactive_source_event_id,
         allow_new_terminal_message=allow_new_terminal_message,
+        resumed_text=resumed.resumed_text if resumed is not None else "",
+        resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
     )
 
     # Ensure the first chunk triggers an initial send immediately
@@ -2107,7 +2148,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         streaming.event_id = existing_event_id
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
-        streaming.accumulated_text = ""
         streaming.placeholder_progress_sent = adopt_existing_placeholder
 
     if header:
