@@ -57,18 +57,19 @@ class ScheduledCallBinding:
 
 
 def prune(transaction: Transaction, principal_id: str, now_ns: int) -> None:
-    """Forget old bindings once their cards and any receipt they explain have retired."""
+    """Forget bindings past their send time or withdrawal once their cards and any receipt have retired."""
+    cutoff_ns = now_ns - _RETENTION_NS
     rows = transaction.fetchall(
         """
         SELECT task_id FROM scheduled_call_approvals AS scheduled
-        WHERE principal_id = ? AND execute_at_ns < ?
+        WHERE principal_id = ? AND (execute_at_ns < ? OR revoked_at_ns < ?)
           AND NOT EXISTS (
               SELECT 1 FROM matrix_delivery_outbox AS receipt
               WHERE receipt.principal_id = scheduled.principal_id
                 AND receipt.delivery_id = scheduled.consumed_delivery_id
           )
         """,
-        (principal_id, now_ns - _RETENTION_NS),
+        (principal_id, cutoff_ns, cutoff_ns),
     )
     for row in rows:
         task_id = str(row["task_id"])
@@ -209,7 +210,8 @@ def apply_armed(
     now = time.time_ns()
     row = transaction.fetchone(
         """
-        SELECT scheduled.task_id, scheduled.execute_at_ns, scheduled.decided_at_ns, scheduled.card_event_id
+        SELECT scheduled.task_id, scheduled.execute_at_ns, scheduled.decided_at_ns, scheduled.decided_by,
+               scheduled.card_event_id
         FROM scheduled_call_approvals AS scheduled
         JOIN background_approval_calls AS background
           ON background.principal_id = scheduled.principal_id AND background.delivery_id = scheduled.delivery_id
@@ -258,11 +260,13 @@ def apply_armed(
         (now, card.delivery_id, principal_id, task_id),
     )
     approved_at = None if row["decided_at_ns"] is None else approval_timestamp(int(row["decided_at_ns"]))
+    # An approved card always records its approver, which may be the canonical account behind an aliased requester.
+    approved_by = str(row["decided_by"])
     provenance = {
         "kind": "scheduled_approval",
         "task_id": task_id,
         "approval_card_event_id": row["card_event_id"],
-        "approved_by": continuation.requester_id,
+        "approved_by": approved_by,
         "approved_at": approved_at,
         "scheduled_for": approval_timestamp(int(row["execute_at_ns"])),
         "arguments_digest": call.arguments_digest,
@@ -274,7 +278,7 @@ def apply_armed(
         status="approved",
         reason=None,
         metadata=approval_card_state.ApprovalDecisionMetadata(
-            resolved_by=continuation.requester_id,
+            resolved_by=approved_by,
             resolved_at=approved_at,
             provenance=provenance,
         ),

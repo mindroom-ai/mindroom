@@ -589,6 +589,83 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
 
 
 @pytest.mark.asyncio
+async def test_receipt_names_the_account_that_approved_the_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """When the requester's alias maps to another account, the audit trail names the account that clicked."""
+    journal = journal_database()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(journal, tmp_path, sent)
+    try:
+        assert await manager.request_scheduled_call_approval(
+            task_id=_TASK,
+            room_id=_ROOM,
+            thread_id=_THREAD,
+            requester_id=_REQUESTER,
+            approver_user_id="@canonical:test",
+            agent_name=_AGENT,
+            tool_name="post_slack_message",
+            arguments=_ARGUMENTS,
+            execute_at=datetime.now(UTC) + timedelta(minutes=1),
+            workflow_digest="workflow",
+            scheduled_for_text="9:00 AM EDT",
+        )
+        result = await manager.handle_card_response(
+            room_id=_ROOM,
+            sender_id="@canonical:test",
+            card_event_id=_SCHEDULED_CARD,
+            status="approved",
+            reason=None,
+            authorize_responder=lambda _agent: True,
+        )
+        assert result.consumed is True
+        assert await manager.arm_scheduled_call_approval(_TASK, "workflow") == "armed"
+        sent.clear()
+
+        await _fire_time_call(journal, manager, "first")
+
+        [receipt] = sent
+        assert receipt.payload["resolved_by"] == "@canonical:test"
+        assert receipt.payload["approval_provenance"]["approved_by"] == "@canonical:test"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_bindings_are_pruned_without_waiting_for_their_send_time(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A far-future call cancelled long ago does not keep its binding until the original send time."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
+    try:
+        assert await _schedule(manager, execute_at=datetime.now(UTC) + timedelta(days=3650))
+        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE scheduled_call_approvals SET revoked_at_ns = 1 WHERE task_id = ?",
+                (_TASK,),
+            ),
+        )
+
+        await manager.recover_cards_on_startup()
+
+        remaining = await journal.backend.read(
+            lambda transaction: transaction.fetchone(
+                "SELECT 1 AS present FROM scheduled_call_approvals WHERE task_id = ?",
+                (_TASK,),
+            ),
+        )
+        assert remaining is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_republished_scheduled_receipt_alias_stays_terminal(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
