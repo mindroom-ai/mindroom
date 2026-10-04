@@ -11,7 +11,7 @@ import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -618,7 +618,7 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     async def test_run_api_server_binds_process_local_script_runtime(self, tmp_path: Path) -> None:
-        """The API gateway must receive the lifecycle-owned broker without replacing it."""
+        """The API gateway and its dedicated listener must receive the lifecycle-owned broker without replacing it."""
 
         class ReturningServer:
             should_exit = True
@@ -647,6 +647,7 @@ class TestAgentBot(AgentBotTestBase):
             touch_live_workers=MagicMock(),
             active_runs=AsyncMock(return_value=[]),
         )
+        runtime_paths = self._runtime_paths(tmp_path)
 
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
@@ -654,12 +655,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.api.main.initialize_api_app"),
             patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
             patch("mindroom.api.main.unbind_script_runtime") as unbind_script_runtime,
+            patch("mindroom.api.script_gateway.serve_script_gateway_listener", return_value=nullcontext()) as listener,
         ):
             await _run_api_server(
                 "127.0.0.1",
                 8765,
                 "INFO",
-                self._runtime_paths(tmp_path),
+                runtime_paths,
                 script_runtime=script_runtime,
                 shutdown_requested=shutdown_requested,
             )
@@ -672,6 +674,12 @@ class TestAgentBot(AgentBotTestBase):
         script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
         script_runtime.unbind_api.assert_awaited_once_with()
         unbind_script_runtime.assert_called_once_with(ANY)
+        listener.assert_called_once_with(
+            runtime_paths,
+            host="127.0.0.1",
+            broker=script_runtime.broker,
+            log_level="INFO",
+        )
 
     @pytest.mark.asyncio
     async def test_run_api_server_starts_without_optional_worker_script_gateway(self, tmp_path: Path) -> None:
