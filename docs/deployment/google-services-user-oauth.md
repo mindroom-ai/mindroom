@@ -1,5 +1,5 @@
 ---
-icon: fontawesome/brands/google
+icon: simple/google
 ---
 
 # Google Services OAuth For Local Installs

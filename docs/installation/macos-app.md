@@ -1,5 +1,5 @@
 ---
-icon: lucide/laptop
+icon: simple/apple
 ---
 
 # macOS App

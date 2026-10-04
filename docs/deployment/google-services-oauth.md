@@ -1,5 +1,5 @@
 ---
-icon: lucide/key-square
+icon: simple/googlecloud
 ---
 
 # Google Services OAuth

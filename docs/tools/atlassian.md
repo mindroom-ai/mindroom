@@ -1,5 +1,5 @@
 ---
-icon: fontawesome/brands/atlassian
+icon: simple/atlassian
 ---
 
 # Atlassian Cloud

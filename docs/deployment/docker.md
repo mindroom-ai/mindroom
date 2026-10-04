@@ -1,5 +1,5 @@
 ---
-icon: lucide/container
+icon: simple/docker
 ---
 
 # Docker Deployment

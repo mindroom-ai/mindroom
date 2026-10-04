@@ -1,5 +1,5 @@
 ---
-icon: lucide/server
+icon: simple/modelcontextprotocol
 ---
 
 # MCP

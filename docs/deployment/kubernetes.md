@@ -1,5 +1,5 @@
 ---
-icon: lucide/ship
+icon: simple/kubernetes
 ---
 
 # Kubernetes Deployment

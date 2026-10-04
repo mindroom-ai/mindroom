@@ -1,5 +1,5 @@
 ---
-icon: lucide/braces
+icon: fontawesome/brands/openai
 ---
 
 # OpenAI-Compatible API

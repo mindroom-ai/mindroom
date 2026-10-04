@@ -1,5 +1,5 @@
 ---
-icon: fontawesome/brands/telegram
+icon: simple/telegram
 ---
 
 # Telegram Bridge
