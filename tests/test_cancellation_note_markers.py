@@ -23,8 +23,8 @@ from mindroom.streaming import (
     RESTART_INTERRUPTED_RESPONSE_NOTE,
     build_cancelled_response_update,
     build_restart_interrupted_body,
+    format_stream_error_note,
 )
-from mindroom.streaming import _format_stream_error_note as format_stream_error_note
 
 _CancelSource = Literal["user_stop", "sync_restart", "interrupted"]
 

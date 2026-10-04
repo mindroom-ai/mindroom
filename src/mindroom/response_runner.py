@@ -340,6 +340,19 @@ def _replaceable_placeholder(request: ResponseRequest) -> bool:
     return request.existing_event_is_placeholder and request.resumed_reply is None
 
 
+def _stopped_before_showing_work(message: ResolvedVisibleMessage | None, *, replayed_turn: bool) -> bool:
+    """Return whether an adopted reply stopped before showing work its attempt may have done.
+
+    An acknowledgement, hidden tool calls and non-streamed tool calls show
+    nothing: unknown work, not absent work. A reply without a stream status, or
+    one that cannot be read, counts only for a replayed turn, since an edit
+    regeneration's earlier answer finished.
+    """
+    if message is None or message.stream_status is None:
+        return replayed_turn
+    return message.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING}
+
+
 def _split_delivery_tool_trace(
     tool_trace: Sequence[ToolTraceEntry],
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
@@ -2600,10 +2613,15 @@ class ResponseRunner:
         recorder: TurnRecorder,
         accumulated_text: str,
         tool_trace: Sequence[ToolTraceEntry],
+        resumed: UnfinishedStreamedReply | None,
     ) -> bool:
         """Capture canonical interrupted replay state from one failed stream delivery."""
         if recorder.outcome != "pending":
             return recorder.outcome == "interrupted"
+        if resumed is not None:
+            # The stopped attempt shown above this one is already in the turn's saved account.
+            accumulated_text = accumulated_text.removeprefix(resumed.resumed_text)
+            tool_trace = tool_trace[len(resumed.tool_trace) :]
         partial_text = clean_partial_reply_text(strip_visible_tool_markers(accumulated_text))
         completed_tools, interrupted_tools = _split_delivery_tool_trace(tool_trace)
         if not partial_text:
@@ -3621,14 +3639,7 @@ class ResponseRunner:
                 interrupted_tools=interrupted_tools,
             )
             instruction = f"{_INTERRUPTED_ATTEMPT_INSTRUCTION}\n\n{attempt}"
-        elif message is None or message.stream_status in {
-            None,
-            STREAM_STATUS_PENDING,
-            STREAM_STATUS_STREAMING,
-            STREAM_STATUS_APPROVAL_PENDING,
-        }:
-            # Unreadable, or stopped before showing anything (an acknowledgement,
-            # hidden or non-streamed tool calls): unknown work, not absent work.
+        elif _stopped_before_showing_work(message, replayed_turn=request.existing_event_is_placeholder):
             instruction = _UNKNOWN_ATTEMPT_INSTRUCTION
         else:
             return request
@@ -3861,6 +3872,7 @@ class ResponseRunner:
                 extra_content=None,
                 existing_event_id=request.existing_event_id,
                 existing_event_is_placeholder=_replaceable_placeholder(request),
+                resumed=request.resumed_reply,
             ),
         )
 
@@ -4490,7 +4502,9 @@ class ResponseRunner:
                 team_turn_recorder.set_response_event_id(response_event_id)
 
             if use_streaming and (
-                delivery_request.existing_event_id is None or delivery_request.existing_event_is_placeholder
+                delivery_request.existing_event_id is None
+                or delivery_request.existing_event_is_placeholder
+                or delivery_request.resumed_reply is not None
             ):
                 async with _response_typing_indicator(
                     self._client(),
@@ -4731,6 +4745,7 @@ class ResponseRunner:
                 recorder=team_turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                resumed=request.resumed_reply,
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=team_turn_recorder,
@@ -5373,6 +5388,7 @@ class ResponseRunner:
                 recorder=turn_recorder,
                 accumulated_text=error.accumulated_text,
                 tool_trace=error.tool_trace,
+                resumed=request.resumed_reply,
             ):
                 await self._persist_interrupted_recorder_off_loop(
                     recorder=turn_recorder,
@@ -5443,6 +5459,7 @@ class ResponseRunner:
                         ),
                         existing_event_id=request.existing_event_id,
                         existing_event_is_placeholder=_replaceable_placeholder(request),
+                        resumed=request.resumed_reply,
                     ),
                 ),
             )

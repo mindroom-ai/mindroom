@@ -96,6 +96,7 @@ __all__ = [
     "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
     "current_task_is_process_shutdown",
+    "format_stream_error_note",
     "interactive_response_for_visible_body",
     "is_interrupted_partial_reply",
     "send_streaming_response",
@@ -265,7 +266,7 @@ def _complete_capture_completions(capture_completions: tuple[asyncio.Future[None
             capture_completion.set_result(None)
 
 
-def _format_stream_error_note(error: Exception) -> str:
+def format_stream_error_note(error: Exception | str) -> str:
     """Return a concise user-facing note for stream-time exceptions."""
     normalized_error = " ".join(str(error).split())
     if not normalized_error:
@@ -832,7 +833,7 @@ class StreamingResponse:
                 resolved_cancel_source = "user_stop"
         if error is not None:
             stripped_text = self.accumulated_text.rstrip()
-            error_note = _format_stream_error_note(error)
+            error_note = format_stream_error_note(error)
             self.accumulated_text = f"{stripped_text}\n\n{error_note}" if stripped_text else error_note
             return STREAM_STATUS_ERROR
         if resolved_cancel_source is not None:
@@ -925,7 +926,10 @@ class StreamingResponse:
         has_placeholder = (
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
-        self._place_final_only_continuation(canonical_final_body_candidate, final_stream_status=final_stream_status)
+        self._place_final_only_continuation(
+            self.canonical_final_body_candidate,
+            final_stream_status=final_stream_status,
+        )
         text_to_send = self.accumulated_text
         if (
             final_stream_status == STREAM_STATUS_COMPLETED

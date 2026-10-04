@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import html
 from dataclasses import dataclass, replace
@@ -28,7 +29,14 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseAttempt, ResponseSources
-from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, TEAM_PROGRESS_PLACEHOLDER, unfinished_streamed_reply
+from mindroom.streaming import (
+    RESTART_INTERRUPTED_RESPONSE_NOTE,
+    TEAM_PROGRESS_PLACEHOLDER,
+    USER_STOP_CANCEL_MSG,
+    build_cancelled_response_update,
+    format_stream_error_note,
+    unfinished_streamed_reply,
+)
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     build_tool_trace_content,
@@ -310,28 +318,48 @@ async def test_replay_continues_below_the_stopped_attempt_and_saves_its_account(
 
 
 @pytest.mark.asyncio
-async def test_a_failure_before_the_continuation_streams_keeps_the_stopped_reply(tmp_path: Path) -> None:
-    """A run that fails before it streams leaves the stopped attempt's text in place rather than redacting it."""
+@pytest.mark.parametrize(
+    ("stop", "terminal_note", "stream_status"),
+    [
+        (RuntimeError("model unavailable"), format_stream_error_note("model unavailable"), STREAM_STATUS_ERROR),
+        (
+            asyncio.CancelledError(USER_STOP_CANCEL_MSG),
+            build_cancelled_response_update("", cancel_source="user_stop")[0],
+            STREAM_STATUS_CANCELLED,
+        ),
+    ],
+    ids=["failure", "user_stop"],
+)
+async def test_an_end_before_the_continuation_streams_keeps_the_stopped_reply(
+    tmp_path: Path,
+    stop: BaseException,
+    terminal_note: str,
+    stream_status: str,
+) -> None:
+    """A run that fails or is stopped before it streams ends the stopped attempt's text with its note instead of redacting it."""
     bot = _bot(tmp_path)
     request = await _crashed_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
-    def failing_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        message = "model unavailable"
-        raise RuntimeError(message)
+    def ending_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        raise stop
 
     with (
         patch("mindroom.response_runner.fetch_latest_visible_message", new=AsyncMock(return_value=_streamed())),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_runner.stream_agent_response", new=failing_stream),
+        patch("mindroom.response_runner.stream_agent_response", new=ending_stream),
         _hooks_prepare(runner),
-        contextlib.suppress(RuntimeError),
+        contextlib.suppress(RuntimeError, asyncio.CancelledError),
     ):
         await runner.generate_response(request)
 
     bot.client.room_redact.assert_not_awaited()
     final = await bot.journal_principal().load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert final is None
+    ended = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
+    assert ended["body"] == f"{PARTIAL}\n\n{terminal_note}"
+    assert ended[STREAM_STATUS_KEY] == stream_status
+    assert tool_trace_from_content(ended) == list(TRACE)
 
 
 @pytest.mark.asyncio
@@ -376,6 +404,25 @@ async def test_a_stopped_attempt_with_unknown_work_still_warns_the_new_attempt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read",
+    [None, _streamed("The earlier answer.", status=None, trace=())],
+    ids=["unreadable", "non_streamed_answer"],
+)
+async def test_an_edit_regeneration_of_a_finished_answer_gets_no_account(
+    tmp_path: Path,
+    read: ResolvedVisibleMessage | None,
+) -> None:
+    """A regenerated reply without a stream status finished, so nothing says an attempt was interrupted."""
+    bot = _bot(tmp_path)
+    request = replace(await _crashed_turn(bot), existing_event_is_placeholder=False)
+
+    (call,), _fetch = await _replay(bot, request, read)
+
+    assert call.account is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("existing_event_id", [None, REPLY_ID], ids=["fresh_reply", "adopted_unrecovered_reply"])
 async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
     tmp_path: Path,
@@ -397,7 +444,11 @@ async def test_only_a_recovered_reply_is_read_for_a_stopped_attempt(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_reply_continues_with_its_account_minus_display_chrome(tmp_path: Path) -> None:
+@pytest.mark.parametrize("adopted_placeholder", [True, False], ids=["replayed_turn", "edit_regeneration"])
+async def test_a_stopped_team_reply_continues_with_its_account_minus_display_chrome(
+    tmp_path: Path,
+    adopted_placeholder: bool,
+) -> None:
     """The team leader gets the account without the team chrome, and the team stream continues below the stopped reply."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team_matrix_message(), runtime_paths)
@@ -445,7 +496,7 @@ async def test_a_stopped_team_reply_continues_with_its_account_minus_display_chr
             replace(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 existing_event_id=REPLY_ID,
-                existing_event_is_placeholder=True,
+                existing_event_is_placeholder=adopted_placeholder,
                 existing_event_is_recovered=True,
             ),
             team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],

@@ -95,6 +95,7 @@ from mindroom.streaming import (
     cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
+    format_stream_error_note,
     interactive_response_for_visible_body,
     send_streaming_response,
     stream_progress_edits,
@@ -508,6 +509,9 @@ class FinalizeStreamedResponseRequest:
     existing_event_id: str | None = None
     existing_event_is_placeholder: bool = False
     prepared_edit_record: TurnRecord | None = None
+    # What a stopped attempt at ``existing_event_id`` showed, for a continuation
+    # that may end before streaming anything below it.
+    resumed: UnfinishedStreamedReply | None = None
 
 
 @dataclass(frozen=True)
@@ -2409,6 +2413,56 @@ class DeliveryGateway:
             extra_content=request.extra_content,
         )
 
+    async def _end_resumed_reply_before_continuation(
+        self,
+        request: FinalizeStreamedResponseRequest,
+        *,
+        event_id: str,
+        resumed: UnfinishedStreamedReply,
+    ) -> FinalDeliveryOutcome:
+        """Put the terminal note below a stopped attempt whose continuation ended before streaming anything.
+
+        The reply still shows that attempt as in progress, so leaving it
+        untouched would leave it looking unfinished.
+        """
+        stream_outcome = request.stream_transport_outcome
+        failure_reason = stream_outcome.failure_reason or "interrupted"
+        cancel_source = None
+        if stream_outcome.terminal_status == "cancelled":
+            cancel_source = cancel_source_from_failure_reason(failure_reason)
+            terminal_text, stream_status = build_cancelled_response_update(
+                resumed.visible_text,
+                cancel_source=cancel_source,
+            )
+        else:
+            terminal_text = f"{resumed.visible_text.rstrip()}\n\n{format_stream_error_note(failure_reason)}"
+            stream_status = constants.STREAM_STATUS_ERROR
+        extra_content = {**(request.extra_content or {}), constants.STREAM_STATUS_KEY: stream_status}
+        tool_trace = list(resumed.tool_trace)
+        edited = await self._visible_notice_is_current(
+            request.identity,
+            request.target.room_id,
+        ) and await self.edit_text(
+            EditTextRequest(
+                target=request.target,
+                event_id=event_id,
+                new_text=terminal_text,
+                tool_trace=tool_trace,
+                extra_content=extra_content,
+            ),
+        )
+        return FinalDeliveryOutcome(
+            terminal_status=stream_outcome.terminal_status,
+            event_id=event_id,
+            is_visible_response=True,
+            final_visible_body=terminal_text if edited else None,
+            delivery_kind="edited" if edited else None,
+            cancel_source=cancel_source,
+            failure_reason=failure_reason,
+            tool_trace=tuple(tool_trace),
+            extra_content=extra_content,
+        )
+
     async def finalize_streamed_response(
         self,
         request: FinalizeStreamedResponseRequest,
@@ -2438,6 +2492,17 @@ class DeliveryGateway:
             visible_stream_event_id = stream_outcome.visible_event_id
             streamed_text = stream_outcome.visible_body_text
             final_body_candidate = stream_outcome.canonical_final_body_candidate or streamed_text
+            if (
+                request.resumed is not None
+                and request.existing_event_id is not None
+                and stream_outcome.terminal_status in {"cancelled", "error"}
+                and stream_outcome.visible_body_state == "none"
+            ):
+                return await self._end_resumed_reply_before_continuation(
+                    request,
+                    event_id=request.existing_event_id,
+                    resumed=request.resumed,
+                )
             if stream_outcome.terminal_status == "cancelled":
                 failure_reason = stream_outcome.failure_reason or "stream_finalize_cancelled"
                 cancel_source = cancel_source_from_failure_reason(failure_reason)

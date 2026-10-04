@@ -1225,6 +1225,24 @@ async def test_a_resumed_team_pause_hands_off_the_teams_own_presentation(config:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
+async def test_a_resumed_stream_that_adds_nothing_shows_the_stopped_text_once(config: Config) -> None:
+    """A continuation that ends without any output, such as a declined participation, completes below the restart note."""
+    gateway = _FakeGateway()
+
+    async def nothing() -> AsyncIterator[object]:
+        return
+        yield
+
+    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+        await _run_resumed_stream(config, nothing())
+
+    final = gateway.ops[-1]
+    assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
+    assert final.display_text.rstrip() == _RESUMED_PREFIX.rstrip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
 async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(config: Config) -> None:
     """A continuation that arrives only as its final event still goes below the stopped attempt."""
     gateway = _FakeGateway()
