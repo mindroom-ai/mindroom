@@ -305,16 +305,19 @@ def test_read_agno_runs_matches_a_run_id_alone(tmp_path: Path) -> None:
 
 
 def test_read_agno_runs_keeps_the_newest_runs_across_databases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Beyond the cap the oldest runs by created_at are dropped and counted; the kept runs come oldest first."""
+    """Beyond the cap the oldest runs by created_at are dropped and counted, even within one table inserted out of order.
+
+    The kept runs come oldest first.
+    """
     monkeypatch.setattr(debug_report_module, "_MAX_AGNO_RUNS", 2)
-    _seed_runs(tmp_path / "agents" / "general", ROOM, [("run-newest", 300), ("run-oldest", 100)])
-    _seed_runs(tmp_path / "teams" / "crew", ROOM, [("run-middle", 200)])
+    _seed_runs(tmp_path / "agents" / "general", ROOM, [("run-300", 300), ("run-100", 100), ("run-200", 200)])
+    _seed_runs(tmp_path / "teams" / "crew", ROOM, [("run-250", 250)])
 
     result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
 
     assert result.status == "ok"
-    assert [item["run_id"] for item in result.items] == ["run-middle", "run-newest"]
-    assert result.dropped == 1
+    assert [item["run_id"] for item in result.items] == ["run-250", "run-300"]
+    assert result.dropped == 2
     assert {item["table"] for item in result.items} == {"general_sessions_runs", "crew_sessions_runs"}
 
 

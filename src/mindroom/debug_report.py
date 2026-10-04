@@ -22,8 +22,6 @@ _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _AGNO_JSON_COLUMNS = frozenset({"run_data"})
 _MAX_JSONL_RECORDS = 1000
 _MAX_AGNO_RUNS = 100
-# Selected next to `*` so sorting by age cannot collide with a column of the runs table.
-_ROWID_COLUMN = "_debug_report_rowid"
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
@@ -37,8 +35,6 @@ _SESSION_DATABASE_GLOBS = (
 )
 
 _Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
-# One Agno run with its sort key: `(created_at, rowid)`.
-type _AgedRun = tuple[tuple[float, int], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -265,7 +261,7 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
         return result
     failures: list[str] = []
     matches = 0
-    runs: list[_AgedRun] = []
+    runs: list[dict[str, Any]] = []
     for database in databases:
         try:
             database_matches, database_runs = _read_agno_database(database, conditions, [*run_ids, *session_ids])
@@ -274,9 +270,9 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
             continue
         matches += database_matches
         runs.extend(database_runs)
-    newest = sorted(runs, key=lambda run: run[0])[-_MAX_AGNO_RUNS:]
-    result.items = [item for _, item in newest]
-    result.dropped = matches - len(newest)
+    # The stable sort keeps each table's rowid order among runs created at the same time.
+    result.items = sorted(runs, key=_run_age)[-_MAX_AGNO_RUNS:]
+    result.dropped = matches - len(result.items)
     if failures:
         result.error = "; ".join(failures)
         if len(failures) == len(databases):
@@ -284,36 +280,37 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     return result
 
 
+def _run_age(run: Mapping[str, Any]) -> float:
+    """Return a run's `created_at`; a run without a numeric one sorts as oldest."""
+    created_at = run.get("created_at")
+    return created_at if isinstance(created_at, int | float) else float("-inf")
+
+
 def _read_agno_database(
     database: Path,
     conditions: Sequence[str],
     params: Sequence[object],
-) -> tuple[int, list[_AgedRun]]:
-    """Return how many runs match and the newest `_MAX_AGNO_RUNS` of each table, keyed by age.
-
-    The age is the run's `created_at`, then its rowid; a run without a numeric `created_at` sorts as oldest.
-    """
+) -> tuple[int, list[dict[str, Any]]]:
+    """Return how many runs match and the newest `_MAX_AGNO_RUNS` of each table, oldest first."""
     where = " OR ".join(conditions)
     matches = 0
-    runs: list[_AgedRun] = []
+    runs: list[dict[str, Any]] = []
     with _sqlite_query(database) as query:
         tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
         for table in sorted(name for name in tables if name.endswith("_runs")):
             columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
-            if not {"run_id", "session_id", "run_data"} <= columns:
+            if not {"run_id", "session_id", "run_data", "created_at"} <= columns:
                 continue
             # Table names come from sqlite_master; values are placeholders.
             matches += query(f'SELECT COUNT(*) AS matches FROM "{table}" WHERE {where}', params)[0]["matches"]  # noqa: S608
             rows = query(
-                f'SELECT rowid AS "{_ROWID_COLUMN}", * FROM "{table}" WHERE {where} ORDER BY rowid DESC LIMIT ?',  # noqa: S608
+                f'SELECT * FROM "{table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
                 [*params, _MAX_AGNO_RUNS],
             )
-            for row in rows:
-                rowid = row.pop(_ROWID_COLUMN)
-                created_at = row.get("created_at")
-                age = (created_at if isinstance(created_at, int | float) else float("-inf"), rowid)
-                item = {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
-                runs.append((age, item))
+            runs.extend(
+                {"database": str(database), "table": table, **_decode_json_columns(row, _AGNO_JSON_COLUMNS)}
+                for row in reversed(rows)
+            )
     return matches, runs
 
 
