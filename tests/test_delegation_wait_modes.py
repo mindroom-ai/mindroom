@@ -28,7 +28,13 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import (
+    DelegationModel,
+    _call,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+)
 from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -157,6 +163,7 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
                     **options,
                     decisions={call_id: True},
                     denial_reasons={call_id: None},
+                    approval_calls=_saved_approval_calls(state),
                 )
                 assert response.status == RunStatus.completed
                 jobs = await runtime.list_jobs(owner=owner, depth=0)

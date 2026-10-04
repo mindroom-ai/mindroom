@@ -16,7 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.event_journal import ApprovalCall
+from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -100,7 +100,16 @@ async def test_reserved_controls_obey_approval_and_plugin_hooks(
                 assert phases == []
                 for requirement in response.requirements:
                     requirement.confirm()
-                calls = (ApprovalCall("control", "job", "leader", 2**62, toolkit_name="job"),)
+                calls = (
+                    ApprovalCall(
+                        "control",
+                        "job",
+                        "leader",
+                        2**62,
+                        toolkit_name="job",
+                        arguments_digest=approval_arguments_digest({"action": action, "job_id": "missing"}),
+                    ),
+                )
                 restored_tools = await required_approval_tool_names(
                     "leader",
                     calls,
