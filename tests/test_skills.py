@@ -120,15 +120,18 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
     assert (listing.path.parent / "references" / "reference-index.md").exists()
 
 
-def test_bundled_open_knowledge_format_skill_is_discoverable() -> None:
-    """Ensure the bundled open-knowledge-format skill is discoverable."""
-    listing = skills_module.resolve_skill_listing(
-        "open-knowledge-format",
-        roots=[skills_module._get_bundled_skills_dir()],
+def test_bundled_open_knowledge_format_skill_loads_for_allowlisted_agent(tmp_path: Path) -> None:
+    """Ensure an agent that allowlists the bundled open-knowledge-format skill can load it."""
+    skills = build_agent_skills(
+        "code",
+        _base_config(["open-knowledge-format"]),
+        _runtime_paths(tmp_path),
+        skill_roots=[skills_module._get_bundled_skills_dir()],
+        env_vars={},
+        credential_keys=set(),
     )
-    assert listing is not None
-    assert listing.origin == "bundled"
-    assert listing.description.startswith("Use when")
+
+    assert _skill_names(skills) == ["open-knowledge-format"]
 
 
 def test_get_bundled_skills_dir_uses_package_fallback(

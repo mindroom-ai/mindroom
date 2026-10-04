@@ -26,11 +26,11 @@ Links that start with `/` resolve from the bundle root, such as `/playbooks/depl
 | `generated.at` after the newest `verified` time | Changed since it was last verified. |
 
 3. Cite concept paths in your answer.
-4. For `type: Attested Computation`, use the computation exactly as written and supply only values for its declared `parameters`.
+4. For `type: Attested Computation`, use its `# Computation` block, or the file its `computation` key names, exactly as written, and supply only values for its declared `parameters`.
 
 ## Writing
 
-Every concept you create or change gets this frontmatter shape:
+New concepts get this frontmatter shape; when you edit a concept, keep all its existing keys and values and change only what the edit requires:
 
 ```yaml
 ---
@@ -54,7 +54,7 @@ sources:
   Recording a confirmation leaves `generated` as it is, because the content did not change.
 - Retire a concept by setting `status: deprecated` and linking its replacement at the top of the body; keep the file.
 - Write links to other concepts from the bundle root, such as `/services/billing-api.md`.
-- Cite a source in the body with a footnote whose label is the source `id`: `...every 90 days.[^ops-412]`.
+- Cite a source in the body with a footnote whose label is the source `id`, `...every 90 days.[^ops-412]`, and end the body with its definition, `[^ops-412]: Ticket OPS-412`.
 - Put double quotes around every `title` and `description`, and around any other value that contains `: ` or starts with `@`, as in the template above.
 
 After each write:
@@ -62,4 +62,4 @@ After each write:
 1. Update the folder's `index.md`: one line per concept, `* [Title](file.md) - description`, marking deprecated entries.
    A new folder also gets a line `* [Folder](folder/index.md) - description` in its parent's `index.md`.
 2. Update the bundle root `log.md`: newest date first, one line per change under `## YYYY-MM-DD`, such as `* **Update**: Added a canary step to the [billing deploy playbook](/playbooks/deploy-billing.md).`
-3. Read each changed concept back and check that its frontmatter still has every key exactly once.
+3. Read each changed concept back and check that its frontmatter still has every key it had before, each exactly once.

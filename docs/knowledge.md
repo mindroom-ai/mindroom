@@ -462,7 +462,7 @@ Mirror the bundle's repository inside the agent workspace and name the bundle ro
 ```yaml
 knowledge_bases:
   acme_okf:
-    description: Acme Retail finance knowledge, an Open Knowledge Format (OKF) bundle mirrored from Git. Start at bundles/acme_retail/index.md.
+    description: Acme Retail finance knowledge, a read-only Open Knowledge Format (OKF) bundle mirrored from Git. Start at knowledge/acme_okf/bundles/acme_retail/index.md.
     mode: files
     path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/acme
     git:
@@ -478,9 +478,9 @@ agents:
     skills: [open-knowledge-format]
 ```
 
-MindRoom clones the repository one `poll_interval_seconds` after startup, and agents see the base once the clone exists; trigger a sync from the dashboard to clone it right away.
+MindRoom clones the repository one `poll_interval_seconds` interval after startup, and agents see the base once the clone exists; trigger a sync from the dashboard to clone it right away.
 Agents can read the whole checkout; `include_patterns` only limits what MindRoom lists and indexes.
-Treat a Git-backed bundle as read-only, because [sync](#sync-behavior) discards edits to tracked files.
+Treat a Git-backed bundle as read-only, because [sync](#sync-behavior) discards edits to tracked files whenever the upstream branch moves.
 
 ### Maintaining a Bundle with Agents
 
@@ -492,7 +492,6 @@ knowledge_bases:
     description: The team's ops wiki, an Open Knowledge Format (OKF) bundle that the team and its agents maintain.
     mode: files
     path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/ops_wiki
-    watch: false
 ```
 
 Create the folder with a root `index.md` first, because agents see a files-mode base only once its folder exists.
