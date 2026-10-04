@@ -326,10 +326,12 @@ Minimal-mode ownership and recovery are described in `docs/architecture/agent-cl
 | `interactive.py` | Interactive Q&A system via Matrix reactions |
 | `stop.py` | StopManager for cancelling in-progress responses |
 | `topic_generator.py` | AI-generated room topics |
+| `debug_report.py` | Read-only collection of what the backend stored about one reported conversation: event journal, Agno runs, tool-call and LLM request logs, and log lines |
 | `cli/main.py` | Main CLI entry point (Typer app) |
 | `cli/banner.py` | CLI startup banner |
 | `cli/config.py` | Config subcommand logic |
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
+| `cli/debug_report.py` | `mindroom debug-report` command: bug report parsing, config-only storage location, and JSON output |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
 | `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
