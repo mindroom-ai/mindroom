@@ -232,8 +232,10 @@ def apply_armed(
         "scheduled_for": approval_timestamp(int(row["execute_at_ns"])),
         "arguments_digest": call.arguments_digest,
     }
+    # Timed-grant scope is bound only when a card is reserved, so this receipt
+    # must not carry the unbound placeholder its prepared payload still holds.
     receipt = approval_card_state.terminal_content(
-        card.payload,
+        {key: value for key, value in card.payload.items() if key != "approval_scope"},
         status="approved",
         reason=None,
         metadata=approval_card_state.ApprovalDecisionMetadata(

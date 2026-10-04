@@ -40,6 +40,7 @@ from mindroom.scheduling import (
     cancel_scheduled_task,
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from mindroom.tool_approval_grants import ApprovalOperation
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
@@ -171,6 +172,7 @@ async def _fire_time_call(
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=agent,
         thread_id=thread,
+        grant_operation=ApprovalOperation("binding", "post_slack_message"),
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -243,6 +245,8 @@ async def test_armed_approval_runs_the_exact_call_once(
         assert receipt.payload["approvable"] is False
         assert receipt.payload["resolved_by"] == _REQUESTER
         assert receipt.payload["arguments"] == _ARGUMENTS
+        assert "approval_scope" not in receipt.payload
+        assert "auto_approve_options" not in receipt.payload
         provenance = receipt.payload["approval_provenance"]
         assert provenance["kind"] == "scheduled_approval"
         assert provenance["task_id"] == _TASK
