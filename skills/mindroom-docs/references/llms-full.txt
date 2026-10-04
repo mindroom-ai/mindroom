@@ -25670,10 +25670,9 @@ Create and privately save the dedicated local desktop Matrix device.
 │                                                                    homeserver.         │
 │ --login-method                                [auto|password|sso]  Matrix login        │
 │                                                                    method. Auto uses   │
-│                                                                    password when       │
+│                                                                    browser SSO when    │
 │                                                                    advertised,         │
-│                                                                    otherwise browser   │
-│                                                                    SSO.                │
+│                                                                    otherwise password. │
 │                                                                    [default: auto]     │
 │ --sso-idp                                     TEXT                 Matrix SSO          │
 │                                                                    identity-provider   │
