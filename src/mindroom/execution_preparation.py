@@ -479,7 +479,7 @@ def _build_unseen_context_messages(
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
-    unseen_messages, partial_reply_kinds = _get_unseen_messages_for_sender(
+    unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
         history_before_current or (),
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
@@ -509,7 +509,10 @@ def _build_unseen_context_messages(
             config=config,
             member_display_names=member_display_names,
         ),
-        _get_unseen_event_ids_for_metadata(unseen_messages),
+        _get_unseen_event_ids_for_metadata(
+            unseen_messages,
+            in_progress_event_ids=in_progress_event_ids,
+        ),
     )
 
 
@@ -658,7 +661,7 @@ def _sanitize_thread_history_for_replay(
     active_event_ids: Collection[str],
 ) -> tuple[ResolvedVisibleMessage, ...]:
     """Apply unseen-context sanitization before fallback full-thread replay."""
-    sanitized, _ = _get_unseen_messages_for_sender(
+    sanitized, _, _ = _get_unseen_messages_for_sender(
         thread_history,
         sender_id=response_sender_id,
         seen_event_ids=set(),
@@ -668,16 +671,16 @@ def _sanitize_thread_history_for_replay(
     return tuple(sanitized)
 
 
-def _get_unseen_event_ids_for_metadata(unseen_messages: list[ResolvedVisibleMessage]) -> list[str]:
-    """Return unseen event IDs that should be persisted as consumed by this run.
-
-    A reply still being written, this entity's or another's, is read again once
-    it is finished: it may still change, and a placeholder that ends empty is redacted.
-    """
+def _get_unseen_event_ids_for_metadata(
+    unseen_messages: list[ResolvedVisibleMessage],
+    *,
+    in_progress_event_ids: set[str],
+) -> list[str]:
+    """Return unseen event IDs that should be persisted as consumed by this run."""
     event_ids: list[str] = []
     for msg in unseen_messages:
         event_id = msg.event_id
-        if msg.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
+        if event_id in in_progress_event_ids:
             continue
         event_ids.append(event_id)
         if msg.latest_event_id != event_id:
@@ -692,10 +695,11 @@ def _get_unseen_messages_for_sender(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: Collection[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind]]:
+) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
     """Filter thread_history to unseen messages for one Matrix sender."""
     unseen: list[ResolvedVisibleMessage] = []
     partial_reply_kinds: set[_PartialReplyKind] = set()
+    in_progress_event_ids: set[str] = set()
     for msg in thread_history:
         event_id = msg.event_id
         sender = msg.sender
@@ -706,6 +710,12 @@ def _get_unseen_messages_for_sender(
             continue
         if isinstance(content, dict) and any(key in content for key in _LIFECYCLE_NOTICE_CONTENT_KEYS):
             continue
+        if msg.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING} and not _clean_partial_reply_body(
+            msg.body,
+        ):
+            # A reply that so far shows only its placeholder has nothing to read yet, and a placeholder that
+            # ends empty is redacted, so recording it as consumed would let that tidy-up remove real history.
+            continue
         if sender_id and sender == sender_id and not _is_relayed_user_message(msg):
             partial_kind = _classify_partial_reply(
                 msg,
@@ -714,20 +724,19 @@ def _get_unseen_messages_for_sender(
             if partial_kind is _PartialReplyKind.INTERRUPTED:
                 continue
             if partial_kind is not None:
-                cleaned_body = _clean_partial_reply_body(msg.body)
-                if not cleaned_body:
-                    continue
                 partial_reply_kinds.add(partial_kind)
+                if partial_kind is _PartialReplyKind.IN_PROGRESS and event_id is not None:
+                    in_progress_event_ids.add(event_id)
                 unseen.append(
                     replace_visible_message(
                         msg,
                         sender=_PARTIAL_REPLY_SENDER_LABELS.get(partial_kind.value, "You (partial reply)"),
-                        body=cleaned_body,
+                        body=_clean_partial_reply_body(msg.body),
                     ),
                 )
                 continue
         unseen.append(msg)
-    return unseen, partial_reply_kinds
+    return unseen, partial_reply_kinds, in_progress_event_ids
 
 
 def _scope_seen_event_ids(scope_context: ScopeSessionContext | None) -> set[str]:

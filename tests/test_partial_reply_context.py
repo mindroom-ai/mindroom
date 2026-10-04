@@ -78,7 +78,7 @@ def _get_unseen_messages(
     seen_event_ids: set[str],
     current_event_id: str | None,
     active_event_ids: set[str],
-) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind]]:
+) -> tuple[list[ResolvedVisibleMessage], set[_PartialReplyKind], set[str]]:
     response_sender_id = entity_ids(config, runtime_paths).get(agent_name)
     response_sender = response_sender_id.full_id if response_sender_id is not None else None
     return _get_unseen_messages_for_sender(
@@ -380,7 +380,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             thread_history,
             "helper",
             config,
@@ -392,6 +392,7 @@ class TestUnseenMessagesPartialReplies:
 
         assert unseen == []
         assert partial_reply_kinds == set()
+        assert in_progress_event_ids == set()
 
     def test_includes_streaming_self_reply_with_cleaned_body_and_header(self) -> None:
         """Inject still-streaming self replies with the non-duplication warning header."""
@@ -509,7 +510,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -529,29 +530,23 @@ class TestUnseenMessagesPartialReplies:
 
         assert [msg.event_id for msg in unseen] == ["e1", "e2"]
         assert partial_reply_kinds == {_PartialReplyKind.IN_PROGRESS}
-        assert _get_unseen_event_ids_for_metadata(unseen) == ["e2"]
+        assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
 
     @pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
-    def test_another_entitys_unfinished_reply_is_read_but_not_recorded_as_consumed(self, stream_status: str) -> None:
-        """An unfinished reply may still change or be redacted as an empty placeholder, so a later run reads it again."""
+    def test_another_entitys_placeholder_only_reply_is_neither_read_nor_recorded(self, stream_status: str) -> None:
+        """A placeholder that ends empty is redacted, so recording it as consumed would let that remove real history."""
         config = _make_config()
         runtime_paths = runtime_paths_for(config)
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
                     sender="@mindroom_other:localhost",
-                    body="Thinking...",
+                    body=_PROGRESS_PLACEHOLDER,
                     stream_status=stream_status,
                 ),
-                _make_visible_message(
-                    event_id="e2",
-                    sender="@mindroom_other:localhost",
-                    body="Done",
-                    stream_status=STREAM_STATUS_COMPLETED,
-                ),
-                _make_visible_message(event_id="e3", sender="@user:localhost", body="Question"),
+                _make_visible_message(event_id="e2", sender="@user:localhost", body="Question"),
             ],
             "helper",
             config,
@@ -561,9 +556,34 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
 
-        assert [msg.event_id for msg in unseen] == ["e1", "e2", "e3"]
+        assert [msg.event_id for msg in unseen] == ["e2"]
         assert partial_reply_kinds == set()
-        assert _get_unseen_event_ids_for_metadata(unseen) == ["e2", "e3"]
+        assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e2"]
+
+    def test_another_entitys_streamed_text_is_recorded_as_consumed(self) -> None:
+        """Text already read from another entity's unfinished reply stays traceable, so redacting that reply finds the run."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+
+        unseen, _partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
+            [
+                _make_visible_message(
+                    event_id="e1",
+                    sender="@mindroom_other:localhost",
+                    body="The first half of an answer",
+                    stream_status=STREAM_STATUS_STREAMING,
+                ),
+            ],
+            "helper",
+            config,
+            runtime_paths,
+            seen_event_ids=set(),
+            current_event_id=None,
+            active_event_ids=set(),
+        )
+
+        assert [msg.body for msg in unseen] == ["The first half of an answer"]
+        assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e1"]
 
     def test_recent_streaming_reply_without_live_event_id_is_skipped_from_unseen_context(self) -> None:
         """After restart, stale self-streaming output should not be reconstructed from Matrix history."""
@@ -571,7 +591,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -591,6 +611,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert partial_reply_kinds == set()
+        assert in_progress_event_ids == set()
         assert unseen == []
 
     def test_placeholder_only_self_reply_is_not_injected(self) -> None:
@@ -599,7 +620,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
-        unseen, partial_reply_kinds = _get_unseen_messages(
+        unseen, partial_reply_kinds, _in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -626,7 +647,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
-        initial_unseen, initial_kinds = _get_unseen_messages(
+        initial_unseen, initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -644,10 +665,13 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids=set(),
         )
         seen_event_ids = set(
-            _get_unseen_event_ids_for_metadata(initial_unseen),
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            ),
         ) | {"e2"}
 
-        repeated_unseen, repeated_kinds = _get_unseen_messages(
+        repeated_unseen, repeated_kinds, _repeated_in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -667,7 +691,13 @@ class TestUnseenMessagesPartialReplies:
 
         assert initial_unseen == []
         assert initial_kinds == set()
-        assert _get_unseen_event_ids_for_metadata(initial_unseen) == []
+        assert (
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            )
+            == []
+        )
         assert repeated_unseen == []
         assert repeated_kinds == set()
 
@@ -677,7 +707,7 @@ class TestUnseenMessagesPartialReplies:
         runtime_paths = runtime_paths_for(config)
         agent_id = entity_ids(config, runtime_paths)["helper"].full_id
 
-        initial_unseen, _initial_kinds = _get_unseen_messages(
+        initial_unseen, _initial_kinds, initial_in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -695,10 +725,13 @@ class TestUnseenMessagesPartialReplies:
             active_event_ids={"e1"},
         )
         seen_event_ids = set(
-            _get_unseen_event_ids_for_metadata(initial_unseen),
+            _get_unseen_event_ids_for_metadata(
+                initial_unseen,
+                in_progress_event_ids=initial_in_progress_event_ids,
+            ),
         ) | {"e2"}
 
-        updated_unseen, updated_kinds = _get_unseen_messages(
+        updated_unseen, updated_kinds, updated_in_progress_event_ids = _get_unseen_messages(
             [
                 _make_visible_message(
                     event_id="e1",
@@ -717,6 +750,7 @@ class TestUnseenMessagesPartialReplies:
         )
 
         assert updated_kinds == set()
+        assert updated_in_progress_event_ids == set()
         assert updated_unseen == []
 
 
