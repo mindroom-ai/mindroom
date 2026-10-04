@@ -906,8 +906,8 @@ class AgentBot:
                     build_message_target=self._conversation_resolver.build_message_target,
                     delivery_gateway=self._delivery_gateway,
                 ),
-                holds_background_work=self._response_runner.held_reply_for_message,
-                stop_held_work=self._response_runner.stop_held_reply,
+                holds_background_work=self._response_runner.held_messages.holds_work,
+                stop_held_work=self._response_runner.held_messages.stop,
             ),
         )
 

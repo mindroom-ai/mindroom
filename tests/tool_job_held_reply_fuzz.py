@@ -293,7 +293,7 @@ class HeldReplyFuzzRunner:
         request = _plain_request(_target(thread_id=_THREAD), source_event_id=source)
 
         async def operation(_target: MessageTarget) -> None:
-            await self.runner._settle_held_reply(
+            await self.runner.held_messages.settle(
                 request,
                 FinalDeliveryOutcome(terminal_status="completed", event_id=None, suppressed=True),
                 None,
@@ -336,7 +336,7 @@ class HeldReplyFuzzRunner:
 
         async def operation(_target: MessageTarget) -> None:
             nonlocal request
-            resumed = await self.runner._resume_held_reply(request)
+            resumed = await self.runner.held_messages.resume(request)
             if resumed is None:
                 return
             request = resumed
@@ -348,7 +348,7 @@ class HeldReplyFuzzRunner:
                 self.model.latest_boundary_message = turn.message
                 self.model.unheld_allowed = self.model.unheld_allowed and report.boundary.joins >= JOB_JOIN_LIMIT
                 self.model.uncertain = False
-            await self.runner._settle_held_reply(
+            await self.runner.held_messages.settle(
                 request,
                 outcome,
                 report.boundary,
@@ -398,7 +398,7 @@ class HeldReplyFuzzRunner:
                 raise
             # A Stop: the turn settles its message as stopped before the cancellation ends it.
             outcome = self._delivered(turn, "cancelled", "Stopped.")
-            await self.runner._settle_held_reply(
+            await self.runner.held_messages.settle(
                 request,
                 outcome,
                 report.boundary,
@@ -505,7 +505,7 @@ class HeldReplyFuzzRunner:
             return
         if any(turn.message == hold.message_event_id for turn in self._live()):
             return
-        assert await self.runner.stop_held_reply(hold.message_event_id, self._next_order())
+        assert await self.runner.held_messages.stop(hold.message_event_id, self._next_order())
 
     async def _stop_live(self, _step: Step) -> None:
         """Stop the running turn: it ends, and so does the work of it and every earlier turn."""

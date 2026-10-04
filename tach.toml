@@ -2737,6 +2737,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.held_reply_lifecycle",
     "mindroom.tool_jobs.held_replies",
     "mindroom.agent_modes",
     "mindroom.runtime_resolution",
@@ -7684,6 +7685,7 @@ visibility = [
     "mindroom.delegation.background",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
+    "mindroom.held_reply_lifecycle",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
     "mindroom.tool_jobs.agno_compat_execution",
@@ -8023,10 +8025,22 @@ depends_on = [
 visibility = [
     "mindroom.ai",
     "mindroom.bot",
+    "mindroom.held_reply_lifecycle",
     "mindroom.response_runner",
     "mindroom.response_turn",
     "mindroom.teams",
 ]
+
+[[modules]]
+path = "mindroom.held_reply_lifecycle"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.streaming",
+    "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.held_replies",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.tool_jobs.held_replies"
@@ -8044,6 +8058,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
+    "mindroom.held_reply_lifecycle",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
     "mindroom.tool_jobs.completion",

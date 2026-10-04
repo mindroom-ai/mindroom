@@ -12,7 +12,7 @@ from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, precondition, rule, run_state_machine_as_test
 
-from mindroom.response_runner import ResponseRunner
+from mindroom.held_reply_lifecycle import HeldReplyLifecycle
 from tests.tool_job_held_reply_fuzz import HeldReplyFuzzRunner, Step
 
 if TYPE_CHECKING:
@@ -184,10 +184,10 @@ async def test_held_reply_oracle_detects_work_no_message_holds(
 ) -> None:
     """The fuzzer must fail when a reply ends without its message holding its running work."""
 
-    async def never_hold(self: ResponseRunner, *_args: object, **_kwargs: object) -> None:
+    async def never_hold(self: HeldReplyLifecycle, *_args: object, **_kwargs: object) -> None:
         del self
 
-    monkeypatch.setattr(ResponseRunner, "_save_held_reply", never_hold)
+    monkeypatch.setattr(HeldReplyLifecycle, "save", never_hold)
     runner = await _runner(tmp_path, monkeypatch)
     try:
         with pytest.raises(AssertionError):
@@ -203,10 +203,10 @@ async def test_held_reply_oracle_detects_a_message_left_waiting(
 ) -> None:
     """The fuzzer must fail when a newer reply takes the work over but the older message keeps its notice."""
 
-    async def keep_waiting(self: ResponseRunner, *_args: object, **_kwargs: object) -> None:
+    async def keep_waiting(self: HeldReplyLifecycle, *_args: object, **_kwargs: object) -> None:
         del self
 
-    monkeypatch.setattr(ResponseRunner, "_release_held_message", keep_waiting)
+    monkeypatch.setattr(HeldReplyLifecycle, "release", keep_waiting)
     runner = await _runner(tmp_path, monkeypatch)
     try:
         await runner.step(Step("message", jobs=1, hold=True))

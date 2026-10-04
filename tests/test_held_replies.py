@@ -107,7 +107,7 @@ class _Held:
             if event_id is not None
             else FinalDeliveryOutcome(terminal_status="completed", event_id=None)
         )
-        await self.runner._settle_held_reply(
+        await self.runner.held_messages.settle(
             replace(self.request, held_reply=held),
             outcome,
             ReplyBoundary(_KEY, notice, joins),
@@ -235,7 +235,7 @@ async def test_a_turn_ending_before_its_boundary_releases_the_hold_it_ran_on(
     await held.settle("$reply", "Started.", _WAITING_NOTICE)
     hold = await held.hold()
     assert hold is not None
-    await held.runner._settle_held_reply(
+    await held.runner.held_messages.settle(
         held.request,
         FinalDeliveryOutcome(
             terminal_status=status,
@@ -257,7 +257,7 @@ async def test_a_turn_ending_before_its_boundary_releases_the_hold_it_ran_on(
 async def test_a_silent_schedule_holds_its_work_without_a_message(held: _Held) -> None:
     """A silent schedule's hold has no message to edit, so only a turn continuing it reports the results."""
     silent_key = replace(_KEY, silent=True)
-    await held.runner._settle_held_reply(
+    await held.runner.held_messages.settle(
         held.request,
         FinalDeliveryOutcome(terminal_status="completed", event_id=None),
         ReplyBoundary(silent_key, _WAITING_NOTICE, 0),
@@ -278,7 +278,7 @@ async def test_resuming_a_held_message_retrieves_ready_work(held: _Held) -> None
     await held.settle("$reply", "Started.", _WAITING_NOTICE, joins=2)
     hold = await held.hold()
     assert hold is not None
-    resumed = await held.runner._resume_held_reply(replace(held.request, held_reply=hold))
+    resumed = await held.runner.held_messages.resume(replace(held.request, held_reply=hold))
     assert resumed is not None
     assert 'job_id="ready"' in resumed.prompt
     assert resumed.response_envelope.body == resumed.prompt
@@ -318,7 +318,7 @@ async def test_resuming_after_an_interrupted_continuation_reads_what_it_already_
     )
     await held.runtime.acknowledge_wait("read", claim, source_event_id=_wake_event_id(hold))
     assert (await conversation_work(held.runtime, _KEY)).jobs == ()
-    resumed = await held.runner._resume_held_reply(wake)
+    resumed = await held.runner.held_messages.resume(wake)
     assert resumed is not None
     # The re-run asks for the outcome again like any ready work, from the message as it was held.
     assert 'job_id="read"' in resumed.prompt
@@ -340,7 +340,7 @@ async def test_resuming_a_replaced_hold_does_nothing(held: _Held) -> None:
     old = await held.hold()
     await held.settle("$second", "Second.", _WAITING_NOTICE)
     assert old is not None
-    assert await held.runner._resume_held_reply(replace(held.request, held_reply=old)) is None
+    assert await held.runner.held_messages.resume(replace(held.request, held_reply=old)) is None
     current = await held.hold()
     assert current is not None
     assert current.message_event_id == "$second"
@@ -370,7 +370,7 @@ async def test_resuming_shows_what_the_work_waits_for_now(held: _Held) -> None:
         await held.settle("$reply", "Started.", _WAITING_NOTICE)
         hold = await held.hold()
         assert hold is not None
-        assert await held.runner._resume_held_reply(replace(held.request, held_reply=hold)) is None
+        assert await held.runner.held_messages.resume(replace(held.request, held_reply=hold)) is None
         again = await held.hold()
         assert again is not None
         assert again.generation != hold.generation
@@ -390,7 +390,7 @@ async def test_resuming_releases_a_message_with_nothing_left_to_continue(held: _
     await held.settle("$reply", "Started.", _WAITING_NOTICE, joins=JOB_JOIN_LIMIT if reason == "join_limit" else 0)
     hold = await held.hold()
     assert hold is not None
-    assert await held.runner._resume_held_reply(replace(held.request, held_reply=hold)) is None
+    assert await held.runner.held_messages.resume(replace(held.request, held_reply=hold)) is None
     assert await held.hold() is None
     assert held.edits[-1].new_text == "Started."
     assert held.edits[-1].extra_content["io.mindroom.stream_status"] == "completed"
@@ -406,8 +406,8 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
     gate = asyncio.Event()
     await held.start("running", gate)
     await held.settle("$reply", "Started.", _WAITING_NOTICE, button="$button")
-    assert await held.runner.held_reply_for_message("$reply", "!room:localhost")
-    assert not await held.runner.held_reply_for_message("$reply", "!other:localhost")
+    assert await held.runner.held_messages.holds_work("$reply", "!room:localhost")
+    assert not await held.runner.held_messages.holds_work("$reply", "!other:localhost")
     target = held.request.response_envelope.target
     release = asyncio.Event()
     running = asyncio.Event()
@@ -426,7 +426,7 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
             ),
         )
         await asyncio.wait_for(running.wait(), JOB_TEST_TIMEOUT)
-    assert await asyncio.wait_for(held.runner.stop_held_reply("$reply", 7), JOB_TEST_TIMEOUT)
+    assert await asyncio.wait_for(held.runner.held_messages.stop("$reply", 7), JOB_TEST_TIMEOUT)
     stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
     assert stopped.user_stop_receipt_order == 7
     await wait_for_status(held.runtime, "running", "cancelled")
@@ -439,7 +439,7 @@ async def test_stop_on_a_held_message_ends_its_work(held: _Held, *, busy: bool) 
     assert held.edits[-1].new_text == "Started.\n\n**[Response cancelled by user]**"
     assert held.edits[-1].extra_content["io.mindroom.stream_status"] == "cancelled"
     held.bot.client.room_redact.assert_awaited_once_with("!room:localhost", "$button", reason="Response completed")
-    assert not await held.runner.stop_held_reply("$reply", 8)
+    assert not await held.runner.held_messages.stop("$reply", 8)
 
 
 @pytest.mark.asyncio
@@ -458,10 +458,10 @@ async def test_a_wake_queued_before_a_stop_leaves_the_message_stopped(held: _Hel
         ),
     )
     try:
-        assert await held.runner.stop_held_reply("$reply", 7)
+        assert await held.runner.held_messages.stop("$reply", 7)
         assert await held.hold() is None
         edits = len(held.edits)
-        assert await held.runner._resume_held_reply(replace(held.request, held_reply=hold)) is None
+        assert await held.runner.held_messages.resume(replace(held.request, held_reply=hold)) is None
         assert len(held.edits) == edits
     finally:
         release.set()
@@ -479,7 +479,7 @@ async def test_stop_on_a_held_message_a_continuation_began_on_leaves_the_message
     continuation = asyncio.create_task(asyncio.Event().wait())
     held.runner.deps.stop_manager.set_current("$reply", held.request.response_envelope.target, continuation)
     try:
-        assert not await held.runner.stop_held_reply("$reply", 7)
+        assert not await held.runner.held_messages.stop("$reply", 7)
         stopped = await lookup(held.runtime, "running", owner=held.owner, depth=0)
         assert stopped.user_stop_receipt_order == 7
         assert await held.hold() is None
@@ -498,7 +498,7 @@ async def test_a_continuation_holding_under_another_key_ends_the_hold_it_ran_on(
     old = await held.hold()
     assert old is not None
     roster = replace(_KEY, participants=("general", "helper"))
-    await held.runner._settle_held_reply(
+    await held.runner.held_messages.settle(
         held.request,
         _completed("$reply", "Continued."),
         ReplyBoundary(roster, _WAITING_NOTICE, 1),
@@ -546,7 +546,7 @@ async def test_stop_on_a_held_message_leaves_the_work_of_a_newer_reply(
 
     monkeypatch.setattr(store, "response_receipt_order_before_stop", response_order)
     monkeypatch.setattr(store, "load_event", load_event)
-    assert await held.runner.stop_held_reply("$reply", 30)
+    assert await held.runner.held_messages.stop("$reply", 30)
     stopped = await lookup(held.runtime, "held", owner=held.owner, depth=0)
     running = await lookup(held.runtime, "newer", owner=held.owner, depth=0)
     assert (stopped.user_stop_receipt_order, running.user_stop_receipt_order) == (30, None)
@@ -564,7 +564,7 @@ async def test_a_newer_reply_that_cannot_show_the_work_leaves_the_older_message_
     await held.settle("$first", "First.", _WAITING_NOTICE)
     first = await held.hold()
     edits = len(held.edits)
-    await held.runner._settle_held_reply(
+    await held.runner.held_messages.settle(
         held.request,
         FinalDeliveryOutcome(terminal_status=status, event_id="$second", is_visible_response=True),
         ReplyBoundary(_KEY, _WAITING_NOTICE, 0),
@@ -583,7 +583,7 @@ async def test_stop_on_a_held_message_leaves_outcomes_turns_already_read(held: _
     await held.runtime.acknowledge_wait("read", claim, source_event_id="$earlier")
     await held.start("running", asyncio.Event())
     await held.settle("$reply", "Started.", _WAITING_NOTICE)
-    assert await held.runner.stop_held_reply("$reply", 7)
+    assert await held.runner.held_messages.stop("$reply", 7)
     read = await lookup(held.runtime, "read", owner=held.owner, depth=0)
     running = await lookup(held.runtime, "running", owner=held.owner, depth=0)
     assert (read.user_stop_receipt_order, running.user_stop_receipt_order) == (None, 7)
@@ -618,15 +618,15 @@ async def test_work_whose_access_is_unresolved_stays_held(tmp_path: Path) -> Non
             work = await conversation_work(state.runtime, _KEY)
             assert ([job.job_id for job in work.jobs], work.ready) == (["work"], ())
             # Unreadable for now, the ready outcome is held without a turn retrieving it.
-            assert await state.runner._resume_held_reply(replace(state.request, held_reply=hold)) is None
+            assert await state.runner.held_messages.resume(replace(state.request, held_reply=hold)) is None
             again = await state.hold()
             assert again is not None
             access = "allowed"
-            resumed = await state.runner._resume_held_reply(replace(state.request, held_reply=again))
+            resumed = await state.runner.held_messages.resume(replace(state.request, held_reply=again))
             assert resumed is not None
             assert 'job_id="work"' in resumed.prompt
             access = "denied"
-            assert await state.runner._resume_held_reply(replace(state.request, held_reply=again)) is None
+            assert await state.runner.held_messages.resume(replace(state.request, held_reply=again)) is None
             assert await state.hold() is None
     finally:
         await state.runtime.shutdown()
@@ -639,7 +639,7 @@ async def test_an_offered_outcome_is_not_offered_again_by_wakes(held: _Held) -> 
     await held.start("ignored")
     await wait_for_status(held.runtime, "ignored", "completed")
     await held.start("running", gate)
-    await held.runner._settle_held_reply(
+    await held.runner.held_messages.settle(
         held.request,
         _completed("$reply", "Started."),
         ReplyBoundary(_KEY, _WAITING_NOTICE, 1, offered=frozenset({"ignored"})),
@@ -653,7 +653,7 @@ async def test_an_offered_outcome_is_not_offered_again_by_wakes(held: _Held) -> 
     assert ([job.job_id for job in work.jobs], work.ready) == (["running"], ())
     gate.set()
     await wait_for_status(held.runtime, "running", "completed")
-    resumed = await held.runner._resume_held_reply(replace(held.request, held_reply=hold))
+    resumed = await held.runner.held_messages.resume(replace(held.request, held_reply=hold))
     assert resumed is not None
     assert 'job_id="running"' in resumed.prompt
     assert 'job_id="ignored"' not in resumed.prompt
