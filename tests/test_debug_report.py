@@ -973,9 +973,10 @@ def test_build_debug_report_keeps_values_the_json_decoder_refuses(tmp_path: Path
     assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
 
 
-def test_cli_requires_an_identifier(tmp_path: Path) -> None:
-    """With nothing to look up the command fails and says what to pass."""
-    result = runner.invoke(app, ["debug-report", "-s", str(tmp_path)])
+@pytest.mark.parametrize("args", [[], ["--thread", "~local"]], ids=["nothing", "local-echo-thread"])
+def test_cli_requires_an_identifier(tmp_path: Path, args: list[str]) -> None:
+    """With nothing to look up, such as only a local echo that never reached the server, the command fails."""
+    result = runner.invoke(app, ["debug-report", *args, "-s", str(tmp_path)])
     assert result.exit_code == 1
     assert "at least one of --event, --room, --thread" in result.output
 

@@ -47,8 +47,8 @@ class _DebugReportIds:
     session_ids: frozenset[str] = frozenset()
 
     def is_empty(self) -> bool:
-        """Return whether there is nothing to look up."""
-        return not (self.room_id or self.thread_id or self.event_ids or self.run_ids)
+        """Return whether there is nothing to look up: a room yields a session ID and a thread an event ID."""
+        return not (self.event_ids or self.run_ids or self.session_ids)
 
     def to_json(self) -> dict[str, object]:
         """Return a JSON-ready view with sorted lists."""
@@ -73,20 +73,6 @@ def _ai_runs(value: object) -> Iterator[Mapping[str, Any]]:
             yield from _ai_runs(child)
 
 
-def _scan_event(raw: object, events: set[str], run_ids: set[str], session_ids: set[str]) -> None:
-    """Add the event id and every nested AI run identifier of one raw event."""
-    if not isinstance(raw, Mapping):
-        return
-    event = cast("Mapping[str, Any]", raw)
-    if isinstance(event.get("event_id"), str):
-        events.add(event["event_id"])
-    for ai_run in _ai_runs(raw):
-        if isinstance(ai_run.get("run_id"), str):
-            run_ids.add(ai_run["run_id"])
-        if isinstance(ai_run.get("session_id"), str):
-            session_ids.add(ai_run["session_id"])
-
-
 def collect_ids(
     report: Mapping[str, Any] | None,
     *,
@@ -95,29 +81,30 @@ def collect_ids(
     thread_id: str | None = None,
 ) -> _DebugReportIds:
     """Merge identifiers from a MindRoom Chat bug report and explicit flags."""
-    events = set(event_ids)
-    run_ids: set[str] = set()
-    session_ids: set[str] = set()
-    if report is not None:
-        target = report.get("target") or {}
-        room_id = room_id or target.get("roomId")
-        thread_id = thread_id or target.get("threadId")
-        if isinstance(target.get("eventId"), str):
-            events.add(target["eventId"])
-        for entry in report.get("events") or []:
-            _scan_event(entry.get("event"), events, run_ids, session_ids)
-            _scan_event(entry.get("latestEdit"), events, run_ids, session_ids)
-    if thread_id:
-        events.add(thread_id)
+    report = report or {}
+    target = report.get("target") or {}
+    room_id = room_id or target.get("roomId")
+    thread_id = thread_id or target.get("threadId")
+    raw_events = [
+        raw
+        for entry in report.get("events") or []
+        for raw in (entry.get("event"), entry.get("latestEdit"))
+        if isinstance(raw, Mapping)
+    ]
+    ai_runs = [ai_run for raw in raw_events for ai_run in _ai_runs(raw)]
+    events = [*event_ids, target.get("eventId"), thread_id, *(raw.get("event_id") for raw in raw_events)]
+    sessions = [ai_run.get("session_id") for ai_run in ai_runs]
     if room_id:
-        session_ids.add(f"{room_id}:{thread_id}" if thread_id else room_id)
+        sessions.append(f"{room_id}:{thread_id}" if thread_id else room_id)
     return _DebugReportIds(
         room_id=room_id,
         thread_id=thread_id,
         # Local echoes ("~…") never reached the homeserver, so the backend cannot know them.
-        event_ids=frozenset(event for event in events if event and not event.startswith("~")),
-        run_ids=frozenset(run_ids),
-        session_ids=frozenset(session_ids),
+        event_ids=frozenset(
+            event for event in events if isinstance(event, str) and event and not event.startswith("~")
+        ),
+        run_ids=frozenset(run_id for ai_run in ai_runs if isinstance(run_id := ai_run.get("run_id"), str)),
+        session_ids=frozenset(session for session in sessions if isinstance(session, str)),
     )
 
 
