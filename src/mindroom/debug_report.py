@@ -16,19 +16,19 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 if TYPE_CHECKING:
     from pathlib import Path
 
-AI_RUN_KEY = "io.mindroom.ai_run"
-JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
+_AI_RUN_KEY = "io.mindroom.ai_run"
+_JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _AGNO_JSON_COLUMNS = frozenset({"run_data"})
-MAX_JSONL_RECORDS = 1000
-MAX_LOG_LINES = 2000
-MAX_LOG_LINE_CHARS = 4000
+_MAX_JSONL_RECORDS = 1000
+_MAX_LOG_LINES = 2000
+_MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
 
-Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
+_Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
-class DebugReportIds:
+class _DebugReportIds:
     """Identifiers of one reported conversation."""
 
     room_id: str | None = None
@@ -56,7 +56,7 @@ def _ai_runs(value: object) -> Iterator[Mapping[str, Any]]:
     """Yield every AI run block nested anywhere in an event; streaming edits carry it in m.new_content."""
     if isinstance(value, Mapping):
         for key, child in cast("Mapping[str, object]", value).items():
-            if key == AI_RUN_KEY and isinstance(child, Mapping):
+            if key == _AI_RUN_KEY and isinstance(child, Mapping):
                 yield cast("Mapping[str, Any]", child)
             yield from _ai_runs(child)
     elif isinstance(value, list):
@@ -84,7 +84,7 @@ def collect_ids(
     event_ids: Iterable[str] = (),
     room_id: str | None = None,
     thread_id: str | None = None,
-) -> DebugReportIds:
+) -> _DebugReportIds:
     """Merge identifiers from a MindRoom Chat bug report and explicit flags."""
     events = set(event_ids)
     run_ids: set[str] = set()
@@ -102,7 +102,7 @@ def collect_ids(
         events.add(thread_id)
     if room_id:
         session_ids.add(f"{room_id}:{thread_id}" if thread_id else room_id)
-    return DebugReportIds(
+    return _DebugReportIds(
         room_id=room_id,
         thread_id=thread_id,
         # Local echoes ("~…") never reached the homeserver, so the backend cannot know them.
@@ -113,7 +113,7 @@ def collect_ids(
 
 
 @dataclass
-class SourceResult:
+class _SourceResult:
     """What one storage source held for the identifiers."""
 
     status: str
@@ -143,7 +143,7 @@ def _decode_json_columns(row: Mapping[str, Any], extra: frozenset[str] = frozens
 
 
 @contextmanager
-def sqlite_query(path: Path) -> Iterator[Query]:
+def _sqlite_query(path: Path) -> Iterator[_Query]:
     """Open one SQLite database read-only and yield a query function returning dict rows."""
     connection = sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True, timeout=1.0)
     connection.row_factory = sqlite3.Row
@@ -158,7 +158,7 @@ def sqlite_query(path: Path) -> Iterator[Query]:
 
 
 @contextmanager
-def postgres_query(database_url: str) -> Iterator[Query]:
+def _postgres_query(database_url: str) -> Iterator[_Query]:
     """Open the PostgreSQL event journal read-only and yield a query function returning dict rows."""
     import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
     from psycopg.rows import dict_row  # noqa: PLC0415
@@ -183,9 +183,9 @@ def _in_list(values: Iterable[str]) -> tuple[str, list[str]]:
     return ", ".join("?" for _ in ordered), ordered
 
 
-def read_journal(query: Query, ids: DebugReportIds, location: str) -> dict[str, SourceResult]:
+def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
     """Read turn records, admitted events, and outbound deliveries for the identifiers."""
-    results = {name: SourceResult("ok", [location]) for name in JOURNAL_SOURCES}
+    results = {name: _SourceResult("ok", [location]) for name in _JOURNAL_SOURCES}
     marks, event_ids = _in_list(ids.event_ids)
     thread_known = bool(ids.room_id and ids.thread_id)
 
@@ -221,7 +221,7 @@ def read_journal(query: Query, ids: DebugReportIds, location: str) -> dict[str, 
     return results
 
 
-def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
+def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     """Read Agno runs by run ID or session ID from every session database under the session root.
 
     Databases are found by path rather than from the config so deleted agents' history is included.
@@ -231,8 +231,8 @@ def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
     """
     databases = sorted(session_root.glob("**/sessions/*.db"))
     if not databases:
-        return SourceResult("missing", [str(session_root)])
-    result = SourceResult("ok", [str(database) for database in databases])
+        return _SourceResult("missing", [str(session_root)])
+    result = _SourceResult("ok", [str(database) for database in databases])
     run_marks, run_ids = _in_list(ids.run_ids)
     session_marks, session_ids = _in_list(ids.session_ids)
     conditions = [
@@ -260,7 +260,7 @@ def read_agno_runs(session_root: Path, ids: DebugReportIds) -> SourceResult:
 
 def _read_agno_database(database: Path, conditions: Sequence[str], params: Sequence[object]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    with sqlite_query(database) as query:
+    with _sqlite_query(database) as query:
         tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
         for table in sorted(name for name in tables if name.endswith("_runs")):
             columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
@@ -277,7 +277,7 @@ def _read_agno_database(database: Path, conditions: Sequence[str], params: Seque
     return items
 
 
-def _record_matches(record: Mapping[str, Any], ids: DebugReportIds) -> bool:
+def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
     return (
         record.get("correlation_id") in ids.event_ids
         or record.get("reply_to_event_id") in ids.event_ids
@@ -285,12 +285,12 @@ def _record_matches(record: Mapping[str, Any], ids: DebugReportIds) -> bool:
     )
 
 
-def read_jsonl_records(paths: Sequence[Path], ids: DebugReportIds, *, location: Path) -> SourceResult:
+def _read_jsonl_records(paths: Sequence[Path], ids: _DebugReportIds, *, location: Path) -> _SourceResult:
     """Read JSONL records whose correlation, reply target, or session matches, oldest file first."""
     existing = [path for path in paths if path.is_file()]
     if not existing:
-        return SourceResult("missing", [str(location)])
-    result = SourceResult("ok", [str(path) for path in existing])
+        return _SourceResult("missing", [str(location)])
+    result = _SourceResult("ok", [str(path) for path in existing])
     needles = tuple(ids.event_ids | ids.session_ids)
     for path in existing:
         with path.open(encoding="utf-8", errors="replace") as handle:
@@ -304,22 +304,22 @@ def read_jsonl_records(paths: Sequence[Path], ids: DebugReportIds, *, location: 
                     continue
                 if not isinstance(record, dict) or not _record_matches(record, ids):
                     continue
-                if len(result.items) >= MAX_JSONL_RECORDS:
+                if len(result.items) >= _MAX_JSONL_RECORDS:
                     result.dropped += 1
                     continue
                 result.items.append(record)
     return result
 
 
-def read_log_lines(paths: Sequence[Path], ids: DebugReportIds, *, location: Path) -> SourceResult:
+def _read_log_lines(paths: Sequence[Path], ids: _DebugReportIds, *, location: Path) -> _SourceResult:
     """Read log lines that mention an event or run ID, bounded because lines can embed whole prompts.
 
     Room IDs are not matched: every line about the room would match and bury the turn.
     """
     existing = [path for path in paths if path.is_file()]
     if not existing:
-        return SourceResult("missing", [str(location)])
-    result = SourceResult("ok", [str(path) for path in existing])
+        return _SourceResult("missing", [str(location)])
+    result = _SourceResult("ok", [str(path) for path in existing])
     needles = tuple(ids.event_ids | ids.run_ids)
     if not needles:
         return result
@@ -328,12 +328,12 @@ def read_log_lines(paths: Sequence[Path], ids: DebugReportIds, *, location: Path
             for number, line in enumerate(handle, start=1):
                 if not any(needle in line for needle in needles):
                     continue
-                if len(result.items) >= MAX_LOG_LINES:
+                if len(result.items) >= _MAX_LOG_LINES:
                     result.dropped += 1
                     continue
                 text = line.rstrip("\n")
-                if len(text) > MAX_LOG_LINE_CHARS:
-                    text = text[:MAX_LOG_LINE_CHARS]
+                if len(text) > _MAX_LOG_LINE_CHARS:
+                    text = text[:_MAX_LOG_LINE_CHARS]
                     result.truncated += 1
                 result.items.append({"file": path.name, "line": number, "text": text})
     return result
@@ -350,32 +350,32 @@ class DebugReportSources:
     llm_request_log_dir: Path
 
 
-def _failed(location: str, error: Exception) -> SourceResult:
-    return SourceResult("error", [location], error=_describe_error(error))
+def _failed(location: str, error: Exception) -> _SourceResult:
+    return _SourceResult("error", [location], error=_describe_error(error))
 
 
-def _read_journal_source(sources: DebugReportSources, ids: DebugReportIds) -> dict[str, SourceResult]:
+def _read_journal_source(sources: DebugReportSources, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
     if sources.journal_postgres_url is not None:
         import psycopg  # noqa: PLC0415 - psycopg ships with the optional postgres extra
 
         try:
-            with postgres_query(sources.journal_postgres_url) as query:
-                return read_journal(query, ids, "postgres")
+            with _postgres_query(sources.journal_postgres_url) as query:
+                return _read_journal(query, ids, "postgres")
         except (psycopg.Error, OSError) as error:
-            return {name: _failed("postgres", error) for name in JOURNAL_SOURCES}
+            return {name: _failed("postgres", error) for name in _JOURNAL_SOURCES}
     path = sources.journal_sqlite_path
     try:
         # `is_file()` raises PermissionError when a parent directory is unreadable, so it belongs in the guard.
         if path is None or not path.is_file():
-            return {name: SourceResult("missing", [str(path)]) for name in JOURNAL_SOURCES}
-        with sqlite_query(path) as query:
-            return read_journal(query, ids, str(path))
+            return {name: _SourceResult("missing", [str(path)]) for name in _JOURNAL_SOURCES}
+        with _sqlite_query(path) as query:
+            return _read_journal(query, ids, str(path))
     except (sqlite3.Error, OSError) as error:
-        return {name: _failed(str(path), error) for name in JOURNAL_SOURCES}
+        return {name: _failed(str(path), error) for name in _JOURNAL_SOURCES}
 
 
-def _read_guarded(read: Callable[[], SourceResult], location: Path) -> SourceResult:
+def _read_guarded(read: Callable[[], _SourceResult], location: Path) -> _SourceResult:
     """Run one file or SQLite source read; a locked or corrupt store must not abort the other sources."""
     try:
         return read()
@@ -383,20 +383,20 @@ def _read_guarded(read: Callable[[], SourceResult], location: Path) -> SourceRes
         return _failed(str(location), error)
 
 
-def build_debug_report(sources: DebugReportSources, ids: DebugReportIds, *, generated_at: str) -> dict[str, Any]:
+def build_debug_report(sources: DebugReportSources, ids: _DebugReportIds, *, generated_at: str) -> dict[str, Any]:
     """Collect every backend source for the identifiers into one JSON-ready document."""
     tracking = sources.storage_root / "tracking"
     tool_call_logs = [tracking / f"tool_calls.jsonl.{n}" for n in range(_TOOL_CALL_ROTATIONS, 0, -1)]
     tool_call_logs.append(tracking / "tool_calls.jsonl")
     logs_dir = sources.storage_root / "logs"
     results = _read_journal_source(sources, ids)
-    results["agno_runs"] = _read_guarded(lambda: read_agno_runs(sources.session_root, ids), sources.session_root)
+    results["agno_runs"] = _read_guarded(lambda: _read_agno_runs(sources.session_root, ids), sources.session_root)
     results["tool_calls"] = _read_guarded(
-        lambda: read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
+        lambda: _read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
         tracking / "tool_calls.jsonl",
     )
     results["llm_requests"] = _read_guarded(
-        lambda: read_jsonl_records(
+        lambda: _read_jsonl_records(
             sorted(sources.llm_request_log_dir.glob("llm-requests-*.jsonl")),
             ids,
             location=sources.llm_request_log_dir,
@@ -404,7 +404,7 @@ def build_debug_report(sources: DebugReportSources, ids: DebugReportIds, *, gene
         sources.llm_request_log_dir,
     )
     results["log_lines"] = _read_guarded(
-        lambda: read_log_lines(sorted(logs_dir.glob("mindroom_*.log")), ids, location=logs_dir),
+        lambda: _read_log_lines(sorted(logs_dir.glob("mindroom_*.log")), ids, location=logs_dir),
         logs_dir,
     )
     return {

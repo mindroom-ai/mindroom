@@ -13,24 +13,28 @@ import pytest
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
+from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
 from mindroom.agent_storage import create_state_storage
+from mindroom.cli.main import app
 from mindroom.debug_report import (
     DebugReportSources,
+    _postgres_query,
+    _read_agno_runs,
+    _read_journal,
+    _read_jsonl_records,
+    _read_log_lines,
+    _sqlite_query,
     build_debug_report,
     collect_ids,
-    postgres_query,
-    read_agno_runs,
-    read_journal,
-    read_jsonl_records,
-    read_log_lines,
-    sqlite_query,
 )
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from tests.conftest import postgres_journal_schema_url, seed_session
 
 ROOM = "!room:example.com"
+
+runner = CliRunner()
 
 
 def _report() -> dict[str, object]:
@@ -103,8 +107,8 @@ def test_read_journal_matches_events_and_thread_and_decodes_json(tmp_path: Path)
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     ids = collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root")
-    with sqlite_query(path) as query:
-        results = read_journal(query, ids, str(path))
+    with _sqlite_query(path) as query:
+        results = _read_journal(query, ids, str(path))
 
     turns = results["turn_records"]
     assert turns.status == "ok"
@@ -122,8 +126,8 @@ def test_read_journal_without_thread_matches_event_ids_only(tmp_path: Path) -> N
     """Without a thread, only the named events are read and the outbox is not queried."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
-    with sqlite_query(path) as query:
-        results = read_journal(query, collect_ids(None, event_ids=["$late"], room_id=ROOM), str(path))
+    with _sqlite_query(path) as query:
+        results = _read_journal(query, collect_ids(None, event_ids=["$late"], room_id=ROOM), str(path))
     assert [item["event_id"] for item in results["journal_events"].items] == ["$late"]
     assert results["delivery_outbox"].items == []
 
@@ -132,7 +136,7 @@ def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
     """The reader opens the database read-only, so inspecting an install cannot change it."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
-    with sqlite_query(path) as query, pytest.raises(sqlite3.OperationalError):
+    with _sqlite_query(path) as query, pytest.raises(sqlite3.OperationalError):
         query("DELETE FROM turn_records", [])
 
 
@@ -140,7 +144,7 @@ def test_sqlite_query_accepts_a_relative_path(tmp_path: Path, monkeypatch: pytes
     """A relative database path resolves against the working directory instead of raising."""
     _seed_journal(tmp_path / "event_journal.db")
     monkeypatch.chdir(tmp_path)
-    with sqlite_query(Path("event_journal.db")) as query:
+    with _sqlite_query(Path("event_journal.db")) as query:
         assert len(query("SELECT * FROM turn_records", [])) == 2
 
 
@@ -158,8 +162,8 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
         )
 
     ids = collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root")
-    with postgres_query(database_url) as query:
-        results = read_journal(query, ids, "postgres")
+    with _postgres_query(database_url) as query:
+        results = _read_journal(query, ids, "postgres")
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             query("DELETE FROM turn_records", [])
 
@@ -214,7 +218,7 @@ def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> 
     """Runs match by session id, and run_data comes back as a nested object."""
     _seed_agno(tmp_path)
     ids = collect_ids(None, room_id=ROOM, thread_id="$root")
-    result = read_agno_runs(tmp_path, ids)
+    result = _read_agno_runs(tmp_path, ids)
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-1"]
     assert result.items[0]["run_data"]["metadata"] == {"matrix_event_id": "$user"}
@@ -223,7 +227,7 @@ def test_read_agno_runs_matches_session_and_decodes_run_data(tmp_path: Path) -> 
 
 def test_read_agno_runs_reports_missing_databases(tmp_path: Path) -> None:
     """A session root without databases is reported as missing."""
-    result = read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
+    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM))
     assert result.status == "missing"
 
 
@@ -280,7 +284,7 @@ def test_jsonl_and_log_readers_match_structured_fields_and_bound_output(tmp_path
     )
 
     tracking = tmp_path / "tracking"
-    tools = read_jsonl_records(
+    tools = _read_jsonl_records(
         [tracking / "tool_calls.jsonl.1", tracking / "tool_calls.jsonl"],
         ids,
         location=tracking / "tool_calls.jsonl",
@@ -288,21 +292,21 @@ def test_jsonl_and_log_readers_match_structured_fields_and_bound_output(tmp_path
     assert [item["tool_name"] for item in tools.items] == ["old", "shell"]
 
     llm_dir = tmp_path / "logs" / "llm_requests"
-    llm = read_jsonl_records(sorted(llm_dir.glob("llm-requests-*.jsonl")), ids, location=llm_dir)
+    llm = _read_jsonl_records(sorted(llm_dir.glob("llm-requests-*.jsonl")), ids, location=llm_dir)
     assert [item.get("record", "request") for item in llm.items] == ["request", "response"]
 
-    logs = read_log_lines(sorted((tmp_path / "logs").glob("mindroom_*.log")), ids, location=tmp_path / "logs")
+    logs = _read_log_lines(sorted((tmp_path / "logs").glob("mindroom_*.log")), ids, location=tmp_path / "logs")
     assert [item["line"] for item in logs.items] == [1, 3]
     assert logs.truncated == 1
-    assert len(logs.items[1]["text"]) == debug_report_module.MAX_LOG_LINE_CHARS
+    assert len(logs.items[1]["text"]) == debug_report_module._MAX_LOG_LINE_CHARS
 
 
 def test_jsonl_reader_caps_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Records beyond the cap are counted as dropped instead of growing the report without bound."""
-    monkeypatch.setattr(debug_report_module, "MAX_JSONL_RECORDS", 1)
+    monkeypatch.setattr(debug_report_module, "_MAX_JSONL_RECORDS", 1)
     _seed_files(tmp_path)
     tracking = tmp_path / "tracking"
-    result = read_jsonl_records(
+    result = _read_jsonl_records(
         [tracking / "tool_calls.jsonl.1", tracking / "tool_calls.jsonl"],
         collect_ids(None, event_ids=["$user"]),
         location=tracking / "tool_calls.jsonl",
@@ -367,7 +371,7 @@ def test_read_agno_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -
     broken.parent.mkdir(parents=True)
     broken.write_bytes(b"this is not a sqlite database" * 100)
 
-    result = read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+    result = _read_agno_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
 
     assert result.status == "ok"
     assert [item["run_id"] for item in result.items] == ["run-1"]
@@ -431,3 +435,107 @@ def test_build_debug_report_survives_an_unreadable_tracking_directory(tmp_path: 
         assert "PermissionError" in sources[name]["error"]
     assert sources["llm_requests"]["status"] == "ok"
     assert sources["log_lines"]["status"] == "ok"
+
+
+def _write_config(path: Path) -> None:
+    path.write_text(
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5-5\n"
+        "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
+        "router:\n  model: default\n"
+        "matrix_space:\n  enabled: false\n"
+        "authorization:\n  global_users: []\n",
+        encoding="utf-8",
+    )
+
+
+def test_cli_writes_backend_report_for_a_chat_bug_report(tmp_path: Path) -> None:
+    """A bug report file yields a JSON document with every source and a per-source summary on stderr."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    _seed_agno(storage)
+    _seed_files(storage)
+    report = tmp_path / "bug-report.json"
+    report.write_text(json.dumps(_report()), encoding="utf-8")
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(app, ["debug-report", str(report), "-c", str(config), "-s", str(storage), "-o", str(output)])
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["identifiers"]["roomId"] == ROOM
+    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == []
+    assert document["sources"]["agno_runs"]["items"][0]["run_id"] == "run-1"
+    assert "agno_runs: ok" in result.output
+
+
+def test_cli_accepts_plain_identifiers(tmp_path: Path) -> None:
+    """Plain --event identifiers work without a bug report file."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
+
+
+def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) -> None:
+    """A failing source is summarized with its error on stderr while the other sources are still collected."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+    broken = storage / "agents" / "x" / "sessions" / "x.db"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"this is not a sqlite database" * 100)
+    output = tmp_path / "backend.json"
+
+    result = runner.invoke(
+        app,
+        ["debug-report", "-e", "$user", "-r", ROOM, "-c", str(config), "-s", str(storage), "-o", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document["sources"]["agno_runs"]["status"] == "error"
+    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
+    assert f"agno_runs: error, 0 items ({document['sources']['agno_runs']['error']})" in result.output
+    assert "turn_records: ok, 1 items" in result.output
+
+
+def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path) -> None:
+    """Without --output the JSON goes to stdout."""
+    config = tmp_path / "config.yaml"
+    _write_config(config)
+    storage = tmp_path / "storage"
+    _seed_journal(storage / "tracking" / "event_journal.db")
+
+    result = runner.invoke(app, ["debug-report", "-e", "$user", "-c", str(config), "-s", str(storage)])
+
+    assert result.exit_code == 0, result.output
+    assert '"type": "io.mindroom.debug_report"' in result.stdout
+
+
+def test_cli_requires_an_identifier(tmp_path: Path) -> None:
+    """With nothing to look up the command fails and says what to pass."""
+    result = runner.invoke(app, ["debug-report", "-s", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "at least one of --event, --room, --thread" in result.output
+
+
+def test_cli_rejects_a_file_that_is_not_a_bug_report(tmp_path: Path) -> None:
+    """A JSON file of another type is refused instead of producing an empty report."""
+    other = tmp_path / "other.json"
+    other.write_text('{"type": "something"}', encoding="utf-8")
+    result = runner.invoke(app, ["debug-report", str(other), "-s", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "not a MindRoom Chat bug report" in result.output
