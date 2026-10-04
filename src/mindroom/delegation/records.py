@@ -377,8 +377,8 @@ class DelegationRecordOwner:
                 return
             line = b""
             artifacts: dict[str, bytes] = {}
-            if state.run["status"] != status:
-                _ensure_active(state.run)
+            # The first terminal outcome stands, so a later finish, even with another status, only refreshes exports.
+            if state.run["status"] not in _TERMINAL_STATUSES:
                 sequence = state.run["event_count"] + 1
                 terminal_data, artifacts = _redacted_event_data(
                     sequence=sequence,

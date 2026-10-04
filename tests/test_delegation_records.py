@@ -827,6 +827,25 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
     ) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_settled_record_keeps_its_first_terminal_outcome(tmp_path: Path) -> None:
+    """A later finish with another terminal status, such as a stale cancellation, keeps the first outcome."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(module, owner)
+    await owner.finish(handle, status="failed", error="Child failed")
+
+    await owner.finish(handle, status="cancelled", error="Delegation cancelled.")
+
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert (run["status"], run["error"]) == ("failed", "Child failed")
+    assert _read_json(_receipt_path(handle))["status"] == "failed"
+    assert [event["kind"] for event in _read_events(handle.state_dir / "events.jsonl")] == [
+        "delegation_started",
+        "delegation_finished",
+    ]
+
+
 @pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "denied"])
 @pytest.mark.asyncio
 async def test_finish_persists_each_terminal_outcome(status: str, tmp_path: Path) -> None:
