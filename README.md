@@ -243,8 +243,8 @@ Want Claude for writing or Gemini for research? Connect everything again, hand y
 MindRoom turns that around:
 
 - **Connect once, use any model.** Your accounts, memory, and documents live in MindRoom, which can run on your own machine, and every agent uses them with the model that fits: Claude, GPT, Gemini, or a local model.
-- **You decide who sees what.** A cloud model sees only what its agent sends it, and an agent on a local model with local memory keeps everything at home.
-- **One place, everywhere you chat.** Agents live in shared rooms on Matrix and follow you to Slack, Telegram, and email through bridges, with their memory intact.
+- **You decide who sees what.** A cloud model sees only what its agent sends it, and an agent on a local model, with local memory and your own server, keeps everything at home.
+- **One place, everywhere you chat.** Agents live in shared rooms on Matrix and follow you to Slack, Telegram, WhatsApp, and Discord through Matrix bridges, with their memory intact.
 
 Federation even lets agents cross organization boundaries:
 
