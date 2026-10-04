@@ -112,7 +112,6 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
         process_env={},
     )
     sources = _resolve_sources(runtime_paths)
-    assert sources.journal_sqlite_path == event_journal_sqlite_path(runtime_paths.storage_root)
     # model_loading.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
     # as an inline expression, so that literal is what is pinned here.
     assert sources.llm_request_log_dir == runtime_paths.storage_root / "logs" / "llm_requests"
@@ -122,6 +121,8 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
     tool_call_log.write_text(json.dumps({"correlation_id": "$user"}) + "\n", encoding="utf-8")
     document = build_debug_report(sources, collect_ids(None, event_ids=["$user"]), generated_at="now")
     assert document["sources"]["tool_calls"]["paths"] == [str(tool_call_log)]
+    # No journal exists yet, so the missing source names where the reader looked.
+    assert document["sources"]["turn_records"]["paths"] == [str(event_journal_sqlite_path(runtime_paths.storage_root))]
 
 
 def _seed_journal(path: Path) -> None:
@@ -387,7 +388,6 @@ def _sources(storage_root: Path, *, journal_postgres_url: str | None = None) -> 
     return DebugReportSources(
         storage_root=storage_root,
         session_root=storage_root,
-        journal_sqlite_path=storage_root / "tracking" / "event_journal.db",
         journal_postgres_url=journal_postgres_url,
         llm_request_log_dir=storage_root / "logs" / "llm_requests",
     )

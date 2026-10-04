@@ -540,7 +540,6 @@ depends_on = [
 visibility = [
     "mindroom.api.config_lifecycle",
     "mindroom.bot",
-    "mindroom.cli.debug_report",
     "mindroom.cli.main",
     "mindroom.commands.config_commands",
     "mindroom.orchestration.config_lifecycle",
@@ -6780,7 +6779,6 @@ depends_on = [
     "mindroom.config.yaml_includes",
     "mindroom.constants",
     "mindroom.debug_report",
-    "mindroom.event_journal_open",
 ]
 visibility = ["mindroom.cli.main"]
 

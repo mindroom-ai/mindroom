@@ -82,29 +82,24 @@ def _resolve_sources(runtime_paths: RuntimePaths) -> DebugReportSources:
     from mindroom.config.matrix import EventJournalConfig  # noqa: PLC0415
     from mindroom.constants import resolve_session_state_root  # noqa: PLC0415
     from mindroom.debug_report import DebugReportSources  # noqa: PLC0415
-    from mindroom.event_journal_open import event_journal_sqlite_path  # noqa: PLC0415
 
     storage_root = runtime_paths.storage_root
     config_source = _read_config_source(runtime_paths)
-    journal_sqlite_path: Path | None = event_journal_sqlite_path(storage_root)
     journal_postgres_url: str | None = None
     journal_error: str | None = None
     try:
         journal = EventJournalConfig.model_validate(config_source.get("event_journal") or {})
         if journal.backend == "postgres":
-            journal_sqlite_path = None
             journal_postgres_url = journal.resolve_postgres_database_url(runtime_paths)
     except ValueError as exc:
         # An invalid section (pydantic's ValidationError is a ValueError), or a URL that lives in the service's
         # environment rather than this one.
         # Reading the SQLite file instead could show the wrong database, so the journal sources report the error.
-        journal_sqlite_path = None
         journal_error = str(exc)
         typer.echo(f"Warning: {exc}; the journal sources are reported as errors.", err=True)
     return DebugReportSources(
         storage_root=storage_root,
         session_root=resolve_session_state_root(storage_root, runtime_paths),
-        journal_sqlite_path=journal_sqlite_path,
         journal_postgres_url=journal_postgres_url,
         llm_request_log_dir=_llm_request_log_dir(config_source, storage_root),
         journal_error=journal_error,

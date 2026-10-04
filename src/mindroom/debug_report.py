@@ -387,7 +387,6 @@ class DebugReportSources:
 
     storage_root: Path
     session_root: Path
-    journal_sqlite_path: Path | None
     journal_postgres_url: str | None
     llm_request_log_dir: Path
     # Why the journal could not be located (for example no PostgreSQL URL resolved from the config, its .env, or the
@@ -419,16 +418,15 @@ def _read_postgres_journal(database_url: str, ids: _DebugReportIds) -> dict[str,
         return _journal_failed("postgres", _describe_error(error))
 
 
-def _read_journal_source(sources: DebugReportSources, ids: _DebugReportIds) -> dict[str, _SourceResult]:
+def _read_journal_source(sources: DebugReportSources, path: Path, ids: _DebugReportIds) -> dict[str, _SourceResult]:
     """Read the journal group, or mark all of it failed: one unreadable journal says nothing about the others."""
     if sources.journal_error is not None:
         return _journal_failed("postgres", sources.journal_error)
     if sources.journal_postgres_url is not None:
         return _read_postgres_journal(sources.journal_postgres_url, ids)
-    path = sources.journal_sqlite_path
     try:
         # `is_file()` raises PermissionError when a parent directory is unreadable, so it belongs in the guard.
-        if path is None or not path.is_file():
+        if not path.is_file():
             return {name: _SourceResult("missing", [str(path)]) for name in _JOURNAL_SOURCES}
         with _sqlite_query(path) as query:
             return _read_journal(query, ids, str(path))
@@ -450,7 +448,7 @@ def build_debug_report(sources: DebugReportSources, ids: _DebugReportIds, *, gen
     tool_call_logs = [tracking / f"tool_calls.jsonl.{n}" for n in range(_TOOL_CALL_ROTATIONS, 0, -1)]
     tool_call_logs.append(tracking / "tool_calls.jsonl")
     logs_dir = sources.storage_root / "logs"
-    results = _read_journal_source(sources, ids)
+    results = _read_journal_source(sources, tracking / "event_journal.db", ids)
     results["agno_runs"] = _read_guarded(lambda: _read_agno_runs(sources.session_root, ids), sources.session_root)
     results["tool_calls"] = _read_guarded(
         lambda: _read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
