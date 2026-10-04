@@ -422,7 +422,7 @@ def remove_redacted_event_from_history(
 ) -> bool:
     """Remove the part of one scope's history that derives from a redacted Matrix event.
 
-    The first run that answered or read the event goes with every run after it,
+    The first run that answered, read, or wrote the event goes with every run after it,
     and compacted history is rolled back the same way. ``session`` is synced to
     the stored result. Returns whether the scope's history changed.
     """
