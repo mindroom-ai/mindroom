@@ -39,6 +39,7 @@ To get started, follow [Install & First Run](https://docs.mindroom.chat/getting-
 | **Images** | Analysis of user-sent images with vision-capable models |
 | **File & Video Attachments** | Files and videos that agents can read and send within a conversation |
 | **Interactive Q&A** | Clickable multiple-choice questions answered with Matrix reactions |
+| **Interactive Canvases** | Agent-written web pages, such as dashboards and forms, that the user answers in MindRoom Chat |
 | **Matrix Desktop Bridge** | Observe or locally lease control of a computer, read selected folders, and run locally approved shell commands without opening inbound ports |
 | **Authorization** | Control which users may use which agents and rooms |
 | **OpenAI-Compatible API** | Use agents from LibreChat, Open WebUI, or any OpenAI client |
@@ -64,6 +65,7 @@ To get started, follow [Install & First Run](https://docs.mindroom.chat/getting-
 - [Streaming Responses](https://docs.mindroom.chat/streaming/) - Progressive message edits
 - [Voice Messages](https://docs.mindroom.chat/voice/), [Image Messages](https://docs.mindroom.chat/images/), and [File & Video Attachments](https://docs.mindroom.chat/attachments/) - Media handling
 - [Interactive Q&A](https://docs.mindroom.chat/interactive/) - Multiple-choice questions via Matrix reactions
+- [Interactive Canvases](https://docs.mindroom.chat/canvases/) - Dashboards, reports, and forms in a panel beside the conversation
 - [Rooms & Spaces](https://docs.mindroom.chat/rooms/) - Managed rooms and the optional root Matrix Space
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - Connect Telegram, Slack, and other platforms to Matrix
 - [Authorization](https://docs.mindroom.chat/authorization/) - User and room access control
@@ -4841,6 +4843,139 @@ Only human users can answer; reactions and messages from agents are ignored.
 - A very large question, roughly a few thousand characters of question text, option labels, and option values, is shown without reaction buttons and cannot be answered by number; shorten the question, labels, or values to keep it answerable.
 - Questions only work in an agent's normal responses; sending or editing one with the `matrix_message` tool fails with `Interactive prompts are only supported in normal agent responses.`
 
+# Interactive Canvases
+
+An agent can show the user a web page it wrote, such as a dashboard, report, slide deck, form, or picker, in the Canvas panel beside the conversation in MindRoom Chat.
+The user can work in the page and send an answer, which reaches the agent as the user's next message.
+Use a canvas when seeing or clicking beats reading or typing; for a quick choice between a few options, a plain reply or an [interactive question](https://docs.mindroom.chat/interactive/) is simpler.
+
+## Turn canvases on
+
+Canvases need two switches, and both are off by default.
+
+First, give the agent the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
+
+```yaml
+agents:
+  planner:
+    display_name: Planner
+    role: Plan trips and compare the options visually.
+    model: default
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+```
+
+`enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
+It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
+
+Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true
+    }
+  }
+}
+```
+
+The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
+
+## What the user sees
+
+Each canvas appears in the conversation as a notice with an **Open panel** button.
+Chat opens the panel by itself under the same conditions as other [Chat UI actions](https://docs.mindroom.chat/tools/chat-ui/#what-the-user-sees); otherwise the user chooses **Open panel**.
+The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
+
+When the panel cannot open, the button says why:
+
+| Message | Cause |
+|---|---|
+| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
+| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| End the call to open interactive panels. | Chat does not run canvases during a call. |
+
+Other Matrix clients show only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+
+## Answering a canvas
+
+Typing, toggling, and moving between steps inside the page send nothing.
+When the page submits an answer, Chat shows the user exactly what will be sent, and nothing is sent until the user chooses **Send**.
+To change a pending answer, the user chooses **Discard** and answers again.
+
+The answer is an ordinary message from the user in the canvas's thread; it mentions the agent and starts the agent's next turn:
+
+```text
+@mindroom_planner:example.org Canvas response ($canvas-event, revision $canvas-event): Pro plan
+{"plan":"pro"}
+```
+
+The first ID is the canvas and the second is the version the user answered; when that is not the latest version, the user answered an earlier page.
+MindRoom Chat shows the answer as a one-line receipt that expands to the exact data.
+An answer can carry up to 512 KB of data, enough for a long document the user edited in the canvas.
+
+## Update a canvas
+
+`show_canvas` returns the canvas `event_id`.
+Calling `show_canvas` again with `canvas_event_id` set to that ID replaces the page in place, for the next step of a flow or a new version of a file the agent edited, and the conversation keeps one card.
+An open panel switches to the new page at once, unless the user has been working in it; then Chat shows "*agent* updated this panel." with a **Load update** button, so unsent work is not lost.
+An agent can update only its own canvases from the same conversation; elsewhere it shows a new canvas instead.
+
+## Write a page
+
+Pass the page as `html`, or as a `path` to an HTML file, which suits pages the agent builds and refines, such as slides.
+Paths follow the agent's `file_access`, like [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/#attachments); prefer workspace-relative paths such as `slides/deck.html`.
+
+```python
+chat_ui.show_canvas(
+    title="Choose a plan",
+    html="""
+<style>
+  .plans { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .plan { background: var(--mr-surface); border: 1px solid var(--mr-border);
+          border-radius: var(--mr-radius); padding: 16px; }
+  button { background: var(--mr-accent); color: var(--mr-accent-text); border: 0;
+           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+</style>
+<div class="plans">
+  <div class="plan"><h3>Basic</h3><p>For trying things out.</p>
+    <button onclick="mindroom.submit({plan: 'basic'}, {label: 'Basic plan'})">Choose Basic</button></div>
+  <div class="plan"><h3>Pro</h3><p>For daily work.</p>
+    <button onclick="mindroom.submit({plan: 'pro'}, {label: 'Pro plan'})">Choose Pro</button></div>
+</div>
+""",
+)
+```
+
+- **Self-contained:** write inline CSS and JavaScript. The page cannot load or send anything over the network, so draw charts with inline SVG or a `<canvas>` element and embed images as `data:` URLs.
+- **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
+- **Responsive:** the panel ranges from narrow to the full conversation width.
+- **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
+- **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
+  Pages larger than about 24 KB are stored as Matrix media, and each update stores a new copy, so iterate on large pages sparingly.
+
+Chat exposes its current theme as CSS variables, so a page can match light and dark mode:
+
+| Variable | Use |
+|---|---|
+| `--mr-bg` | Page background (the default body background) |
+| `--mr-surface`, `--mr-surface-raised` | Cards and raised elements |
+| `--mr-border` | Borders and dividers |
+| `--mr-text`, `--mr-text-muted` | Text (the default body color) and secondary text |
+| `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
+| `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
+| `--mr-radius`, `--mr-font` | Corner radius and font family |
+
+## Privacy and safety
+
+- The page cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate away; a page that tries to leave its sandbox is stopped.
+- Nothing reaches the conversation until the user chooses **Send**.
+- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, so a malicious page could leak what the user types into it.
+  Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
+- Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.
+
 # Thread Exports
 
 Thread exports write Matrix conversation history to YAML files that agents and operators can search with ordinary file tools.
@@ -5834,7 +5969,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
-- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an interactive canvas in MindRoom Chat.
+- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
@@ -10058,7 +10193,7 @@ agents:
 
 The toolkit is opt-in and works only for a configured agent replying in a Matrix conversation; teams and the router cannot use it.
 A subagent running as a different agent cannot use it; the replying agent must make the request.
-Canvases need a separate opt-in; see [Turning canvases on](#turning-canvases-on).
+Canvases need a separate opt-in; see [Turn canvases on](https://docs.mindroom.chat/canvases/#turn-canvases-on).
 The agent cannot choose the recipient, room, thread, or a URL: every request goes to the current conversation and is addressed to the user the agent is answering.
 
 ## Actions
@@ -10074,7 +10209,7 @@ None of the actions touches the user's own computer or browser:
 
 - `open_panel` accepts only `members` (the default) and `computer`; `show_computer()` is the same as `open_panel(panel="computer")`.
 - `open_settings` accepts `general` (the default), `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
-- `show_canvas` exists only when canvases are turned on for the agent; see [Interactive canvases](#interactive-canvases).
+- `show_canvas` exists only when canvases are turned on for the agent; [Interactive Canvases](https://docs.mindroom.chat/canvases/) covers turning them on, answers, updates, and writing pages.
 
 The Computer, Canvas, and Members panels share one place on the screen, so opening one replaces whichever is open.
 Requests made in a thread are posted in that thread; requests made at room level stay at room level.
@@ -10125,135 +10260,6 @@ The shipped MindRoom Chat configuration lists `mindroom.chat`.
 An absent or empty list keeps every request behind its button.
 Entries match the exact server name in the agent's Matrix ID, including any port; URLs, wildcards, and subdomain matching are unsupported.
 Operators must reserve and control the agent username namespace on any homeserver they allow, as `mindroom.chat` does.
-
-## Interactive canvases
-
-`show_canvas` shows a web page the agent wrote beside the conversation and returns what the user chose.
-Use it when seeing or clicking beats reading or typing: dashboards, reports, charts, slides, menus, forms, pickers, and multi-step flows.
-
-```python
-chat_ui.show_canvas(
-    title="Choose a plan",
-    html="""
-<style>
-  .plans { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-  .plan { background: var(--mr-surface); border: 1px solid var(--mr-border);
-          border-radius: var(--mr-radius); padding: 16px; }
-  button { background: var(--mr-accent); color: var(--mr-accent-text); border: 0;
-           border-radius: 8px; padding: 8px 14px; cursor: pointer; }
-</style>
-<div class="plans">
-  <div class="plan"><h3>Basic</h3><p>For trying things out.</p>
-    <button onclick="mindroom.submit({plan: 'basic'}, {label: 'Basic plan'})">Choose Basic</button></div>
-  <div class="plan"><h3>Pro</h3><p>For daily work.</p>
-    <button onclick="mindroom.submit({plan: 'pro'}, {label: 'Pro plan'})">Choose Pro</button></div>
-</div>
-""",
-)
-```
-
-### Turning canvases on
-
-Canvases need two switches, and both are off by default.
-
-The agent gets `show_canvas` only when `enable_show_canvas` (boolean, default `false`) is true in its `chat_ui` entry:
-
-```yaml
-agents:
-  researcher:
-    tools:
-      - chat_ui:
-          enable_show_canvas: true
-```
-
-It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
-
-MindRoom Chat shows canvases only when the deployment enables them in its runtime `config.json`:
-
-```json
-{
-  "mindroom": {
-    "canvas": {
-      "enabled": true
-    }
-  }
-}
-```
-
-When they are off, the notice shows its text and its button explains that interactive panels are turned off.
-Canvases open automatically under the same conditions as other requests; otherwise the user chooses the notice's **Open panel** button.
-
-### Pages and files
-
-`title` is one line of at most 120 characters.
-Pass the page as either `html` or a `path`, never both.
-A `path` such as `slides/deck.html` suits pages the agent builds and refines: edit the file, then call `show_canvas` again with the same `path` and the canvas ID.
-Paths follow the agent's `file_access`, like [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/): the default `workspace` keeps them inside the workspace, and `unrestricted` allows any file the MindRoom process can read.
-The file is read by the MindRoom process, so `~` means that process's home rather than a worker's; prefer workspace-relative paths.
-The page must be UTF-8 text of at most 4 MB.
-
-Pages up to about 24,000 characters travel inside the Matrix event.
-Larger pages are uploaded as Matrix media (encrypted in encrypted rooms), and each update uploads a new copy that users cannot delete, so iterate on large pages sparingly.
-
-Agents should only show pages they wrote.
-A canvas always appears as the agent's own, so a downloaded or untrusted page would be presented under the agent's name, and what the user types into it could leave the panel.
-
-### Design
-
-Write self-contained HTML with inline CSS and JavaScript.
-External scripts, styles, fonts, images, and network requests are blocked, so draw charts with inline SVG or a `<canvas>` element and embed images as `data:` URLs.
-The user can resize the panel and expand it to the full width of the conversation, so use a responsive layout.
-
-MindRoom Chat exposes its current theme as CSS variables, so a page can match light and dark mode:
-
-| Variable | Use |
-|---|---|
-| `--mr-bg` | Page background (the default body background) |
-| `--mr-surface`, `--mr-surface-raised` | Cards and raised elements |
-| `--mr-border` | Borders and dividers |
-| `--mr-text`, `--mr-text-muted` | Text (the default body color) and secondary text |
-| `--mr-accent`, `--mr-accent-text` | Primary actions and the text on them |
-| `--mr-success`, `--mr-warning`, `--mr-danger` | Status colors |
-| `--mr-radius`, `--mr-font` | Corner radius and font family |
-
-### How the answer reaches the agent
-
-Typing, toggling, dragging, and moving between steps inside the canvas send nothing.
-When the page calls `window.mindroom.submit(data, {label})`, or the user submits a `<form>` (its fields become the data and its `data-mindroom-label` attribute the label), Chat shows what will be sent and the user confirms with **Send**.
-While an answer waits for confirmation, the page cannot change it; the user discards it to choose again.
-`data` must be JSON-serializable and at most 512 KB, enough for a long document the user edited in the canvas.
-
-The answer is an ordinary threaded message from the user that mentions the agent, so it starts the agent's next turn:
-
-```text
-@mindroom_planner:example.org Canvas response ($canvas-event, revision $canvas-event): Pro plan
-{"plan":"pro"}
-```
-
-The first ID is the canvas and the second is the version the user answered; if that revision is not the latest update, the user answered an earlier version of the page.
-Decimal numbers and integers too large for JSON arrive as text.
-MindRoom Chat shows the message as a one-line receipt that expands to the exact data; other clients show the text.
-
-### Updating a canvas in place
-
-`show_canvas` returns the canvas `event_id`.
-To show the next step of the same flow, call `show_canvas` again with `canvas_event_id` set to that ID, not a revision ID.
-The timeline keeps one card, an open panel switches to the new page, and the call returns `Canvas update sent.`
-If the user has been working in the panel and has not sent anything since, Chat asks before replacing it.
-An agent can update only its own canvases for the same user in the same room and thread; a canvas shown at room level can be updated from any thread of that room, because answering it starts a thread.
-
-### Sandbox and limits
-
-MindRoom Chat runs the page in a sandboxed frame:
-
-- It cannot read the user's Matrix account, messages, cookies, or storage, and it cannot open pop-ups or navigate Chat or itself to other sites.
-- Network requests and external resources are blocked.
-- Nothing is posted to the conversation without the user's explicit **Send**.
-
-These protections do not make a canvas a safe place for secrets.
-Browsers do not let a page block WebRTC, so a malicious canvas could still leak what the user types into it.
-Chat therefore shows which agent made each canvas and reminds the user that what they enter may leave the panel.
-Chat does not run canvases during a call.
 
 # Messaging & Social
 
@@ -13208,7 +13214,7 @@ Do not report or "fix" these; they are deliberate.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
-- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, so agents should only show pages they wrote; see [Sandbox and limits](https://docs.mindroom.chat/tools/chat-ui/#sandbox-and-limits).
+- A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.

@@ -36,6 +36,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Features | Image Messages | `images.md` | `images/index.md` | `page__images__index.md` |
 | Features | File & Video Attachments | `attachments.md` | `attachments/index.md` | `page__attachments__index.md` |
 | Features | Interactive Questions | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
+| Features | Interactive Canvases | `canvases.md` | `canvases/index.md` | `page__canvases__index.md` |
 | Features | Thread Exports | `thread-exports.md` | `thread-exports/index.md` | `page__thread-exports__index.md` |
 | Features | Usage Tracking | `usage.md` | `usage/index.md` | `page__usage__index.md` |
 | Matrix | Matrix Integration | `matrix.md` | `matrix/index.md` | `page__matrix__index.md` |

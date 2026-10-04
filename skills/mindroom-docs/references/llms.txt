@@ -29,6 +29,7 @@
 - [Image Messages](https://docs.mindroom.chat/images/)
 - [File & Video Attachments](https://docs.mindroom.chat/attachments/)
 - [Interactive Questions](https://docs.mindroom.chat/interactive/)
+- [Interactive Canvases](https://docs.mindroom.chat/canvases/)
 - [Thread Exports](https://docs.mindroom.chat/thread-exports/)
 - [Usage Tracking](https://docs.mindroom.chat/usage/)
 - [Matrix Integration](https://docs.mindroom.chat/matrix/)

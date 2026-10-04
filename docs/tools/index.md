@@ -140,7 +140,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
 - [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, low-level Matrix API access, and attachment-aware workflows.
 - [Matrix Message Tool](matrix-message.md) - Send, read, edit, and react to messages with `matrix_message`.
-- [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an interactive canvas in MindRoom Chat.
+- [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](../canvases.md) in MindRoom Chat.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
