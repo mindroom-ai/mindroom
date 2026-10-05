@@ -82,8 +82,9 @@ _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
 _PLAYWRIGHT_INSTALL_COMMAND = "uv run playwright install chromium"
 # Chromium binds its SingletonSocket in a new directory under TMPDIR, and a Unix
-# socket path holds at most 107 bytes. Dedicated workers point TMPDIR into their
-# long state path, where Chromium aborts at startup with "Socket path too long".
+# socket path holds at most 107 bytes. A worker that cannot link its temp directory
+# into /tmp keeps TMPDIR in its long state path, where Chromium aborts at startup
+# with "Socket path too long".
 _CHROMIUM_SINGLETON_SOCKET_SUFFIX = "/org.chromium.Chromium.XXXXXX/SingletonSocket"
 _UNIX_SOCKET_PATH_MAX_BYTES = 107
 

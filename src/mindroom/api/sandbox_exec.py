@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import selectors
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
+_TMPDIR_LINK_ROOT = Path("/tmp")  # noqa: S108
 _WORKSPACE_ENV_HOOK_RELATIVE_PATH = Path(".mindroom") / "worker-env.sh"
 _WORKSPACE_ENV_HOOK_TIMEOUT_SECONDS = 10.0
 _WORKSPACE_ENV_HOOK_MAX_SCRIPT_BYTES = 64 * 1024
@@ -291,6 +293,25 @@ def generic_subprocess_env() -> dict[str, str]:
     return env
 
 
+def worker_tmp_dir(paths: LocalWorkerStatePaths) -> Path:
+    """Return the TMPDIR for one worker's tool subprocesses.
+
+    Chromium binds its SingletonSocket at `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket`,
+    and a Unix socket path holds at most 107 bytes, which the worker state path alone can exceed.
+    A short link in /tmp keeps socket paths short while temp files stay on the disk-backed state mount.
+    When this process cannot create the link, or the name leads anywhere else, the long path stays.
+    """
+    digest = hashlib.sha256(os.fsencode(paths.tmp_dir)).hexdigest()[:16]
+    link = _TMPDIR_LINK_ROOT / f"mindroom-{digest}"
+    with suppress(OSError):
+        link.symlink_to(paths.tmp_dir, target_is_directory=True)
+    try:
+        owned = link.lstat().st_uid == os.geteuid() and link.readlink() == paths.tmp_dir
+    except OSError:
+        owned = False
+    return link if owned else paths.tmp_dir
+
+
 def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     """Build the subprocess env for one prepared local worker."""
     env = generic_subprocess_env()
@@ -299,7 +320,7 @@ def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
     env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
-    env["TMPDIR"] = str(paths.tmp_dir)
+    env["TMPDIR"] = str(worker_tmp_dir(paths))
     env["VIRTUAL_ENV"] = str(paths.venv_dir)
 
     env["PATH"] = constants.subprocess_path_with_prepends(

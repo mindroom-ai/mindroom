@@ -44,6 +44,7 @@ from aioresponses import aioresponses
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
+import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval_manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
@@ -2940,6 +2941,20 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         raise httpx.ConnectError(message, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+@pytest.fixture(scope="session")
+def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
+    """Hold this session's worker TMPDIR links in one short directory removed at the end."""
+    path = Path(tempfile.mkdtemp(prefix="mr-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_worker_tmpdir_links(monkeypatch: pytest.MonkeyPatch, _worker_tmpdir_link_root: Path) -> None:
+    """Keep the worker TMPDIR links that tool subprocess envs create out of the machine's shared /tmp."""
+    monkeypatch.setattr(sandbox_exec_module, "_TMPDIR_LINK_ROOT", _worker_tmpdir_link_root)
 
 
 @pytest.fixture(autouse=True)
