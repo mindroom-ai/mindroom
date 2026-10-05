@@ -456,8 +456,11 @@ class ChatUITools(Toolkit):
         answered an earlier version of the page.
 
         Inputs, selects, and textareas with an ``id`` or ``name`` keep their values
-        across reloads, your updates, and versions automatically, so give them stable
-        ids. To keep anything else the user does in the page, call
+        across reloads, your updates, and versions automatically (not passwords,
+        hidden inputs, or ``autocomplete="off"`` fields): give them stable ids, a new
+        id when a field's meaning changes, and redraw on their ``input`` events, which
+        Chat fires when it restores them. To keep anything else the user does in the
+        page, call
         ``window.mindroom.saveState(value)`` on every change with up to 256K characters
         of JSON (larger values throw); later loads of this canvas start with it in
         ``window.mindroom.state``, which is ``undefined`` when nothing is saved. Read it
