@@ -2343,6 +2343,36 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restart_stop_reports_failed_release_over_reply_drain_timeout() -> None:
+    """A store that failed to close must not hide behind a reply that outlived the drain."""
+    store_failure = RuntimeError("journal store close failed")
+    bot = object.__new__(AgentBot)
+    bot._hook_registry_state = HookRegistryState(HookRegistry.empty())
+    bot.agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@mindroom_test_agent:localhost",
+        display_name="Test Agent",
+        password=TEST_PASSWORD,
+    )
+    bot._runtime_view = MagicMock(client=None)
+    bot._journal_dispatcher = MagicMock(stop=AsyncMock())
+    bot._own_journal = MagicMock(close=AsyncMock(side_effect=store_failure))
+    bot._ingestion_session = None
+    bot.logger = MagicMock()
+    bot.prepare_for_sync_shutdown = AsyncMock(side_effect=ResponseShutdownTimeoutError("reply outlived the drain"))
+    bot._emit_agent_lifecycle_event = AsyncMock()
+    bot._call_manager = None
+    bot._response_runner = MagicMock(pending_inbox_response_count=1)
+    bot._response_runner.wait_for_source_owned_inbox_responses = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="journal store close failed") as raised:
+        await AgentBot.stop(bot, shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert raised.value is store_failure
+    bot._journal_dispatcher.stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+
+@pytest.mark.asyncio
 async def test_stop_entities_completes_with_real_supervisor_task(monkeypatch: pytest.MonkeyPatch) -> None:
     """stop_entities must finish promptly when cancelling a real supervisor task."""
     bot = _FakeBot()
@@ -3275,6 +3305,89 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 
         # Also verify only one sync task is tracked for coach
         assert "coach" in orchestrator._sync_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_drain(tmp_path: Path) -> None:
+    """A reply that outlives one bot's bounded restart drain must not strand the batch."""
+
+    def agent_config(role: str) -> dict[str, object]:
+        return {"display_name": role, "role": role, "model": "default", "rooms": ["lobby"]}
+
+    models = {"default": {"provider": "test", "id": "test-model"}}
+    old_config = Config(agents={"general": agent_config("Old"), "coach": agent_config("Old")}, models=models)
+    new_config = Config(agents={"general": agent_config("New"), "coach": agent_config("New")}, models=models)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator.config = old_config
+    write_config_yaml(new_config, orchestrator.config_path)
+
+    old_bots: dict[str, AsyncMock] = {}
+    for entity_name in ("general", "coach", ROUTER_AGENT_NAME):
+        bot = _shutdown_bot_mock()
+        bot.config = old_config
+        bot.matrix_id = MatrixID.parse(f"@mindroom_{entity_name}:localhost")
+        bot.schedule_reply_authorized_call_reconciliation = MagicMock()
+        bot.schedule_reply_authorized_call_revocation = MagicMock()
+        old_bots[entity_name] = bot
+    drain_timeout = ResponseShutdownTimeoutError("1 response tasks did not stop within bounded cleanup")
+    old_bots["general"].prepare_for_sync_shutdown.side_effect = drain_timeout
+    old_bots["general"].stop.side_effect = drain_timeout
+    orchestrator.agent_bots = dict(old_bots)
+    orchestrator._sync_tasks = {name: asyncio.create_task(asyncio.sleep(60)) for name in old_bots}
+    old_router_task = orchestrator._sync_tasks[ROUTER_AGENT_NAME]
+    created_configs: dict[str, Config] = {}
+
+    def make_bot(
+        entity_name: str,
+        agent_user: AgentMatrixUser,
+        config: Config,
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncMock:
+        bot = _shutdown_bot_mock()
+        bot.matrix_id = agent_user.matrix_id
+        bot.try_start = AsyncMock(return_value=True)
+        created_configs[entity_name] = config
+        return bot
+
+    accounts = {
+        name: AgentMatrixUser(
+            agent_name=name,
+            user_id=f"@mindroom_{name}:localhost",
+            display_name=name,
+            password=TEST_PASSWORD,
+        )
+        for name in ("general", "coach")
+    }
+    try:
+        with (
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                return_value={"general", "coach"},
+            ),
+            patch("mindroom.orchestrator.create_bot_for_entity", side_effect=make_bot),
+            patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
+            patch.object(_MultiAgentOrchestrator, "_prepare_entity_accounts", new=AsyncMock(return_value=accounts)),
+            patch.object(_MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+        ):
+            await orchestrator.config_reload._apply_queued_config_reload()
+    finally:
+        tasks = list(orchestrator._sync_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert orchestrator.config_reload.status.status == "applied"
+    old_bots["general"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    old_bots["coach"].stop.assert_awaited_once_with(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    assert created_configs == {"general": orchestrator.config, "coach": orchestrator.config}
+    assert orchestrator.config.agents["general"].role == "New"
+    for entity_name in ("general", "coach"):
+        assert orchestrator.agent_bots[entity_name] is not old_bots[entity_name]
+        assert entity_name in orchestrator._sync_tasks
+    assert orchestrator.agent_bots[ROUTER_AGENT_NAME] is old_bots[ROUTER_AGENT_NAME]
+    assert orchestrator._sync_tasks[ROUTER_AGENT_NAME] is old_router_task
 
 
 @pytest.mark.asyncio
