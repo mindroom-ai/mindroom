@@ -246,16 +246,46 @@ def test_deleting_archived_memory_is_restored_even_when_the_prompt_files_are_unt
 
 
 def test_overwriting_archived_memory_while_moving_is_restored(tmp_path: Path) -> None:
-    """Moving a section by overwriting an existing topic file drops the archive; verify restores both files."""
+    """Overwriting a topic file drops its archive; verify restores it, keeps the lines the run added, and MEMORY.md."""
     plan, root = _plan_with_archive(tmp_path)
-    before = _snapshot(root)
     (root / "memory" / "projects.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
 
     result = verify_curation(plan)
 
     assert result.restored
-    assert _snapshot(root) == before
+    assert (root / "MEMORY.md").read_text() == MEMORY
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + SECTIONS[3]
+
+
+def test_a_restored_archive_keeps_facts_added_during_the_run(tmp_path: Path) -> None:
+    """A fact appended to a damaged topic file, for example by auto-flush, survives the restore."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").write_text("# Projects\n- Dentist on Friday.\n", encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert (root / "memory" / "projects.md").read_text() == ARCHIVE + "- Dentist on Friday.\n"
+
+
+def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
+    """Moving detail out of a context file that lives under memory/ is a move, not a deletion."""
+    config, automation, root = _setup(tmp_path)
+    context = "# Context\n" + "".join(SECTIONS)
+    (root / "memory" / "context.md").write_text(context, encoding="utf-8")
+    (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    config.agents["mind"].context_files = ["memory/context.md"]
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    assert "memory/context.md" not in plan.memory_snapshot
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (True, False)
 
 
 def test_reorganizing_an_archive_without_losing_content_is_kept(tmp_path: Path) -> None:

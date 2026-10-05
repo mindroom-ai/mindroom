@@ -20,7 +20,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_budget import estimate_text_tokens
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.automations import PromptCurationAutomation
     from mindroom.config.main import Config
@@ -79,13 +79,29 @@ def _tokens(payload: bytes) -> int:
     return estimate_text_tokens(payload.decode("utf-8"))
 
 
-def _memory_dir_texts(root: Path) -> dict[str, str]:
-    """Return the rewritable memory/ topic files by path; truncated or undecodable ones cannot be restored."""
+def _memory_dir_texts(root: Path, exclude: Iterable[str]) -> dict[str, str]:
+    """Return the rewritable memory/ topic files by path, except ``exclude``; others cannot be restored.
+
+    Curated and protected files are excluded even under memory/, so their content is counted and restored once.
+    """
+    excluded = set(exclude)
     return {
         memory_file.relative_path: memory_file.text
         for memory_file in read_scope_memory_files(root)
-        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.rewritable
+        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX)
+        and memory_file.rewritable
+        and memory_file.relative_path not in excluded
     }
+
+
+def _restored_archive(archived: str, current: str) -> str:
+    """Return a topic file's archived text followed by the lines the run added to it."""
+    archived_lines = set(archived.splitlines())
+    added = [line for line in current.splitlines() if line not in archived_lines]
+    if not added:
+        return archived
+    separator = "" if not archived or archived.endswith("\n") else "\n"
+    return archived + separator + "\n".join(added) + "\n"
 
 
 def _curated_paths(config: Config, agent_name: str, settings: PromptCurationAutomation) -> list[str]:
@@ -119,13 +135,14 @@ def plan_curation(
     protected_payloads = {
         path: payload for path in settings.protected_files if (payload := _read(root, path)) is not None
     }
+    snapshot = {**curated_payloads, **protected_payloads}
     upper = max(round(measured * (1 - settings.min_reduction)), round(_STOP_RATIO * settings.trigger_tokens))
     return CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
-        snapshot={**curated_payloads, **protected_payloads},
-        memory_snapshot=_memory_dir_texts(root),
+        snapshot=snapshot,
+        memory_snapshot=_memory_dir_texts(root, exclude=snapshot),
         curated=curated,
         upper_tokens=upper,
         floor_tokens=upper - round(measured * (settings.max_reduction - settings.min_reduction)),
@@ -201,7 +218,7 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     changed = [path for path, payload in plan.snapshot.items() if after_run[path] != payload]
-    memory_now = _memory_dir_texts(plan.root)
+    memory_now = _memory_dir_texts(plan.root, exclude=plan.snapshot)
     # Appending keeps a topic file's archived text; deleting, truncating, or rewriting it does not.
     damaged = [path for path, text in plan.memory_snapshot.items() if not memory_now.get(path, "").startswith(text)]
     if not changed and not damaged:
@@ -215,7 +232,8 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
         for path in changed:
             _restore(plan.root, path, plan.snapshot[path])
         for path in damaged:
-            _restore(plan.root, path, plan.memory_snapshot[path].encode("utf-8"))
+            restored = _restored_archive(plan.memory_snapshot[path], memory_now.get(path, ""))
+            _restore(plan.root, path, restored.encode("utf-8"))
         return _CurationResult(tokens_after=plan.measured_tokens, changed=True, violations=tuple(violations))
     tokens_after = sum(_tokens(current[path] or b"") for path in plan.curated)
     return _CurationResult(tokens_after=tokens_after, changed=True)
