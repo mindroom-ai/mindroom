@@ -102,6 +102,7 @@ describe('LandingPage', () => {
     expect(menuElement).not.toBeNull()
     const menu = within(menuElement as HTMLElement)
     expect(menu.getAllByRole('link').map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
+      ['Open MindRoom Chat', 'https://chat.mindroom.chat'],
       ['Why MindRoom', '#why'],
       ['Self-host', '#self-host'],
       ['Hosted', '#hosted'],
@@ -147,6 +148,13 @@ describe('LandingPage', () => {
     fireEvent.click(within(document.getElementById('mobile-menu') as HTMLElement).getByRole('link', { name: 'Hosted' }))
 
     expect(document.getElementById('mobile-menu')).toBeNull()
+  })
+
+  it('links to MindRoom Chat from the header and the hero', () => {
+    render(<LandingPage />)
+
+    expect(screen.getByRole('link', { name: 'Open Chat' })).toHaveAttribute('href', 'https://chat.mindroom.chat')
+    expect(screen.getByRole('link', { name: 'Open MindRoom Chat' })).toHaveAttribute('href', 'https://chat.mindroom.chat')
   })
 
   it('lists the MindRoom Chat apps', () => {
