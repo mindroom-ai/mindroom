@@ -51,6 +51,7 @@ const docsUrl = 'https://docs.mindroom.chat/'
 const githubUrl = 'https://github.com/mindroom-ai/mindroom'
 const installGuideUrl = `${docsUrl}getting-started/`
 const showcaseUrl = `${docsUrl}showcase/`
+const chatUrl = 'https://chat.mindroom.chat'
 const macAppUrl = `${docsUrl}installation/macos-app/`
 
 type InstallOption = {
@@ -96,7 +97,7 @@ const installOptions: InstallOption[] = [
 ]
 
 const chatApps: { label: string; href?: string; icon: LucideIcon; beta?: boolean }[] = [
-  { label: 'Web', href: 'https://chat.mindroom.chat', icon: Globe },
+  { label: 'Web', href: chatUrl, icon: Globe },
   { label: 'Mac', href: macAppUrl, icon: Laptop },
   { label: 'iPhone & iPad', href: 'https://apps.apple.com/us/app/mindroom-ai/id6760272172', icon: TabletSmartphone },
   { label: 'Android', icon: Smartphone, beta: true },
@@ -109,6 +110,7 @@ const navLinks = [
 ]
 
 const menuLinks: { href: string; label: string; external?: boolean; newTab?: boolean }[] = [
+  { href: chatUrl, label: 'Open MindRoom Chat', external: true },
   ...navLinks,
   { href: showcaseUrl, label: 'Showcase', external: true },
   { href: docsUrl, label: 'Docs', external: true },
@@ -552,13 +554,17 @@ export default function LandingPage() {
             <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
               Docs
             </a>
-            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
+            <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex">
               GitHub
             </a>
             <DarkModeToggle />
             <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
+            <a href={chatUrl} className="hidden items-center gap-2 whitespace-nowrap rounded-md border border-gray-300 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 transition-colors hover:bg-gray-50 dark:border-white/14 dark:bg-white/5 dark:text-white/88 dark:hover:bg-white/10 sm:inline-flex">
+              <MessageSquare className="h-4 w-4" />
+              Open Chat
+            </a>
             <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">
               Get started
               <ArrowRight className="hidden h-4 w-4 sm:block" />
@@ -592,6 +598,12 @@ export default function LandingPage() {
               </a>
             </div>
             <p className="mt-4 text-sm text-gray-600 dark:text-gray-400">
+              Already have agents?{' '}
+              <a href={chatUrl} className="font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200">
+                Open MindRoom Chat
+              </a>
+            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
               Rather not run it yourself?{' '}
               <Link href="#hosted" className="font-semibold text-orange-700 hover:text-orange-800 dark:text-orange-300 dark:hover:text-orange-200">
                 Try hosted MindRoom
