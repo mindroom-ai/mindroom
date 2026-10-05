@@ -176,6 +176,7 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
     model = config.models.get(model_name) if model_name is not None else None
     return (
         config.calls.livekit_service_url,
+        config.calls.agents[agent_name],
         profile.model_dump(exclude_none=True),
         model.model_dump(exclude_none=True) if model is not None else None,
     )

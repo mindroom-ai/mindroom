@@ -1647,8 +1647,24 @@ async def test_call_start_holds_response_admission_through_session_handoff(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: Path) -> None:
-    """Activity reporting sees a call from its first SFU step until the agent leaves it."""
+async def test_active_call_requesters_cover_starting_and_joined_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Activity reporting sees a call from tool materialization until the agent leaves it."""
+    tools_started = asyncio.Event()
+    release_tools = asyncio.Event()
+
+    async def blocking_tools(**kwargs: object) -> CallAgentTooling:
+        tools_started.set()
+        await release_tools.wait()
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", blocking_tools)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = _BlockingConnectBridge()
@@ -1656,6 +1672,9 @@ async def test_active_call_requesters_cover_starting_and_joined_calls(tmp_path: 
     assert manager.active_call_requesters == ()
 
     reconcile = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(tools_started.wait(), timeout=1)
+    assert manager.active_call_requesters == ("@alice:example.org",)
+    release_tools.set()
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     assert manager.active_call_requesters == ("@alice:example.org",)
     bridge.release_connect.set()

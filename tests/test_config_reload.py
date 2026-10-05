@@ -72,7 +72,6 @@ def _calls_for(
     agent_name: str,
     *,
     enabled: bool = True,
-    model: str = "gpt-realtime",
     voice: str = "marin",
 ) -> CallsConfig:
     return CallsConfig(
@@ -80,7 +79,7 @@ def _calls_for(
         profiles={
             "voice": RealtimeCallProfile(
                 backend="realtime",
-                model=model,
+                model="gpt-realtime",
                 credentials_service="openai",
                 voice=voice,
             ),
@@ -2089,6 +2088,12 @@ def test_config_update_plan_restarts_old_and_new_call_agents_when_calls_change()
 
 def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = None) -> Config:
     speech_service = {"provider": "openai_compatible", "model": "local-speech", "host": "http://127.0.0.1:9000"}
+    realtime_profile = {
+        "backend": "realtime",
+        "model": "gpt-realtime",
+        "credentials_service": "openai",
+        "voice": "marin",
+    }
     data: dict[str, Any] = {
         "agents": {
             "general": {"display_name": "General Agent"},
@@ -2102,12 +2107,8 @@ def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = 
         "calls": {
             "enabled": True,
             "profiles": {
-                "realtime": {
-                    "backend": "realtime",
-                    "model": "gpt-realtime",
-                    "credentials_service": "openai",
-                    "voice": "marin",
-                },
+                "realtime": realtime_profile,
+                "realtime-copy": dict(realtime_profile),
                 "cascaded": {"backend": "cascaded", "model": "call", "stt": speech_service, "tts": speech_service},
             },
             "agents": {"general": "realtime", "writer": "cascaded"},
@@ -2140,17 +2141,24 @@ def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = 
         pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), {"writer"}, id="profile-model"),
         pytest.param(lambda d: d["calls"]["agents"].update(general="cascaded"), {"general"}, id="profile-assignment"),
         pytest.param(
+            lambda d: d["calls"]["agents"].update(general="realtime-copy"),
+            {"general"},
+            id="equal-profile-assignment",
+        ),
+        pytest.param(
             lambda d: d["calls"].update(livekit_service_url="https://livekit.example.org"),
             {"general", "writer"},
             id="livekit-service-url",
         ),
     ],
 )
-def test_config_update_plan_restarts_idle_call_agents_only_for_their_call_setup(
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "general-in-call"])
+def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_in_progress(
     change: Callable[[dict[str, Any]], object],
     expected_call_restarts: set[str],
+    in_call: frozenset[str],
 ) -> None:
-    """Call agents without a call in progress restart only when their own call setup changes."""
+    """Idle call agents restart only for their own call setup; an agent in a call restarts for any change."""
     running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
 
     plan = build_config_update_plan(
@@ -2158,10 +2166,10 @@ def test_config_update_plan_restarts_idle_call_agents_only_for_their_call_setup(
         new_config=_two_call_agents_config(change),
         configured_entities=running_entities,
         existing_entities=running_entities,
-        agent_bots=_call_bots(running_entities),
+        agent_bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts
+    assert plan.entities_to_restart & {"general", "writer"} == expected_call_restarts | in_call
 
 
 def test_config_update_plan_restarts_call_agents_when_administrators_change() -> None:
