@@ -3214,6 +3214,47 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_router_handoff_for_a_bot_account_keeps_model_and_history_limit(tmp_path: Path) -> None:
+    """The router's relay of a task a bot account scheduled keeps the task's model and history cap."""
+    bot_account = "@telegram:localhost"
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}, bot_accounts=[bot_account]),
+        test_runtime_paths(tmp_path / "runtime"),
+    )
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
+    event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "@general ⏰ [Automated Task]\nPoll the queue",
+                "msgtype": "m.text",
+                constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+                constants.ORIGINAL_SENDER_KEY: bot_account,
+                constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
+                constants.SCHEDULED_MODEL_KEY: "cheap",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$scheduled:localhost"}},
+            },
+            "event_id": "$scheduled-router-handoff:localhost",
+            "sender": _entity_user_id(config, ROUTER_AGENT_NAME),
+            "origin_server_ts": 1_000_000,
+            "room_id": _ROOM_ID,
+            "type": "m.room.message",
+        },
+    )
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.response_envelope.requester_id == bot_account
+    assert request.scheduled_history_budget == ScheduledHistoryBudget(
+        limit=2,
+        source_event_id="$scheduled:localhost",
+    )
+    assert request.scheduled_model == "cheap"
+
+
+@pytest.mark.asyncio
 async def test_router_relay_keeps_original_alias_unsettled_through_gate_handoff(
     config: Config,
     tmp_path: Path,
