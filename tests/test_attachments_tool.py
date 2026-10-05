@@ -805,6 +805,42 @@ async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("uses_worker", [True, False])
+async def test_attachment_metadata_shows_local_path_only_where_agent_tools_can_open_it(
+    tmp_path: Path,
+    uses_worker: bool,
+) -> None:
+    """Worker-routed agents are told to copy the file instead of getting a runtime path their tools cannot open."""
+    tool = _worker_attachment_tool(
+        tmp_path,
+        runtime_env=_WORKER_RUNTIME_ENV,
+        worker_tools_override=["file"] if uses_worker else [],
+    )
+    (tmp_path / "workspace" / "notes.txt").write_text("notes", encoding="utf-8")
+    sample_file = tmp_path / "archive.zip"
+    sample_file.write_bytes(b"PK")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_archive")
+    assert attachment is not None
+
+    with tool_runtime_context(
+        _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
+    ):
+        metadata = json.loads(await tool.get_attachment("att_archive"))
+        listing = json.loads(await tool.list_attachments())
+        registered = json.loads(await tool.register_attachment("notes.txt"))
+
+    assert metadata["status"] == listing["status"] == registered["status"] == "ok"
+    for payload in (metadata["attachment"], listing["attachments"][0], registered["attachment"]):
+        assert payload["available"] is True
+        if uses_worker:
+            assert "local_path" not in payload
+            assert "mindroom_output_path" in payload["usage"]
+        else:
+            assert Path(payload["local_path"]).is_file()
+            assert "usage" not in payload
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -> None:
     """Helper should resolve attachment IDs and upload them to Matrix."""
     sample_file = tmp_path / "upload.txt"
