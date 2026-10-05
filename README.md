@@ -131,7 +131,7 @@ Even from a server across the world, they can use a computer you pair.
 <td width="50%" valign="top">
 
 **🔒 [Private where it matters](https://docs.mindroom.chat/#private-where-it-matters)**<br />
-Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home.
+Pick a model per agent: a local one for your most personal data, a frontier one for coding. With local memory and your own server, nothing that agent sees leaves your home, and what you tell a private agent stays out of shared ones.
 
 </td>
 </tr>
@@ -139,7 +139,7 @@ Pick a model per agent: a local one for your most personal data, a frontier one 
 <td valign="top">
 
 **🧠 [Memory that keeps improving](https://docs.mindroom.chat/#they-remember-and-keep-improving)**<br />
-Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills, while what you tell a private agent stays out of shared ones.
+Agents keep what matters from every conversation, get better as more people use them, and can turn work they repeat into reusable skills.
 
 </td>
 <td valign="top">
@@ -317,7 +317,6 @@ To work on MindRoom itself, run it from a checkout.
 
 <details>
 <summary><b>Run from source</b></summary>
-
 
 Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
