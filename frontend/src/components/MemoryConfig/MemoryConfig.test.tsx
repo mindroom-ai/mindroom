@@ -393,6 +393,44 @@ describe("MemoryConfig", () => {
     });
   });
 
+  it("loads and updates the entrypoint token cap without touching other file settings", async () => {
+    (useConfigStore as any).mockReturnValue({
+      config: {
+        memory: {
+          backend: "file",
+          embedder: mockConfig.memory!.embedder,
+          file: {
+            path: "./memory_files",
+            max_entrypoint_lines: 120,
+            max_entrypoint_tokens: 30000,
+          },
+        },
+      },
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+    render(<MemoryConfig />);
+
+    const tokenInput = document.getElementById(
+      "entrypoint-max-tokens",
+    ) as HTMLInputElement;
+    expect(tokenInput.value).toBe("30000");
+    fireEvent.change(tokenInput, { target: { value: "20000" } });
+
+    await waitFor(() => {
+      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          file: {
+            path: "./memory_files",
+            max_entrypoint_lines: 120,
+            max_entrypoint_tokens: 20000,
+          },
+        }),
+      );
+    });
+  });
+
   it("calls saveConfig when save button is clicked", async () => {
     // Re-mock with isDirty: true so the button is enabled
     (useConfigStore as any).mockReturnValue({
