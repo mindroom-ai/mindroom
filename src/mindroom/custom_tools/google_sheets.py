@@ -73,7 +73,6 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         # Pass credentials to parent class
         super().__init__(creds=creds, **kwargs)
         if "update_sheet" in self.functions:
-            self.tools = [*self.tools, self.batch_update_sheet]
             self.register(self.batch_update_sheet)
 
         # Store original auth method for fallback
@@ -84,7 +83,7 @@ class GoogleSheetsTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, A
         return build("sheets", "v4", http=self._google_authorized_http(creds))
 
     @authenticate
-    def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict[str, Any]]) -> str:
+    def batch_update_sheet(self, spreadsheet_id: str, requests: list[dict]) -> str:
         """Apply Google Sheets API batchUpdate requests to one spreadsheet, in order.
 
         Use this for changes that update_sheet cannot make, such as cell formatting, column widths,

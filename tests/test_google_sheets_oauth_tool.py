@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
@@ -18,6 +20,7 @@ from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -142,8 +145,8 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
     assert [registered.__name__ for registered in tool.tools] == [
         "create_sheet",
         "update_sheet",
-        "batch_update_sheet",
     ]
+    assert "batch_update_sheet" in tool.functions
 
 
 def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> None:
@@ -174,8 +177,8 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
         "read_sheet",
         "create_sheet",
         "update_sheet",
-        "batch_update_sheet",
     }
+    assert "batch_update_sheet" in tool.functions
 
 
 class _FakeSheetsRequest:
@@ -189,9 +192,12 @@ class _FakeSheetsRequest:
 class _FakeSpreadsheetsResource:
     def __init__(self) -> None:
         self.batch_update_kwargs: dict[str, object] | None = None
+        self.batch_update_error: HttpError | None = None
 
     def batchUpdate(self, **kwargs: object) -> _FakeSheetsRequest:  # noqa: N802
         self.batch_update_kwargs = kwargs
+        if self.batch_update_error is not None:
+            raise self.batch_update_error
         return _FakeSheetsRequest({"spreadsheetId": kwargs["spreadsheetId"], "replies": [{}]})
 
 
@@ -203,7 +209,7 @@ class _FakeSheetsService:
         return self.spreadsheets_resource
 
 
-def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> None:
+def _connected_sheets_tool(tmp_path: Path) -> tuple[GoogleSheetsTools, _FakeSheetsService]:
     tool = GoogleSheetsTools(
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
@@ -219,29 +225,45 @@ def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> N
     )
     service = _FakeSheetsService()
     tool.service = service
-    requests: list[dict[str, object]] = [
-        {
-            "updateSheetProperties": {
-                "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
-            },
-        },
-        {
-            "repeatCell": {
-                "range": {"sheetId": 0, "endRowIndex": 1},
-                "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                "fields": "userEnteredFormat.textFormat.bold",
-            },
-        },
-    ]
+    return tool, service
 
-    result = json.loads(tool.batch_update_sheet("sheet-id", requests))
+
+_FORMAT_REQUESTS: list[dict[str, object]] = [
+    {
+        "updateSheetProperties": {
+            "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount",
+        },
+    },
+    {
+        "repeatCell": {
+            "range": {"sheetId": 0, "endRowIndex": 1},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat.bold",
+        },
+    },
+]
+
+
+def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> None:
+    tool, service = _connected_sheets_tool(tmp_path)
+
+    result = json.loads(tool.batch_update_sheet("sheet-id", _FORMAT_REQUESTS))
 
     assert result == {"spreadsheetId": "sheet-id", "replies": [{}]}
     assert service.spreadsheets_resource.batch_update_kwargs == {
         "spreadsheetId": "sheet-id",
-        "body": {"requests": requests},
+        "body": {"requests": _FORMAT_REQUESTS},
     }
+
+
+def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path: Path) -> None:
+    tool, _service = _connected_sheets_tool(tmp_path)
+
+    validate_tool_arguments(
+        function_schema(tool.functions["batch_update_sheet"]),
+        {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
+    )
 
 
 def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
@@ -263,3 +285,15 @@ def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) ->
     )
 
     assert tool._should_fallback_to_original_auth() is True
+
+
+def test_google_sheets_batch_update_returns_sanitized_http_error(tmp_path: Path) -> None:
+    tool, service = _connected_sheets_tool(tmp_path)
+    service.spreadsheets_resource.batch_update_error = HttpError(
+        Response({"status": "400", "reason": "Bad Request"}),
+        b'{"error":{"message":"provider detail"}}',
+    )
+
+    result = json.loads(tool.batch_update_sheet("sheet-id", [{"deleteSheet": {"sheetId": 7}}]))
+
+    assert result == {"error": "Google Sheets request failed (HTTP 400)"}
