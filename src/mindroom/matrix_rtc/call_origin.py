@@ -10,14 +10,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.logging_config import get_logger
+from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
 from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+logger = get_logger(__name__)
+
 AGENT_CALL_STATE_EVENT_TYPE = "io.mindroom.agent_call"
 CALL_BRIEF_TOKEN_BUDGET = 6_000
 _BRIEF_MESSAGE_MAX_CHARS = 2_000
+_ROOM_ORIGIN_READ_LIMIT = 200
+_THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,78 @@ def _origin_from_event(
     if thread_id is not None and (not isinstance(thread_id, str) or not thread_id):
         return None
     return CallOrigin(room_id=room_id, thread_id=thread_id)
+
+
+def _reject(origin: CallOrigin, reason: str, **fields: str) -> None:
+    logger.warning("call_origin_rejected", room_id=origin.room_id, thread_id=origin.thread_id, reason=reason, **fields)
+
+
+async def _read_origin_history(origin: CallOrigin, context: ToolRuntimeContext) -> ThreadHistoryResult | None:
+    """Read the origin conversation, or return ``None`` when a thread origin is not a real thread root."""
+    if origin.thread_id is not None:
+        history = await complete_thread_history(context.conversation_reader, origin.room_id, origin.thread_id)
+        return history if history and history[0].event_id == origin.thread_id else None
+    page = await context.conversation_reader.read_strict(
+        room_id=origin.room_id,
+        thread_id=None,
+        limit=_ROOM_ORIGIN_READ_LIMIT,
+    )
+    return projected_thread_history(page, complete=False)
+
+
+async def resolve_call_origin_context(
+    origin: CallOrigin,
+    *,
+    context: ToolRuntimeContext,
+) -> CallOriginContext | None:
+    """Snapshot the origin conversation for the caller, or ``None`` when any check fails.
+
+    The origin is stamped by the caller, so it is only trusted after the same
+    cross-room check that gates the Matrix tools: the caller must be allowed to
+    use this agent and be currently joined to the origin room. The agent must
+    also be in that room, and a stamped thread must be rooted at the stamped
+    event. Every failure, including a failed read, rejects instead of raising.
+    """
+    try:
+        access_allowed = await room_access_allowed(context, origin.room_id)
+    except Exception as error:
+        _reject(origin, "caller_cannot_access_origin", error=str(error))
+        return None
+    if not access_allowed:
+        _reject(origin, "caller_cannot_access_origin")
+        return None
+    room = context.client.rooms.get(origin.room_id)
+    if room is None:
+        _reject(origin, "agent_not_in_origin")
+        return None
+    try:
+        history = await _read_origin_history(origin, context)
+    except Exception as error:
+        _reject(origin, "origin_read_failed", error=str(error))
+        return None
+    if history is None:
+        _reject(origin, "not_a_thread_root")
+        return None
+
+    trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
+    thread_title: str | None = None
+    messages: list[CallBriefMessage] = []
+    for message in history:
+        if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+            summary = message.content[_THREAD_SUMMARY_CONTENT_KEY].get("summary")
+            thread_title = summary if isinstance(summary, str) and summary else None
+            continue
+        body = message.body.strip()
+        if not body:
+            continue
+        label = "You" if message.sender == context.client.user_id else room.user_name(message.sender) or message.sender
+        messages.append(CallBriefMessage(label=label, body=body))
+    return CallOriginContext(
+        origin=origin,
+        room_name=room.display_name or origin.room_id,
+        thread_title=thread_title,
+        messages=tuple(messages),
+    )
 
 
 def _capped(body: str) -> str:
