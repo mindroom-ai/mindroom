@@ -45,7 +45,6 @@ from mindroom.tool_system.runtime_context import (
     list_tool_runtime_attachment_ids,
 )
 from mindroom.tool_system.sandbox_proxy import (
-    attachment_path_reach,
     attachment_save_uses_worker,
     inline_attachment_byte_limit,
     save_attachment_to_worker,
@@ -56,7 +55,6 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.sandbox_proxy import AttachmentPathReach
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
@@ -88,21 +86,13 @@ def _infer_local_attachment_metadata(local_path: Path) -> tuple[_LocalAttachment
     return "file", local_path.name, mime_type
 
 
-def _attachment_record_payload(record: AttachmentRecord, *, path_reach: AttachmentPathReach) -> dict[str, object]:
-    """Render one retained attachment with the runtime path only where the agent's tools can open it."""
+def _attachment_record_payload(record: AttachmentRecord, *, tools_use_worker: bool) -> dict[str, object]:
+    """Render one retained attachment, replacing the runtime path with copy instructions for worker tools."""
     payload = attachments_for_tool_payload([record])[0]
-    if not path_reach.worker_tools:
-        return payload
-    if not path_reach.runtime_path_tools:
-        # The path names the primary runtime's storage, which none of this agent's tools can open.
+    if tools_use_worker:
+        # The path names the primary runtime's storage, which worker tools cannot open.
         del payload["local_path"]
         payload["usage"] = _WORKER_ATTACHMENT_USAGE
-        return payload
-    payload["usage"] = (
-        f"local_path opens only in tools that run in the MindRoom runtime ({', '.join(path_reach.runtime_path_tools)}). "
-        f"Before tools that run in a worker ({', '.join(path_reach.worker_tools)}) use the file, copy it into "
-        "the workspace with get_attachment(attachment_id, mindroom_output_path=...)."
-    )
     return payload
 
 
@@ -110,7 +100,7 @@ def _get_attachment_listing(
     context: ToolRuntimeContext,
     target: str | None,
     *,
-    path_reach: AttachmentPathReach,
+    tools_use_worker: bool,
 ) -> tuple[list[str], list[dict[str, object]], list[str], str | None]:
     """List requested context attachments and report missing metadata records."""
     requested_attachment_ids = list_tool_runtime_attachment_ids(context)
@@ -132,7 +122,7 @@ def _get_attachment_listing(
             continue
         attachment_record = load_attachment(context.storage_path, attachment_id)
         if attachment_record is not None:
-            attachments.append(_attachment_record_payload(attachment_record, path_reach=path_reach))
+            attachments.append(_attachment_record_payload(attachment_record, tools_use_worker=tools_use_worker))
             resolved_attachment_ids.append(attachment_id)
     missing_attachment_ids = [
         attachment_id for attachment_id in requested_attachment_ids if attachment_id not in resolved_attachment_ids
@@ -531,20 +521,6 @@ class AttachmentTools(Toolkit):
             worker_tools_override=self._worker_tools_override,
         )
 
-    def _attachment_path_reach(self, context: ToolRuntimeContext) -> AttachmentPathReach:
-        """Resolve which of the calling agent's workspace tools can open a runtime attachment path."""
-        config = context.config
-        return attachment_path_reach(
-            runtime_paths=self._runtime_paths or context.runtime_paths,
-            worker_tools_override=self._worker_tools_override,
-            tool_names=(
-                config.resolve_entity(context.agent_name).available_tools
-                if context.agent_name in config.agents
-                else None
-            ),
-            file_access=self._file_access,
-        )
-
     async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolResult:
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
@@ -594,7 +570,7 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             target,
-            path_reach=self._attachment_path_reach(context),
+            tools_use_worker=self._tools_use_worker(context),
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -644,7 +620,7 @@ class AttachmentTools(Toolkit):
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
-            path_reach=self._attachment_path_reach(context),
+            tools_use_worker=self._tools_use_worker(context),
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
@@ -876,5 +852,5 @@ class AttachmentTools(Toolkit):
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
-            attachment=_attachment_record_payload(attachment_record, path_reach=self._attachment_path_reach(context)),
+            attachment=_attachment_record_payload(attachment_record, tools_use_worker=self._tools_use_worker(context)),
         )

@@ -4984,8 +4984,7 @@ matrix_message(message="Here is the report.", attachments=["att_abc123", "export
 
 Attachment arguments must be `att_*` IDs available in the current conversation or registered earlier in the same tool run.
 Metadata includes the kind, filename, MIME type, size, room ID, thread ID, sender, timestamps, and an `available` flag that reports whether the file still exists.
-It also includes the runtime-local path, which only tools running in the MindRoom process can open, and only when [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) does not confine them to the workspace, as with `shell` and `python`.
-When some of the agent's workspace tools run on a worker, a `usage` note names them and says to save the file with `mindroom_output_path` before they use it, and the path is left out unless another of the agent's tools can open it.
+It also includes the runtime-local path, except for agents whose workspace tools run on a worker, where that path does not exist; their metadata has a `usage` note saying to save the file with `mindroom_output_path` instead.
 To post files into Matrix, pass attachment IDs or file paths to `matrix_message`; see [`matrix_message` attachments](https://docs.mindroom.chat/tools/matrix-message/#attachments).
 
 ### Viewing Content

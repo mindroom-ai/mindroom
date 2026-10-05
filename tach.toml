@@ -6575,7 +6575,6 @@ from = ["mindroom.tool_approval"]
 expose = [
     "INLINE_ATTACHMENT_BYTES_ENV",
     "WorkerAttachmentSaveReceipt",
-    "attachment_path_reach",
     "attachment_save_uses_worker",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",

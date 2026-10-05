@@ -23,11 +23,7 @@ from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.declarations import (
-    SupportsPrimaryCallPlacement,
-    ToolFileAccess,
-    declare_tool_schema_source,
-)
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -62,13 +58,12 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function, ToolResult
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
-    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.workers.backend import WorkerBackend
@@ -521,15 +516,6 @@ def _tool_defaults_to_worker(tool_name: str) -> bool:
     return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
-def _workspace_consumer_names(tool_names: Collection[str] | None = None) -> list[str]:
-    """Return registered tools that consume workspace paths, optionally only among *tool_names*."""
-    return [
-        tool_name
-        for tool_name, metadata in TOOL_METADATA.items()
-        if metadata.consumes_workspace_paths and (tool_names is None or tool_name in tool_names)
-    ]
-
-
 def attachment_save_uses_worker(
     *,
     runtime_paths: RuntimePaths,
@@ -542,48 +528,8 @@ def attachment_save_uses_worker(
             runtime_paths=runtime_paths,
             worker_tools_override=worker_tools_override,
         )
-        for tool_name in _workspace_consumer_names()
-    )
-
-
-@dataclass(frozen=True)
-class AttachmentPathReach:
-    """Which of one agent's workspace tools run in a worker, and which can open a runtime attachment path."""
-
-    worker_tools: tuple[str, ...]
-    runtime_path_tools: tuple[str, ...]
-
-
-def attachment_path_reach(
-    *,
-    runtime_paths: RuntimePaths,
-    worker_tools_override: list[str] | None,
-    tool_names: Collection[str] | None,
-    file_access: FileAccess,
-) -> AttachmentPathReach:
-    """Split one agent's workspace tools by whether they can open a path in runtime attachment storage.
-
-    Worker tools never see that storage. In the primary process, only tools that file_access does not
-    confine can open it, or any path tool when file_access is unrestricted.
-    With *tool_names* unknown, every registered workspace tool counts.
-    """
-    worker_tools: list[str] = []
-    runtime_path_tools: list[str] = []
-    for tool_name in _workspace_consumer_names(tool_names):
-        tool_file_access = TOOL_METADATA[tool_name].file_access
-        if sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=worker_tools_override,
-        ):
-            worker_tools.append(tool_name)
-        elif tool_file_access is ToolFileAccess.UNCONFINED or (
-            file_access == "unrestricted" and tool_file_access is ToolFileAccess.AGENT
-        ):
-            runtime_path_tools.append(tool_name)
-    return AttachmentPathReach(
-        worker_tools=tuple(sorted(worker_tools)),
-        runtime_path_tools=tuple(sorted(runtime_path_tools)),
+        for tool_name, metadata in TOOL_METADATA.items()
+        if metadata.consumes_workspace_paths
     )
 
 
