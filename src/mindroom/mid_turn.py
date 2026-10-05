@@ -177,6 +177,7 @@ class MidTurnGate:
             del context[0]
         # Only the newest messages that fit reach the judge, so older ones are never scanned.
         kept = history[len(history) - len(context) :]
-        if not all(_is_plain_text(message.text) and _clip_is_unredacted(message.text) for message in kept):
+        # Earlier messages may name attachments the judge cannot open, as agents echo their attachment annotations.
+        if not all(_clip_is_unredacted(message.text) for message in kept):
             return "history_unjudgeable"
         return request

@@ -96,6 +96,9 @@ Chat shows the Computer action when this origin is set and the room has a joined
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
+For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
+Other custom-scheme origins and opaque `"null"` origins are refused.
+The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
 

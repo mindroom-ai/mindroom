@@ -406,6 +406,7 @@ print(json.dumps({
             "decision",
             "prune_calls",
             "reserve_delivery",
+            "reserve_script_delivery",
             "resolve",
             "resolve_call",
             "resolve_pending_calls",
