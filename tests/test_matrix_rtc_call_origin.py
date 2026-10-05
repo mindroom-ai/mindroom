@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
+from mindroom.event_journal import ConversationPage, VisibleMessage
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix_rtc import call_origin
@@ -181,7 +182,7 @@ def _origin_room() -> nio.MatrixRoom:
 def _resolve_context(*, rooms: dict | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         client=SimpleNamespace(user_id=AGENT, rooms={ORIGIN_ROOM: _origin_room()} if rooms is None else rooms),
-        conversation_reader=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock(),
         config=object(),
         runtime_paths=object(),
     )
@@ -195,6 +196,27 @@ def _allow_access(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _history(*messages: ResolvedVisibleMessage) -> ThreadHistoryResult:
     return ThreadHistoryResult(messages=list(messages), is_full_history=True)
+
+
+def _page(*messages: tuple[str, str | None, dict]) -> ConversationPage:
+    """Build a projection page from ``(event_id, thread_id, content)`` messages sent by the caller."""
+    return ConversationPage(
+        messages=tuple(
+            VisibleMessage(
+                logical_event_id=event_id,
+                room_id=ORIGIN_ROOM,
+                thread_id=thread_id,
+                sender=CALLER,
+                created_ts=1_000,
+                revision_event_id=event_id,
+                revision_ts=1_000,
+                content=content,
+            )
+            for event_id, thread_id, content in messages
+        ),
+        refresh_pending=(),
+        next_cursor=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -342,6 +364,32 @@ async def test_resolve_rejects_event_that_is_not_the_thread_root(
         context=_resolve_context(),  # type: ignore[arg-type]
     )
     assert resolved is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_allow_access")
+async def test_resolve_rejects_a_thread_reply_stamped_as_the_root() -> None:
+    """A reply inside another thread is not a root, even though reading it by id returns it first."""
+    reply_content = {
+        "msgtype": "m.text",
+        "body": "Reply in another thread",
+        "m.relates_to": {
+            "rel_type": "m.thread",
+            "event_id": "$root",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$root"},
+        },
+    }
+    context = _resolve_context()
+    context.conversation_reader.read_strict.return_value = _page(("$reply", "$root", reply_content))
+
+    resolved = await resolve_call_origin_context(
+        CallOrigin(room_id=ORIGIN_ROOM, thread_id="$reply"),
+        context=context,  # type: ignore[arg-type]
+    )
+
+    assert resolved is None
+    context.conversation_reader.read_strict.assert_awaited_once()
 
 
 @pytest.mark.asyncio

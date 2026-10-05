@@ -4044,6 +4044,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.event_info",
 ]
 
 [[modules]]
