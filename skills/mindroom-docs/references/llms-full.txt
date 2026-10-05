@@ -3635,7 +3635,7 @@ agents:
     skills: [open-knowledge-format]
 ```
 
-The mirror is a [Git-backed base](#git-backed-knowledge-bases), so trigger a sync from the dashboard to clone it before the first poll, and keep it read-only because sync discards local edits when the branch moves.
+The mirror is a [Git-backed base](#git-backed-knowledge-bases), so trigger a sync from the dashboard to clone it before the first poll.
 
 ### Maintaining a Bundle with Agents
 
