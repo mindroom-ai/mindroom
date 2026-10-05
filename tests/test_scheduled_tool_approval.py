@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 from agno.agent import Agent
+from agno.agent._tools import parse_tools
 from agno.models.openai import OpenAIChat
 from agno.run import RunContext
 from agno.tools import Toolkit
@@ -2122,3 +2123,42 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
     assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
     assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
     assert plugin.functions["run_scheduled_call"].requires_confirmation is True
+
+
+def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:
+    """The model sees each tool's real parameters, never the runtime-supplied agent or run context."""
+    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools()])
+    prepared = {
+        function.name: function
+        for function in parse_tools(agent, tools=[SchedulerTools()], model=agent.model, async_mode=True)
+    }
+
+    schedule = prepared["schedule_tool_call"].parameters
+    run = prepared["run_scheduled_call"].parameters
+    assert sorted(schedule["properties"]) == ["arguments_json", "description", "execute_at", "tool_name"]
+    assert sorted(schedule["required"]) == ["arguments_json", "description", "execute_at", "tool_name"]
+    assert sorted(run["properties"]) == ["arguments_json", "task_id"]
+    assert run["required"] == ["task_id"]
+
+
+@pytest.mark.asyncio
+async def test_edited_task_offers_the_ordinary_way_after_its_approval_was_withdrawn(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A task whose time was edited still fires its trigger; the withdrawn approval points to ordinary approval."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    try:
+        await _armed(manager)
+        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule edited.")
+
+        result = await _run(manager, _live_agent(runs))
+
+        assert isinstance(result, str)
+        assert "withdrawn" in result
+        assert "call `post_slack_message` with these arguments" in result
+        assert runs == []
+    finally:
+        await manager.shutdown()

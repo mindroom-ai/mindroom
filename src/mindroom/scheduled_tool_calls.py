@@ -60,7 +60,8 @@ _REFUSALS: dict[ScheduledCallRefusal, str] = {
 }
 
 
-_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"not_approved", "not_armed", "late"})
+# Refusals after which the requester can still approve the same call the ordinary way, such as after an edit.
+_ASK_INSTEAD: frozenset[ScheduledCallRefusal] = frozenset({"withdrawn", "not_approved", "not_armed", "late"})
 
 
 @dataclass(frozen=True, slots=True)

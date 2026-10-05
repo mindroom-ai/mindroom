@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from agno.agent import Agent  # noqa: TC002 - Agno reads tool annotations at runtime
+from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
 from mindroom.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
@@ -18,10 +18,6 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,
 )
-
-if TYPE_CHECKING:
-    from agno.agent import Agent
-    from agno.run import RunContext
 
 _TOOL_ERROR_PREFIX = "❌"
 _LIST_SCHEDULES_ERROR = "Unable to retrieve scheduled tasks."
