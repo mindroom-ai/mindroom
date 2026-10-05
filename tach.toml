@@ -928,6 +928,7 @@ visibility = [
     "mindroom.turn_store",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
+    "mindroom.prompt_curation.runner",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
 ]
@@ -946,6 +947,7 @@ visibility = [
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice_handler",
+    "mindroom.prompt_curation.runner",
     "mindroom.skill_learning.reviewer",
 ]
 
@@ -1115,6 +1117,7 @@ visibility = ["mindroom.judgment.llm",
     "mindroom.thread_summary",
     "mindroom.topic_generator",
     "mindroom.voice_handler",
+    "mindroom.prompt_curation.runner",
     "mindroom.skill_learning.reviewer",
 ]
 
@@ -2703,6 +2706,7 @@ depends_on = [
     "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.workers.runtime",
     "mindroom.delegation.recovery",
+    "mindroom.prompt_curation.runner",
     "mindroom.skill_learning.runner",
 ]
 
@@ -2918,6 +2922,7 @@ depends_on = [
     "mindroom.config.judgment",
     "mindroom.config.access",
     "mindroom.config.legacy_fields",
+    "mindroom.config.prompt_curation",
     "mindroom.config.validation",
     "mindroom.constants",
     "mindroom.credential_policy",
@@ -2950,6 +2955,7 @@ depends_on = [
     "mindroom.config.memory",
     "mindroom.config.models",
     "mindroom.config.plugin",
+    "mindroom.config.prompt_curation",
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -2980,6 +2986,7 @@ depends_on = [
     "mindroom.constants", "mindroom.tool_system.worker_routing",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
+    "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
 ]
@@ -3117,7 +3124,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.timing",
 ]
-visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
+visibility = ["mindroom.memory", "mindroom.memory._backend", "mindroom.memory.functions"]
 
 [[modules]]
 path = "mindroom.memory._semantic_file_search"
@@ -5693,11 +5700,15 @@ expose = [
     "get_agent_memory",
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
+    "read_scope_file",
+    "read_scope_memory_files",
     "reprioritize_auto_flush_sessions",
+    "schedule_agent_memory_refresh",
     "search_agent_memories",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",
+    "write_scope_file",
 ]
 from = ["mindroom.memory"]
 
@@ -7438,7 +7449,7 @@ expose = [
 [[modules]]
 path = "mindroom.tool_call_budget"
 depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.logging_config"]
-visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynamic_workflow", "mindroom.skill_learning.reviewer"]
+visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynamic_workflow", "mindroom.prompt_curation.runner", "mindroom.skill_learning.reviewer"]
 
 [[interfaces]]
 from = ["mindroom.tool_call_budget"]
@@ -7926,6 +7937,46 @@ depends_on = []
 path = "mindroom.config.skill_learning"
 depends_on = []
 visibility = ["mindroom.config.agent"]
+
+[[modules]]
+path = "mindroom.config.prompt_curation"
+depends_on = ["mindroom.config.validation"]
+visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+
+[[modules]]
+path = "mindroom.prompt_curation.policy"
+depends_on = []
+visibility = ["mindroom.prompt_curation.runner", "mindroom.prompt_curation.staging", "mindroom.prompt_curation.tools"]
+
+[[modules]]
+path = "mindroom.prompt_curation.staging"
+depends_on = ["mindroom.memory", "mindroom.prompt_curation.policy"]
+visibility = ["mindroom.prompt_curation.runner"]
+
+[[modules]]
+path = "mindroom.prompt_curation.tools"
+depends_on = ["mindroom.prompt_curation.policy"]
+visibility = ["mindroom.prompt_curation.runner"]
+
+[[modules]]
+path = "mindroom.prompt_curation.runner"
+depends_on = [
+    "mindroom.agent_storage",
+    "mindroom.background_tasks",
+    "mindroom.helper_usage",
+    "mindroom.history.storage",
+    "mindroom.llm_request_logging",
+    "mindroom.logging_config",
+    "mindroom.memory",
+    "mindroom.model_loading",
+    "mindroom.path_confinement",
+    "mindroom.prompt_curation.policy",
+    "mindroom.prompt_curation.staging",
+    "mindroom.prompt_curation.tools",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_call_budget",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.skill_learning.library"

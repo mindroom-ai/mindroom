@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.prompt_curation import PromptCurationConfig
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
@@ -494,6 +495,10 @@ class DefaultsConfig(BaseModel):
         default=50000,
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
+    )
+    prompt_curation: PromptCurationConfig = Field(
+        default_factory=PromptCurationConfig,
+        description="Background condensing of oversized always-loaded prompt files for file-memory agents",
     )
     tool_output_auto_save_threshold_bytes: int = Field(
         default=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,

@@ -69,6 +69,7 @@ from mindroom.config.models import (
 )
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.config.prompt_curation import PromptCurationConfig, merge_prompt_curation
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
     strip_runtime_approved_egress_overlay_from_dump,
@@ -1848,6 +1849,21 @@ class Config(BaseModel):
             return self.memory.search
         # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
         return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
+
+    def _agent_prompt_curation(self, agent_name: str) -> PromptCurationConfig:
+        """Get effective prompt-curation settings for one agent."""
+        return merge_prompt_curation(self.defaults.prompt_curation, self.get_agent(agent_name).prompt_curation)
+
+    @model_validator(mode="after")
+    def validate_prompt_curation(self) -> Config:
+        """Reject per-agent prompt-curation overrides whose merge with the defaults is invalid."""
+        for agent_name, agent in self.agents.items():
+            try:
+                merge_prompt_curation(self.defaults.prompt_curation, agent.prompt_curation)
+            except ValidationError as exc:
+                msg = f"Invalid prompt_curation for agent {agent_name!r}: {exc.errors()[0]['msg']}"
+                raise ValueError(msg) from exc
+        return self
 
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""

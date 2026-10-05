@@ -616,6 +616,7 @@ def _extract_run(
         "memory_auto_flush",
         "dynamic_workflow",
         "live_voice",
+        "prompt_curation",
         "skill_learning",
         "routing",
         "room_topic",

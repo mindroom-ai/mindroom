@@ -2220,6 +2220,13 @@ class ResponseRunner:
                 session_id=session_id,
                 execution_identity=execution_identity,
             )
+            if (orchestrator := self.deps.runtime.orchestrator) is not None:
+                orchestrator.prompt_curation.maybe_start(
+                    self.deps.runtime.config,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    identity=execution_identity,
+                )
             if self.deps.runtime.config.resolve_entity(agent_name).memory_backend == "mem0":
                 create_background_task(
                     store_conversation_memory(

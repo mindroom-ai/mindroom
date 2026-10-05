@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.prompt_curation.runner import PromptCurationRunner
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.skill_learning.runner import SkillReviewRunner
     from mindroom.tool_system.plugins import PluginReloadResult
@@ -59,6 +60,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def skill_reviews(self) -> SkillReviewRunner: ...  # noqa: D102
+
+    @property
+    def prompt_curation(self) -> PromptCurationRunner: ...  # noqa: D102
 
     @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102

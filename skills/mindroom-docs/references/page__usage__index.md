@@ -44,6 +44,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `memory_auto_flush` | Background memory auto-flush extraction |
 | `dynamic_workflow` | Embedded Dynamic Workflow participants |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
+| `prompt_curation` | Background [prompt curation](https://docs.mindroom.chat/memory/#prompt-curation) passes |
 | `routing`, `room_topic`, `schedule_parse`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.

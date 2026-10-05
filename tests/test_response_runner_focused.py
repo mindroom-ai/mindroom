@@ -10072,6 +10072,48 @@ async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path
     send.assert_awaited()
 
 
+@dataclass
+class _RecordedPromptCuration:
+    """The orchestrator's prompt-curation runner as a response sees it, recording each workspace check."""
+
+    started: list[dict[str, object]] = field(default_factory=list)
+
+    def maybe_start(self, _config: object, **scope: object) -> None:
+        self.started.append(scope)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_response_hands_its_workspace_to_prompt_curation(tmp_path: Path) -> None:
+    """The completed-agent memory handoff lets background curation check the workspace the response used."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    assert bot.client is not None
+    bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
+    curation = _RecordedPromptCuration()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, prompt_curation=curation)
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=30,
+        max_response_chars=30,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    with (
+        patch("mindroom.model_loading.get_model_instance", return_value=model),
+        patch_response_runner_module(
+            typing_indicator=_noop_typing,
+            should_use_streaming=AsyncMock(return_value=False),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target()))
+        assert await wait_for_background_tasks(5, owner=coordinator.deps.runtime)
+
+    (started,) = curation.started
+    assert started["agent_name"] == "general"
+    assert started["session_id"]
+    assert started["identity"].requester_id == "@user:localhost"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
 async def test_only_a_completed_response_counts_toward_its_skill_review(succeeded: bool) -> None:

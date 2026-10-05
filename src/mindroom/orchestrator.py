@@ -85,6 +85,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.prompt_curation.runner import PromptCurationRunner
 from mindroom.response_activity import ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
@@ -410,6 +411,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _skill_reviews: SkillReviewRunner = field(init=False, repr=False)
+    _prompt_curation: PromptCurationRunner = field(init=False, repr=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
@@ -469,6 +471,7 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._skill_reviews = SkillReviewRunner(self.runtime_paths, lambda agent_name: self.agent_bots.get(agent_name))
+        self._prompt_curation = PromptCurationRunner(self.runtime_paths)
         self._todo_poke_runtime = TodoPokeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -566,6 +569,11 @@ class _MultiAgentOrchestrator:
     def skill_reviews(self) -> SkillReviewRunner:
         """Return the orchestrator-owned runner of automatic skill reviews."""
         return self._skill_reviews
+
+    @property
+    def prompt_curation(self) -> PromptCurationRunner:
+        """Return the orchestrator-owned runner of background prompt curation."""
+        return self._prompt_curation
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
         """Return first-sync readiness for the current entity generation."""
@@ -2443,6 +2451,7 @@ class _MultiAgentOrchestrator:
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
         await _run_shutdown_step("memory_auto_flush", self._stop_memory_auto_flush_worker())
         await _run_shutdown_step("skill_reviews", self._skill_reviews.stop())
+        await _run_shutdown_step("prompt_curation", self._prompt_curation.stop())
         await _run_shutdown_step("knowledge_source_watchers", self._knowledge_source_watcher.shutdown())
         await _run_shutdown_step("knowledge_refresh", self._knowledge_refresh_scheduler.shutdown())
         await _run_shutdown_step("bot_start_tasks", self._cancel_bot_start_tasks())

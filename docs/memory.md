@@ -281,6 +281,72 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+## Prompt Curation
+
+File-memory agents load `MEMORY.md` into every prompt, and they append to it far more often than they condense it.
+Prompt curation keeps such always-loaded files in check: once they grow too large, MindRoom gives the agent a background maintenance pass that condenses them gradually and moves detail into searchable `memory/` files.
+It applies only to agents whose effective backend is `file`, and it is on by default.
+
+```yaml
+defaults:
+  prompt_curation:
+    enabled: true
+    trigger_tokens: 50000
+    target_ratio: 0.9
+    max_reduction_per_pass: 0.15
+    cooldown_hours: 24
+    files: [MEMORY.md]
+
+agents:
+  mind:
+    display_name: Mind
+    memory_backend: file
+    prompt_curation:
+      files: [MEMORY.md, USER.md]
+```
+
+1. After each completed reply, a background check measures the curatable `files` with the estimate behind `static_prompt_tokens` (characters / 4); it never delays the reply.
+2. Above `trigger_tokens`, a pass is due at most once per `cooldown_hours`, and later passes continue until the files are under `target_ratio` of the trigger.
+3. MindRoom computes the pass's band from the measured size, for example "at most 64800 tokens, but not below 61200" for 72000 tokens, and gives it to the agent's own model with three tools on a staged copy of the workspace: `read_file`, `edit_file` for the curatable files, and `append_file` for Markdown files under `memory/`.
+4. The model keeps durable facts concise, moves detail verbatim into topic files such as `memory/projects.md`, and leaves one-line pointers.
+5. MindRoom validates the result and publishes it only when every guard holds.
+
+A pass is discarded, leaving every live file byte-identical, when:
+
+- a curatable file shrank by more than `max_file_shrink`;
+- the curatable files total less than the pass's floor;
+- a protected file, or any file that is neither curatable nor under `memory/`, changed;
+- the curatable files did not shrink;
+- total memory content (the curatable files plus `memory/**`) dropped by more than `max_content_loss` of the curatable files' size, because detail was deleted instead of moved.
+
+An edit that would over-cut a file or the total is refused as soon as the model makes it, and `memory/` files can only grow during a pass.
+Each failed pass doubles the cooldown, up to eight times, and attempt times survive restarts in `prompt_curation_state.json` in the storage directory.
+When a reply rewrites a curated file while a pass runs, the pass is discarded; lines a reply only appended are kept.
+After a published pass, a `semantic` memory index is refreshed so moved detail stays searchable.
+
+Passes post nothing to Matrix, so neither people nor the router see them.
+Their log lines and LLM usage logs carry `caller_label=prompt_curation`, a published pass logs `Prompt curation accepted` with `tokens_before` and `tokens_after`, and usage is reported under `kind: prompt_curation` in [usage tracking](usage.md#token-usage).
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Turn curation on or off |
+| `trigger_tokens` | `50000` (min 1) | Start curating once the curatable files exceed this many estimated tokens |
+| `trigger_context_fraction` | `null` | Lower trigger as a fraction (between 0 and 1) of the agent model's `context_window`, for small-window models |
+| `target_ratio` | `0.9` | Keep curating on later passes until the files are under this fraction of the trigger |
+| `min_reduction_per_pass` | `0.10` | Cut each pass is asked for, or only the gap to the target when that is smaller |
+| `max_reduction_per_pass` | `0.15` | Largest cut one pass may make |
+| `max_file_shrink` | `0.25` | Largest shrink of any single curatable file per pass |
+| `max_content_loss` | `0.05` | Largest net drop in total memory content per pass, as a fraction of the curatable files' size |
+| `cooldown_hours` | `24` | Minimum hours between passes for one workspace |
+| `timeout_seconds` | `600` (30 to 3600) | Time limit for one pass |
+| `files` | `[MEMORY.md]` | Workspace-relative Markdown files a pass may condense; never under `memory/` |
+| `protected_files` | `[SOUL.md, IDENTITY.md, AGENTS.md]` | Files a pass never changes; `files` may not name them |
+
+`agents.<name>.prompt_curation` overrides individual fields, and omitted fields inherit `defaults.prompt_curation`.
+Set `enabled: false` there for one agent, or under `defaults` for all agents.
+A [private agent](#per-requester-file-memory) curates each requester's workspace separately.
+`memory.file.max_entrypoint_tokens` stays the hard cap on what `MEMORY.md` adds to a prompt when curation is off or has not caught up, and `context_files` such as `USER.md` are capped by `defaults.max_preload_chars`.
+
 ## [`memory`]
 
 The `memory` tool lets an agent deliberately remember, look up, correct, or forget something, alongside automatic memory.

@@ -441,6 +441,18 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "prompt_curation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentPromptCurationConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional per-agent prompt curation override; omitted fields inherit defaults.prompt_curation"
+        },
         "skill_learning": {
           "$ref": "#/$defs/SkillLearningConfig",
           "default": {
@@ -660,6 +672,193 @@
         }
       },
       "title": "AgentPrivateKnowledgeConfig",
+      "type": "object"
+    },
+    "AgentPromptCurationConfig": {
+      "additionalProperties": false,
+      "description": "Per-agent prompt-curation overrides; omitted fields inherit defaults.prompt_curation.",
+      "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent prompt curation switch",
+          "title": "Enabled"
+        },
+        "trigger_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent trigger in estimated tokens",
+          "title": "Trigger Tokens"
+        },
+        "trigger_context_fraction": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent trigger as a fraction of the model's context_window",
+          "title": "Trigger Context Fraction"
+        },
+        "target_ratio": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent hysteresis target",
+          "title": "Target Ratio"
+        },
+        "min_reduction_per_pass": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent minimum cut",
+          "title": "Min Reduction Per Pass"
+        },
+        "max_reduction_per_pass": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent maximum cut",
+          "title": "Max Reduction Per Pass"
+        },
+        "max_file_shrink": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent per-file shrink cap",
+          "title": "Max File Shrink"
+        },
+        "max_content_loss": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent net content-loss cap",
+          "title": "Max Content Loss"
+        },
+        "cooldown_hours": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent hours between passes",
+          "title": "Cooldown Hours"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 30,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent pass timeout",
+          "title": "Timeout Seconds"
+        },
+        "files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent curatable files",
+          "title": "Files"
+        },
+        "protected_files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent protected files",
+          "title": "Protected Files"
+        }
+      },
+      "title": "AgentPromptCurationConfig",
       "type": "object"
     },
     "AgentThreadExportConfig": {
@@ -1380,6 +1579,30 @@
           "minimum": 1,
           "title": "Max Preload Chars",
           "type": "integer"
+        },
+        "prompt_curation": {
+          "$ref": "#/$defs/PromptCurationConfig",
+          "default": {
+            "enabled": true,
+            "trigger_tokens": 50000,
+            "trigger_context_fraction": null,
+            "target_ratio": 0.9,
+            "min_reduction_per_pass": 0.1,
+            "max_reduction_per_pass": 0.15,
+            "max_file_shrink": 0.25,
+            "max_content_loss": 0.05,
+            "cooldown_hours": 24.0,
+            "timeout_seconds": 600,
+            "files": [
+              "MEMORY.md"
+            ],
+            "protected_files": [
+              "SOUL.md",
+              "IDENTITY.md",
+              "AGENTS.md"
+            ]
+          },
+          "description": "Background condensing of oversized always-loaded prompt files for file-memory agents"
         },
         "tool_output_auto_save_threshold_bytes": {
           "default": 51200,
@@ -3079,6 +3302,122 @@
       "title": "PluginEntryConfig",
       "type": "object"
     },
+    "PromptCurationConfig": {
+      "additionalProperties": false,
+      "description": "Condense oversized always-loaded prompt files gradually in a background run of the agent.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Condense curatable files once they exceed the trigger",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "trigger_tokens": {
+          "default": 50000,
+          "description": "Start curating once the curatable files total more than this many estimated tokens",
+          "minimum": 1,
+          "title": "Trigger Tokens",
+          "type": "integer"
+        },
+        "trigger_context_fraction": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1,
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lower trigger as a fraction of the agent model's context_window, for small-window models",
+          "title": "Trigger Context Fraction"
+        },
+        "target_ratio": {
+          "default": 0.9,
+          "description": "Keep curating on later passes until the files are under this fraction of the trigger",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Target Ratio",
+          "type": "number"
+        },
+        "min_reduction_per_pass": {
+          "default": 0.1,
+          "description": "Fraction of the curatable files' size each pass is asked to remove, unless less is needed",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Min Reduction Per Pass",
+          "type": "number"
+        },
+        "max_reduction_per_pass": {
+          "default": 0.15,
+          "description": "Largest fraction of the curatable files' size one pass may remove",
+          "exclusiveMaximum": 1,
+          "exclusiveMinimum": 0,
+          "title": "Max Reduction Per Pass",
+          "type": "number"
+        },
+        "max_file_shrink": {
+          "default": 0.25,
+          "description": "Largest fraction any single curatable file may shrink in one pass",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Max File Shrink",
+          "type": "number"
+        },
+        "max_content_loss": {
+          "default": 0.05,
+          "description": "Largest net drop in total memory content (curatable files plus memory/**), as a fraction of the curatable files' size before the pass; detail must move to memory/ instead of being deleted",
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Max Content Loss",
+          "type": "number"
+        },
+        "cooldown_hours": {
+          "default": 24,
+          "description": "Minimum hours between passes for one agent workspace; doubles after each failed pass, up to 8x",
+          "exclusiveMinimum": 0,
+          "title": "Cooldown Hours",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 600,
+          "description": "Maximum seconds per pass",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "files": {
+          "default": [
+            "MEMORY.md"
+          ],
+          "description": "Workspace-relative prompt files curation may condense",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Files",
+          "type": "array"
+        },
+        "protected_files": {
+          "default": [
+            "SOUL.md",
+            "IDENTITY.md",
+            "AGENTS.md"
+          ],
+          "description": "Workspace-relative files curation never changes and that files may not name",
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Files",
+          "type": "array"
+        }
+      },
+      "title": "PromptCurationConfig",
+      "type": "object"
+    },
     "RealtimeCallProfile": {
       "additionalProperties": false,
       "description": "One OpenAI realtime speech-to-speech call profile.",
@@ -4255,6 +4594,26 @@
         "worker_grantable_credentials": null,
         "allow_self_config": false,
         "max_preload_chars": 50000,
+        "prompt_curation": {
+          "cooldown_hours": 24.0,
+          "enabled": true,
+          "files": [
+            "MEMORY.md"
+          ],
+          "max_content_loss": 0.05,
+          "max_file_shrink": 0.25,
+          "max_reduction_per_pass": 0.15,
+          "min_reduction_per_pass": 0.1,
+          "protected_files": [
+            "SOUL.md",
+            "IDENTITY.md",
+            "AGENTS.md"
+          ],
+          "target_ratio": 0.9,
+          "timeout_seconds": 600,
+          "trigger_context_fraction": null,
+          "trigger_tokens": 50000
+        },
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
           "interval_ramp_seconds": 15.0,

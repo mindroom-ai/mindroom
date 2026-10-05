@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import CompactionConfig, EffectiveToolConfig, FileAccess
+    from mindroom.config.prompt_curation import PromptCurationConfig
     from mindroom.history.types import ResolvedHistorySettings
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -82,6 +83,11 @@ class ResolvedEntityView:
         if self.name is None:
             return self._config.memory.search
         return self._config._agent_memory_search(self.name)
+
+    @property
+    def prompt_curation(self) -> PromptCurationConfig:
+        """Effective prompt-curation settings for this agent."""
+        return self._config._agent_prompt_curation(self._agent_name())
 
     @property
     def model_name(self) -> str:

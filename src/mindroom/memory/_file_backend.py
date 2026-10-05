@@ -79,7 +79,7 @@ class _CappedPayload:
 
 
 @dataclass(frozen=True)
-class _ScopeMemoryFile:
+class ScopeMemoryFile:
     """One memory file's scope-relative path and its capped text.
 
     ``rewritable`` is false when the loaded text is not the file's exact
@@ -93,7 +93,7 @@ class _ScopeMemoryFile:
 
 @dataclass(frozen=True)
 class _PathMemoryLine:
-    memory_file: _ScopeMemoryFile
+    memory_file: ScopeMemoryFile
     relative_path: str
     line_no: int
     raw_line: str
@@ -263,19 +263,19 @@ def _decode_capped_text(payload: _CappedPayload) -> str:
     return text[: newline_index + 1] if newline_index >= 0 else ""
 
 
-def _scope_memory_file(relative_path: str, payload: _CappedPayload) -> _ScopeMemoryFile:
+def _scope_memory_file(relative_path: str, payload: _CappedPayload) -> ScopeMemoryFile:
     text = _decode_capped_text(payload)
     # Replacement characters and dropped bytes must never be written back.
     lossy = text.encode("utf-8") != payload.payload
-    return _ScopeMemoryFile(
+    return ScopeMemoryFile(
         relative_path=relative_path,
         text=text,
         rewritable=not payload.truncated and not lossy,
     )
 
 
-def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_ScopeMemoryFile]:
-    files: list[_ScopeMemoryFile] = []
+def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[ScopeMemoryFile]:
+    files: list[ScopeMemoryFile] = []
     skipped: list[str] = []
     budget = _MAX_MEMORY_SCAN_BYTES
     for relative_path in _scope_markdown_relative_paths(scope_fd):
@@ -303,7 +303,7 @@ def _read_scope_markdown_files_at(scope_fd: int, scope_path: Path) -> list[_Scop
     return files
 
 
-def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemoryFile | None:
+def _read_listed_memory_file(scope_path: Path, relative_path: str) -> ScopeMemoryFile | None:
     """Read one listed non-entrypoint memory file without reading the rest of the scope."""
     if relative_path == FILE_MEMORY_ENTRYPOINT:
         return None
@@ -320,7 +320,7 @@ def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemo
     return _scope_memory_file(relative_path, payload) if payload is not None else None
 
 
-def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
+def read_scope_memory_files(scope_path: Path) -> list[ScopeMemoryFile]:
     """Read every in-scope memory file under the per-file and per-scan byte caps."""
     try:
         with open_directory_within_root(scope_path) as scope_fd:
@@ -336,7 +336,26 @@ def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
         return []
 
 
-def _require_rewritable(memory_file: _ScopeMemoryFile) -> None:
+def read_scope_file(scope_path: Path, relative_path: str) -> ScopeMemoryFile | None:
+    """Read one scope file, such as a context file beside `MEMORY.md`, under the per-file cap.
+
+    Returns None only when the file or the scope is absent; a planted link or
+    FIFO raises, so a caller never mistakes it for an empty file.
+    """
+    try:
+        with open_directory_within_root(scope_path) as scope_fd:
+            payload = _read_scope_file_at(scope_fd, relative_path, max_bytes=_MAX_MEMORY_FILE_BYTES)
+    except FileNotFoundError:
+        return None
+    return _scope_memory_file(relative_path, payload) if payload is not None else None
+
+
+def write_scope_file(scope_path: Path, relative_path: str, text: str) -> None:
+    """Atomically publish one scope file, creating its directories, without following a planted entry."""
+    _write_scope_markdown_file(scope_path, Path(relative_path), text.encode("utf-8"))
+
+
+def _require_rewritable(memory_file: ScopeMemoryFile) -> None:
     if not memory_file.rewritable:
         msg = (
             f"File memory entry {memory_file.relative_path} is oversized or not valid UTF-8, "
@@ -408,12 +427,12 @@ def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> tuple[list[MemoryResult], dict[str, _ScopeMemoryFile]]:
+) -> tuple[list[MemoryResult], dict[str, ScopeMemoryFile]]:
     scope_path = _scope_dir(scope_user_id, resolution, config, create=False)
 
     results: list[MemoryResult] = []
-    id_to_file: dict[str, _ScopeMemoryFile] = {}
-    for memory_file in _read_scope_markdown_files(scope_path):
+    id_to_file: dict[str, ScopeMemoryFile] = {}
+    for memory_file in read_scope_memory_files(scope_path):
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
             match = FILE_MEMORY_ENTRY_PATTERN.match(raw_line.strip())
             if not match:
@@ -436,7 +455,7 @@ def _load_scope_id_entries(
 
 def _iter_scope_unstructured_lines(scope_path: Path) -> Iterator[tuple[str, int, str]]:
     """Yield relative paths, line numbers, and eligible snippets in file order."""
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in read_scope_memory_files(scope_path):
         if memory_file.relative_path == FILE_MEMORY_ENTRYPOINT:
             continue
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
@@ -478,7 +497,7 @@ def _load_scope_entries_for_search(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
-) -> tuple[list[MemoryResult], dict[str, _ScopeMemoryFile]]:
+) -> tuple[list[MemoryResult], dict[str, ScopeMemoryFile]]:
     return _load_scope_id_entries(scope_user_id, resolution, config)
 
 
@@ -503,18 +522,35 @@ def _format_entry_line(memory_id: str, content: str) -> str:
 
 def _schedule_agent_semantic_refresh(
     agent_name: str,
-    scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
+    schedule_agent_memory_refresh(
+        agent_name,
+        _scope_dir(agent_scope_user_id(agent_name), resolution, config, create=False),
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
+
+
+def schedule_agent_memory_refresh(
+    agent_name: str,
+    scope_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Refresh an agent's semantic file-memory index after its files changed; keyword search needs nothing."""
     search_config = config.resolve_entity(agent_name).memory_search
     if search_config.mode != "semantic":
         return
     schedule_semantic_file_memory_refresh(
-        scope_user_id=scope_user_id,
-        root=_scope_dir(scope_user_id, resolution, config, create=False),
+        scope_user_id=agent_scope_user_id(agent_name),
+        root=scope_path,
         config=config,
         runtime_paths=runtime_paths,
         search_config=search_config,
@@ -533,7 +569,6 @@ def _schedule_scope_semantic_refresh(
         return
     _schedule_agent_semantic_refresh(
         agent_name,
-        scope_user_id,
         resolution,
         config,
         runtime_paths,
@@ -1004,7 +1039,6 @@ def append_agent_daily_file_memory(
     )
     _schedule_agent_semantic_refresh(
         agent_name,
-        scope_user_id,
         resolution,
         config,
         runtime_paths,
@@ -1124,7 +1158,6 @@ class FileMemoryBackend:
         await asyncio.to_thread(_append_scope_memory_entry, scope_user_id, content, resolution, config)
         _schedule_agent_semantic_refresh(
             agent_name,
-            scope_user_id,
             resolution,
             config,
             self.runtime_paths,
@@ -1443,7 +1476,6 @@ class FileMemoryBackend:
             for resolution in resolutions:
                 _schedule_agent_semantic_refresh(
                     agent_name,
-                    scope_user_id,
                     resolution,
                     config,
                     self.runtime_paths,

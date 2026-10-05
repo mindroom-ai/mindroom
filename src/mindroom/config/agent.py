@@ -34,6 +34,7 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
+from mindroom.config.prompt_curation import AgentPromptCurationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
@@ -377,6 +378,10 @@ class AgentConfig(BaseModel):
     allow_self_config: bool | None = Field(
         default=None,
         description="Allow this agent to modify its own configuration via a tool",
+    )
+    prompt_curation: AgentPromptCurationConfig | None = Field(
+        default=None,
+        description="Optional per-agent prompt curation override; omitted fields inherit defaults.prompt_curation",
     )
     skill_learning: SkillLearningConfig = Field(
         default_factory=SkillLearningConfig,
