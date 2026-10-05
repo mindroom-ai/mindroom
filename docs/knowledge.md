@@ -56,7 +56,7 @@ agents:
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
 The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
-When the base's path is inside that workspace, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
+When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](configuration/agents.md#configuration-options) the agent's file tools cannot reach them.
 
 ## Configuration
@@ -377,14 +377,9 @@ MindRoom requests short-lived installation tokens limited to that repository wit
 
 ## Open Knowledge Format Bundles
 
-An [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) bundle is a folder of markdown concept files with YAML frontmatter.
-Each concept declares a `type` and can record who wrote it (`generated`), who confirmed it (`verified`), whether it is current (`status`), and when it goes stale (`stale_after`).
-`index.md` files list each folder's concepts, and `log.md` files record changes.
-Use `mode: files` for OKF bundles so agents follow the indexes and read the frontmatter directly.
-In `semantic` mode, frontmatter is embedded as ordinary text and cannot filter search results.
-
-Give agents the bundled `open-knowledge-format` skill.
-It teaches them to report trust and freshness from frontmatter, to use attested computations verbatim, and to keep provenance, indexes, and logs current when they write.
+An [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) bundle is a folder of markdown files whose YAML frontmatter records who wrote each concept, who verified it, and whether it is current.
+Use `mode: files` for OKF bundles, because semantic search cannot filter on frontmatter.
+Agents with the bundled `open-knowledge-format` skill report trust and freshness when they answer, and when they edit, they record themselves as the author and add a `verified` entry only when a person confirms the content.
 
 ### Reading a Published Bundle
 
@@ -409,13 +404,11 @@ agents:
     skills: [open-knowledge-format]
 ```
 
-MindRoom clones the repository one `poll_interval_seconds` interval after startup, and agents see the base once the clone exists; trigger a sync from the dashboard to clone it right away.
-Agents can read the whole checkout; `include_patterns` only limits what MindRoom lists and indexes.
-Treat a Git-backed bundle as read-only, because [sync](#sync-behavior) discards edits to tracked files whenever the upstream branch moves.
+The mirror is a [Git-backed base](#git-backed-knowledge-bases), so trigger a sync from the dashboard to clone it before the first poll, and keep it read-only because sync discards local edits when the branch moves.
 
 ### Maintaining a Bundle with Agents
 
-Keep a bundle that agents write in a local folder inside the agent workspace:
+For a bundle that agents edit, create a local folder with a root `index.md` inside the agent workspace, then add it to the agent's `knowledge_bases`:
 
 ```yaml
 knowledge_bases:
@@ -424,10 +417,6 @@ knowledge_bases:
     mode: files
     path: ${MINDROOM_STORAGE_PATH}/agents/analyst/workspace/okf/ops_wiki
 ```
-
-Create the folder with a root `index.md` first, because agents see a files-mode base only once its folder exists.
-Add `ops_wiki` to the agent's `knowledge_bases`, and keep `open-knowledge-format` in its `skills`.
-Agents record themselves in `generated`, and add a `verified` entry only for a person who confirms the content in chat.
 
 ## Embedder Configuration
 
