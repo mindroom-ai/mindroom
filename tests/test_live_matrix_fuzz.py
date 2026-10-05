@@ -6068,7 +6068,6 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
     assert "$edit" not in (records["$root"].revision_replay or {})
     assert not records["$edit"].completed
     assert records["$edit"].redacted_source_event_ids == ("$edit",)
-    assert not records["$edit"].pending_redaction_cleanup_event_ids
     runner._pending_source_tombstones.add("$edit")
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=0.01, batch_index=29)
@@ -6087,14 +6086,10 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
         (None, None, "wrong_source", (False, False)),
         (None, None, "registered", (False, False)),
         (None, None, "clean", (True, False)),
-        (None, "clean", "pending", (True, True)),
         (None, "clean", "registered", (True, True)),
-        ("clean", None, "pending", (True, True)),
         ("clean", None, "registered", (True, True)),
-        ("clean", "clean", "pending", (True, True)),
         ("clean", "clean", "clean", (True, False)),
         ("clean", None, "wrong_source", (True, False)),
-        ("pending", "clean", "clean", (True, True)),
         ("registered", None, None, (False, False)),
     ],
 )
@@ -6105,7 +6100,7 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
     context_revision: str | None,
     expected: tuple[bool, bool],
 ) -> None:
-    """Exact deletion evidence cannot hide another response owner's unreconciled cleanup."""
+    """Exact deletion evidence cannot hide another response owner that has yet to reconcile the tombstone."""
     records = {}
     for owner, state in (("$root", root_revision), ("$context", context_revision)):
         replay = (
@@ -6114,7 +6109,6 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
                     "$wrong" if state == "wrong_source" else "$root",
                     100,
                     redacted=state != "registered",
-                    cleanup_pending=state == "pending",
                 ),
             }
             if state is not None
@@ -6132,7 +6126,6 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
             source_event_ids=("$edit",),
             completed=physical == "registered",
             redacted_source_event_ids=() if physical == "registered" else ("$edit",),
-            pending_redaction_cleanup_event_ids=("$edit",) if physical == "pending" else (),
         )
     ledger = tmp_path / "event_journal.db"
     _write_ledger(ledger, records)
@@ -6142,7 +6135,7 @@ def test_edit_tombstone_checks_every_matching_cleanup_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["no_response", "redacted", "missing", "incomplete"])
-@pytest.mark.parametrize("attempt", ["none", "clean", "contaminated", "pending"])
+@pytest.mark.parametrize("attempt", ["none", "clean", "contaminated"])
 @pytest.mark.parametrize("dedicated", [False, True])
 async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     tmp_path: Path,
@@ -6157,7 +6150,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     root_record = TurnRecord.create(
         source_event_ids=("$root",),
         response_event_id="$root-reply",
-        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True)},
     )
     _write_ledger(ledger, {"$root": root_record})
     operation = LiveOperation(
@@ -6188,17 +6181,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
         "$root-reply": _agent_reply_event("$root", "$root-reply", _short_body_for(1)),
     }
     records = {
-        "$root": replace(
-            root_record,
-            revision_replay={
-                "$edit": RevisionReplay(
-                    "$root",
-                    100,
-                    redacted=True,
-                    cleanup_pending=attempt == "pending" or (outcome == "redacted" and attempt == "none"),
-                ),
-            },
-        ),
+        "$root": root_record,
     }
     observed = {1: frozenset({_source_marker("root:0", ORIGINAL_REVISION)})}
     if outcome != "redacted":
@@ -6232,9 +6215,7 @@ async def test_ordinary_cleanup_qualification_preserves_terminal_outcomes(
     failure = {"missing": "supersession proof", "incomplete": "incomplete"}.get(outcome)
     if dedicated and failure is None:
         failure = "has no completed response"
-    failure = failure or {"pending": "pending or missing tombstone cleanup", "contaminated": "redacted history"}.get(
-        attempt,
-    )
+    failure = failure or {"contaminated": "redacted history"}.get(attempt)
     if failure is not None:
         with pytest.raises(AssertionError, match=failure):
             await runner._audit_final_state()
@@ -6264,7 +6245,6 @@ async def test_cleanup_admission_rejects_inexact_incomplete_owner_tombstone(
                 "$wrong" if provenance == "wrong_source" else "$root",
                 100,
                 redacted=provenance != "not_redacted",
-                cleanup_pending=True,
             ),
         },
     )
@@ -6300,7 +6280,7 @@ async def test_cleanup_admission_reads_incomplete_owner_edit_tombstone(
         source_event_ids=("$root",),
         completed=False,
         response_event_id="$inflight",
-        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True, cleanup_pending=True)},
+        revision_replay={"$edit": RevisionReplay("$root", 100, redacted=True)},
     )
     _write_ledger(ledger, {"$root": incomplete})
     monkeypatch.setattr(
@@ -6813,7 +6793,7 @@ async def test_final_audit_reuses_one_ledger_snapshot(
 
 
 def test_strict_ledger_read_accepts_durable_redaction_tombstone(tmp_path: Path) -> None:
-    """A durable tombstone settles replay while session cleanup awaits a response."""
+    """A durable tombstone settles replay; history cleanup happens when a response next reads it."""
     ledger_path = tmp_path / "event_journal.db"
     tombstone = TurnRecord.create(
         source_event_ids=("$stop-reaction",),
@@ -6831,17 +6811,6 @@ def test_strict_ledger_read_accepts_durable_redaction_tombstone(tmp_path: Path) 
         "@agent:example",
         ledger_path=ledger_path,
     )
-    oracle.refresh_ledger_attributions(min_interval=0)
-    assert oracle.source_tombstoned("$stop-reaction")
-
-    pending_cleanup = replace(
-        tombstone,
-        pending_redaction_cleanup_event_ids=("$stop-reaction",),
-    )
-    _write_ledger(ledger_path, {"$stop-reaction": pending_cleanup})
-    assert live_fuzz.read_ledger_records(ledger_path, strict=True) == {
-        "$stop-reaction": pending_cleanup,
-    }
     oracle.refresh_ledger_attributions(min_interval=0)
     assert oracle.source_tombstoned("$stop-reaction")
 
@@ -9590,7 +9559,7 @@ async def test_chaos_checkpoint_releases_marker_for_no_response_source(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cause", ["tombstoned_before_cleanup_finished", "declined"])
+@pytest.mark.parametrize("cause", ["tombstoned", "declined"])
 async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_apply(
     monkeypatch: pytest.MonkeyPatch,
     cause: str,
@@ -9605,7 +9574,6 @@ async def test_chaos_checkpoint_releases_marker_for_an_edit_mindroom_cannot_appl
             source_event_ids=("$root",),
             completed=False,
             redacted_source_event_ids=("$root",),
-            pending_redaction_cleanup_event_ids=("$root",),
         )
     monkeypatch.setattr(runner.oracle, "pump", AsyncMock())
     await runner._wait_for_pending_mutation_effects(deadline_seconds=1.0, batch_index=4)

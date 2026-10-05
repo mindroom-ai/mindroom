@@ -202,7 +202,14 @@ chat_ui.show_canvas(
 - **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
-- **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
+- **Saved state:** call `window.mindroom.saveState(value)` on every change to keep what the user did in the page; Chat batches the writes, and a value over 256K characters of JSON throws.
+  Later loads of the canvas, after a reload, an update, or a switch to another version, start with it in `window.mindroom.state`, which is `undefined` when nothing is saved.
+  Read it defensively, since an earlier version of the page may have saved it in another shape.
+  It stays in that browser and never reaches the agent, so anything the agent needs belongs in the answer.
+  The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
+- **Checking a page:** an agent with the [`browser`](tools/web-scraping-and-browser.md#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
+  Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
+  The browser also does not block everything the panel blocks.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
   Each update of a page larger than about 24 KB stores a new copy on the homeserver that users cannot delete, so iterate on large pages sparingly.
 

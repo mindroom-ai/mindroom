@@ -104,6 +104,11 @@ Agents also answer any OpenAI-compatible client ([OpenAI-Compatible API](https:/
 
 ## How MindRoom Compares
 
+AI apps such as ChatGPT, Claude, and Gemini can connect to your email, calendar, and documents, but each one ties those connections to one company.
+Connect your inbox to ChatGPT, and OpenAI's servers process it for OpenAI's models only; using Claude or Gemini as well means connecting everything again, handing your data to another company, and teaching it about you from scratch.
+In MindRoom you connect once: your accounts, memory, and documents live in MindRoom, which can run on your own machine, and every agent uses them with the model that fits.
+A cloud model sees only what its agent sends it, and an agent on a local model, with local memory and your own server, keeps everything at home.
+
 Agents such as OpenClaw and Hermes Agent plug into existing messaging apps through one adapter per app.
 That lets them reach many apps, but each app decides what the agent can show.
 MindRoom takes the opposite approach.
@@ -2839,7 +2844,8 @@ With the default `reserve_tokens`, a summary model with a context window of roug
 
 Text compaction moves older runs into an archive in the conversation database and replays a merged summary in their place.
 Compaction deletes no stored history; only Matrix redaction and conversation deletion remove archived runs.
-Redacting a message, including one the agent never answered, removes the first stored run that read, answered, or wrote it and every later run in that conversation before the agent replies there again.
+Redacting a message, including one the agent never answered, removes the first stored run that read, answered, or wrote it, and every later run, from an agent's or team's history before that agent or team next replies in the conversation (for a private agent, its next reply to that requester).
+Until then the text stays in local storage; a reply that continues after a tool approval, and a voice-call reply, do not remove it first.
 Redacting a Matrix event that a compacted run consumed rolls compaction back to just before that run, removing that run and everything after it, instead of clearing the whole conversation.
 
 If a reply fails with `Saved conversation summary exceeds the available history budget`, the saved summary no longer fits beside the current prompt.
@@ -5196,7 +5202,14 @@ chat_ui.show_canvas(
 - **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
-- **No saved state:** the page starts fresh every time it loads, so anything the user must keep belongs in the answer.
+- **Saved state:** call `window.mindroom.saveState(value)` on every change to keep what the user did in the page; Chat batches the writes, and a value over 256K characters of JSON throws.
+  Later loads of the canvas, after a reload, an update, or a switch to another version, start with it in `window.mindroom.state`, which is `undefined` when nothing is saved.
+  Read it defensively, since an earlier version of the page may have saved it in another shape.
+  It stays in that browser and never reaches the agent, so anything the agent needs belongs in the answer.
+  The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
+- **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
+  Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
+  The browser also does not block everything the panel blocks.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
   Each update of a page larger than about 24 KB stores a new copy on the homeserver that users cannot delete, so iterate on large pages sparingly.
 
@@ -7299,6 +7312,9 @@ Chat shows the Computer action when this origin is set and the room has a joined
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
+For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
+Other custom-scheme origins and opaque `"null"` origins are refused.
+The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
 Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
 One invalid entry disables the whole list.
 
@@ -9435,6 +9451,15 @@ With the default `workspace`, `upload` accepts files in the artifact directory, 
 Everything else is refused, including credentials, encryption keys, Matrix state, sessions, and other agents' workspaces; in a worker only the worker workspace is readable.
 With `unrestricted`, `upload` accepts any file its process can read.
 One browser holds at most 256 MiB of uploaded files until their tabs close, so a larger upload is refused until a tab is closed.
+
+On the host target, `open` also takes one HTML file in `paths` instead of `targetUrl`, read under the same rules as `upload`, so an agent can check a page it wrote with `screenshot`, `console` (which also lists uncaught errors), and `act`.
+The file is UTF-8 text of at most 16 MiB.
+The page cannot load or navigate to other local files, and relative links in it do not resolve; its network requests follow the same checks as any page.
+
+```python
+browser_control(action="open", paths=["slides/deck.html"])
+browser_control(action="screenshot")
+```
 
 #### Profiles and Signed-In Sessions
 

@@ -4526,8 +4526,8 @@ def read_ledger_records(
     audits use strict mode and reject every unreadable, malformed, or
     non-terminal entry instead of letting corruption look like an empty ledger.
     A fully redacted record is a durable tombstone even when ``completed``
-    remains false. Session cleanup may remain pending until the next response;
-    explicit cleanup probes audit that separate obligation.
+    remains false. Session history is cleaned when a response next opens it;
+    explicit cleanup probes audit that separately.
     Live tombstone observation may include unfinished owners; strict final
     audits still reject their unfinished live sources.
     """
@@ -4588,7 +4588,7 @@ def _decode_ledger_rows(
     strict: bool,
     include_incomplete: bool = False,
 ) -> dict[str, TurnRecord]:
-    """Retain completed turns and durable tombstones, including deferred session cleanup."""
+    """Retain completed turns and durable tombstones."""
     records: dict[str, TurnRecord] = {}
     decoded_records: dict[str, TurnRecord] = {}
     for event_id, raw_record in raw_records.items():
@@ -4598,9 +4598,9 @@ def _decode_ledger_rows(
             continue
         decoded_records[event_id] = record
         fully_redacted = not record.replay_source_event_ids
-        # Redaction callbacks commit tombstones; the next response in this
-        # session removes the saved run and clears pending cleanup. An idle
-        # tombstoned session is therefore settled without eager cleanup.
+        # Redaction callbacks commit tombstones; the next response that opens
+        # an affected history removes the saved run. An idle tombstoned
+        # session is therefore settled without eager cleanup.
         if not record.completed and not fully_redacted and (strict or not include_incomplete):
             _invalid_ledger(ledger_path, f"record {event_id!r} is incomplete", strict=strict)
             continue
@@ -5729,7 +5729,7 @@ def _redaction_target_state(
     records: Mapping[str, TurnRecord],
     source_revision_markers: Mapping[str, Mapping[str, str]],
 ) -> tuple[bool, bool]:
-    """Join exact event invalidation and cleanup debt across every response owner."""
+    """Join exact event invalidation, and whether any registered owner has yet to reconcile it."""
     source_id = next((source for source, edits in source_revision_markers.items() if target_id in edits), None)
     physical = records.get(target_id)
     revisions = [
@@ -5741,11 +5741,8 @@ def _redaction_target_state(
     tombstoned = (physical is not None and target_id in physical.redacted_source_event_ids) or any(
         revision.redacted for revision in revisions
     )
-    # Reconciliation joins physical invalidation into every registered owner
-    # before locked cleanup acknowledges that owner's debt independently.
-    pending = (physical is not None and target_id in physical.pending_redaction_cleanup_event_ids) or any(
-        revision.cleanup_pending or (tombstoned and not revision.redacted) for revision in revisions
-    )
+    # Reconciliation joins physical invalidation into every registered owner.
+    pending = any(tombstoned and not revision.redacted for revision in revisions)
     return tombstoned, pending
 
 
@@ -5849,11 +5846,7 @@ class FinalStateAuditor:
         # discharge another live source's generation or mutation debt.
         for source, proof in tuple(proofs.items()):
             record = snapshot.records.get(source)
-            if record is not None and (
-                any(owned not in proofs for owned in record.replay_source_event_ids)
-                or record.pending_redaction_cleanup_event_ids
-                or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-            ):
+            if record is not None and any(owned not in proofs for owned in record.replay_source_event_ids):
                 proofs.pop(proof.source_event_id, None)
         # Removing one incomplete owner also invalidates every chain depending on it.
         for source in tuple(proofs):
@@ -5973,13 +5966,7 @@ class FinalStateAuditor:
     ) -> tuple[str, str] | None:
         """Require exact durable completion and visible current-source model consumption."""
         record = records.get(source)
-        if (
-            record is None
-            or not record.completed
-            or source not in record.source_event_ids
-            or record.pending_redaction_cleanup_event_ids
-            or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
-        ):
+        if record is None or not record.completed or source not in record.source_event_ids:
             return None
         response = record.response_event_id
         if response is None or response not in self._visible_record_reply_ids(record, replies):
@@ -6110,8 +6097,8 @@ class FinalStateAuditor:
                     continue
                 tombstoned, pending = _redaction_target_state(source_id, records, self.source_revision_markers)
                 is_edit = any(source_id in revisions for revisions in self.source_revision_markers.values())
-                # Edit acknowledgement is monotonic before model admission.
-                # Original-source callbacks can re-arm debt after an ordinary call.
+                # Every registered owner reconciles an edit tombstone before model admission;
+                # an original source's callback may still be reconciling after an ordinary call.
                 requires_cleanup = probe_id in self.cleanup_probes or (bool(calls) and is_edit)
                 if not tombstoned or (pending and requires_cleanup):
                     msg = (

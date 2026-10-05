@@ -121,7 +121,6 @@ class TurnRecordCodec:
             "anchor_event_id": record.anchor_event_id,
             "source_event_ids": list(record.source_event_ids),
             "redacted_source_event_ids": list(record.redacted_source_event_ids),
-            "pending_redaction_cleanup_event_ids": list(record.pending_redaction_cleanup_event_ids),
             "response_event_id": record.response_event_id,
             "completed": record.completed,
             "timestamp": record.timestamp,
@@ -195,7 +194,14 @@ class TurnRecordCodec:
         raw_source_event_ids = record.get("source_event_ids")
         raw_discovery_event_ids = record.get("discovery_event_ids", [])
         raw_redacted_source_event_ids = record.get("redacted_source_event_ids", [])
-        raw_pending_redaction_cleanup_event_ids = record.get("pending_redaction_cleanup_event_ids", [])
+        # LEGACY_COMPAT: Ledger records carrying redaction cleanup obligations.
+        # Legacy format: A stored record with pending_redaction_cleanup_event_ids, and revision replay
+        # entries with cleanup_pending, naming session cleanup still owed for its tombstoned sources.
+        # Last legacy release: v2026.10.145; replacement: the next release derives session cleanup at
+        # each response from the history's own event ids against the journal and ledger tombstones.
+        # Handling: Both keys are ignored on read and dropped on the next write; every owed event is
+        # also a ledger tombstone, so the next response of each affected history finds and removes it.
+        # Coverage: tests/test_handled_turns.py::test_stored_cleanup_obligations_are_ignored_on_read.
         anchor_event_id = record.get("anchor_event_id")
         completed = record.get("completed")
         timestamp = record.get("timestamp")
@@ -204,7 +210,6 @@ class TurnRecordCodec:
             not isinstance(raw_source_event_ids, list)
             or not isinstance(raw_discovery_event_ids, list)
             or not isinstance(raw_redacted_source_event_ids, list)
-            or not isinstance(raw_pending_redaction_cleanup_event_ids, list)
             or not isinstance(anchor_event_id, str)
             or not anchor_event_id
             or not isinstance(completed, bool)
@@ -220,9 +225,6 @@ class TurnRecordCodec:
             source_event_ids,
             discovery_event_ids=canonical_source_event_ids(raw_discovery_event_ids),
             redacted_source_event_ids=canonical_source_event_ids(raw_redacted_source_event_ids),
-            pending_redaction_cleanup_event_ids=canonical_source_event_ids(
-                raw_pending_redaction_cleanup_event_ids,
-            ),
             anchor_event_id=anchor_event_id,
             response_event_id=response_event_id,
             completed=completed,
@@ -354,7 +356,6 @@ class _LedgerState:
 
     responses: dict[str, TurnRecord] = field(default_factory=dict)
     conversation_responses: dict[str, dict[str, TurnRecord]] = field(default_factory=dict)
-    cleanup_responses: dict[str, TurnRecord] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # Reserve conflicting identities briefly; cleanup holds this mutex while
     # draining active writes. Unrelated updates may await persistence together.
@@ -424,7 +425,7 @@ class HandledTurnLedger:
 
     def _publish_responses(self, indexes: _ResponseIndexes) -> None:
         """Install a detached map and its indexes with the state lock held."""
-        self._state.responses, self._state.conversation_responses, self._state.cleanup_responses = indexes
+        self._state.responses, self._state.conversation_responses = indexes
 
     def _set_response(self, event_id: str, record: TurnRecord | None) -> None:
         """Publish or restore one alias and its read indexes with the state lock held.
@@ -449,10 +450,6 @@ class HandledTurnLedger:
             self._responses[event_id] = record
             if session is not None:
                 self._state.conversation_responses.setdefault(session, {})[event_id] = record
-        if record is not None and record.pending_redaction_cleanup_event_ids:
-            self._state.cleanup_responses[event_id] = record
-        else:
-            self._state.cleanup_responses.pop(event_id, None)
 
     async def load(self) -> None:
         """Read every stored record into memory, once per process.
@@ -748,18 +745,6 @@ class HandledTurnLedger:
                         return self._responses.get(source_event_id)
             await asyncio.shield(pending_write)
 
-    def pending_redaction_cleanup_event_ids(self) -> tuple[str, ...]:
-        """Return every durable redaction cleanup intent still awaiting completion."""
-        with self._state.lock:
-            self._require_loaded()
-            return canonical_source_event_ids(
-                tuple(
-                    event_id
-                    for record in self._state.cleanup_responses.values()
-                    for event_id in record.pending_redaction_cleanup_event_ids
-                ),
-            )
-
     def all_turn_records(self) -> tuple[TurnRecord, ...]:
         """Return each retained owner once without publishing provenance aliases."""
         with self._state.lock:
@@ -843,19 +828,16 @@ class HandledTurnLedger:
         )
 
 
-type _ResponseIndexes = tuple[dict[str, TurnRecord], dict[str, dict[str, TurnRecord]], dict[str, TurnRecord]]
+type _ResponseIndexes = tuple[dict[str, TurnRecord], dict[str, dict[str, TurnRecord]]]
 
 
 def _index_responses(responses: dict[str, TurnRecord]) -> _ResponseIndexes:
     """Build detached lookup maps before publishing them to synchronous readers."""
     conversations: dict[str, dict[str, TurnRecord]] = {}
-    cleanup: dict[str, TurnRecord] = {}
     for event_id, record in responses.items():
         if record.conversation_target is not None:
             conversations.setdefault(record.conversation_target.session_id, {})[event_id] = record
-        if record.pending_redaction_cleanup_event_ids:
-            cleanup[event_id] = record
-    return responses, conversations, cleanup
+    return responses, conversations
 
 
 def _decode_response_indexes(stored: Sequence[tuple[str, str, str]]) -> _ResponseIndexes:
@@ -965,13 +947,12 @@ def _project_redaction_alias(
         turn_record,
         source_event_ids=retained_source_event_ids,
         anchor_event_id=anchor_event_id,
+        # An explicit empty source map keeps per-source replay ownership fail-closed after projection.
         source_event_metadata=(
             {}
             if turn_record.is_coalesced and turn_record.source_event_metadata is None
             else turn_record.source_event_metadata
         ),
-        # Turn-level requester context remains required for owed redaction cleanup; an explicit
-        # empty source map keeps per-source replay ownership fail-closed after projection.
         requester_id=turn_record.requester_id,
     )
 
@@ -1060,14 +1041,24 @@ def _response_group_requires_retention(
     group: _ResponseGroup,
     unsettled_source_event_ids: frozenset[str],
 ) -> bool:
-    """Return whether one group still owns unfinished durable work."""
+    """Return whether one group still owns unfinished durable work or redaction evidence.
+
+    A conversation's ledger tombstones are what history cleanup derives from when the
+    journal no longer has them, and nothing tracks which histories still hold an event,
+    so they are kept for good; their number grows only with redactions.
+    """
     return (
         not unsettled_source_event_ids.isdisjoint(group.records)
-        or any(record.pending_redaction_cleanup_event_ids for record in group.records.values())
         or any(
-            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {})
-            or any(value.cleanup_pending for value in (record.revision_replay or {}).values())
+            record.conversation_target is not None
+            and (
+                bool(record.redacted_source_event_ids)
+                or any(revision.redacted for revision in (record.revision_replay or {}).values())
+            )
             for record in group.records.values()
+        )
+        or any(
+            not unsettled_source_event_ids.isdisjoint(record.revision_replay or {}) for record in group.records.values()
         )
         or any(
             not record.completed and record.replay_source_event_ids and not _is_prepared_voice_checkpoint_only(record)

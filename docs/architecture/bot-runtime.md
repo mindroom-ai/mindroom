@@ -41,7 +41,7 @@ STOP and stale approval failure decisions query exact durable identity; prepared
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 
-`TurnStore` owns source-redaction tombstoning, and removes redacted persisted replay before the next response starts in the affected conversation.
+`TurnStore` owns source-redaction tombstoning and answers which events a conversation's history derives from are redacted; each response removes that history from the scope it opens before using it.
 The projection learns about a redaction through journal admission; the Matrix callback records the exact tombstone and joins it to retained physical revision owners.
 A redaction naming an event whose turn or revision owner is recorded in another room changes nothing.
 When no turn records a room for the event, the tombstone is written only if the journal admitted the event in the redaction's room.
@@ -297,7 +297,7 @@ It no longer sends messages, runs AI, or writes persistence state.
 Command handling now records terminal outcomes through `TurnStore` as well.
 Potentially mutating chat commands use an at-most-once execution-attempt journal: `TurnStore` records that execution is about to begin before the handler runs, then records the exact result before visible delivery.
 Recovery re-delivers a recorded result, while an interrupted execution attempt without a result is not rerun and instead produces an explicit uncertain-outcome response that requires the requester to inspect state before retrying.
-Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining pending redaction work, replayable incomplete turns, and every group referenced by an unsettled journal row.
+Startup loads turn truth without pruning, repairs ledger records for answers the outbox proves were delivered, replays turn-backed journal events, then applies age and count cleanup while retaining conversation redaction tombstones, replayable incomplete turns, and every group referenced by an unsettled journal row.
 Recovery and its post-recovery ledger cleanup run under one background retry owner, independently of bot startup and Matrix sync lifecycle progress.
 Multi-purpose callbacks durably claim one application consumer before that consumer's side effects, and recovery routes only to the claimed consumer instead of rediscovering intent from mutable runtime state.
 Consumer-owned side effects remain responsible for their own replay semantics; for example, generic reaction hooks are at-least-once.
@@ -356,25 +356,26 @@ Import publication waits for conflicting provisional writes, rechecks the reques
 An occupied recovered physical source remains authoritative, while any collision confined to a recovered discovery alias declines the historical import.
 `TurnStore` immediately writes an imported record into the ledger, so every later load uses journal authority.
 One runtime process owns each ledger's semantic ordering, and nothing defines cross-process turn precedence.
-Conversation and pending-cleanup lookups use indexes derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
+Conversation lookups use an index derived from the ledger's shared in-memory records, so ordinary response preparation does not scan unrelated retained history.
 Each alias publication, committed replacement, and rollback updates those indexes under the same lock as the primary record map; startup and retention rebuild them from that map.
 The indexes retain references to existing records and add no durable schema or separate recovery state.
-Preparation still scales with the selected conversation's retained records and outstanding cleanup work.
+Preparation still scales with the selected conversation's retained records.
 Terminal records live in the journal database rather than a per-agent JSON file, so the advisory file lock that used to make the file update atomic is gone; the database serializes the write itself.
 One process must own one agent's records; the database merges delivery acknowledgements with ledger writes for that owner, without coordinating independent runtimes against the same storage path.
 Unversioned pre-user ledger and run-metadata turn schemas are rejected instead of carrying migration scaffolding.
 
 Matrix source redactions are durably tombstoned in the same transaction that withholds the redacted body, and every projection install path consults that tombstone table.
-A tombstone becomes a retained cleanup intent once the entity has recorded the affected conversation context, while unrelated redactions of events the journal admitted in that room remain bounded ledger barriers without storage probes.
 Pending normal and interactive responses durably record their exact target and history scope off the event loop before generation, and every source-backed response checks tombstones again under the lifecycle lock.
-Before a response starts, `TurnStore` removes the matching run and its causal suffix from every history scope recorded for the conversation, rolls compaction back to just before the first archived run that consumed the event, and sanitizes coalesced prompt metadata used by later edit regeneration.
-A redacted event no turn owns, such as a message a turn only read as context, records no conversation, so when the shared turn driver opens a history scope it also checks every event that history derives from against the room's tombstones and removes it from the first run that read, answered, or wrote one, before the turn uses it.
+Before a response starts, `TurnStore` sanitizes coalesced prompt metadata used by later edit regeneration.
+When the shared turn driver then opens a history scope, it checks every event that history derives from (each top-level run's sources, consumed history, revisions and reply, and the compaction archive) against the room's journal tombstones and this conversation's ledger tombstones, and removes the first run that read, answered, or wrote a redacted one together with its causal suffix, rolling compaction back to just before the first archived run that consumed it.
+Nothing durable records that cleanup is owed: the check derives it at every response, so a crash between tombstone and cleanup, or a redacted event no turn owns, needs no recovery path.
 Physical edits register on the owning turn before prompt retention or generation, including edits consumed only as another turn's context, without becoming source indexes or completion aliases.
 Exact edit tombstones invalidate those revisions while preserving the original source, completed response identity, and any unrelated surviving revision.
 Consumed-history metadata retains physical revision IDs through compaction; only legacy records lacking that provenance use retained source ownership to invalidate an ambiguous compacted summary.
-Registration, tombstone reconciliation, and cleanup share ledger conflict keys, and unsettled physical edits or pending cleanup pin their owners through retention.
-Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts, and cleanup acknowledgement occurs only after all affected scopes are durably clean.
-The revision map remains ledger-owned; model runs carry consumption provenance without mutable cleanup debt.
+Registration and tombstone reconciliation share ledger conflict keys, and unsettled physical edits pin their owners through retention.
+Retention also keeps every turn record that carries a redaction tombstone for a conversation, because history cleanup derives from it once a departure has dropped the journal's tombstone or for history older than the journal.
+Recovery sanitizes each candidate before removing revision tags or backfilling missing prompts.
+The revision map remains ledger-owned; model runs carry consumption provenance.
 Each physical revision may retain a completed response ID as historical consumption proof, which registration alone never grants and deletion never erases.
 Successful edit generation freezes its selected turn record in the final outbox result before sending; internal prompts and ledger metadata never enter the Matrix payload.
 A winning acknowledgement under active delivery ownership commits that exact historical consumption proof with the canonical response identity, merging current tombstones, STOP, and newer edit facts in the same transaction.
@@ -384,8 +385,8 @@ Coalesced regeneration refills invalidated slots through strict paginated reads 
 An exact principal/room/source projection tombstone proves canonical deletion during refill, allowing the edit owner to reconcile cleanup and rebuild surviving sources before the room FIFO reaches the deletion callback; missing unproven data still blocks generation.
 The locked edit preparation gate explicitly requests a rebuild for an invalid snapshot, preserving other pending edits when the driving revision is deleted.
 The source-preparation callback receives the actual request history both at early admission and after the final locked history and payload refresh, so context-only revisions are registered before consumption.
-Physical snapshot validation follows awaited cleanup and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
-Redacted replay may remain in local session storage until that conversation's next response, but no model receives it.
+Physical snapshot validation follows awaited tombstone reconciliation and STOP preparation; synchronous stale-run pruning happens at most once for each immutable edit request.
+Redacted replay may remain in local session storage until the history scope holding it next serves a response; responses do not receive it, while approval continuations, manual compaction, and voice-call turns do not run the check.
 Semantic memory backends such as Mem0 have a separate lifecycle and are not altered by persisted replay cleanup.
 
 ## Tool Dispatch Contracts

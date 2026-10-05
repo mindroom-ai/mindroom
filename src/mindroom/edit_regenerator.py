@@ -399,7 +399,7 @@ class EditRegenerator:
             )
             mailbox.rebuild_requested = result is EditPreparation.REBUILD
             if result is False and not stale_runs_removed:
-                self.deps.turn_store.remove_stale_runs_for_edit(
+                await self.deps.turn_store.remove_stale_runs_for_edit(
                     turn_record=record,
                     requester_user_id=requester_id,
                 )
