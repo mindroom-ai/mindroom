@@ -118,22 +118,24 @@ describe('LandingPage', () => {
     expect(document.getElementById('mobile-menu')).toBeNull()
   })
 
-  it('closes the menu when keyboard focus leaves it', () => {
+  it('closes the menu when keyboard focus moves outside it', () => {
     render(<LandingPage />)
     fireEvent.click(screen.getByRole('button', { name: 'Menu' }))
-    const signIn = within(document.getElementById('mobile-menu') as HTMLElement).getByRole('link', { name: 'Sign in' })
 
-    fireEvent.blur(signIn, { relatedTarget: screen.getByRole('link', { name: 'Try hosted MindRoom' }) })
+    fireEvent.focusIn(screen.getByRole('link', { name: 'Try hosted MindRoom' }))
 
     expect(document.getElementById('mobile-menu')).toBeNull()
   })
 
-  it('keeps the menu open while focus moves between its links', () => {
+  it('keeps the menu open for focus and taps inside it', () => {
     render(<LandingPage />)
     fireEvent.click(screen.getByRole('button', { name: 'Menu' }))
-    const menu = within(document.getElementById('mobile-menu') as HTMLElement)
+    const menuElement = document.getElementById('mobile-menu') as HTMLElement
+    const menu = within(menuElement)
 
-    fireEvent.blur(menu.getByRole('link', { name: 'Docs' }), { relatedTarget: menu.getByRole('link', { name: 'GitHub' }) })
+    fireEvent.focusIn(menu.getByRole('link', { name: 'GitHub' }))
+    fireEvent.pointerDown(menuElement)
+    fireEvent.blur(menu.getByRole('link', { name: 'GitHub' }), { relatedTarget: null })
 
     expect(document.getElementById('mobile-menu')).not.toBeNull()
   })

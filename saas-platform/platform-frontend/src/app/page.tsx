@@ -475,28 +475,24 @@ function MobileMenu() {
       setOpen(false)
       buttonRef.current?.focus()
     }
-    const closeOnOutsideTap = (event: PointerEvent) => {
+    // A tap outside, or keyboard focus moving to a control the open menu would hide, closes it.
+    const closeOutside = (event: Event) => {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
     }
     document.addEventListener('keydown', closeOnEscape)
-    document.addEventListener('pointerdown', closeOnOutsideTap)
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('focusin', closeOutside)
     return () => {
       document.removeEventListener('keydown', closeOnEscape)
-      document.removeEventListener('pointerdown', closeOnOutsideTap)
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('focusin', closeOutside)
     }
   }, [open])
 
   const linkClass = 'block rounded-md px-3 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-200 dark:hover:bg-white/8 dark:hover:text-white'
 
   return (
-    <div
-      ref={containerRef}
-      className="lg:hidden"
-      onBlur={(event) => {
-        // Keyboard focus leaving the menu would otherwise land on controls hidden beneath it.
-        if (!containerRef.current?.contains(event.relatedTarget as Node | null)) setOpen(false)
-      }}
-    >
+    <div ref={containerRef} className="lg:hidden">
       <button
         ref={buttonRef}
         type="button"
@@ -550,7 +546,7 @@ export default function LandingPage() {
             ))}
           </div>
           <div className="flex items-center gap-1 sm:gap-3">
-            <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white lg:inline-flex">
+            <a href={showcaseUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white xl:inline-flex">
               Showcase
             </a>
             <a href={docsUrl} className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-950 dark:text-gray-300 dark:hover:text-white sm:inline-flex">
