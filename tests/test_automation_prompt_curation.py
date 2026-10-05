@@ -299,3 +299,16 @@ def test_reorganizing_an_archive_without_losing_content_is_kept(tmp_path: Path) 
 
     assert (result.changed, result.restored) == (True, False)
     assert (root / "memory" / "projects.md").read_text() == reorganized
+
+
+def test_a_lossless_memory_edit_while_the_prompt_files_are_untouched_is_kept(tmp_path: Path) -> None:
+    """Without a curation edit, only lost content triggers a restore; reorganizing memory/ is left alone."""
+    plan, root = _plan_with_archive(tmp_path)
+    (root / "memory" / "projects.md").unlink()
+    (root / "memory" / "work.md").write_text(ARCHIVE, encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (False, False)
+    assert not (root / "memory" / "projects.md").exists()
+    assert curation_notice(plan, result).startswith("Prompt maintenance changed nothing")

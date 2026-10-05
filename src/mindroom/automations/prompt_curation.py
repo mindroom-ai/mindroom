@@ -188,11 +188,18 @@ def _violations(plan: CurationPlan, current: Mapping[str, bytes | None], memory_
         violations.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         violations.append(f"the files did not shrink ({total} tokens)")
-    before = plan.measured_tokens + sum(estimate_text_tokens(text) for text in plan.memory_snapshot.values())
-    lost = before - (total + sum(estimate_text_tokens(text) for text in memory_now.values()))
-    if lost > (max_loss := round(settings.max_content_loss * plan.measured_tokens)):
-        violations.append(f"{lost} tokens of memory were deleted instead of moved to memory/ (at most {max_loss})")
+    if loss := _content_loss(plan, total, memory_now):
+        violations.append(loss)
     return violations
+
+
+def _content_loss(plan: CurationPlan, curated_tokens: int, memory_now: Mapping[str, str]) -> str | None:
+    """Describe memory content deleted instead of moved beyond the allowance, or return None."""
+    before = plan.measured_tokens + sum(estimate_text_tokens(text) for text in plan.memory_snapshot.values())
+    lost = before - (curated_tokens + sum(estimate_text_tokens(text) for text in memory_now.values()))
+    if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
+        return None
+    return f"{lost} tokens of memory were deleted instead of moved to memory/ (at most {max_loss})"
 
 
 def _restore(root: Path, path: str, payload: bytes) -> None:
@@ -214,6 +221,12 @@ def _read_after_run(root: Path, path: str) -> bytes | None | OSError | ValueErro
         return error
 
 
+def _restore_archives(plan: CurationPlan, damaged: Iterable[str], memory_now: Mapping[str, str]) -> None:
+    for path in damaged:
+        restored = _restored_archive(plan.memory_snapshot[path], memory_now.get(path, ""))
+        _restore(plan.root, path, restored.encode("utf-8"))
+
+
 def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
@@ -221,8 +234,13 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     memory_now = _memory_dir_texts(plan.root, exclude=plan.snapshot)
     # Appending keeps a topic file's archived text; deleting, truncating, or rewriting it does not.
     damaged = [path for path, text in plan.memory_snapshot.items() if not memory_now.get(path, "").startswith(text)]
-    if not changed and not damaged:
-        return _CurationResult(tokens_after=plan.measured_tokens, changed=False)
+    if not changed:
+        # Untouched prompt files leave only the loss guard: other memory/ edits, such as a memory tool update from
+        # another conversation, stay unless detail was deleted.
+        if not damaged or (loss := _content_loss(plan, plan.measured_tokens, memory_now)) is None:
+            return _CurationResult(tokens_after=plan.measured_tokens, changed=False)
+        _restore_archives(plan, damaged, memory_now)
+        return _CurationResult(tokens_after=plan.measured_tokens, changed=True, violations=(loss,))
     # A run that replaced a file with a link or grew it past the read cap is restored like any other miss.
     unreadable = [
         f"{path} cannot be read ({error})" for path, error in after_run.items() if isinstance(error, Exception)
@@ -231,9 +249,7 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     if violations := unreadable or _violations(plan, current, memory_now):
         for path in changed:
             _restore(plan.root, path, plan.snapshot[path])
-        for path in damaged:
-            restored = _restored_archive(plan.memory_snapshot[path], memory_now.get(path, ""))
-            _restore(plan.root, path, restored.encode("utf-8"))
+        _restore_archives(plan, damaged, memory_now)
         return _CurationResult(tokens_after=plan.measured_tokens, changed=True, violations=tuple(violations))
     tokens_after = sum(_tokens(current[path] or b"") for path in plan.curated)
     return _CurationResult(tokens_after=tokens_after, changed=True)

@@ -309,8 +309,9 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
-A restore also rewrites any `memory/` topic file that lost archived text during the run, while files and lines the run added are kept, so moved detail is never lost.
-A reply that rewrites a curated file during the run can be overwritten when verify restores the snapshot.
+A restore also rewrites any `memory/` topic file the run changed other than by appending, back to its archived text followed by the lines the run added, and new files are kept, so moved detail is never lost.
+When the prompt files are unchanged, only lost memory content triggers that restore.
+A reply that rewrites a curated file or a changed topic file during the run can be overwritten when verify restores the snapshot.
 
 | Field | Default | Description |
 |---|---|---|
