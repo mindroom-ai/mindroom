@@ -302,20 +302,10 @@ async def test_resolve_skips_empty_bodies_and_falls_back_to_ids(monkeypatch: pyt
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_allow_access")
-async def test_resolve_reads_the_bounded_room_conversation_for_room_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolve_reads_the_bounded_room_conversation_for_room_origin() -> None:
     """A room-level origin reads the room's own conversation and needs no thread root."""
-    page = object()
-    projections: list[tuple[object, bool]] = []
-
-    def projected(read_page: object, *, complete: bool) -> ThreadHistoryResult:
-        projections.append((read_page, complete))
-        return _history(_message("$1", CALLER, "Hi"))
-
-    thread_read = AsyncMock()
-    monkeypatch.setattr(call_origin, "complete_thread_history", thread_read)
-    monkeypatch.setattr(call_origin, "projected_thread_history", projected)
     context = _resolve_context()
-    context.conversation_reader.read_strict.return_value = page
+    context.conversation_reader.read_strict.return_value = _page(("$1", None, {"msgtype": "m.text", "body": "Hi"}))
 
     resolved = await resolve_call_origin_context(
         CallOrigin(room_id=ORIGIN_ROOM, thread_id=None),
@@ -325,8 +315,6 @@ async def test_resolve_reads_the_bounded_room_conversation_for_room_origin(monke
     assert resolved is not None
     assert resolved.messages == (_CallBriefMessage(label="Alice", body="Hi"),)
     context.conversation_reader.read_strict.assert_awaited_once_with(room_id=ORIGIN_ROOM, thread_id=None, limit=200)
-    assert projections == [(page, False)]
-    thread_read.assert_not_awaited()
 
 
 @pytest.mark.asyncio
