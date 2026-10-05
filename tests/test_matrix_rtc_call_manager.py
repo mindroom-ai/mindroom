@@ -4098,7 +4098,8 @@ async def test_delegated_call_retries_reuse_logical_call_session_id(
     async def fake_join(
         room: nio.MatrixRoom,
         members: list[CallMember],
-        agent_call_events: tuple[dict, ...] = (),
+        *,
+        agent_call_events: tuple[dict, ...],
     ) -> str:
         assert agent_call_events == ()
         await manager._build_tooling(room.room_id, requester_id=members[0].user_id)

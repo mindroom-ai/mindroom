@@ -643,7 +643,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
-        agent_call_events: tuple[dict[str, Any], ...] = (),
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
         room_id = room.room_id
@@ -683,7 +683,7 @@ class CallManager:
         members: list[CallMember],
         *,
         retrying: bool = False,
-        agent_call_events: tuple[dict[str, Any], ...] = (),
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Join a populated call or finish a successful empty reconciliation."""
         if not members:
@@ -879,7 +879,8 @@ class CallManager:
         self,
         room: nio.MatrixRoom,
         members: list[CallMember],
-        agent_call_events: tuple[dict[str, Any], ...] = (),
+        *,
+        agent_call_events: tuple[dict[str, Any], ...],
     ) -> _JoinResult:
         room_id = room.room_id
         logical_call = self._logical_calls[room_id]

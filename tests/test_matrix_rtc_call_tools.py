@@ -1669,7 +1669,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
     origin_brief: str | None,
     expected_origin_items: tuple[EnrichmentItem, ...],
 ) -> None:
-    """The delegate agent sees the call origin brief as stable system enrichment after the voice rules."""
+    """The delegate agent gets the call origin brief as a stable system enrichment item beside the voice rules."""
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     turns: list[ResponseTurnContext] = []
