@@ -4,7 +4,8 @@ Config reloads and MCP catalog replacements must not hand new responses to
 entities they are about to stop and recreate. ``ConfigReloadLifecycle``
 serializes those flows behind one admission owner, waits up to 600 seconds for
 active responses to drain, and then force-applies if the runtime never becomes
-idle. MCP notifications schedule their replacement asynchronously so the
+idle. A config reload that restarts nothing and changes no reply-authorization
+input skips that wait and closes admission only for its apply. MCP notifications schedule their replacement asynchronously so the
 triggering admitted tool call can release its own slot first.
 
 Matrix reply surfaces reserve admission before their final authorization check

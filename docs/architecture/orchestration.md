@@ -104,10 +104,10 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    The gate covers Matrix-driven response lifecycles, external-trigger delivery, call admission, and requester-driven call operations.
    Text and router planning, commands, edit regeneration, interactive selections, visible router voice echoes, calls, and external triggers perform their final reply-policy check after admission and retain the slot through their direct side effect or response-runner handoff.
    The OpenAI-compatible API in `mindroom.api.openai_compat` remains outside this gate because it does not use Matrix reply authorization.
-   Config loading keeps response admission open; after current responses drain, the gate closes for diff planning and publication.
+   Config loading and diff planning keep response admission open; after current responses drain, the gate closes for publication.
    Holding the gate while loading would block responses for validation work that cannot affect the live runtime.
 5. While the gate is closed, a response waits before taking a lifecycle lock, incrementing the in-flight count, or publishing a placeholder.
-   The gate is global and covers the whole apply window regardless of how narrow the plan turns out to be.
+   The gate is global and covers the whole apply window, including a config apply that skipped the drain.
    When the apply finishes, responses owned by unchanged or replacement runtimes compete for admission normally.
 6. A runtime being replaced wakes its pre-admission waiters with `ResponseAdmissionRefusedError`.
    The refusal leaves the admitted source pending in the event journal so the replacement runtime can replay it.
@@ -115,7 +115,12 @@ The MCP manager callback schedules an orchestrator-owned background task so the 
    Replies the forced apply cancels are left pending the same way, so the replacement runtime replays them and continues each in its existing message.
 7. If responses never drain, either replacement flow stops deferring after 600 seconds and closes the gate over still-running responses.
    This bounded forced apply prevents a busy install from starving config or MCP replacement forever.
-8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config while admission remains open, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations after the gate closes.
+8. For config reloads, `ConfigReloadLifecycle._update_config()` loads and validates the new config, then `build_config_update_plan()` computes targeted restarts and in-place reconciliations, all while admission remains open.
+   The bot inventory changes only under the replacement admission lock the reload already holds, so the plan stays exact through the drain.
+   When `ConfigUpdatePlan.requires_response_drain` is false, the reload skips the drain and closes the gate at once for the swap; admitted responses keep running and read the new config wherever they read it live.
+   That requires a plan that creates, restarts, removes, and re-rooms no entity and changes no reply-authorization input: `administrators`, `authorization`, `bot_accounts`, `mindroom_user`, `room_defaults`, `rooms`, `router.access`, `router.accept_invites`, `personal_rooms`, or `external_trigger_policy`.
+   Per-entity access already restarts its entity, and keeping the drain for these inputs stops a policy change from committing between an admitted reply's authorization decision and the response it permits.
+   Partial-publication repairs always drain, and MCP catalogs refreshed during a skipped-drain apply restart their dependents through the drained MCP catalog path instead of inline.
 9. The orchestrator applies the resulting plan: changed entities are replaced, unchanged bots receive the new config, and room-only changes reconcile memberships in place without restarting receive loops.
    Call-enabled agents are conservatively replaced after any authored config change because active call tooling captures the full authored config snapshot.
 10. Removed entities prepare their response runtime for shutdown, reconcile approval work, and call `leave_rooms()` while ingestion remains active; the orchestrator then cancels the receive loop and stops the bot.

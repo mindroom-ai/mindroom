@@ -2000,6 +2000,46 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
     assert plan.only_support_service_changes is False
 
 
+@pytest.mark.parametrize(
+    ("changes", "requires_drain"),
+    [
+        pytest.param({"defaults": {"enable_streaming": False}}, False, id="defaults"),
+        pytest.param({"router": {"model": "fast"}}, False, id="router-model"),
+        pytest.param({"agents": {"general": {"display_name": "General", "role": "New"}}}, True, id="agent-restart"),
+        pytest.param({"administrators": ["@admin:localhost"]}, True, id="administrators"),
+        pytest.param({"authorization": {"aliases": {"@alice:localhost": ["@tg_1:localhost"]}}}, True, id="aliases"),
+        pytest.param({"bot_accounts": ["@bridge:localhost"]}, True, id="bot-accounts"),
+        pytest.param({"room_defaults": {"invite_users": ["@alice:localhost"]}}, True, id="room-defaults"),
+        pytest.param({"router": {"access": {"users": ["@alice:localhost"]}}}, True, id="router-access"),
+        pytest.param({"router": {"accept_invites": False}}, True, id="router-invites"),
+        pytest.param({"external_trigger_policy": {"enabled": False}}, True, id="trigger-policy"),
+    ],
+)
+def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authorization(
+    changes: dict[str, object],
+    requires_drain: bool,
+) -> None:
+    """Edits that restart nothing and leave reply authorization alone may publish during replies."""
+    base = {
+        "agents": {"general": {"display_name": "General"}},
+        "models": {
+            "default": {"provider": "openai", "id": "gpt-6-sol"},
+            "fast": {"provider": "openai", "id": "gpt-6-luna"},
+        },
+    }
+    running_entities = {ROUTER_AGENT_NAME, "general"}
+
+    plan = build_config_update_plan(
+        current_config=_runtime_bound_config(Config.model_validate(base)),
+        new_config=_runtime_bound_config(Config.model_validate({**base, **changes})),
+        configured_entities=running_entities,
+        existing_entities=running_entities,
+        agent_bots={entity: AsyncMock() for entity in running_entities},
+    )
+
+    assert plan.requires_response_drain is requires_drain
+
+
 def test_config_update_plan_restarts_agents_when_tool_output_threshold_changes() -> None:
     """The tool output auto-save threshold is captured when agent and team toolkits are built."""
     old_config = _runtime_bound_config(

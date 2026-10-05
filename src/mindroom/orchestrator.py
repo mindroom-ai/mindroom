@@ -2023,6 +2023,27 @@ class _MultiAgentOrchestrator:
             plugin_changes=plugin_changes,
         )
 
+    async def _restart_refreshed_mcp_dependents(
+        self,
+        plan: ConfigUpdatePlan,
+        changed_server_ids: set[str],
+    ) -> ConfigUpdatePlan:
+        """Restart entities using MCP catalogs that the config apply refreshed."""
+        if not changed_server_ids:
+            return plan
+        if not plan.requires_response_drain:
+            # Replies may still be running, so restart dependents behind their own drain.
+            for server_id in sorted(changed_server_ids):
+                await self._notify_mcp_catalog_change(server_id)
+            return plan
+        return replace(
+            plan,
+            entities_to_restart=plan.entities_to_restart
+            | plan.new_config.get_entities_referencing_tools(
+                {mcp_tool_name(server_id) for server_id in changed_server_ids},
+            ),
+        )
+
     async def _apply_config_update_plan(
         self,
         current_config: Config,
@@ -2071,14 +2092,7 @@ class _MultiAgentOrchestrator:
             warn_about_config_risks(new_config, self.runtime_paths)
             self._computer_runtime.unbind()
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
-            if changed_runtime_mcp_servers:
-                plan = replace(
-                    plan,
-                    entities_to_restart=plan.entities_to_restart
-                    | new_config.get_entities_referencing_tools(
-                        {mcp_tool_name(server_id) for server_id in changed_runtime_mcp_servers},
-                    ),
-                )
+            plan = await self._restart_refreshed_mcp_dependents(plan, changed_runtime_mcp_servers)
             await self._update_unchanged_bots(plan)
             if router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.entities_to_restart:
                 router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)

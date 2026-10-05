@@ -1312,7 +1312,8 @@ mindroom config validate --path /path/to/config.yaml
 ```
 
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which need a restart.
-A reload waits for active responses to finish, for at most 600 seconds.
+An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition or knowledge base change, applies within seconds even while agents are replying.
+Other edits, including changes to an agent's or team's own settings, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
