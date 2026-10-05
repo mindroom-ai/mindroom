@@ -199,7 +199,7 @@ async def block_secret_reads(ctx):
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | On the router, after a human joins a room | None | 3000 |
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
-| `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart | None | 5000 |
+| `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 

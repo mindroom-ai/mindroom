@@ -621,7 +621,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,

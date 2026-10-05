@@ -21,8 +21,10 @@ mindroom config validate --path /path/to/config.yaml
 ```
 
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](../deployment/storage.md#event-journal) changes, which need a restart.
-An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition or knowledge base change, applies within seconds even while agents are replying.
-Other edits, including changes to an agent's or team's own settings, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
+Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
+Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
+An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
+Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](../deployment/config-bundles.md#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration

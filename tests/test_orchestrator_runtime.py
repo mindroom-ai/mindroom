@@ -4767,6 +4767,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             added_entities=set(),
             removed_entities=set(),
+            live_updated_entities=set(),
             only_support_service_changes=True,
             requires_response_drain=True,
         )
@@ -4839,6 +4840,7 @@ class TestMultiAgentOrchestrator:
             new_entities=set(),
             added_entities=set(),
             removed_entities=set(),
+            live_updated_entities=set(),
             only_support_service_changes=True,
             requires_response_drain=True,
         )
@@ -4888,6 +4890,7 @@ class TestMultiAgentOrchestrator:
             added_entities=set(),
             configured_entities=set(),
             removed_entities=set(),
+            live_updated_entities=set(),
             only_support_service_changes=True,
             requires_response_drain=True,
         )

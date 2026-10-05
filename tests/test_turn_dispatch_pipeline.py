@@ -2773,7 +2773,6 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
             config=config,
             runtime_paths=runtime_paths,
-            team_mode="coordinate",
         )
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()

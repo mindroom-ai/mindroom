@@ -496,7 +496,7 @@ class ConfigReloadLifecycle:
         elif updated:
             logger.info("Configuration update applied to affected agents")
         else:
-            logger.info("No agent changes detected in configuration update")
+            logger.info("Configuration update applied without restarting agents")
 
     async def _run_reload_loop(self) -> None:
         """Apply queued config reloads after debounce and response drain."""

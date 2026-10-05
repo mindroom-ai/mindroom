@@ -167,7 +167,6 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         tmp_path,
         config=config,
         runtime_paths=runtime_paths,
-        team_mode="coordinate",
     )
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
@@ -422,7 +421,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
                 ),
             ),
             team_agents=[entity_ids(bot.config, runtime_paths_for(bot.config))["code"]],
-            team_mode=bot.team_mode,
+            team_mode="coordinate",
         )
 
     assert outcome is None

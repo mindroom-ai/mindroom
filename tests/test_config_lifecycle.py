@@ -181,7 +181,8 @@ _AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
     ("new_yaml", "waits_for_idle"),
     [
         pytest.param(_AGENT1_YAML + "defaults:\n  enable_streaming: false\n", False, id="restarts-nothing"),
-        pytest.param(_AGENT1_YAML + "    role: Changed\n", True, id="restarts-agent"),
+        pytest.param(_AGENT1_YAML + "    role: Changed\n", False, id="live-agent-edit"),
+        pytest.param(_AGENT1_YAML.replace("Agent 1", "Agent One"), True, id="restarts-agent"),
         pytest.param(_AGENT1_YAML + "administrators:\n  - '@admin:localhost'\n", True, id="reply-authorization"),
     ],
 )
@@ -787,7 +788,7 @@ async def test_update_config_builds_plan_and_dispatches(
     runtime_paths = test_runtime_paths(tmp_path)
     current_config = bind_runtime_paths(Config(agents={"agent1": AgentConfig(display_name="Agent 1")}), runtime_paths)
     new_config = bind_runtime_paths(
-        Config(agents={"agent1": AgentConfig(display_name="Agent 1", role="changed role")}),
+        Config(agents={"agent1": AgentConfig(display_name="Agent One")}),
         runtime_paths,
     )
     monkeypatch.setattr(

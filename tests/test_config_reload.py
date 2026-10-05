@@ -34,7 +34,12 @@ from mindroom.matrix import client_room_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestration.config_updates import ConfigUpdatePlan, _get_changed_agents, build_config_update_plan
+from mindroom.orchestration.config_updates import (
+    _AGENT_LIVE_FIELDS,
+    _TEAM_LIVE_FIELDS,
+    ConfigUpdatePlan,
+    build_config_update_plan,
+)
 from mindroom.orchestration.plugin_watch import (
     _collect_plugin_root_changes,
     _drop_unconfigured_plugin_root_snapshots,
@@ -1815,80 +1820,124 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         await orchestrator.config_reload.cancel()
 
 
-@pytest.mark.parametrize(
-    ("old_settings", "new_settings"),
-    [(None, {}), ({}, None), ({}, {"decline_reaction": "👍"}), ({}, {"debounce_seconds": 0})],
-)
-def test_participation_changes_restart_only_owning_agent(
-    old_settings: dict[str, object] | None,
-    new_settings: dict[str, object] | None,
-) -> None:
-    """Enabling, disabling, and tuning participation must refresh the owning agent."""
-    configs = [
-        Config.model_validate(
-            {
-                "agents": {
-                    "helper": {"display_name": "Helper", "participation": settings},
-                    "other": {"display_name": "Other"},
-                },
-            },
-        )
-        for settings in (old_settings, new_settings)
-    ]
-    assert _get_changed_agents(configs[0], configs[1], agent_bots={}) == {"helper"}
+def _entity_edit_config(change: Callable[[dict[str, Any]], object] | None = None) -> Config:
+    data: dict[str, Any] = {
+        "agents": {
+            "helper": {"display_name": "Helper", "tools": [{"shell": {"enable_run_shell_command": False}}]},
+            "other": {"display_name": "Other"},
+        },
+        "teams": {"crew": {"display_name": "Crew", "role": "Coordinate", "agents": ["helper"]}},
+        "models": {
+            "default": {"provider": "openai", "id": "gpt-6-sol"},
+            "fast": {"provider": "openai", "id": "gpt-6-luna"},
+        },
+        "mcp_servers": {"docs": {"transport": "stdio", "command": "npx"}},
+    }
+    if change is not None:
+        change(data)
+    return _runtime_bound_config(Config.model_validate(data))
 
 
-@pytest.mark.parametrize(
-    ("old_settings", "new_settings"),
-    [(None, {}), ({}, None), ({}, {"defer_reaction": "👍"}), ({}, {"instructions": "Continue for thanks"})],
-)
-def test_mid_turn_changes_restart_only_owning_agent(
-    old_settings: dict[str, object] | None,
-    new_settings: dict[str, object] | None,
-) -> None:
-    """Enabling, disabling, and tuning mid_turn must refresh the owning agent."""
-    configs = [
-        Config.model_validate(
-            {
-                "agents": {
-                    "helper": {
-                        "display_name": "Helper",
-                        "mid_turn": None if settings is None else {"judgment": {"provider": "typesafe"}, **settings},
-                    },
-                    "other": {"display_name": "Other"},
-                },
-            },
-        )
-        for settings in (old_settings, new_settings)
-    ]
-    assert _get_changed_agents(configs[0], configs[1], agent_bots={}) == {"helper"}
-
-
-def test_get_changed_agents_detects_tool_override_updates() -> None:
-    """Agent restarts should trigger when authored tool overrides change."""
-    old_config = _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    tools=[{"shell": {"enable_run_shell_command": False}}],
-                ),
-            },
-        ),
-    )
-    new_config = _runtime_bound_config(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    tools=[{"shell": {"enable_run_shell_command": True}}],
-                ),
-            },
-        ),
+def _entity_edit_plan(
+    change: Callable[[dict[str, Any]], object],
+    *,
+    stopped: AbstractSet[str] = frozenset(),
+) -> ConfigUpdatePlan:
+    entities = {ROUTER_AGENT_NAME, "helper", "other", "crew"}
+    return build_config_update_plan(
+        current_config=_entity_edit_config(),
+        new_config=_entity_edit_config(change),
+        configured_entities=entities,
+        existing_entities=entities,
+        agent_bots={entity: AsyncMock(running=entity not in stopped) for entity in entities},
     )
 
-    changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
-    assert changed == {"agent1"}
+
+def test_every_agent_and_team_field_is_classified_for_config_reload() -> None:
+    """A new entity field must be classified, so it cannot silently skip a restart its bot needs."""
+    assert set(AgentConfig.model_fields) >= _AGENT_LIVE_FIELDS
+    assert set(AgentConfig.model_fields) - _AGENT_LIVE_FIELDS == {"display_name", "accept_invites", "private"}
+    assert set(TeamConfig.model_fields) >= _TEAM_LIVE_FIELDS
+    assert set(TeamConfig.model_fields) - _TEAM_LIVE_FIELDS == {"display_name", "accept_invites"}
+
+
+def _update_helper(**fields: object) -> Callable[[dict[str, Any]], object]:
+    return lambda data: data["agents"]["helper"].update(fields)
+
+
+@pytest.mark.parametrize(
+    ("change", "entity"),
+    [
+        pytest.param(_update_helper(instructions=["Be brief."]), "helper", id="instructions"),
+        pytest.param(_update_helper(model="fast"), "helper", id="model"),
+        pytest.param(_update_helper(tools=["shell", "calculator"]), "helper", id="tools"),
+        pytest.param(
+            _update_helper(tools=[{"shell": {"enable_run_shell_command": True}}]),
+            "helper",
+            id="tool-override",
+        ),
+        pytest.param(_update_helper(participation={"decline_reaction": "👍"}), "helper", id="participation"),
+        pytest.param(_update_helper(mid_turn={"judgment": {"provider": "typesafe"}}), "helper", id="mid-turn"),
+        pytest.param(_update_helper(access={"users": ["@alice:localhost"]}), "helper", id="access"),
+        pytest.param(lambda data: data["teams"]["crew"].update(mode="collaborate"), "crew", id="team-mode"),
+        pytest.param(lambda data: data["teams"]["crew"].update(agents=["helper", "other"]), "crew", id="team-members"),
+    ],
+)
+def test_config_update_plan_applies_live_entity_edits_without_restarting(
+    change: Callable[[dict[str, Any]], object],
+    entity: str,
+) -> None:
+    """Edits to fields running bots read live reach them through the unchanged-bot path."""
+    plan = _entity_edit_plan(change)
+
+    assert plan.entities_to_restart == set()
+    assert plan.live_updated_entities == {entity}
+
+
+@pytest.mark.parametrize(
+    ("change", "restarted"),
+    [
+        pytest.param(_update_helper(display_name="Helpful"), {"helper"}, id="display-name"),
+        pytest.param(_update_helper(accept_invites=False), {"helper"}, id="accept-invites"),
+        pytest.param(lambda data: data["agents"]["other"].update(private={"per": "user"}), {"other"}, id="private"),
+        pytest.param(_update_helper(tools=["shell", "desktop"]), {"helper"}, id="desktop"),
+        pytest.param(_update_helper(tools=["shell", "mcp_docs"]), {"helper"}, id="mcp-tool"),
+        pytest.param(
+            lambda data: data.update(defaults={"tools": ["scheduler", "desktop"]}),
+            {"helper", "other"},
+            id="inherited-desktop",
+        ),
+        pytest.param(lambda data: data["teams"]["crew"].update(display_name="Crew Two"), {"crew"}, id="team-name"),
+        pytest.param(lambda data: data["teams"]["crew"].update(accept_invites=False), {"crew"}, id="team-invites"),
+    ],
+)
+def test_config_update_plan_restarts_only_entities_whose_startup_inputs_changed(
+    change: Callable[[dict[str, Any]], object],
+    restarted: set[str],
+) -> None:
+    """Fields a bot reads only when it starts restart that bot and no other."""
+    plan = _entity_edit_plan(change)
+
+    assert plan.entities_to_restart == restarted
+    assert plan.live_updated_entities == set()
+
+
+@pytest.mark.parametrize(
+    ("change", "entity"),
+    [
+        pytest.param(_update_helper(instructions=["Be brief."]), "helper", id="agent"),
+        pytest.param(lambda data: data["teams"]["crew"].update(mode="collaborate"), "crew", id="team"),
+    ],
+)
+def test_config_update_plan_restarts_a_stopped_bot_for_any_edit(
+    change: Callable[[dict[str, Any]], object],
+    entity: str,
+) -> None:
+    """An edit to a bot whose startup failed retries that startup, even for a field read live."""
+    plan = _entity_edit_plan(change, stopped={entity})
+
+    assert plan.entities_to_restart == {entity}
+    assert plan.live_updated_entities == set()
 
 
 def test_config_update_plan_restarts_running_entities_when_construction_prompts_change() -> None:
@@ -2014,7 +2063,13 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
         pytest.param({"defaults": {"enable_streaming": False}}, False, id="defaults"),
         pytest.param({"router": {"model": "fast"}}, False, id="router-model"),
         pytest.param({"matrix_space": {"name": "Team Space"}}, False, id="space-name"),
-        pytest.param({"agents": {"general": {"display_name": "General", "role": "New"}}}, True, id="agent-restart"),
+        pytest.param({"agents": {"general": {"display_name": "General", "role": "New"}}}, False, id="agent-live"),
+        pytest.param({"agents": {"general": {"display_name": "General Agent"}}}, True, id="agent-restart"),
+        pytest.param(
+            {"agents": {"general": {"display_name": "General", "access": {"users": ["@alice:localhost"]}}}},
+            True,
+            id="agent-access",
+        ),
         pytest.param({"administrators": ["@admin:localhost"]}, True, id="administrators"),
         pytest.param({"authorization": {"aliases": {"@alice:localhost": ["@tg_1:localhost"]}}}, True, id="aliases"),
         pytest.param({"bot_accounts": ["@bridge:localhost"]}, True, id="bot-accounts"),
