@@ -2571,7 +2571,7 @@ async def test_cascaded_call_without_origin_asks_the_caller_where_to_start_work(
     assert isinstance(bridge.agent_options, CascadedVoiceAgentOptions)
     note = cast("str", tooling_kwargs["origin_brief"])
     assert note.startswith("## Starting work from this call")
-    assert "ask which room" in note
+    assert "ask which one" in note
     await manager.shutdown()
 
 

@@ -240,11 +240,9 @@ def build_call_brief(origin_context: CallOriginContext, *, token_budget: int) ->
 def build_call_handoff_note(origin: CallOrigin | None, *, agent_name: str) -> str:
     """Tell a call agent with matrix_message where to start longer work: the origin, never the call room."""
     if origin is None:
-        target = (
-            "a new thread in the room the caller chooses; ask which room, then use its room_id with new_thread=True"
-        )
+        target = "the room the caller chooses; ask which one, then pass its name or ID as room_id"
     elif origin.thread_id is None:
-        target = f'a new thread in the room this call came from (room_id "{origin.room_id}", new_thread=True)'
+        target = f'the room this call came from (room_id "{origin.room_id}")'
     else:
         target = f'the thread this call came from (room_id "{origin.room_id}", thread_id "{origin.thread_id}")'
     return (

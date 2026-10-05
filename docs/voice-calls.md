@@ -280,9 +280,9 @@ Before posting, the agent checks the caller's access to the origin room again, a
 If the agent's media connection drops and it rejoins the same call, each part of the call posts its own message.
 
 An agent with the `matrix_message` tool is also told how to start longer work during a call.
-It sends a self-contained task to the thread the call came from, or to a new thread in that room, and names itself or another agent as `recipient`, so the work runs there while you keep talking.
+It sends a self-contained task to the thread or room the call came from, and names itself or another agent as `recipient`, so the work runs there while you keep talking.
 A call without an origin makes it ask you which room to use.
-It never posts in the call room.
+It is told never to post in the call room.
 
 Clients ask for this with the `origin` field of the call room's `io.mindroom.agent_call` state event:
 

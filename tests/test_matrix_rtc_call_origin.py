@@ -563,8 +563,8 @@ async def test_resolve_uses_cross_room_membership_policy(
             CallOrigin(room_id="!r:x", thread_id="$root"),
             'the thread this call came from (room_id "!r:x", thread_id "$root")',
         ),
-        (CallOrigin(room_id="!r:x", thread_id=None), 'a new thread in the room this call came from (room_id "!r:x"'),
-        (None, "ask which room"),
+        (CallOrigin(room_id="!r:x", thread_id=None), 'the room this call came from (room_id "!r:x")'),
+        (None, "ask which one, then pass its name or ID as room_id"),
     ],
 )
 def test_handoff_note_points_at_the_origin_never_the_call_room(
