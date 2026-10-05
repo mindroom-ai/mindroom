@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix_rtc.call_origin import CallOrigin
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
     from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
@@ -116,6 +117,8 @@ _MAX_PENDING_KEYS_PER_ROOM = 64
 _PENDING_KEY_TTL_MS = 120_000
 _RECONCILE_RETRY_DELAYS_S = (1.0, 5.0, 30.0, 60.0)
 _RECONCILE_MIN_INTERVAL_S = 1.0
+# Origin context is optional enrichment; never let a slow homeserver delay call pick-up beyond this.
+_ORIGIN_RESOLUTION_TIMEOUT_S = 5.0
 _OPENAI_SPEECH_BASE_URL = "https://api.openai.com/v1"
 _MATRIX_NETWORK_ERRORS = (nio.exceptions.ProtocolError, OSError, aiohttp.ClientError)
 _CALL_NETWORK_ERRORS = (httpx.HTTPError, *_MATRIX_NETWORK_ERRORS)
@@ -892,12 +895,20 @@ class CallManager:
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
             return "skip"
+        # The origin only enriches the call; a slow or broken one must never block it.
+        origin_context = None
         try:
-            origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
+            async with asyncio.timeout(_ORIGIN_RESOLUTION_TIMEOUT_S):
+                origin_context = await self._resolve_origin_context(room_id, requester_id, agent_call_events)
+        except TimeoutError:
+            logger.warning(
+                "call_origin_resolution_timed_out",
+                room_id=room_id,
+                agent=self._agent_name,
+                timeout_s=_ORIGIN_RESOLUTION_TIMEOUT_S,
+            )
         except Exception:
-            # The origin only enriches the call; a broken one must never block it.
             logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
-            origin_context = None
         try:
             tooling = await self._build_tooling(
                 room_id,
@@ -1189,7 +1200,11 @@ class CallManager:
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> CallOriginContext | None:
         """Return the validated conversation this call was started from, if any."""
-        origin = parse_call_origin(agent_call_events, requester_id=requester_id, agent_user_id=self._client.user_id)
+        origin: CallOrigin | None = parse_call_origin(
+            agent_call_events,
+            requester_id=requester_id,
+            agent_user_id=self._client.user_id,
+        )
         if origin is None:
             return None
         context = self._tool_support.build_context(

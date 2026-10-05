@@ -2518,6 +2518,40 @@ async def test_origin_resolution_error_does_not_block_the_call(
 
 
 @pytest.mark.asyncio
+async def test_slow_origin_resolution_does_not_delay_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An origin read that never answers is abandoned after the time limit and the call connects without it."""
+
+    async def never_resolves(*_args: object, **_kwargs: object) -> CallOriginContext:
+        await asyncio.Event().wait()
+        msg = "origin resolution unexpectedly resumed"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.resolve_call_origin_context", never_resolves)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._ORIGIN_RESOLUTION_TIMEOUT_S", 0.01)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, tool_support=_origin_tool_support())
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(
+            _deliver(manager, manager.on_room_event(_room(), _member_unknown_event())),
+            timeout=5,
+        )
+
+    assert bridge.connected_grant == GRANT
+    assert bridge.agent_options is not None
+    assert "Conversation this call is about" not in bridge.agent_options.instructions
+    assert [log["event"] for log in logs if log["event"].startswith("call_origin_resolution")] == [
+        "call_origin_resolution_timed_out",
+    ]
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_cascaded_delegate_receives_origin_brief(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
