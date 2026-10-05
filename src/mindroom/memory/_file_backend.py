@@ -319,7 +319,7 @@ def _read_listed_memory_file(scope_path: Path, relative_path: str) -> _ScopeMemo
     return _scope_memory_file(relative_path, payload) if payload is not None else None
 
 
-def _read_scope_markdown_files(scope_path: Path) -> list[_ScopeMemoryFile]:
+def read_scope_memory_files(scope_path: Path) -> list[_ScopeMemoryFile]:
     """Read every in-scope memory file under the per-file and per-scan byte caps."""
     try:
         with open_directory_within_root(scope_path) as scope_fd:
@@ -412,7 +412,7 @@ def _load_scope_id_entries(
 
     results: list[MemoryResult] = []
     id_to_file: dict[str, _ScopeMemoryFile] = {}
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in read_scope_memory_files(scope_path):
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):
             match = FILE_MEMORY_ENTRY_PATTERN.match(raw_line.strip())
             if not match:
@@ -435,7 +435,7 @@ def _load_scope_id_entries(
 
 def _iter_scope_unstructured_lines(scope_path: Path) -> Iterator[tuple[str, int, str]]:
     """Yield relative paths, line numbers, and eligible snippets in file order."""
-    for memory_file in _read_scope_markdown_files(scope_path):
+    for memory_file in read_scope_memory_files(scope_path):
         if memory_file.relative_path == FILE_MEMORY_ENTRYPOINT:
             continue
         for line_no, raw_line in enumerate(memory_file.text.splitlines(), 1):

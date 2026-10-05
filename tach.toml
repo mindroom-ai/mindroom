@@ -2703,6 +2703,7 @@ depends_on = [
     "mindroom.workers.backends.legacy_state_root_mounts",
     "mindroom.workers.runtime",
     "mindroom.delegation.recovery",
+    "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
 ]
 
@@ -2917,6 +2918,7 @@ path = "mindroom.config.models"
 depends_on = [
     "mindroom.config.judgment",
     "mindroom.config.access",
+    "mindroom.config.automations",
     "mindroom.config.legacy_fields",
     "mindroom.config.validation",
     "mindroom.constants",
@@ -2942,6 +2944,7 @@ depends_on = [
     "mindroom.config.judgment",
     "mindroom.agent_policy",
     "mindroom.config.agent",
+    "mindroom.config.automations",
     "mindroom.config.auth",
     "mindroom.config.calls",
     "mindroom.config.entity_view",
@@ -2980,6 +2983,7 @@ depends_on = [
     "mindroom.constants", "mindroom.tool_system.worker_routing",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
+    "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
 ]
@@ -3117,7 +3121,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.timing",
 ]
-visibility = ["mindroom.memory._backend", "mindroom.memory.functions"]
+visibility = ["mindroom.memory", "mindroom.memory._backend", "mindroom.memory.functions"]
 
 [[modules]]
 path = "mindroom.memory._semantic_file_search"
@@ -5693,6 +5697,7 @@ expose = [
     "get_agent_memory",
     "list_all_agent_memories",
     "mark_auto_flush_dirty_session",
+    "read_scope_memory_files",
     "reprioritize_auto_flush_sessions",
     "search_agent_memories",
     "store_conversation_memory",
@@ -7926,6 +7931,28 @@ depends_on = []
 path = "mindroom.config.skill_learning"
 depends_on = []
 visibility = ["mindroom.config.agent"]
+
+[[modules]]
+path = "mindroom.config.automations"
+depends_on = ["mindroom.config.validation"]
+visibility = ["mindroom.config.agent", "mindroom.config.main", "mindroom.config.models"]
+
+[[modules]]
+path = "mindroom.automations.prompt_curation"
+depends_on = ["mindroom.atomic_file", "mindroom.memory", "mindroom.path_confinement", "mindroom.runtime_resolution"]
+visibility = ["mindroom.automations.runner"]
+
+[[modules]]
+path = "mindroom.automations.runner"
+depends_on = [
+    "mindroom.automations.prompt_curation",
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.state",
+]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.skill_learning.library"

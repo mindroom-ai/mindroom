@@ -1284,11 +1284,18 @@ class ResponseRunner:
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build post-response effect deps bound to one request's room."""
+        orchestrator = self.deps.runtime.orchestrator
+        source_event_ids = request.sources.logical_source_event_ids
         return self.deps.post_response_effects.build_deps(
             room_id=request.room_id,
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
+            notify_response_finished=(
+                (lambda: orchestrator.automations.response_finished(source_event_ids))
+                if orchestrator is not None
+                else None
+            ),
             persist_response_event_id=persist_response_event_id,
         )
 

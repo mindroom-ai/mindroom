@@ -38,6 +38,7 @@ from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.automations import PromptCurationAutomation  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -1848,6 +1849,33 @@ class Config(BaseModel):
             return self.memory.search
         # exclude_none keeps the "None inherits" tri-state; deep copy avoids aliasing memory.search.include.
         return self.memory.search.model_copy(update=override.model_dump(exclude_none=True), deep=True)
+
+    def _agent_automations(self, agent_name: str) -> list[PromptCurationAutomation]:
+        """Get one agent's built-in automations: its own list, or the defaults for an eligible agent.
+
+        Automations run unattended, so requester-private agents have no identity to run them as, and
+        prompt curation moves detail into file memory, which needs the file backend.
+        """
+        agent = self.get_agent(agent_name)
+        if agent.automations is not None:
+            return agent.automations
+        if agent.private is not None or self._agent_memory_backend(agent_name) != "file":
+            return []
+        return self.defaults.automations
+
+    @model_validator(mode="after")
+    def validate_agent_automations(self) -> Config:
+        """Reject automations an agent lists but cannot run."""
+        for agent_name, agent in self.agents.items():
+            if not agent.automations:
+                continue
+            if agent.private is not None:
+                msg = f"Agent {agent_name!r} is private; automations run unattended and need a shared agent"
+                raise ValueError(msg)
+            if self._agent_memory_backend(agent_name) != "file":
+                msg = f"Agent {agent_name!r} needs memory_backend: file for prompt_curation"
+                raise ValueError(msg)
+        return self
 
     def uses_file_memory(self) -> bool:
         """Return whether any configured agent uses file-backed memory."""

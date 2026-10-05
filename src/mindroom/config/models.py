@@ -10,6 +10,11 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
+from mindroom.config.automations import (
+    PromptCurationAutomation,
+    normalize_automation_entries,
+    validate_unique_automations,
+)
 from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
@@ -495,6 +500,10 @@ class DefaultsConfig(BaseModel):
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
     )
+    automations: list[PromptCurationAutomation] = Field(
+        default_factory=list,
+        description="Built-in automations, such as prompt_curation, for agents that do not list their own",
+    )
     tool_output_auto_save_threshold_bytes: int = Field(
         default=DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
         ge=1,
@@ -562,6 +571,18 @@ class DefaultsConfig(BaseModel):
             msg = "defaults.tools does not support defer or initial flags: " + ", ".join(lazy_entries)
             raise ValueError(msg)
         return validated
+
+    @field_validator("automations", mode="before")
+    @classmethod
+    def normalize_automations(cls, values: object) -> object:
+        """Accept bare built-in names."""
+        return normalize_automation_entries(values)
+
+    @field_validator("automations")
+    @classmethod
+    def validate_automations(cls, values: list[PromptCurationAutomation]) -> list[PromptCurationAutomation]:
+        """Allow each built-in at most once."""
+        return validate_unique_automations(values)
 
     @field_validator("worker_grantable_credentials")
     @classmethod

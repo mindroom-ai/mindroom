@@ -39,6 +39,7 @@ __all__ = [
     "OUTPUT_REDIRECT_PROMPT",
     "PERSONALITY_CONTEXT_SECTION_HEADING",
     "PREVIOUS_CONVERSATION_THREAD_HEADER",
+    "PROMPT_CURATION_PROMPT_TEMPLATE",
     "PROMPT_DEFAULTS",
     "PROMPT_DEFAULT_NAMES",
     "PROMPT_TEMPLATE_FIELDS",
@@ -277,6 +278,17 @@ FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "(capped by memory.file.max_entrypoint_lines={max_entrypoint_lines}). "
     "Read `{memory_path}` directly for the omitted lines.]"
 )
+PROMPT_CURATION_PROMPT_TEMPLATE = """🧹 Prompt maintenance: the files loaded into every one of your prompts total {measured_tokens} tokens, over the {trigger_tokens}-token limit.
+Files: {file_sizes}.
+
+1. Commit these files to git in your workspace first (run `git init` if it is not a repository yet), so this change can be undone.
+2. Bring them to at most {upper_tokens} tokens in total, but not below {floor_tokens}; no single file may shrink by more than {max_file_shrink_percent}%.
+3. When the same fact appears in more than one file, keep it once, in the file that owns it: identity and voice in SOUL.md and IDENTITY.md, workflow rules in AGENTS.md, facts about the person in USER.md, and everything else in MEMORY.md.
+4. Move detail, history, and finished items verbatim into topic files under memory/, such as memory/projects.md, and leave a one-line pointer where it helps; those files are searched on demand.
+5. Never invent facts or change their meaning, names, dates, or numbers.
+{protected_line}
+MindRoom checks the files when you finish and restores them if the result misses these bounds or deletes detail instead of moving it.
+Reply with one line saying what you changed."""
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
 MEMORY_NO_EXISTING_SNIPPETS = "Existing memory snippets: (none)\n"
 MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE = """Extract only durable memories from this conversation excerpt.
@@ -636,6 +648,17 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
             {"included_lines", "total_lines", "max_entrypoint_lines", "memory_path"},
         ),
         "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE": frozenset({"tool_domains"}),
+        "PROMPT_CURATION_PROMPT_TEMPLATE": frozenset(
+            {
+                "measured_tokens",
+                "trigger_tokens",
+                "file_sizes",
+                "upper_tokens",
+                "floor_tokens",
+                "max_file_shrink_percent",
+                "protected_line",
+            },
+        ),
         "MEMORY_AUTO_FLUSH_EXTRACT_PROMPT_TEMPLATE": frozenset(
             {"no_reply_token", "existing_block", "excerpt"},
         ),
