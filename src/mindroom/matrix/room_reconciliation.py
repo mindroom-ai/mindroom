@@ -66,7 +66,11 @@ async def read_room_creators(
     """
     if snapshot is not None:
         return snapshot.creators
-    create = await client.room_get_state_event(room_id, "m.room.create")
+    try:
+        create = await client.room_get_state_event(room_id, "m.room.create")
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        logger.warning("room_creators_unreadable", room_id=room_id, exc_info=True)
+        return None
     if not isinstance(create, nio.RoomGetStateEventResponse) or not isinstance(create.content, dict):
         logger.warning("room_creators_unreadable", room_id=room_id, error=str(create))
         return None

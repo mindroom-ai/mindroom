@@ -138,3 +138,83 @@ async def test_an_older_creator_without_listed_power_still_cannot_write_thread_t
 
     with pytest.raises(thread_tags.ThreadTagsError, match="has 0, requires 50"):
         await thread_tags._assert_thread_tags_write_allowed(client, ROOM)
+
+
+@pytest.mark.asyncio
+async def test_the_first_qualifying_candidate_wins_even_when_it_is_a_creator() -> None:
+    """A creator listed first is returned before a later candidate with listed admin power."""
+    client = _room_client(version="12", sender=OWNER)
+    power = {"users": {"@bridge:example.com": 100}, "state_default": 50}
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
+        content = power if event_type == "m.room.power_levels" else {"room_version": "12"}
+        return nio.RoomGetStateEventResponse(
+            content=dict(content),
+            event_type=event_type,
+            state_key=state_key,
+            room_id=room_id,
+        )
+
+    client.room_get_state_event.side_effect = get_state_event
+
+    assert await client_room_admin.room_admin_power_user(client, ROOM, [OWNER, "@bridge:example.com"]) == OWNER
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_create_event_fails_the_admin_check_closed() -> None:
+    """A transport failure while reading creators denies instead of raising out of the admin check."""
+    client = _room_client(version="12", sender=OWNER)
+    power_response = nio.RoomGetStateEventResponse(
+        content={"users": {}},
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id=ROOM,
+    )
+    client.room_get_state_event.side_effect = [power_response, TimeoutError("create-event read timed out")]
+
+    assert await client_room_admin.room_admin_power_user(client, ROOM, [OWNER]) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["send", "json"])
+async def test_an_unreadable_capabilities_probe_falls_back_to_the_server_default(failure: str) -> None:
+    """Room creation proceeds without pinning a version when capabilities cannot be read."""
+    client = _creating_client("12")
+    if failure == "send":
+        client.send.side_effect = TimeoutError("capabilities timed out")
+    else:
+        client.send.return_value.json.side_effect = ValueError("not json")
+
+    assert await client_room_admin.create_room(client, "Personal", admin_users=[OWNER]) == ROOM
+
+    kwargs = client.room_create.await_args.kwargs
+    assert "room_version" not in kwargs
+    assert kwargs["initial_state"][0]["content"]["users"] == {OWNER: 100, ROUTER: 100}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["managed", "admins"])
+async def test_a_snapshot_write_rereads_power_levels_and_still_omits_creators(helper: str) -> None:
+    """The fresh re-read keeps grants made since the snapshot, reuses its creators, and never lists them."""
+    client = _room_client(version="12", sender=OWNER)
+    snapshot = await read_room_state(client, ROOM)
+    assert snapshot is not None
+    fresh = {"users": {"@later:example.com": 100}, "state_default": 50, "custom": "keep"}
+    client.room_get_state_event.reset_mock(side_effect=True)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=dict(fresh),
+        event_type="m.room.power_levels",
+        state_key="",
+        room_id=ROOM,
+    )
+    targets = {OWNER, "@guest:example.com"}
+
+    if helper == "managed":
+        assert await client_room_admin.ensure_managed_room_power_levels(client, ROOM, targets, snapshot=snapshot)
+    else:
+        assert await client_room_admin.ensure_room_admin_power_levels(client, ROOM, targets, snapshot=snapshot)
+
+    content = client.room_put_state.await_args.kwargs["content"]
+    assert content["users"] == {"@later:example.com": 100, "@guest:example.com": 100}
+    assert content["custom"] == "keep"
+    client.room_get_state_event.assert_awaited_once_with(ROOM, "m.room.power_levels", "")

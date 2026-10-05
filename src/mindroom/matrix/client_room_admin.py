@@ -9,6 +9,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import aiohttp
 import nio
 
 from mindroom.logging_config import get_logger
@@ -124,17 +125,22 @@ async def _new_room_version(client: nio.AsyncClient) -> str | None:
     """Return the room version the homeserver creates rooms with, or None when it does not say."""
     if not client.access_token:
         return None
-    response = await client.send(
-        "GET",
-        "/_matrix/client/v3/capabilities",
-        headers={"Authorization": f"Bearer {client.access_token}"},
-    )
     try:
-        if response.status != HTTPStatus.OK:
-            return None
-        payload = await response.json()
-    finally:
-        response.release()
+        response = await client.send(
+            "GET",
+            "/_matrix/client/v3/capabilities",
+            headers={"Authorization": f"Bearer {client.access_token}"},
+        )
+        try:
+            if response.status != HTTPStatus.OK:
+                return None
+            payload = await response.json()
+        finally:
+            response.release()
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        # Creation then leaves the version to the server, as it did before capabilities were read.
+        logger.warning("matrix_capabilities_unreadable", exc_info=True)
+        return None
     capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
     room_versions = capabilities.get("m.room_versions") if isinstance(capabilities, dict) else None
     default = room_versions.get("default") if isinstance(room_versions, dict) else None
@@ -344,7 +350,7 @@ def _with_room_admin_power_levels(
     return next_content
 
 
-async def room_admin_power_user(
+async def room_admin_power_user(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
     client: nio.AsyncClient,
     room_id: str,
     user_ids: Iterable[str],
@@ -377,12 +383,17 @@ async def room_admin_power_user(
         )
         return None
 
+    # Room version 12 never lists its creators, whose power is unlimited; they are read only for a user who
+    # lacks listed admin power, and in candidate order, so the first qualifying user is still the one returned.
+    creators: frozenset[str] | None = None
     for user_id in concrete_user_ids:
         if user_power_level(current_response.content, user_id) >= _ROOM_ADMIN_POWER_LEVEL:
             return user_id
-    # Room version 12 never lists its creators, whose power is unlimited, so they are checked only now.
-    creators = await read_room_creators(client, room_id)
-    return next((user_id for user_id in concrete_user_ids if user_id in (creators or frozenset())), None)
+        if creators is None:
+            creators = await read_room_creators(client, room_id) or frozenset()
+        if user_id in creators:
+            return user_id
+    return None
 
 
 async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
