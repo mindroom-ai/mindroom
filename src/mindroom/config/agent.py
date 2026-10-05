@@ -22,11 +22,7 @@ from mindroom.config.access import (
     RoomJoinPolicy,
     validate_concrete_matrix_user_ids,
 )
-from mindroom.config.automations import (
-    PromptCurationAutomation,
-    normalize_automation_entries,
-    validate_unique_automations,
-)
+from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
@@ -383,7 +379,7 @@ class AgentConfig(BaseModel):
         default=None,
         description="Allow this agent to modify its own configuration via a tool",
     )
-    automations: list[PromptCurationAutomation] | None = Field(
+    automations: AutomationList | None = Field(
         default=None,
         description="Built-in automations for this agent, such as prompt_curation; omitted inherits defaults.automations",
     )
@@ -450,21 +446,6 @@ class AgentConfig(BaseModel):
         if value is False:
             return None
         return value
-
-    @field_validator("automations", mode="before")
-    @classmethod
-    def normalize_automations(cls, values: object) -> object:
-        """Accept bare built-in names."""
-        return normalize_automation_entries(values)
-
-    @field_validator("automations")
-    @classmethod
-    def validate_automations(
-        cls,
-        values: list[PromptCurationAutomation] | None,
-    ) -> list[PromptCurationAutomation] | None:
-        """Allow each built-in at most once."""
-        return None if values is None else validate_unique_automations(values)
 
     @field_validator("tools")
     @classmethod

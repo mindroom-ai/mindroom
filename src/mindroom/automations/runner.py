@@ -75,6 +75,7 @@ class AutomationRunner:
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
     _firing: set[str] = field(default_factory=set, init=False)
+    _verifying: set[str] = field(default_factory=set, init=False)
     _pending: dict[str, _PendingVerify] = field(default_factory=dict, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _wake: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -95,9 +96,7 @@ class AutomationRunner:
         """Verify an automation prompt once the response it started is final."""
         for event_id in source_event_ids:
             if (pending := self._pending.pop(event_id, None)) is not None:
-                create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
-                # A held automation may be due again now.
-                self._wake.set()
+                self._start_verify(pending)
 
     async def _tick(self, now: datetime) -> None:
         """Fire every automation that is due at ``now`` and verify prompts whose run never reported back."""
@@ -125,11 +124,20 @@ class AutomationRunner:
         for event_id, pending in list(self._pending.items()):
             if pending.deadline <= now:
                 del self._pending[event_id]
-                create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
+                self._start_verify(pending)
+
+    def _start_verify(self, pending: _PendingVerify) -> None:
+        # The automation stays busy until verify ends, so a new pass never snapshots files a restore is replacing.
+        self._verifying.add(pending.key)
+        create_background_task(self._verify(pending), name=f"automation_verify:{pending.plan.agent_name}")
 
     def _busy(self, key: str) -> bool:
-        """Return whether this automation is checking, or waiting on the run of its last prompt."""
-        return key in self._firing or any(pending.key == key for pending in self._pending.values())
+        """Return whether this automation is checking, waiting on its last prompt's run, or verifying it."""
+        return (
+            key in self._firing
+            or key in self._verifying
+            or any(pending.key == key for pending in self._pending.values())
+        )
 
     async def _run(self) -> None:
         while True:
@@ -195,6 +203,14 @@ class AutomationRunner:
             self._firing.discard(key)
 
     async def _verify(self, pending: _PendingVerify) -> None:
+        try:
+            await self._verify_and_notify(pending)
+        finally:
+            self._verifying.discard(pending.key)
+            # A held automation may be due again now.
+            self._wake.set()
+
+    async def _verify_and_notify(self, pending: _PendingVerify) -> None:
         plan = pending.plan
         result = await asyncio.to_thread(verify_curation, plan)
         logger.info(

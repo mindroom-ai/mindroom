@@ -10112,6 +10112,44 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
     assert automations.finished == [tuple(request.sources.logical_source_event_ids)]
 
 
+def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+    """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    automations = _RecordedAutomations()
+    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        resolved_thread_id="$prompt",
+        session_id="session-1",
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-1",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$prompt",
+        requester_id="@user:localhost",
+        response_event_id="$response",
+        sources=ResponseSources(("$prompt",), ("$prompt",)),
+        calls=(),
+        state="running",
+        execution_identity=serialize_tool_execution_identity(identity),
+    )
+
+    deps = coordinator._approval_post_response_deps(continuation)
+    assert deps.notify_response_finished is not None
+    deps.notify_response_finished()
+
+    assert automations.finished == [("$prompt",)]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("succeeded", [True, False])
 async def test_automations_hear_of_every_final_response(succeeded: bool) -> None:

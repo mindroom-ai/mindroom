@@ -2,24 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from datetime import UTC, datetime
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.validation import duplicate_items
 from mindroom.tool_system.worker_routing import agent_workspace_relative_path
 
 _CRON_FIELDS = 5
-
-
-def _validate_cron(value: str) -> str:
-    # why-lazy: croniter stays out of the config import surface.
-    from croniter import croniter  # noqa: PLC0415
-
-    if len(value.split()) != _CRON_FIELDS or not croniter.is_valid(value):
-        msg = f"Automation cron must be a valid five-field expression: {value!r}"
-        raise ValueError(msg)
-    return value
 
 
 class PromptCurationAutomation(BaseModel):
@@ -73,8 +64,18 @@ class PromptCurationAutomation(BaseModel):
     @field_validator("cron")
     @classmethod
     def validate_cron(cls, value: str) -> str:
-        """Reject cron expressions croniter cannot schedule."""
-        return _validate_cron(value)
+        """Reject expressions that are not five fields or can never fire, such as February 31."""
+        # why-lazy: croniter stays out of the config import surface.
+        from croniter import croniter  # noqa: PLC0415
+
+        try:
+            if len(value.split()) != _CRON_FIELDS:
+                raise ValueError(value)  # noqa: TRY301 - one message for every invalid form
+            croniter(value, datetime.now(UTC)).get_next(datetime)
+        except ValueError as exc:
+            msg = f"Automation cron must be a five-field expression that can fire: {value!r}"
+            raise ValueError(msg) from exc
+        return value
 
     @field_validator("protected_files")
     @classmethod
@@ -91,16 +92,23 @@ class PromptCurationAutomation(BaseModel):
         return self
 
 
-def normalize_automation_entries(values: object) -> object:
+def _normalize_automation_entries(values: object) -> object:
     """Accept a bare built-in name as shorthand for that built-in with its defaults."""
     if not isinstance(values, list):
         return values
     return [{"name": value} if isinstance(value, str) else value for value in values]
 
 
-def validate_unique_automations(values: list[PromptCurationAutomation]) -> list[PromptCurationAutomation]:
+def _validate_unique_automations(values: list[PromptCurationAutomation]) -> list[PromptCurationAutomation]:
     """Allow each built-in at most once per agent."""
     if duplicates := duplicate_items([automation.name for automation in values]):
         msg = f"Duplicate automations are not allowed: {', '.join(duplicates)}"
         raise ValueError(msg)
     return values
+
+
+AutomationList = Annotated[
+    list[PromptCurationAutomation],
+    BeforeValidator(_normalize_automation_entries),
+    AfterValidator(_validate_unique_automations),
+]

@@ -287,7 +287,7 @@ agents:
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
 - Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
 - Edits apply on config reload without restarting the agent.
-- The prompt mentions the agent and is posted as a hook-dispatched message from the agent's own account, with MindRoom's internal user as the requester, like a todo poke.
+- The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to that prompt is final, or after an hour without one, the automation's verify step runs and posts a one-line notice in the prompt's thread; a run paused for tool approval longer than that hour is verified as it stood, and later edits are not checked.
 - An automation does not post again while its previous prompt awaits verify.
 - Nothing is persisted: the schedule is the cooldown, and a restart skips the occurrence it missed.
@@ -300,7 +300,7 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files`, except `protected_files`, with the estimate behind `static_prompt_tokens` (characters / 4).
-2. Above `trigger_tokens`, it snapshots those files and posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", which asks for a 10 to 15% cut and never below 90% of the trigger.
+2. Above `trigger_tokens`, it snapshots those files and posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", which asks for a 10 to 15% cut, or only the gap to 90% of the trigger when that is smaller.
 3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
 4. Verify writes the snapshot back over every changed file, and posts why, when any of these holds:
     - a file can no longer be read safely, for example because it became a link or grew past 1 MiB;
@@ -309,7 +309,7 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
     - a protected file changed, or a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
-`memory/` files added by a restored run are kept, so moved detail is never lost.
+A restore also rewrites any `memory/` topic file that lost archived text during the run, while files and lines the run added are kept, so moved detail is never lost.
 A reply that rewrites a curated file during the run can be overwritten when verify restores the snapshot.
 
 | Field | Default | Description |

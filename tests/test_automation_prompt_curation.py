@@ -81,7 +81,7 @@ def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_p
     assert plan.curated == {"MEMORY.md": 1286, "SOUL.md": 4, "USER.md": 2}
     assert plan.measured_tokens == 1292
     assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
-    assert plan.memory_tokens == 1292 + 3
+    assert plan.memory_snapshot == {"memory/2026-10-01.md": "Daily note.\n"}
 
 
 def test_protected_files_are_excluded_from_the_band(tmp_path: Path) -> None:
@@ -218,3 +218,54 @@ def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
 
     with pytest.raises((OSError, ValueError)):
         plan_curation(config, paths, "mind", automation)
+
+
+ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
+
+
+def _plan_with_archive(tmp_path: Path) -> tuple[CurationPlan, Path]:
+    config, automation, root = _setup(tmp_path)
+    (root / "memory" / "projects.md").write_text(ARCHIVE, encoding="utf-8")
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    plan = plan_curation(config, paths, "mind", automation)
+    assert plan is not None
+    return plan, root
+
+
+def test_deleting_archived_memory_is_restored_even_when_the_prompt_files_are_untouched(tmp_path: Path) -> None:
+    """A run that empties a memory/ topic file loses detail verify must catch on its own."""
+    plan, root = _plan_with_archive(tmp_path)
+    before = _snapshot(root)
+    (root / "memory" / "projects.md").unlink()
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert any("deleted instead of moved" in violation for violation in result.violations)
+    assert _snapshot(root) == before
+
+
+def test_overwriting_archived_memory_while_moving_is_restored(tmp_path: Path) -> None:
+    """Moving a section by overwriting an existing topic file drops the archive; verify restores both files."""
+    plan, root = _plan_with_archive(tmp_path)
+    before = _snapshot(root)
+    (root / "memory" / "projects.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert result.restored
+    assert _snapshot(root) == before
+
+
+def test_reorganizing_an_archive_without_losing_content_is_kept(tmp_path: Path) -> None:
+    """Rewriting a topic file is fine as long as the detail stays and the cut is in bounds."""
+    plan, root = _plan_with_archive(tmp_path)
+    reorganized = SECTIONS[3] + ARCHIVE
+    (root / "memory" / "projects.md").write_text(reorganized, encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = verify_curation(plan)
+
+    assert (result.changed, result.restored) == (True, False)
+    assert (root / "memory" / "projects.md").read_text() == reorganized

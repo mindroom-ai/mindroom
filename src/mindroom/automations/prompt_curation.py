@@ -42,8 +42,9 @@ class CurationPlan:
     settings: PromptCurationAutomation
     # Curated and protected files, by workspace-relative path, as they were at fire time.
     snapshot: Mapping[str, bytes]
+    # memory/ topic files as they were at fire time, so a run that deletes archived detail can be undone.
+    memory_snapshot: Mapping[str, str]
     curated: Mapping[str, int]
-    memory_tokens: int
     upper_tokens: int
     floor_tokens: int
 
@@ -78,12 +79,13 @@ def _tokens(payload: bytes) -> int:
     return estimate_text_tokens(payload.decode("utf-8"))
 
 
-def _memory_dir_tokens(root: Path) -> int:
-    return sum(
-        estimate_text_tokens(memory_file.text)
+def _memory_dir_texts(root: Path) -> dict[str, str]:
+    """Return the rewritable memory/ topic files by path; truncated or undecodable ones cannot be restored."""
+    return {
+        memory_file.relative_path: memory_file.text
         for memory_file in read_scope_memory_files(root)
-        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX)
-    )
+        if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.rewritable
+    }
 
 
 def _curated_paths(config: Config, agent_name: str, settings: PromptCurationAutomation) -> list[str]:
@@ -123,8 +125,8 @@ def plan_curation(
         root=root,
         settings=settings,
         snapshot={**curated_payloads, **protected_payloads},
+        memory_snapshot=_memory_dir_texts(root),
         curated=curated,
-        memory_tokens=measured + _memory_dir_tokens(root),
         upper_tokens=upper,
         floor_tokens=upper - round(measured * (settings.max_reduction - settings.min_reduction)),
     )
@@ -146,7 +148,7 @@ def curation_prompt(config: Config, plan: CurationPlan) -> str:
     )
 
 
-def _violations(plan: CurationPlan, current: Mapping[str, bytes | None]) -> list[str]:
+def _violations(plan: CurationPlan, current: Mapping[str, bytes | None], memory_now: Mapping[str, str]) -> list[str]:
     settings = plan.settings
     violations = [
         f"{path} changed but is protected"
@@ -169,7 +171,8 @@ def _violations(plan: CurationPlan, current: Mapping[str, bytes | None]) -> list
         violations.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         violations.append(f"the files did not shrink ({total} tokens)")
-    lost = plan.memory_tokens - (total + _memory_dir_tokens(plan.root))
+    before = plan.measured_tokens + sum(estimate_text_tokens(text) for text in plan.memory_snapshot.values())
+    lost = before - (total + sum(estimate_text_tokens(text) for text in memory_now.values()))
     if lost > (max_loss := round(settings.max_content_loss * plan.measured_tokens)):
         violations.append(f"{lost} tokens of memory were deleted instead of moved to memory/ (at most {max_loss})")
     return violations
@@ -198,16 +201,21 @@ def verify_curation(plan: CurationPlan) -> _CurationResult:
     """Check the files against the plan, writing the snapshot back over every changed file when a guard fails."""
     after_run = {path: _read_after_run(plan.root, path) for path in plan.snapshot}
     changed = [path for path, payload in plan.snapshot.items() if after_run[path] != payload]
-    if not changed:
+    memory_now = _memory_dir_texts(plan.root)
+    # Appending keeps a topic file's archived text; deleting, truncating, or rewriting it does not.
+    damaged = [path for path, text in plan.memory_snapshot.items() if not memory_now.get(path, "").startswith(text)]
+    if not changed and not damaged:
         return _CurationResult(tokens_after=plan.measured_tokens, changed=False)
     # A run that replaced a file with a link or grew it past the read cap is restored like any other miss.
     unreadable = [
         f"{path} cannot be read ({error})" for path, error in after_run.items() if isinstance(error, Exception)
     ]
     current = {path: None if isinstance(payload, Exception) else payload for path, payload in after_run.items()}
-    if violations := unreadable or _violations(plan, current):
+    if violations := unreadable or _violations(plan, current, memory_now):
         for path in changed:
             _restore(plan.root, path, plan.snapshot[path])
+        for path in damaged:
+            _restore(plan.root, path, plan.memory_snapshot[path].encode("utf-8"))
         return _CurationResult(tokens_after=plan.measured_tokens, changed=True, violations=tuple(violations))
     tokens_after = sum(_tokens(current[path] or b"") for path in plan.curated)
     return _CurationResult(tokens_after=tokens_after, changed=True)

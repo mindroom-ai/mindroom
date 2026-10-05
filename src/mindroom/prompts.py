@@ -287,7 +287,8 @@ Files: {file_sizes}.
 4. Move detail, history, and finished items verbatim into topic files under memory/, such as memory/projects.md, and leave a one-line pointer where it helps; those files are searched on demand.
 5. Never invent facts or change their meaning, names, dates, or numbers.
 {protected_line}
-MindRoom checks the files when you finish and restores them if the result misses these bounds or deletes detail instead of moving it.
+Delete only true duplicates; move everything else.
+When you finish, MindRoom restores the files if a file shrank too much, the total fell below {floor_tokens} tokens or did not shrink, or detail was deleted instead of moved.
 Reply with one line saying what you changed."""
 MEMORY_EXISTING_SNIPPETS_TEMPLATE = "Existing memory snippets (avoid duplicates):\n{existing_context}\n"
 MEMORY_NO_EXISTING_SNIPPETS = "Existing memory snippets: (none)\n"

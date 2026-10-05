@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -9,6 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.automations import runner as runner_module
+from mindroom.automations.prompt_curation import CurationPlan, verify_curation
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig
@@ -201,6 +204,30 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
     assert await wait_for_background_tasks(5)
     await _tick(runner, NOON + timedelta(minutes=3))
 
+    assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
+
+
+@pytest.mark.asyncio
+async def test_no_new_prompt_while_verify_is_still_restoring(tmp_path: Path) -> None:
+    """The automation stays busy until verify ends, so a new pass never snapshots files a restore is replacing."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, cron="* * * * *")]
+    await _tick(runner, NOON)
+    await _tick(runner, NOON + timedelta(minutes=1))
+    release = threading.Event()
+
+    def slow_verify(plan: CurationPlan) -> object:
+        release.wait(5)
+        return verify_curation(plan)
+
+    with patch.object(runner_module, "verify_curation", slow_verify):
+        runner.response_finished(["$event1"])
+        await runner._tick(NOON + timedelta(minutes=3))
+        assert len(bot.sent) == 1
+        release.set()
+        assert await wait_for_background_tasks(5)
+
+    await _tick(runner, NOON + timedelta(minutes=4))
     assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
 
 
