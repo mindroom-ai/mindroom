@@ -269,7 +269,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
 | `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
 | `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
-| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit and the setting that raises it. |
+| `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit, and also the setting that raises it when an operator has lowered the limit. |
 | `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |
 | `attachment_context_unavailable` | The call ran outside a conversation with attachment storage. |
 

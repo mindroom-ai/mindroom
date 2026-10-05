@@ -13,9 +13,9 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
-import mindroom.matrix.media as media_module
 from mindroom import attachments as attachments_module
 from mindroom.attachments import load_attachment
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.custom_tools import atlassian as atlassian_module
 from mindroom.custom_tools import atlassian_client
 from mindroom.custom_tools.atlassian import AtlassianTools
@@ -848,17 +848,27 @@ async def test_failed_storage_is_reported(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_download_above_the_retained_media_limit_is_too_large(
+@pytest.mark.parametrize(
+    "extra_env",
+    [None, {"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": str(2 * RETAINED_MEDIA_MAX_BYTES)}],
+)
+async def test_download_over_the_attachment_limit_offers_no_setting_to_raise(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    extra_env: dict[str, str] | None,
 ) -> None:
-    """An inline transfer limit above MindRoom's retained media limit still reports a size error."""
-    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(media_module, "RETAINED_MEDIA_MAX_BYTES", 4)
-    gateway.route("GET", gateway_url("confluence", DOWNLOAD_PATH), _file(b"12345"))
+    """At or above MindRoom's attachment limit, raising the inline transfer setting cannot help, so no error offers it."""
+    tool, gateway, context, _paths = _setup(tmp_path, monkeypatch, extra_env)
+    gateway.route(
+        "GET",
+        gateway_url("confluence", DOWNLOAD_PATH),
+        _file(headers={"content-length": str(RETAINED_MEDIA_MAX_BYTES + 1)}),
+    )
 
     result = await _download(tool, context)
 
     assert result["code"] == "attachment_too_large"
-    assert "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES cannot raise" in result["message"]
+    assert result["max_bytes"] == RETAINED_MEDIA_MAX_BYTES
+    assert result["message"] == f"The attachment exceeds MindRoom's {RETAINED_MEDIA_MAX_BYTES}-byte attachment limit."
+    assert "limit_setting" not in result
     assert not (tmp_path / "storage" / "incoming_media").exists()

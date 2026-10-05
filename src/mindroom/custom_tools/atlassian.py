@@ -18,6 +18,7 @@ from agno.tools import Toolkit
 from mindroom.attachments import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
 from mindroom.credentials import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.atlassian_client import (
     AtlassianAccessRejectedError,
@@ -31,7 +32,6 @@ from mindroom.custom_tools.atlassian_client import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.media import media_payload_exceeds_limit
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
@@ -863,7 +863,10 @@ class AtlassianToolkit(Toolkit):
                 message="Attachment downloads require a conversation with MindRoom attachment storage.",
             )
         storage_path = context.storage_path
-        max_bytes = inline_attachment_byte_limit(self._runtime_paths)
+        inline_limit = inline_attachment_byte_limit(self._runtime_paths)
+        max_bytes = min(inline_limit, RETAINED_MEDIA_MAX_BYTES)
+        # Raising the setting helps only while an operator has lowered it below the fixed attachment limit.
+        max_bytes_setting = INLINE_ATTACHMENT_BYTES_ENV if inline_limit < RETAINED_MEDIA_MAX_BYTES else None
 
         async def download_attachment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             path = f"/wiki/rest/api/content/{page}/child/attachment/{confluence_attachment_id}/download"
@@ -873,14 +876,8 @@ class AtlassianToolkit(Toolkit):
                 "confluence",
                 path,
                 max_bytes=max_bytes,
-                max_bytes_setting=INLINE_ATTACHMENT_BYTES_ENV,
+                max_bytes_setting=max_bytes_setting,
             )
-            if media_payload_exceeds_limit(downloaded.content):
-                raise AtlassianError(
-                    code="attachment_too_large",
-                    message="The attachment exceeds MindRoom's fixed retained media size limit, "
-                    f"which {INLINE_ATTACHMENT_BYTES_ENV} cannot raise.",
-                )
             display_name = _display_filename(downloaded.content_disposition, filename) or confluence_attachment_id
             mime_type = _mime_type(downloaded.content_type, display_name)
             # Like MindRoom's own media registration, a cancelled call still finishes storing,
