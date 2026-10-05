@@ -28,7 +28,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
     scheduled_call,
 )
-from mindroom.tool_approval_grants import ANY_ARGUMENTS
+from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
@@ -42,7 +42,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LiveFunction",
-    "canonical_arguments",
     "prepare_scheduled_call",
     "run_scheduled_call",
 ]
@@ -54,7 +53,7 @@ _REFUSALS: dict[ScheduledCallRefusal, str] = {
     "not_approved": "the requester has not approved it",
     "not_armed": "its approval is not active; it activates when the task fires",
     "used": "its approval was already used",
-    "late": "it is more than 15 minutes from the time the requester approved",
+    "late": "it is more than 15 minutes from its scheduled time",
     "arguments": "the approval covers only the stored arguments; call it without arguments_json",
     "left_room": "the room membership changed since the call was approved",
 }
@@ -99,11 +98,6 @@ def _parse_arguments(text: str) -> dict[str, object] | str:
     if not _finite(arguments):
         return "arguments_json must not contain non-finite numbers"
     return arguments
-
-
-def canonical_arguments(arguments: dict[str, object]) -> str:
-    """Encode arguments the way approval digests do, so equal arguments compare equal."""
-    return json.dumps(arguments, ensure_ascii=True, separators=(",", ":"), sort_keys=True, allow_nan=False)
 
 
 def _resolve_live_function(agent: Agent, tool_name: str, toolkit_name: str | None = None) -> LiveFunction | str:

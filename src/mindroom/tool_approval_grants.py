@@ -77,6 +77,11 @@ def approval_timestamp(timestamp_ns: int) -> str:
     return datetime.fromtimestamp(timestamp_ns / 1_000_000_000, UTC).isoformat()
 
 
+def canonical_arguments(arguments: dict[str, object]) -> str:
+    """Encode arguments the way approval digests do, so equal arguments compare equal."""
+    return json.dumps(arguments, ensure_ascii=True, separators=(",", ":"), sort_keys=True, allow_nan=False)
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduledCallBinding:
     """The call, task, and time one scheduled approval covers."""

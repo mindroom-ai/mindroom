@@ -38,7 +38,6 @@ from mindroom.recurring_schedule import (
     plan_recurring_occurrence,
 )
 from mindroom.requester_identity import equivalent_requester_ids
-from mindroom.scheduled_tool_calls import canonical_arguments
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval import (
     ToolApprovalScriptError,
@@ -49,7 +48,7 @@ from mindroom.tool_approval import (
     scheduled_call_offers_any_arguments,
     withdraw_scheduled_call_approval,
 )
-from mindroom.tool_approval_grants import ScheduledCallBinding
+from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -72,7 +71,10 @@ _MESSAGE_PREVIEW_LENGTH = 50
 
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 _SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
-_SCHEDULE_EDITED_REASON = "Schedule edited; the call will ask for approval when it runs."
+# A stored call and its approval belong to the task as scheduled, so changing it means scheduling it again.
+_PRE_APPROVED_EDIT_ERROR = (
+    "runs a pre-approved tool call, which cannot be edited; cancel it and schedule the call again"
+)
 _SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
 
 # Shared validation message for edit attempts that change task type.
@@ -1167,6 +1169,9 @@ async def save_edited_scheduled_task(
     if existing_task.status != "pending":
         msg = f"Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
         raise ValueError(msg)
+    if existing_task.workflow.pre_approved_call:
+        msg = f"Task `{task_id}` {_PRE_APPROVED_EDIT_ERROR}."
+        raise ValueError(msg)
 
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
@@ -1179,8 +1184,6 @@ async def save_edited_scheduled_task(
         if current_task != existing_task:
             msg = f"Task `{task_id}` changed while it was being edited; refresh and retry."
             raise ValueError(msg)
-        if current_task.workflow.pre_approved_call:
-            await _withdraw_scheduled_call(task_id, reason=_SCHEDULE_EDITED_REASON)
         revision = await _persist_scheduled_task_state(
             client=client,
             room_id=room_id,
@@ -2195,6 +2198,8 @@ async def edit_scheduled_task(
         return f"❌ Task `{task_id}` not found."
     if existing_task.status != "pending":
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
+    if existing_task.workflow.pre_approved_call:
+        return f"❌ Task `{task_id}` {_PRE_APPROVED_EDIT_ERROR}."
 
     target_new_thread = existing_task.workflow.new_thread
     target_thread_id = None if target_new_thread else existing_task.workflow.thread_id
@@ -2216,8 +2221,6 @@ async def edit_scheduled_task(
     if edited_task_id is None:
         return f"❌ Failed to edit task `{task_id}`.\n\n{response_text}"
 
-    if existing_task.workflow.pre_approved_call:
-        response_text += f"\n\n{_SCHEDULE_EDITED_REASON}"
     return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 

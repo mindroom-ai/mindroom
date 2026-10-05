@@ -43,7 +43,6 @@ from mindroom.event_journal import (
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
-from mindroom.scheduled_tool_calls import canonical_arguments
 from mindroom.scheduling import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
@@ -55,7 +54,7 @@ from mindroom.scheduling import (
 )
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
 from mindroom.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
-from mindroom.tool_approval_grants import ScheduledCallBinding
+from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -824,29 +823,6 @@ async def test_only_the_requesters_denial_skips_the_send(
 
 
 @pytest.mark.asyncio
-async def test_editing_the_task_withdraws_an_approval_given_for_the_old_one(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """After an edit, the old card stops being approvable and the edited task asks again when it runs."""
-    journal = journal_database()
-    sent: list[MatrixDelivery] = []
-    manager = _manager(journal, tmp_path, sent)
-    try:
-        assert await _schedule(manager)
-        sent.clear()
-
-        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule edited.")
-
-        [edit] = sent
-        assert edit.payload["status"] == "denied"
-        assert edit.payload["resolution_reason"] == "Schedule edited."
-        assert await _arm(manager) == "unarmed"
-    finally:
-        await manager.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_retire(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -1585,8 +1561,8 @@ async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it()
 
 
 @pytest.mark.asyncio
-async def test_failed_withdrawal_rejects_an_edit_before_publishing_it() -> None:
-    """An edit whose old approval cannot be withdrawn fails like other rejected edits."""
+async def test_pre_approved_task_cannot_be_edited() -> None:
+    """Its stored call and approval belong to the task as scheduled, so an edit is refused and nothing changes."""
     client = AsyncMock()
     workflow = ScheduledWorkflow(
         created_by="@user:server",
@@ -1604,25 +1580,23 @@ async def test_failed_withdrawal_rejects_an_edit_before_publishing_it() -> None:
         created_at=datetime.now(UTC),
         workflow=workflow,
     )
+    withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=existing)),
-        patch(
-            "mindroom.scheduling.withdraw_scheduled_call_approval",
-            new=AsyncMock(side_effect=RuntimeError("journal unavailable")),
-        ),
-        pytest.raises(ValueError, match="journal unavailable"),
+        patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
+        pytest.raises(ValueError, match="cannot be edited; cancel it and schedule the call again"),
     ):
         await save_edited_scheduled_task(
             client=client,
             room_id="!test:server",
             task_id="task1234",
-            workflow=workflow.model_copy(update={"message": "Remind me later"}),
+            workflow=workflow.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=2)}),
             existing_task=existing,
             runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
             timezone="UTC",
         )
 
+    withdraw.assert_not_awaited()
     client.room_put_state.assert_not_awaited()
 
 
@@ -2146,17 +2120,17 @@ def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edited_task_offers_the_ordinary_way_after_its_approval_was_withdrawn(
+async def test_withdrawn_approval_points_to_the_ordinary_way(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A task whose time was edited still fires its trigger; the withdrawn approval points to ordinary approval."""
+    """A withdrawn approval runs nothing, and the agent learns how to ask for approval the usual way."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
     try:
         await _armed(manager)
-        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule edited.")
+        await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
         result = await _run(manager, _live_agent(runs))
 
@@ -2209,3 +2183,38 @@ async def test_reused_task_id_never_borrows_or_withdraws_another_tasks_approval(
         assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsing() -> None:
+    """The edit command says to cancel and schedule again, without spending a model call on the new text."""
+    context = _tool_context(_gated_config())
+    workflow = ScheduledWorkflow(
+        created_by="@user:localhost",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="@general Run scheduled call",
+        description="Morning DM",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        pre_approved_call=True,
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!room:localhost",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+    parse = AsyncMock()
+
+    with (
+        patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=record)),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=parse),
+        tool_runtime_context(context),
+        pytest.raises(RuntimeError, match="cannot be edited; cancel it and schedule the call again"),
+    ):
+        await SchedulerTools().edit_schedule(task_id="task1234", request="move it to 10am")
+
+    parse.assert_not_awaited()
+    context.client.room_put_state.assert_not_awaited()

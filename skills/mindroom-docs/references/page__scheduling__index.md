@@ -211,7 +211,8 @@ When the task runs, it asks the agent to call `run_scheduled_call(task_id)`, whi
 With an any-arguments approval the agent may pass `arguments_json` to `run_scheduled_call` to replace the arguments for the same tool.
 The approval can be used once, by that agent for that requester in that thread, from when the task runs until 15 minutes after its scheduled time.
 If the card was not approved in time, `run_scheduled_call` runs nothing and the agent can call the tool directly, which asks for approval as usual.
-If the requester denies the card, the task does not run, and cancelling or editing the task withdraws the approval.
+If the requester denies the card, the task does not run, and cancelling the task withdraws the approval.
+A pre-approved task cannot be edited; cancel it and schedule the call again.
 The arguments are not posted in the task or its trigger message; MindRoom keeps them with the approval, and the card shows them with secrets hidden.
 Recurring schedules cannot pre-approve calls.
 

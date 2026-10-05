@@ -2077,7 +2077,7 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
 
 @pytest.mark.asyncio
 async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> None:
-    """Editing a pre-approved task withdraws its approval, and the parser cannot mark the edit pre-approved."""
+    """An edit never becomes pre-approved, even when the parsed schedule claims it is."""
     client = AsyncMock()
     serve_task_state_events(client)
     room_state: dict[str, dict[str, Any]] = {}
@@ -2107,7 +2107,6 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
         room_id="!test:server",
         thread_id="$thread",
         created_by="@alice:server",
-        pre_approved_call=True,
     )
     await _persist_scheduled_task_state(
         client=client,
@@ -2118,15 +2117,13 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
         timezone="UTC",
     )
     withdraw = AsyncMock()
+    parsed = workflow.model_copy(update={"description": "Edited", "pre_approved_call": True})
     with (
         patch(
             "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[ids["assistant"]],
         ),
-        patch(
-            "mindroom.scheduling._parse_workflow_schedule",
-            new=AsyncMock(return_value=workflow.model_copy(update={"description": "Edited"})),
-        ),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parsed)),
         patch("mindroom.scheduling.withdraw_scheduled_call_approval", new=withdraw),
     ):
         result = await edit_scheduled_task(
@@ -2145,8 +2142,7 @@ async def test_parsed_schedule_never_carries_a_call_approval(tmp_path: Path) -> 
         )
 
     assert "Updated task" in result
-    assert result.endswith("Schedule edited; the call will ask for approval when it runs.")
-    withdraw.assert_awaited_once()
+    withdraw.assert_not_awaited()
     saved = await get_scheduled_task(client, "!test:server", "task123", runtime_paths)
     assert saved is not None
     assert saved.workflow.description == "Edited"
