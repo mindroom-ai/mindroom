@@ -108,11 +108,11 @@ const navLinks = [
   { href: '#hosted', label: 'Hosted' },
 ]
 
-const menuLinks: { href: string; label: string; external?: boolean }[] = [
+const menuLinks: { href: string; label: string; external?: boolean; newTab?: boolean }[] = [
   ...navLinks,
   { href: showcaseUrl, label: 'Showcase', external: true },
   { href: docsUrl, label: 'Docs', external: true },
-  { href: githubUrl, label: 'GitHub', external: true },
+  { href: githubUrl, label: 'GitHub', external: true, newTab: true },
   { href: '/auth/login', label: 'Sign in' },
 ]
 
@@ -123,7 +123,7 @@ const personalUses = [
   'Keep your calendar, reminders, and to-do lists in order, by voice.',
   'Keep notes, a journal, and memories you can find months later.',
   'Follow the topics you care about, with a digest only when something is new.',
-  'Look after your homelab and smart home, with approval for anything risky.',
+  'Look after your homelab and smart home, with approval for the actions you choose.',
   'Build quick tools and scripts in the agent’s own workspace.',
 ]
 
@@ -510,7 +510,7 @@ function MobileMenu() {
                 href={link.href}
                 onClick={() => setOpen(false)}
                 className={linkClass}
-                {...(link.href === githubUrl ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                {...(link.newTab ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
               >
                 {link.label}
               </a>
@@ -553,7 +553,7 @@ export default function LandingPage() {
               GitHub
             </a>
             <DarkModeToggle />
-            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white sm:inline-flex">
+            <Link href="/auth/login" className="hidden rounded-md px-3 py-2 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-950 dark:text-gray-300 dark:hover:bg-white/8 dark:hover:text-white md:inline-flex">
               Sign in
             </Link>
             <a href={installGuideUrl} className="inline-flex items-center gap-2 whitespace-nowrap rounded-md border border-gray-950/10 bg-gray-950 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-950 dark:hover:bg-gray-200 sm:px-4">

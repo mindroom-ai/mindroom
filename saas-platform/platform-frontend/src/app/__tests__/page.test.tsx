@@ -91,7 +91,7 @@ describe('LandingPage', () => {
     expect(screen.getByRole('button', { name: 'Copy command' })).toHaveTextContent('Copy')
   })
 
-  it('opens a menu with every page link on small screens and closes it on Escape', () => {
+  it('opens a menu with every page link and closes it on Escape', () => {
     render(<LandingPage />)
     const button = screen.getByRole('button', { name: 'Menu' })
 
