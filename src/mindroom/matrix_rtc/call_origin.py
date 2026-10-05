@@ -107,11 +107,10 @@ async def _read_origin_history(origin: CallOrigin, context: ToolRuntimeContext) 
         history = await complete_thread_history(context.conversation_reader, origin.room_id, origin.thread_id)
         # The read returns the stamped event first even when it is a reply, so its stored thread decides.
         # Visible content cannot: an edit's ``m.new_content`` carries no relation, and a root may be a rich reply.
-        is_root = (
-            bool(history)
-            and history[0].event_id == origin.thread_id
-            and history[0].thread_id is None
-            and history[0].thread_id_known
+        # The bounded read of a very long thread drops the root: then every row must be a reply of that thread.
+        is_root = bool(history) and (
+            (history[0].event_id == origin.thread_id and history[0].thread_id is None)
+            or all(message.thread_id == origin.thread_id for message in history)
         )
         return history if is_root else None
     page = await context.conversation_reader.read_strict(
@@ -171,10 +170,10 @@ async def resolve_call_origin_context(  # noqa: PLR0911
         if not body:
             continue
         label = "You" if message.sender == context.client.user_id else room.user_name(message.sender) or message.sender
-        messages.append(_CallBriefMessage(label=label, body=body))
+        messages.append(_CallBriefMessage(label=" ".join(label.split()), body=body))
     return CallOriginContext(
         origin=origin,
-        room_name=room.display_name,
+        room_name=" ".join(room.display_name.split()),
         thread_title=thread_title,
         messages=tuple(messages),
     )
